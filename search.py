@@ -266,9 +266,9 @@ def search(query_loads, chapter_name, top_k=TOP_K):
     print(result_text)
     print(f"\n结果已保存: {output_path}")
 
-    # 自动打开 Top 结果图片
+    # 自动打开 Top 结果图片（倒序，最后打开#1在最上层）
     import time
-    for score, name in top:
+    for score, name in reversed(top):
         if score > 0:
             img_path = str(ROOT / name)
             os.startfile(img_path)
