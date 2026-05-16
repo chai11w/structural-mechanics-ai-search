@@ -266,11 +266,13 @@ def search(query_loads, chapter_name, top_k=TOP_K):
     print(result_text)
     print(f"\n结果已保存: {output_path}")
 
-    # 自动打开相似度最高的图片
-    if top and top[0][0] > 0:
-        best_path = str(ROOT / top[0][1])
-        os.startfile(best_path)
-        print(f"已打开: {best_path}")
+    # 自动打开 Top 结果图片
+    for score, name in top:
+        if score > 0:
+            img_path = str(ROOT / name)
+            os.startfile(img_path)
+    if top:
+        print(f"已打开 {len([s for s, _ in top if s > 0])} 个匹配图片")
 
 
 # ============================================================
