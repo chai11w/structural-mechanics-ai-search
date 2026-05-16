@@ -242,7 +242,14 @@ def search(query_loads, chapter_name, top_k=TOP_K):
         results.append((score, row["题目名称"]))
 
     results.sort(key=lambda x: x[0], reverse=True)
-    top = results[:top_k]
+
+    # 100% 相似的不管几个都输出，不足 top_k 再补次高分
+    perfect = [r for r in results if r[0] >= 1.0]
+    if len(perfect) >= top_k:
+        top = perfect
+    else:
+        rest = [r for r in results if r[0] < 1.0][:top_k - len(perfect)]
+        top = perfect + rest
 
     if not top or top[0][0] == 0:
         print("(未找到高相似度匹配，以下是章节内最近题目)")
