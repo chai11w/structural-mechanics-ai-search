@@ -34,6 +34,8 @@ from zhipuai import ZhipuAI
 # 配置
 # ============================================================
 ROOT = Path(r"D:\桌面\答疑、帮做\结构力学\帮做")
+ANSWER_OUTPUT = Path(r"D:\桌面\答疑、帮做\答案输出")
+LAST_SEARCH_FILE = ROOT / "_last_search.json"
 ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY", "")
 TOP_K = 5
 
@@ -219,6 +221,25 @@ def load_chapter_excel(chapter_name):
 # 检索
 # ============================================================
 
+def _update_excel_path(chapter_name, old_rel, new_rel):
+    """更新 Excel 中失效的题目路径"""
+    if old_rel == new_rel:
+        return
+    xlsx_path = ROOT / f"{chapter_name}.xlsx"
+    if not xlsx_path.exists():
+        matches = list(ROOT.glob(f"*{chapter_name}*.xlsx"))
+        if not matches:
+            return
+        xlsx_path = matches[0]
+    df = pd.read_excel(xlsx_path)
+    mask = df["题目名称"] == old_rel
+    if not mask.any():
+        return
+    df.loc[mask, "题目名称"] = new_rel
+    df.to_excel(xlsx_path, index=False)
+    print(f"[路径更新] {old_rel} -> {new_rel}")
+
+
 def search(query_loads, chapter_name, top_k=TOP_K):
     df = load_chapter_excel(chapter_name)
     if df is None:
@@ -256,25 +277,33 @@ def search(query_loads, chapter_name, top_k=TOP_K):
 
     output_path = ROOT / "_search_result.txt"
     lines = []
+    paths = []
     for rank, (score, name) in enumerate(top, 1):
+        if score <= 0:
+            continue
         pct = round(score * 100)
         full_path = str(ROOT / name)
         lines.append(f"{rank}. {full_path}    相似度: {pct}%")
+        paths.append({"rank": rank, "path": full_path, "score": score})
 
-    result_text = "\n".join(lines)
+    result_text = "\n".join(lines) if lines else "无匹配结果"
     output_path.write_text(result_text, encoding="utf-8")
+    LAST_SEARCH_FILE.write_text(json.dumps(paths, ensure_ascii=False), encoding="utf-8")
     print(result_text)
     print(f"\n结果已保存: {output_path}")
 
-    # 自动打开 Top 结果图片（倒序，最后打开#1在最上层）
+    # 自动打开 Top 结果图片（倒序，最后打开#1在最上层；跳过0%）
     import time
+    opened = 0
     for score, name in reversed(top):
-        if score > 0:
-            img_path = str(ROOT / name)
-            os.startfile(img_path)
-            time.sleep(0.3)
-    if top:
-        print(f"已打开 {len([s for s, _ in top if s > 0])} 个匹配图片")
+        if score <= 0:
+            continue
+        img_path = str(ROOT / name)
+        os.startfile(img_path)
+        opened += 1
+        time.sleep(0.3)
+    if opened:
+        print(f"已打开 {opened} 个匹配图片")
 
 
 # ============================================================
@@ -327,6 +356,81 @@ def store(chapter_name, *, image_path=None, rel_path=None, loads_json=None):
 
 
 # ============================================================
+# 答案查询
+# ============================================================
+
+def find_answer_files(question_path):
+    """根据题目路径定位答案文件，返回路径列表
+
+    规则: 题目路径里以"题目"开头的目录，替换为同级"答案"文件夹，
+    然后匹配 {编号}, {编号}+, {编号}++, ... 等所有图片
+    """
+    p = Path(question_path)
+    parts = p.parts
+    stem = p.stem  # 文件名不含扩展，如 "3"
+
+    # 从右向左找以"题目"开头的目录
+    qi = None
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i].startswith("题目"):
+            qi = i
+            break
+    if qi is None:
+        return []
+
+    # 把"题目X"替换为"答案"，丢弃题目下面的所有子路径（答案目录平铺存放）
+    answer_dir = Path(*parts[:qi]) / "答案"
+    if not answer_dir.is_dir():
+        return []
+
+    # 匹配 stem, stem+, stem++, stem+++ 的所有图片
+    found = []
+    for ext in [".jpg", ".jpeg", ".png"]:
+        for suffix in ["", "+", "++", "+++"]:
+            f = answer_dir / f"{stem}{suffix}{ext}"
+            if f.is_file():
+                found.append(f)
+    return found
+
+
+def answer(rank):
+    """根据上次检索的排名，把对应答案复制到输出文件夹"""
+    import shutil
+
+    if rank == 0:
+        print("无匹配答案，跳过")
+        return
+
+    if not LAST_SEARCH_FILE.exists():
+        print("ERROR: 找不到上次检索结果，请先运行 search")
+        return
+
+    last = json.loads(LAST_SEARCH_FILE.read_text(encoding="utf-8"))
+    target = next((x for x in last if x["rank"] == rank), None)
+    if target is None:
+        print(f"ERROR: 排名 {rank} 不在上次结果中（共 {len(last)} 个）")
+        return
+
+    question_path = target["path"]
+    answers = find_answer_files(question_path)
+
+    # 清空输出文件夹
+    if ANSWER_OUTPUT.exists():
+        shutil.rmtree(ANSWER_OUTPUT)
+    ANSWER_OUTPUT.mkdir(parents=True, exist_ok=True)
+
+    if not answers:
+        print(f"WARNING: 未找到答案文件 (题目: {question_path})")
+        return
+
+    for src in answers:
+        dst = ANSWER_OUTPUT / src.name
+        shutil.copy2(src, dst)
+
+    print(f"已输出 {len(answers)} 张答案到 {ANSWER_OUTPUT}")
+
+
+# ============================================================
 # CLI
 # ============================================================
 
@@ -347,6 +451,10 @@ def main():
     p_store.add_argument("--path", help="相对路径，如 '2静定结构/新题/1.jpg'")
     p_store.add_argument("--loads", help="荷载 JSON 字符串")
     p_store.add_argument("--chapter", required=True, help="章节名称，如 '2静定结构'")
+
+    # answer
+    p_answer = sub.add_parser("answer", help="打开检索结果对应的答案")
+    p_answer.add_argument("--rank", type=int, required=True, help="选择排名 (1-N 打开答案, 0 无匹配)")
 
     args = parser.parse_args()
 
@@ -382,6 +490,9 @@ def main():
             rel_path=getattr(args, 'path', None),
             loads_json=args.loads,
         )
+
+    elif args.cmd == "answer":
+        answer(args.rank)
 
 
 if __name__ == "__main__":
