@@ -491,7 +491,7 @@ class App:
                 df = load_chapter_excel(chapter)
                 row_num = df[df["题目名称"] == rel_path].index[0] + 2  # Excel行号（含表头）
                 loads_text = loads_to_display(loads_list)
-                self.win.after(0, lambda: messagebox.showinfo("储存成功", f"位置：第{row_num}行\n荷载：{loads_text}"))
+                self.win.after(0, lambda: messagebox.showinfo("储存成功", f"位置：{chapter}.xlsx 第{row_num}行\n荷载：{loads_text}"))
                 self.win.after(0, lambda: self._set_status("储存完成"))
             except Exception as e:
                 self.win.after(0, lambda: messagebox.showerror("储存失败", str(e)))
