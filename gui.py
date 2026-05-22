@@ -215,7 +215,7 @@ class App:
         left = tk.Frame(result_frame)
         left.pack(side="left", fill="both", expand=True)
 
-        self._result_canvas = tk.Canvas(left)
+        self._result_canvas = tk.Canvas(left, bd=0, highlightthickness=0)
         xscroll = tk.Scrollbar(left, orient="horizontal",
                                command=self._result_canvas.xview)
         self._result_canvas.configure(xscrollcommand=xscroll.set)
@@ -449,60 +449,50 @@ class App:
     # ----------------------------------------------------------
 
     def _do_store(self):
-        chapter = self._chapter.get().strip()
-        if not chapter:
-            messagebox.showwarning("提示", "请选择章节")
+        mode = self._mode.get()
+        if mode == "manual":
+            messagebox.showwarning("提示", "手动模式不支持储存")
+            return
+        img = self._image_path.get().strip()
+        if not img:
+            messagebox.showwarning("提示", "请选择图片")
+            return
+        if not Path(img).exists():
+            messagebox.showerror("错误", f"图片不存在：{img}")
             return
 
-        mode = self._mode.get()
-        if mode == "image":
-            img = self._image_path.get().strip()
-            if not img:
-                messagebox.showwarning("提示", "请选择图片")
-                return
-            if not Path(img).exists():
-                messagebox.showerror("错误", f"图片不存在：{img}")
-                return
-        else:
-            if not self._manual_loads:
-                messagebox.showwarning("提示", "手动模式下请先添加荷载，储存需要同时指定图片路径")
-                return
-            img = self._image_path.get().strip()
-            if not img:
-                messagebox.showwarning("提示", "手动模式储存需要填写图片路径（作为题目名称）")
-                return
+        # 从图片路径提取章节
+        try:
+            rel = Path(img).relative_to(ROOT)
+            chapter = rel.parts[0]
+        except (ValueError, IndexError):
+            messagebox.showerror("错误", "图片路径不在题库目录下，无法确定章节")
+            return
+
+        confirm = messagebox.askyesno("确认储存", f"章节：{chapter}\n图片：{Path(img).name}\n\n确认储存到题库？")
+        if not confirm:
+            return
 
         self.btn_search.config(state="disabled")
         self.btn_store.config(state="disabled")
-        self._set_status("储存中...")
-
-        # 确认弹窗
-        chapter = self._chapter.get().strip()
-        img = self._image_path.get().strip()
-        confirm = messagebox.askyesno(
-            "确认储存",
-            f"章节：{chapter}\n图片：{Path(img).name if img else '（手动荷载）'}\n\n确认储存到题库？"
-        )
-        if not confirm:
-            self._restore_buttons()
-            self._set_status("已取消")
-            return
+        self._set_status("识别中...")
 
         def run():
             try:
-                if mode == "image":
-                    do_store(chapter, image_path=img)
-                else:
-                    import json as _json
-                    loads_json = _json.dumps({"loads": self._manual_loads}, ensure_ascii=False)
-                    try:
-                        rel = str(Path(img).relative_to(ROOT)).replace("\\", "/")
-                    except ValueError:
-                        rel = Path(img).name
-                    do_store(chapter, rel_path=rel, loads_json=loads_json)
+                client = ZhipuAI(api_key=ZHIPUAI_API_KEY)
+                result = extract_loads(client, img)
+                loads_list = result.get("loads", [])
 
+                rel_path = str(Path(img).relative_to(ROOT)).replace("\\", "/")
+                import json as _json
+                loads_json = _json.dumps(result, ensure_ascii=False)
+                do_store(chapter, rel_path=rel_path, loads_json=loads_json)
+
+                df = load_chapter_excel(chapter)
+                row_num = df[df["题目名称"] == rel_path].index[0] + 2  # Excel行号（含表头）
+                loads_text = loads_to_display(loads_list)
+                self.win.after(0, lambda: messagebox.showinfo("储存成功", f"位置：第{row_num}行\n荷载：{loads_text}"))
                 self.win.after(0, lambda: self._set_status("储存完成"))
-                self.win.after(0, lambda: messagebox.showinfo("完成", f"已储存到 {chapter}.xlsx"))
             except Exception as e:
                 self.win.after(0, lambda: messagebox.showerror("储存失败", str(e)))
             finally:
