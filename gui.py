@@ -408,15 +408,15 @@ class App:
             display_w = sum(2 if ord(c) > 127 else 1 for c in text) + 4
             e = tk.Entry(self.result_list, font=("Consolas", 9),
                          relief="flat", bd=0, readonlybackground="#f0f0f0",
-                         width=display_w)
+                         width=max(display_w, 80))
             e.insert(0, text)
             e.config(state="readonly")
-            e.pack(anchor="w", pady=ROW_PAD, ipady=6)
+            e.pack(anchor="w", pady=(ROW_PAD, ROW_PAD + 1), ipady=6)
 
             # 右侧：% + 按钮
             r = rank
             right_row = tk.Frame(self._right_panel)
-            right_row.pack(anchor="e", pady=ROW_PAD)
+            right_row.pack(anchor="e", pady=(ROW_PAD, ROW_PAD - 1))
             tk.Label(right_row, text=f"{pct}%", width=5, anchor="center",
                      font=("", 9, "bold"),
                      fg="#27AE60" if pct == 100 else "#333").pack(side="left", padx=2)
