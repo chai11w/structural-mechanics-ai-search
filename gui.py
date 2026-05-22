@@ -582,7 +582,7 @@ def main():
     else:
         win = tk.Tk()
 
-    win.geometry("780x600")
+    win.geometry("520x600")
     app = App(win)
     win.mainloop()
 
