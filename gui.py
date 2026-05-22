@@ -406,11 +406,10 @@ class App:
             # 左侧：路径 Entry
             text = f"{rank}.  {full_path}"
             e = tk.Entry(self.result_list, font=("Consolas", 9),
-                         relief="flat", bd=0, readonlybackground="#f0f0f0",
-                         width=55)
+                         relief="flat", bd=0, readonlybackground="#f0f0f0")
             e.insert(0, text)
             e.config(state="readonly")
-            e.pack(anchor="w", pady=ROW_PAD, ipady=6)
+            e.pack(anchor="w", pady=ROW_PAD, ipady=6, fill="x", expand=True)
 
             # 右侧：% + 按钮
             r = rank
@@ -583,7 +582,7 @@ def main():
     else:
         win = tk.Tk()
 
-    win.geometry("520x600")
+    win.geometry("780x600")
     app = App(win)
     win.mainloop()
 
