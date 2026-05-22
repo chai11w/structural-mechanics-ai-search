@@ -404,7 +404,7 @@ class App:
             full_path = str(ROOT / name)
 
             # 左侧：路径 Entry
-            text = f"{rank}.  {name}"
+            text = f"{rank}.  {full_path}"
             e = tk.Entry(self.result_list, font=("Consolas", 9),
                          relief="flat", bd=0, readonlybackground="#f0f0f0",
                          width=max(len(text) + 2, 60))
