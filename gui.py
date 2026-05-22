@@ -403,11 +403,12 @@ class App:
             pct = round(score * 100)
             full_path = str(ROOT / name)
 
-            # 左侧：路径 Entry
+            # 左侧：路径 Entry（中文字符按2倍宽度估算）
             text = f"{rank}.  {full_path}"
+            display_w = sum(2 if ord(c) > 127 else 1 for c in text) + 4
             e = tk.Entry(self.result_list, font=("Consolas", 9),
                          relief="flat", bd=0, readonlybackground="#f0f0f0",
-                         width=max(len(text) + 2, 60))
+                         width=max(display_w, 80))
             e.insert(0, text)
             e.config(state="readonly")
             e.pack(anchor="w", pady=ROW_PAD, ipady=6)
