@@ -195,6 +195,11 @@ class App:
                                            font=("", 10), wraplength=480)
         self.loads_result_label.pack(padx=12, anchor="w")
 
+        # === 状态栏 ===
+        self.status_var = tk.StringVar(value="就绪")
+        tk.Label(self.win, textvariable=self.status_var, relief="sunken",
+                 anchor="w", fg="gray").pack(fill="x", side="bottom")
+
         # === 检索结果列表 ===
         result_frame = tk.LabelFrame(self.win, text="检索结果", padx=6, pady=6)
         result_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
@@ -220,11 +225,6 @@ class App:
         self.result_list = tk.Frame(self._result_canvas)
         self._result_canvas.create_window((0, 0), window=self.result_list, anchor="nw")
         self.result_list.bind("<Configure>", self._on_result_resize)
-
-        # === 状态栏 ===
-        self.status_var = tk.StringVar(value="就绪")
-        tk.Label(self.win, textvariable=self.status_var, relief="sunken",
-                 anchor="w", fg="gray").pack(fill="x", side="bottom")
 
         # 初始状态
         self._on_mode_change()
@@ -395,7 +395,7 @@ class App:
             self._set_status("无结果")
             return
 
-        ROW_PAD = 6
+        ROW_PAD = 4
 
         for rank, (score, name) in enumerate(results, 1):
             pct = round(score * 100)
@@ -408,9 +408,9 @@ class App:
                          width=max(len(text) + 2, 60))
             e.insert(0, text)
             e.config(state="readonly")
-            e.pack(anchor="w", pady=ROW_PAD)
+            e.pack(anchor="w", pady=ROW_PAD, ipady=6)
 
-            # 右侧：% + 按钮，pady 与左侧一致
+            # 右侧：% + 按钮
             r = rank
             right_row = tk.Frame(self._right_panel)
             right_row.pack(anchor="e", pady=ROW_PAD)
@@ -422,7 +422,7 @@ class App:
             tk.Button(right_row, text="打开答案", width=8,
                       command=lambda rk=r: self._open_answer(rk)).pack(side="left", padx=(2, 4))
 
-        self._set_status(f"找到 {len(results)} 个结果")
+        self._set_status("检索完成")
         # 延迟刷新，等 Tkinter 完成像素级布局
         self.win.after(50, self._refresh_scroll)
 
@@ -552,7 +552,8 @@ $files = New-Object System.Collections.Specialized.StringCollection
         try:
             subprocess.run(
                 ["powershell", "-NoProfile", "-Command", ps],
-                capture_output=True, timeout=5
+                capture_output=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW
             )
             self._set_status(f"已复制 {len(img_paths)} 张答案图片，可直接粘贴到微信")
         except Exception:
