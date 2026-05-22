@@ -314,6 +314,8 @@ class App:
 
                 # 捕获 search() 的输出结果
                 results = self._run_search(query_loads, chapter)
+                if self._mode.get() == "manual":
+                    self.win.after(0, self._clear_loads)
                 self.win.after(0, lambda: self._show_results(results))
             except Exception as e:
                 import traceback
