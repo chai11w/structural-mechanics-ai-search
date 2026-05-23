@@ -33,11 +33,23 @@ from zhipuai import ZhipuAI
 # ============================================================
 # 配置
 # ============================================================
-ROOT = Path(r"D:\桌面\答疑、帮做\结构力学\帮做")
-ANSWER_OUTPUT = Path(r"D:\桌面\答疑、帮做\答案输出")
+
+def load_local_config():
+    base = Path(__file__).parent
+    cfg = {}
+    for name in ("config.json", "config.local.json"):
+        p = base / name
+        if p.exists():
+            with open(p, encoding="utf-8") as f:
+                cfg.update(json.load(f))
+    return cfg
+
+cfg = load_local_config()
+ROOT = Path(cfg.get("root", r"D:\桌面\答疑、帮做\结构力学\帮做"))
+ANSWER_OUTPUT = Path(cfg.get("answer_output", r"D:\桌面\答疑、帮做\答案输出"))
 LAST_SEARCH_FILE = ROOT / "_last_search.json"
 ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY", "")
-TOP_K = 5
+TOP_K = cfg.get("top_k", 5)
 
 SYSTEM_PROMPT = """从图片中提取所有外部荷载信息。严格按以下JSON格式输出，不要输出任何其他内容。
 

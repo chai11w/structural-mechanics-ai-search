@@ -13,27 +13,31 @@ os.environ['no_proxy'] = '*'
 os.environ['NO_PROXY'] = '*'
 
 # ============================================================
-# 读取 config.json（优先同目录，兼容打包后的路径）
+# 读取配置（优先同目录，兼容打包后的路径）
 # ============================================================
 
-def _config_path():
+def _config_dir():
     if getattr(sys, 'frozen', False):
-        base = Path(sys.executable).parent
+        return Path(sys.executable).parent
     else:
-        base = Path(__file__).parent
-    return base / "config.json"
+        return Path(__file__).parent
 
-def load_config():
-    p = _config_path()
-    if p.exists():
-        with open(p, encoding="utf-8") as f:
+def _load_json(path):
+    if path.exists():
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     return {}
+
+def load_config():
+    base = _config_dir()
+    cfg = _load_json(base / "config.json")
+    cfg.update(_load_json(base / "config.local.json"))
+    return cfg
 
 cfg = load_config()
 ROOT = Path(cfg.get("root", r"D:\桌面\答疑、帮做\结构力学\帮做"))
 ANSWER_OUTPUT = Path(cfg.get("answer_output", r"D:\桌面\答疑、帮做\答案输出"))
-ZHIPUAI_API_KEY = cfg.get("zhipuai_api_key", "")
+ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY", "")
 TOP_K = cfg.get("top_k", 5)
 
 # 把配置注入 search 模块
@@ -535,7 +539,6 @@ class App:
     def _copy_images_to_clipboard(self, img_paths):
         """把图片文件列表复制到 Windows 剪贴板（文件复制，微信可直接粘贴）"""
         import subprocess
-        paths = "\n".join(f'"{p}"' for p in img_paths)
         ps = f"""
 Add-Type -AssemblyName System.Windows.Forms
 $files = New-Object System.Collections.Specialized.StringCollection
@@ -543,12 +546,16 @@ $files = New-Object System.Collections.Specialized.StringCollection
 [System.Windows.Forms.Clipboard]::SetFileDropList($files)
 """
         try:
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps],
+            r = subprocess.run(
+                ["powershell", "-STA", "-NoProfile", "-Command", ps],
                 capture_output=True, timeout=5,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
-            self._set_status(f"已复制 {len(img_paths)} 张答案图片，可直接粘贴到微信")
+            if r.returncode == 0:
+                self._set_status(f"已复制 {len(img_paths)} 张答案图片，可直接粘贴到微信")
+            else:
+                err = r.stderr.decode("utf-8", errors="replace").strip()
+                self._set_status(f"剪贴板复制失败: {err[:60]}" if err else "剪贴板复制失败")
         except Exception:
             self._set_status("答案已打开（剪贴板复制失败）")
 

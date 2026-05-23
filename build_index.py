@@ -26,7 +26,19 @@ from zhipuai import ZhipuAI
 # ============================================================
 # 配置区
 # ============================================================
-ROOT = Path(r"D:/桌面/答疑、帮做/结构力学/帮做")
+
+def load_local_config():
+    base = Path(__file__).parent
+    cfg = {}
+    for name in ("config.json", "config.local.json"):
+        p = base / name
+        if p.exists():
+            with open(p, encoding="utf-8") as f:
+                cfg.update(json.load(f))
+    return cfg
+
+cfg = load_local_config()
+ROOT = Path(cfg.get("root", r"D:/桌面/答疑、帮做/结构力学/帮做"))
 ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY", "")
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
