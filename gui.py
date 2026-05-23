@@ -355,7 +355,7 @@ class App:
 
     def _run_search(self, query_loads, chapter):
         """直接调 search 逻辑，返回结果列表"""
-        from search import fix_load_types, compute_similarity, load_chapter_excel
+        from search import fix_load_types, compute_similarity, load_chapter_excel, _safe_parse_loads
         import json as _json
 
         query_loads = fix_load_types(query_loads)
@@ -365,10 +365,7 @@ class App:
 
         results = []
         for _, row in df.iterrows():
-            try:
-                db_loads = _json.loads(row["荷载"]).get("loads", [])
-            except Exception:
-                db_loads = []
+            db_loads = _safe_parse_loads(row["荷载"])
             db_loads = fix_load_types(db_loads)
             score = compute_similarity(query_loads, db_loads)
             results.append((score, row["题目名称"]))

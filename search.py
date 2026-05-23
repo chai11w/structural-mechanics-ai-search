@@ -95,6 +95,19 @@ def normalize_raw(raw):
     return s
 
 
+def _safe_parse_loads(raw_str):
+    """容错解析荷载 JSON：自动修复中文逗号/引号等常见编辑错误"""
+    if not isinstance(raw_str, str):
+        return []
+    # 中文标点 → 英文标点
+    fixed = raw_str.replace("，", ",").replace("：", ":") \
+                   .replace("“", '"').replace("”", '"')
+    try:
+        return json.loads(fixed).get("loads", [])
+    except (json.JSONDecodeError, KeyError):
+        return []
+
+
 def fix_load_types(loads):
     """修正分类错误"""
     for item in loads:
@@ -268,10 +281,7 @@ def search(query_loads, chapter_name, top_k=TOP_K):
 
     results = []
     for _, row in df.iterrows():
-        try:
-            db_loads = json.loads(row["荷载"]).get("loads", [])
-        except (json.JSONDecodeError, KeyError):
-            db_loads = []
+        db_loads = _safe_parse_loads(row["荷载"])
 
         # 修正数据库荷载分类
         db_loads = fix_load_types(db_loads)
