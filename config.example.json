@@ -1,0 +1,6 @@
+{
+  "root": "D:\\path\\to\\question-bank",
+  "answer_output": "D:\\path\\to\\answer-output",
+  "zhipuai_api_key": "",
+  "top_k": 5
+}

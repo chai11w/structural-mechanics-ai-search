@@ -39,7 +39,7 @@ def load_local_config():
 
 cfg = load_local_config()
 ROOT = Path(cfg.get("root", r"D:/桌面/答疑、帮做/结构力学/帮做"))
-ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY", "")
+ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY") or cfg.get("zhipuai_api_key", "")
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 REQUEST_INTERVAL = 1.0

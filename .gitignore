@@ -4,3 +4,8 @@ __pycache__/
 config.json
 config.local.json
 .env
+.tmp_*
+backups/
+_last_search.json
+_query.json
+_run_search.py

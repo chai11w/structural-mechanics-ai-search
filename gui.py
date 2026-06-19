@@ -37,7 +37,7 @@ def load_config():
 cfg = load_config()
 ROOT = Path(cfg.get("root", r"D:\桌面\答疑、帮做\结构力学\帮做"))
 ANSWER_OUTPUT = Path(cfg.get("answer_output", r"D:\桌面\答疑、帮做\答案输出"))
-ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY", "")
+ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY") or cfg.get("zhipuai_api_key", "")
 TOP_K = cfg.get("top_k", 5)
 
 # 把配置注入 search 模块
@@ -52,7 +52,7 @@ _search_mod.LAST_SEARCH_FILE = ROOT / "_last_search.json"
 
 from search import (
     extract_loads, search as do_search, store as do_store,
-    answer as do_answer, load_chapter_excel
+    answer as do_answer, load_chapter_excel, rerank_candidates
 )
 from zhipuai import ZhipuAI
 
@@ -86,6 +86,13 @@ def loads_to_display(loads_list):
     for item in loads_list:
         parts.append(f"{item['type']}:{item['raw']}")
     return "  |  ".join(parts)
+
+def _path_to_display_name(path):
+    p = Path(path)
+    try:
+        return str(p.relative_to(ROOT)).replace("\\", "/")
+    except ValueError:
+        return str(p)
 
 # ============================================================
 # 主窗口
@@ -309,6 +316,7 @@ class App:
 
         def run():
             try:
+                query_image_path = self._image_path.get().strip() if self._mode.get() == "image" else None
                 query_loads = self._get_query_loads()
                 if query_loads is None:
                     return
@@ -317,7 +325,7 @@ class App:
                 self._set_status("检索中...")
 
                 # 捕获 search() 的输出结果
-                results = self._run_search(query_loads, chapter)
+                results = self._run_search(query_loads, chapter, query_image_path=query_image_path)
                 if self._mode.get() == "manual":
                     self.win.after(0, self._clear_loads)
                 self.win.after(0, lambda: self._show_results(results))
@@ -353,7 +361,7 @@ class App:
         text = "识别荷载：" + loads_to_display(loads_list)
         self.win.after(0, lambda: self.loads_result_label.config(text=text))
 
-    def _run_search(self, query_loads, chapter):
+    def _run_search(self, query_loads, chapter, query_image_path=None):
         """直接调 search 逻辑，返回结果列表"""
         from search import fix_load_types, compute_similarity, load_chapter_excel, _safe_parse_loads
         import json as _json
@@ -382,10 +390,36 @@ class App:
         top = [r for r in top if r[0] > 0]
 
         # 写 last_search.json（供 answer 命令使用）
-        paths = [{"rank": i+1, "path": str(ROOT / name), "score": score}
+        paths = [{"rank": i+1, "path": str(ROOT / name), "score": score, "name": name}
                  for i, (score, name) in enumerate(top)]
         last_file = ROOT / "_last_search.json"
-        last_file.write_text(_json.dumps(paths, ensure_ascii=False), encoding="utf-8")
+        last_file.write_text(
+            _json.dumps([{k: v for k, v in item.items() if k != "name"} for item in paths], ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        if query_image_path and paths:
+            self._set_status("复筛中...")
+            reranked = rerank_candidates(query_image_path, paths, top_n=3)
+            if reranked:
+                display_results = []
+                last_paths = []
+                for rank, item in enumerate(reranked, 1):
+                    item = dict(item)
+                    coarse_rank = item.get("rank")
+                    item["rank"] = rank
+                    item.setdefault("name", _path_to_display_name(item["path"]))
+                    display_results.append(item)
+                    last_paths.append({
+                        "rank": rank,
+                        "path": item["path"],
+                        "score": item["score"],
+                        "coarse_rank": coarse_rank,
+                        "rerank_score": item.get("rerank_score"),
+                        "rerank_reason": item.get("rerank_reason"),
+                    })
+                last_file.write_text(_json.dumps(last_paths, ensure_ascii=False), encoding="utf-8")
+                return display_results
 
         return top
 
@@ -400,9 +434,18 @@ class App:
 
         ROW_PAD = 4
 
-        for rank, (score, name) in enumerate(results, 1):
+        reranked = False
+        for rank, result in enumerate(results, 1):
+            if isinstance(result, dict):
+                score = result["score"]
+                full_path = result["path"]
+                rerank_score = result.get("rerank_score")
+                reranked = reranked or rerank_score is not None
+            else:
+                score, name = result
+                full_path = str(ROOT / name)
+                rerank_score = None
             pct = round(score * 100)
-            full_path = str(ROOT / name)
 
             # 左侧：路径 Entry（中文字符按2倍宽度估算）
             text = f"{rank}.  {full_path}"
@@ -418,15 +461,19 @@ class App:
             r = rank
             right_row = tk.Frame(self._right_panel)
             right_row.pack(anchor="e", pady=(ROW_PAD, ROW_PAD - 1))
-            tk.Label(right_row, text=f"{pct}%", width=5, anchor="center",
+            if rerank_score is None:
+                score_text = f"{pct}%"
+            else:
+                score_text = f"{round(float(rerank_score) * 100)}%"
+            tk.Label(right_row, text=score_text, width=5, anchor="center",
                      font=("", 9, "bold"),
-                     fg="#27AE60" if pct == 100 else "#333").pack(side="left", padx=2)
+                     fg="#27AE60" if score_text == "100%" else "#333").pack(side="left", padx=2)
             tk.Button(right_row, text="打开图片", width=8,
                       command=lambda p=full_path: self._open_file(p)).pack(side="left", padx=2)
             tk.Button(right_row, text="打开答案", width=8,
                       command=lambda rk=r: self._open_answer(rk)).pack(side="left", padx=(2, 4))
 
-        self._set_status("检索完成")
+        self._set_status("检索完成（已复筛）" if reranked else "检索完成")
         # 延迟刷新，等 Tkinter 完成像素级布局
         self.win.after(50, self._refresh_scroll)
 
