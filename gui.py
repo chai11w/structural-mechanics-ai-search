@@ -440,6 +440,8 @@ class App:
                         "coarse_rank": coarse_rank,
                         "rerank_score": item.get("rerank_score"),
                         "final_score": item.get("final_score"),
+                        "length_score": item.get("length_score"),
+                        "length_reason": item.get("length_reason"),
                         "rerank_reason": item.get("rerank_reason"),
                     })
                 last_file.write_text(_json.dumps(last_paths, ensure_ascii=False), encoding="utf-8")

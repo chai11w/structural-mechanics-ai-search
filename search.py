@@ -53,6 +53,7 @@ TOP_K = cfg.get("top_k", 5)
 RERANK_MIN_LOAD_SCORE = 0.5
 RERANK_LOAD_WEIGHT = 0.5
 RERANK_VISION_WEIGHT = 0.5
+LENGTH_TIE_FINAL_FLOOR = 0.9
 
 SYSTEM_PROMPT = """从图片中提取所有外部荷载信息。严格按以下JSON格式输出，不要输出任何其他内容。
 
@@ -180,9 +181,26 @@ RERANK_PROMPT = """你是结构力学搜题结果复筛器。候选题已经通�
 {"score":0.95,"reason":"理由不超过20字"}"""
 
 
-def score_candidate_pair(client, query_image_path, candidate_path):
+LENGTH_TIE_PROMPT = """你是结构力学搜题结果打平复核器。候选题已经被判定为高度相似。
+
+你会看到：
+1. 查询题图片
+2. 一个候选题图片
+
+请只比较杆件长度、跨长、高度、分段长度和整体比例是否一致。
+不要解题。
+不要判断荷载位置。
+不要重新计算荷载数量。
+不要重新判断荷载类型数量。
+不要因为题号、节点字母不同而降分。
+
+严格输出JSON，不要输出其它文字：
+{"score":0.95,"reason":"理由不超过20字"}"""
+
+
+def score_candidate_pair(client, query_image_path, candidate_path, prompt=RERANK_PROMPT):
     content = [
-        {"type": "text", "text": RERANK_PROMPT},
+        {"type": "text", "text": prompt},
         {"type": "text", "text": "查询题图片："},
         {
             "type": "image_url",
@@ -220,6 +238,27 @@ def compute_final_rerank_score(load_score, rerank_score):
     return load_score * RERANK_LOAD_WEIGHT + rerank_score * RERANK_VISION_WEIGHT
 
 
+def apply_length_tie_break(client, query_image_path, scored):
+    perfect = [item for item in scored if float(item.get("final_score") or 0) >= 0.999]
+    if len(perfect) <= 1:
+        return scored
+
+    for item in perfect:
+        path = Path(item["path"])
+        try:
+            length_score, length_reason = score_candidate_pair(
+                client, query_image_path, str(path), prompt=LENGTH_TIE_PROMPT
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARNING: 候选 {item['rank']} 杆长复核失败: {exc}")
+            length_score, length_reason = 0.0, "杆长复核失败"
+        item["length_score"] = length_score
+        item["length_reason"] = length_reason
+        item["final_score"] = LENGTH_TIE_FINAL_FLOOR + (1.0 - LENGTH_TIE_FINAL_FLOOR) * length_score
+
+    return scored
+
+
 def rerank_candidates(query_image_path, candidates, top_n=3):
     """Use the vision model to rerank already-selected search candidates."""
     if not query_image_path or not candidates:
@@ -250,8 +289,14 @@ def rerank_candidates(query_image_path, candidates, top_n=3):
         item["rerank_reason"] = reason
         scored.append(item)
 
+    scored = apply_length_tie_break(client, query_image_path, scored)
     scored.sort(
-        key=lambda x: (x.get("final_score", 0), x.get("score", 0), x.get("rerank_score", 0)),
+        key=lambda x: (
+            x.get("final_score", 0),
+            x.get("length_score", 1),
+            x.get("score", 0),
+            x.get("rerank_score", 0),
+        ),
         reverse=True,
     )
     return scored[:top_n]
@@ -478,6 +523,8 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
                     "coarse_rank": item["rank"],
                     "rerank_score": item.get("rerank_score"),
                     "final_score": item.get("final_score"),
+                    "length_score": item.get("length_score"),
+                    "length_reason": item.get("length_reason"),
                     "rerank_reason": reason,
                 })
             rerank_text = "\n".join(rerank_lines)
