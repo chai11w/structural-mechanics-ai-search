@@ -234,34 +234,37 @@ class App:
 
         self._preview_box = tk.LabelFrame(self._right_panel, text="第一名预览", padx=4, pady=4)
         self._preview_box.pack(side="top", fill="both", expand=True, pady=(10, 0))
-        self._preview_inner = tk.Frame(self._preview_box, bg="#f7f7f7")
+        preview_bg = self.win.cget("bg")
+        self._preview_inner = tk.Frame(self._preview_box, bg=preview_bg)
         self._preview_inner.pack(fill="both", expand=True)
-        self._preview_inner.columnconfigure(1, weight=1)
-        self._preview_inner.rowconfigure(0, weight=1)
-        self._preview_prev = tk.Button(
-            self._preview_inner,
-            text="‹",
-            width=2,
-            command=lambda: self._move_preview(-1),
-        )
-        self._preview_prev.grid(row=0, column=0, sticky="ns")
         self._preview_label = tk.Label(
             self._preview_inner,
             text="暂无预览",
-            bg="#f7f7f7",
+            bg=preview_bg,
             fg="gray",
             width=22,
             height=8,
             anchor="center",
         )
-        self._preview_label.grid(row=0, column=1, sticky="nsew")
+        self._preview_label.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._preview_prev = tk.Button(
+            self._preview_inner,
+            text="‹",
+            width=1,
+            relief="flat",
+            bg=preview_bg,
+            command=lambda: self._move_preview(-1),
+        )
         self._preview_next = tk.Button(
             self._preview_inner,
             text="›",
-            width=2,
+            width=1,
+            relief="flat",
+            bg=preview_bg,
             command=lambda: self._move_preview(1),
         )
-        self._preview_next.grid(row=0, column=2, sticky="ns")
+        self._preview_prev.place(relx=0.02, rely=0.5, anchor="w")
+        self._preview_next.place(relx=0.98, rely=0.5, anchor="e")
         self._hide_preview_arrows()
         for w in (self._preview_box, self._preview_inner, self._preview_label, self._preview_prev, self._preview_next):
             w.bind("<Enter>", self._show_preview_arrows)
@@ -589,8 +592,10 @@ class App:
             self.win.after_cancel(self._preview_hide_after_id)
             self._preview_hide_after_id = None
         if len(self._preview_paths) > 1:
-            self._preview_prev.grid()
-            self._preview_next.grid()
+            self._preview_prev.place(relx=0.02, rely=0.5, anchor="w")
+            self._preview_next.place(relx=0.98, rely=0.5, anchor="e")
+            self._preview_prev.lift()
+            self._preview_next.lift()
 
     def _schedule_hide_preview_arrows(self, _event=None):
         if self._preview_hide_after_id:
@@ -609,8 +614,8 @@ class App:
             self._hide_preview_arrows()
 
     def _hide_preview_arrows(self):
-        self._preview_prev.grid_remove()
-        self._preview_next.grid_remove()
+        self._preview_prev.place_forget()
+        self._preview_next.place_forget()
 
     def _on_result_resize(self, event):
         self._result_canvas.configure(scrollregion=self._result_canvas.bbox("all"))
