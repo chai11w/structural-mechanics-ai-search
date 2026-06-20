@@ -416,6 +416,7 @@ class App:
                         "score": item["score"],
                         "coarse_rank": coarse_rank,
                         "rerank_score": item.get("rerank_score"),
+                        "final_score": item.get("final_score"),
                         "rerank_reason": item.get("rerank_reason"),
                     })
                 last_file.write_text(_json.dumps(last_paths, ensure_ascii=False), encoding="utf-8")
@@ -440,11 +441,13 @@ class App:
                 score = result["score"]
                 full_path = result["path"]
                 rerank_score = result.get("rerank_score")
+                final_score = result.get("final_score")
                 reranked = reranked or rerank_score is not None
             else:
                 score, name = result
                 full_path = str(ROOT / name)
                 rerank_score = None
+                final_score = None
             pct = round(score * 100)
 
             # 左侧：路径 Entry（中文字符按2倍宽度估算）
@@ -464,7 +467,8 @@ class App:
             if rerank_score is None:
                 score_text = f"{pct}%"
             else:
-                score_text = f"{round(float(rerank_score) * 100)}%"
+                display_score = final_score if final_score is not None else rerank_score
+                score_text = f"{round(float(display_score) * 100)}%"
             tk.Label(right_row, text=score_text, width=5, anchor="center",
                      font=("", 9, "bold"),
                      fg="#27AE60" if score_text == "100%" else "#333").pack(side="left", padx=2)
