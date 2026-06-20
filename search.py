@@ -51,8 +51,8 @@ LAST_SEARCH_FILE = ROOT / "_last_search.json"
 ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY") or cfg.get("zhipuai_api_key", "")
 TOP_K = cfg.get("top_k", 5)
 RERANK_MIN_LOAD_SCORE = 0.5
-RERANK_LOAD_WEIGHT = 0.7
-RERANK_VISION_WEIGHT = 0.3
+RERANK_LOAD_WEIGHT = 0.5
+RERANK_VISION_WEIGHT = 0.5
 
 SYSTEM_PROMPT = """从图片中提取所有外部荷载信息。严格按以下JSON格式输出，不要输出任何其他内容。
 
