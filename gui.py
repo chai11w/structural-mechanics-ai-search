@@ -247,6 +247,7 @@ class App:
             anchor="center",
         )
         self._preview_label.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._preview_label.bind("<Button-1>", self._open_current_preview)
         self._preview_prev = tk.Button(
             self._preview_inner,
             text="‹",
@@ -550,7 +551,7 @@ class App:
         self._preview_index = 0
         self._preview_image_ref = None
         self._preview_box.config(text="第一名预览")
-        self._preview_label.config(image="", text="暂无预览")
+        self._preview_label.config(image="", text="暂无预览", cursor="")
         self._hide_preview_arrows()
 
     def _set_preview_paths(self, image_paths):
@@ -570,22 +571,27 @@ class App:
             return
         self._preview_box.config(text=f"第{self._preview_index + 1}名预览")
         if not HAS_PIL:
-            self._preview_label.config(image="", text="未安装 Pillow")
+            self._preview_label.config(image="", text="未安装 Pillow", cursor="")
             return
 
         path = Path(image_path)
         if not path.is_file():
-            self._preview_label.config(image="", text="图片不存在")
+            self._preview_label.config(image="", text="图片不存在", cursor="")
             return
 
         try:
             img = Image.open(path)
             img.thumbnail((210, 170), Image.LANCZOS)
             self._preview_image_ref = ImageTk.PhotoImage(img)
-            self._preview_label.config(image=self._preview_image_ref, text="")
+            self._preview_label.config(image=self._preview_image_ref, text="", cursor="hand2")
         except Exception as exc:  # noqa: BLE001
             self._preview_image_ref = None
-            self._preview_label.config(image="", text=f"预览失败\n{str(exc)[:40]}")
+            self._preview_label.config(image="", text=f"预览失败\n{str(exc)[:40]}", cursor="")
+
+    def _open_current_preview(self, _event=None):
+        if not self._preview_paths:
+            return
+        self._open_file(self._preview_paths[self._preview_index])
 
     def _show_preview_arrows(self, _event=None):
         if self._preview_hide_after_id:
