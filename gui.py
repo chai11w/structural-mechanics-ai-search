@@ -65,6 +65,12 @@ except ImportError:
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+try:
+    from PIL import Image, ImageTk
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+
 # ============================================================
 # 工具
 # ============================================================
@@ -109,6 +115,7 @@ class App:
         self._mode = tk.StringVar(value="image")   # "image" | "manual"
         self._manual_loads = []   # 手动输入的荷载列表
         self._last_results = []   # 上次检索结果
+        self._preview_image_ref = None
 
         self._build_ui()
         self._refresh_chapters()
@@ -218,6 +225,22 @@ class App:
         # 右侧固定面板（%+按钮，不随滚动移动）
         self._right_panel = tk.Frame(result_frame)
         self._right_panel.pack(side="right", fill="y")
+
+        self._actions_panel = tk.Frame(self._right_panel)
+        self._actions_panel.pack(side="top", fill="x")
+
+        self._preview_box = tk.LabelFrame(self._right_panel, text="第一名预览", padx=4, pady=4)
+        self._preview_box.pack(side="top", fill="both", expand=True, pady=(10, 0))
+        self._preview_label = tk.Label(
+            self._preview_box,
+            text="暂无预览",
+            bg="#f7f7f7",
+            fg="gray",
+            width=22,
+            height=8,
+            anchor="center",
+        )
+        self._preview_label.pack(fill="both", expand=True)
 
         # 分隔线
         tk.Frame(result_frame, width=2, bg="#cccccc").pack(side="right", fill="y", padx=2)
@@ -430,12 +453,14 @@ class App:
 
         if not results:
             tk.Label(self.result_list, text="无匹配结果", fg="gray").pack(anchor="w")
+            self._clear_preview()
             self._set_status("无结果")
             return
 
         ROW_PAD = 4
 
         reranked = False
+        first_preview_path = None
         for rank, result in enumerate(results, 1):
             if isinstance(result, dict):
                 score = result["score"]
@@ -448,6 +473,8 @@ class App:
                 full_path = str(ROOT / name)
                 rerank_score = None
                 final_score = None
+            if rank == 1:
+                first_preview_path = full_path
             pct = round(score * 100)
 
             # 左侧：路径 Entry（中文字符按2倍宽度估算）
@@ -462,7 +489,7 @@ class App:
 
             # 右侧：% + 按钮
             r = rank
-            right_row = tk.Frame(self._right_panel)
+            right_row = tk.Frame(self._actions_panel)
             right_row.pack(anchor="e", pady=(ROW_PAD, ROW_PAD - 1))
             if rerank_score is None:
                 score_text = f"{pct}%"
@@ -478,14 +505,42 @@ class App:
                       command=lambda rk=r: self._open_answer(rk)).pack(side="left", padx=(2, 4))
 
         self._set_status("检索完成（已复筛）" if reranked else "检索完成")
+        self._set_preview(first_preview_path)
         # 延迟刷新，等 Tkinter 完成像素级布局
         self.win.after(50, self._refresh_scroll)
 
     def _clear_results(self):
         for w in self.result_list.winfo_children():
             w.destroy()
-        for w in self._right_panel.winfo_children():
+        for w in self._actions_panel.winfo_children():
             w.destroy()
+        self._clear_preview()
+
+    def _clear_preview(self):
+        self._preview_image_ref = None
+        self._preview_label.config(image="", text="暂无预览")
+
+    def _set_preview(self, image_path):
+        if not image_path:
+            self._clear_preview()
+            return
+        if not HAS_PIL:
+            self._preview_label.config(image="", text="未安装 Pillow")
+            return
+
+        path = Path(image_path)
+        if not path.is_file():
+            self._preview_label.config(image="", text="图片不存在")
+            return
+
+        try:
+            img = Image.open(path)
+            img.thumbnail((210, 170), Image.LANCZOS)
+            self._preview_image_ref = ImageTk.PhotoImage(img)
+            self._preview_label.config(image=self._preview_image_ref, text="")
+        except Exception as exc:  # noqa: BLE001
+            self._preview_image_ref = None
+            self._preview_label.config(image="", text=f"预览失败\n{str(exc)[:40]}")
 
     def _on_result_resize(self, event):
         self._result_canvas.configure(scrollregion=self._result_canvas.bbox("all"))
