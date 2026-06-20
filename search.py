@@ -50,6 +50,9 @@ ANSWER_OUTPUT = Path(cfg.get("answer_output", r"D:\桌面\答疑、帮做\答案
 LAST_SEARCH_FILE = ROOT / "_last_search.json"
 ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY") or cfg.get("zhipuai_api_key", "")
 TOP_K = cfg.get("top_k", 5)
+RERANK_MIN_LOAD_SCORE = 0.5
+RERANK_LOAD_WEIGHT = 0.7
+RERANK_VISION_WEIGHT = 0.3
 
 SYSTEM_PROMPT = """从图片中提取所有外部荷载信息。严格按以下JSON格式输出，不要输出任何其他内容。
 
@@ -167,10 +170,9 @@ RERANK_PROMPT = """你是结构力学搜题结果复筛器。候选题已经通�
 1. 查询题图片
 2. 一个候选题图片
 
-请只根据以下三点给候选题打相似度分数：
+请只根据以下两点给候选题打相似度分数：
 1. 荷载位置是否一致
 2. 结构形状是否相近
-3. 是否存在肉眼明显差异
 
 不要解题。
 不要重新计算荷载数量。
@@ -215,6 +217,12 @@ def score_candidate_pair(client, query_image_path, candidate_path):
     return score, str(parsed.get("reason", "")).strip()
 
 
+def compute_final_rerank_score(load_score, rerank_score):
+    load_score = max(0.0, min(1.0, float(load_score or 0)))
+    rerank_score = max(0.0, min(1.0, float(rerank_score or 0)))
+    return load_score * RERANK_LOAD_WEIGHT + rerank_score * RERANK_VISION_WEIGHT
+
+
 def rerank_candidates(query_image_path, candidates, top_n=3):
     """Use the vision model to rerank already-selected search candidates."""
     if not query_image_path or not candidates:
@@ -241,10 +249,14 @@ def rerank_candidates(query_image_path, candidates, top_n=3):
             score, reason = 0.0, "复筛失败"
         item = dict(candidate)
         item["rerank_score"] = score
+        item["final_score"] = compute_final_rerank_score(item.get("score", 0), score)
         item["rerank_reason"] = reason
         scored.append(item)
 
-    scored.sort(key=lambda x: (x.get("rerank_score", 0), x.get("score", 0)), reverse=True)
+    scored.sort(
+        key=lambda x: (x.get("final_score", 0), x.get("score", 0), x.get("rerank_score", 0)),
+        reverse=True,
+    )
     return scored[:top_n]
 
 
@@ -450,17 +462,17 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
     print(result_text)
     print(f"\n结果已保存: {output_path}")
 
-    if rerank_image_path and paths:
-        reranked = rerank_candidates(rerank_image_path, paths, rerank_top)
+    filtered_rerank_paths = [item for item in paths if item["score"] >= RERANK_MIN_LOAD_SCORE]
+    if rerank_image_path and filtered_rerank_paths:
+        reranked = rerank_candidates(rerank_image_path, filtered_rerank_paths, rerank_top)
         if reranked:
             rerank_lines = []
             rerank_paths = []
             for rank, item in enumerate(reranked, 1):
-                pct = round(item["score"] * 100)
-                rerank_pct = round(float(item.get("rerank_score") or 0) * 100)
+                final_pct = round(float(item.get("final_score") or 0) * 100)
                 reason = item.get("rerank_reason") or "LLM复筛"
                 rerank_lines.append(
-                    f"{rank}. {item['path']}    荷载相似度: {pct}%    复筛分: {rerank_pct}%    复筛: {reason}"
+                    f"{rank}. {item['path']}    相似度: {final_pct}%"
                 )
                 rerank_paths.append({
                     "rank": rank,
@@ -468,6 +480,7 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
                     "score": item["score"],
                     "coarse_rank": item["rank"],
                     "rerank_score": item.get("rerank_score"),
+                    "final_score": item.get("final_score"),
                     "rerank_reason": reason,
                 })
             rerank_text = "\n".join(rerank_lines)
