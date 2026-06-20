@@ -116,6 +116,9 @@ class App:
         self._manual_loads = []   # 手动输入的荷载列表
         self._last_results = []   # 上次检索结果
         self._preview_image_ref = None
+        self._preview_paths = []
+        self._preview_index = 0
+        self._preview_hide_after_id = None
 
         self._build_ui()
         self._refresh_chapters()
@@ -231,8 +234,19 @@ class App:
 
         self._preview_box = tk.LabelFrame(self._right_panel, text="第一名预览", padx=4, pady=4)
         self._preview_box.pack(side="top", fill="both", expand=True, pady=(10, 0))
+        self._preview_inner = tk.Frame(self._preview_box, bg="#f7f7f7")
+        self._preview_inner.pack(fill="both", expand=True)
+        self._preview_inner.columnconfigure(1, weight=1)
+        self._preview_inner.rowconfigure(0, weight=1)
+        self._preview_prev = tk.Button(
+            self._preview_inner,
+            text="‹",
+            width=2,
+            command=lambda: self._move_preview(-1),
+        )
+        self._preview_prev.grid(row=0, column=0, sticky="ns")
         self._preview_label = tk.Label(
-            self._preview_box,
+            self._preview_inner,
             text="暂无预览",
             bg="#f7f7f7",
             fg="gray",
@@ -240,7 +254,18 @@ class App:
             height=8,
             anchor="center",
         )
-        self._preview_label.pack(fill="both", expand=True)
+        self._preview_label.grid(row=0, column=1, sticky="nsew")
+        self._preview_next = tk.Button(
+            self._preview_inner,
+            text="›",
+            width=2,
+            command=lambda: self._move_preview(1),
+        )
+        self._preview_next.grid(row=0, column=2, sticky="ns")
+        self._hide_preview_arrows()
+        for w in (self._preview_box, self._preview_inner, self._preview_label, self._preview_prev, self._preview_next):
+            w.bind("<Enter>", self._show_preview_arrows)
+            w.bind("<Leave>", self._schedule_hide_preview_arrows)
 
         # 分隔线
         tk.Frame(result_frame, width=2, bg="#cccccc").pack(side="right", fill="y", padx=2)
@@ -462,7 +487,7 @@ class App:
         ROW_PAD = 4
 
         reranked = False
-        first_preview_path = None
+        preview_paths = []
         for rank, result in enumerate(results, 1):
             if isinstance(result, dict):
                 score = result["score"]
@@ -475,8 +500,7 @@ class App:
                 full_path = str(ROOT / name)
                 rerank_score = None
                 final_score = None
-            if rank == 1:
-                first_preview_path = full_path
+            preview_paths.append(full_path)
             pct = round(score * 100)
 
             # 左侧：路径 Entry（中文字符按2倍宽度估算）
@@ -507,7 +531,7 @@ class App:
                       command=lambda rk=r: self._open_answer(rk)).pack(side="left", padx=(2, 4))
 
         self._set_status("检索完成（已复筛）" if reranked else "检索完成")
-        self._set_preview(first_preview_path)
+        self._set_preview_paths(preview_paths)
         # 延迟刷新，等 Tkinter 完成像素级布局
         self.win.after(50, self._refresh_scroll)
 
@@ -519,13 +543,29 @@ class App:
         self._clear_preview()
 
     def _clear_preview(self):
+        self._preview_paths = []
+        self._preview_index = 0
         self._preview_image_ref = None
+        self._preview_box.config(text="第一名预览")
         self._preview_label.config(image="", text="暂无预览")
+        self._hide_preview_arrows()
+
+    def _set_preview_paths(self, image_paths):
+        self._preview_paths = list(image_paths or [])
+        self._preview_index = 0
+        self._set_preview(self._preview_paths[0] if self._preview_paths else None)
+
+    def _move_preview(self, delta):
+        if not self._preview_paths:
+            return
+        self._preview_index = (self._preview_index + delta) % len(self._preview_paths)
+        self._set_preview(self._preview_paths[self._preview_index])
 
     def _set_preview(self, image_path):
         if not image_path:
             self._clear_preview()
             return
+        self._preview_box.config(text=f"第{self._preview_index + 1}名预览")
         if not HAS_PIL:
             self._preview_label.config(image="", text="未安装 Pillow")
             return
@@ -543,6 +583,34 @@ class App:
         except Exception as exc:  # noqa: BLE001
             self._preview_image_ref = None
             self._preview_label.config(image="", text=f"预览失败\n{str(exc)[:40]}")
+
+    def _show_preview_arrows(self, _event=None):
+        if self._preview_hide_after_id:
+            self.win.after_cancel(self._preview_hide_after_id)
+            self._preview_hide_after_id = None
+        if len(self._preview_paths) > 1:
+            self._preview_prev.grid()
+            self._preview_next.grid()
+
+    def _schedule_hide_preview_arrows(self, _event=None):
+        if self._preview_hide_after_id:
+            self.win.after_cancel(self._preview_hide_after_id)
+        self._preview_hide_after_id = self.win.after(120, self._hide_preview_arrows_if_pointer_outside)
+
+    def _hide_preview_arrows_if_pointer_outside(self):
+        self._preview_hide_after_id = None
+        x = self.win.winfo_pointerx()
+        y = self.win.winfo_pointery()
+        left = self._preview_box.winfo_rootx()
+        top = self._preview_box.winfo_rooty()
+        right = left + self._preview_box.winfo_width()
+        bottom = top + self._preview_box.winfo_height()
+        if not (left <= x <= right and top <= y <= bottom):
+            self._hide_preview_arrows()
+
+    def _hide_preview_arrows(self):
+        self._preview_prev.grid_remove()
+        self._preview_next.grid_remove()
 
     def _on_result_resize(self, event):
         self._result_canvas.configure(scrollregion=self._result_canvas.bbox("all"))
