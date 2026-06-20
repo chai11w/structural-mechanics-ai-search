@@ -88,17 +88,15 @@ def normalize_raw(raw):
     s = raw.strip()
     s = re.sub(r'\s+', '', s)
     s = s.lower()
-    s = s.replace('kn', 'kN')
     # 去掉等号前缀: F=10kN→10kN, q=4kN/m→4kN/m, M=20kN·m→20kN·m
     s = re.sub(r'^[a-z_]+=\s*', '', s)
     # 符号归一化: ql/qL → q
     s = re.sub(r'^q[lL]$', 'q', s)
     # F_P/Fp → F
     s = re.sub(r'^[fF]_?[pP]$', 'F', s)
-    # 去掉力学单位后缀，只保留数值/符号（20kN→20, 4kN/m→4, 10kN·m→10）
+    # 去掉数值荷载单位后缀，只保留数值/符号（20k/20kN→20, 4kN/m→4, 10kN·m→10）
     # 类型已经由 type 字段区分，单位信息冗余
-    s = re.sub(r'kN.*', '', s)
-    s = re.sub(r'[kK][nN].*', '', s)
+    s = re.sub(r'(?<=\d)k(?:n)?.*$', '', s)
     s = s.strip('.')
     return s
 
