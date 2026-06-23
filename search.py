@@ -121,13 +121,17 @@ def _canonical_symbol_expr(raw):
 
 
 def _symbol_length_power(body):
-    if re.search(r"/[la]2$", body):
-        return -2
-    if re.search(r"/[la]$", body):
-        return -1
-    if re.search(r"[la]2$", body):
+    if body in {"fp"}:
+        return 0
+    if "/" in body:
+        denominator = body.rsplit("/", 1)[1]
+        if re.fullmatch(r"[a-z]+2", denominator):
+            return -2
+        if re.fullmatch(r"[a-z]+", denominator):
+            return -1
+    if re.fullmatch(r"[a-z]+2", body) and len(body) > 2:
         return 2
-    if re.search(r"[la]$", body) and len(body) > 1:
+    if re.fullmatch(r"[a-z]+", body) and len(body) > 1:
         return 1
     return 0
 
