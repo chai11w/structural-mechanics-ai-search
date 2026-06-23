@@ -83,7 +83,7 @@ class QwenClassifier:
             cached["from_cache"] = True
             return cached
 
-        api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+        api_key = os.environ.get("DASHSCOPE_API_KEY", "") or search.cfg.get("dashscope_api_key", "")
         if not api_key:
             raise RuntimeError("DASHSCOPE_API_KEY is not set")
 

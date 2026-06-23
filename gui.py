@@ -55,6 +55,7 @@ from search import (
     answer as do_answer, load_chapter_excel, rerank_candidates,
     resolve_question_path
 )
+from multi_agent_pipeline import MultiAgentCoordinator
 from zhipuai import ZhipuAI
 
 try:
@@ -120,6 +121,7 @@ class App:
         self._preview_paths = []
         self._preview_index = 0
         self._preview_hide_after_id = None
+        self._multi_agent = MultiAgentCoordinator(top_k=TOP_K)
 
         self._build_ui()
         self._refresh_chapters()
@@ -369,19 +371,34 @@ class App:
 
         def run():
             try:
-                query_image_path = self._image_path.get().strip() if self._mode.get() == "image" else None
-                query_loads = self._get_query_loads()
-                if query_loads is None:
-                    return
-
-                self._update_loads_display(query_loads)
-                self._set_status("检索中...")
-
-                # 捕获 search() 的输出结果
-                results = self._run_search(query_loads, chapter, query_image_path=query_image_path)
-                if self._mode.get() == "manual":
+                if self._mode.get() == "image":
+                    query_image_path = self._get_query_image_path()
+                    if query_image_path is None:
+                        return
+                    self._set_status("Qwen识别分类中...")
+                    pipeline_result = self._multi_agent.search_image(
+                        query_image_path,
+                        chapter,
+                        rerank=True,
+                        rerank_top=3,
+                    )
+                else:
+                    query_loads = self._get_query_loads()
+                    if query_loads is None:
+                        return
+                    self._set_status("检索中...")
+                    pipeline_result = self._multi_agent.search_loads(
+                        query_loads,
+                        chapter,
+                        rerank=False,
+                    )
                     self.win.after(0, self._clear_loads)
-                self.win.after(0, lambda: self._show_results(results))
+
+                self._update_loads_display(pipeline_result.loads)
+                if pipeline_result.route.route == "needs_review":
+                    msg = f"{pipeline_result.route.category}: {pipeline_result.route.reason}"
+                    self.win.after(0, lambda m=msg: messagebox.showwarning("需要复核", m))
+                self.win.after(0, lambda r=pipeline_result: self._show_pipeline_result(r))
             except Exception as e:
                 import traceback
                 msg = traceback.format_exc()
@@ -391,19 +408,20 @@ class App:
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _get_query_image_path(self):
+        img = self._image_path.get().strip()
+        if not img:
+            self.win.after(0, lambda: messagebox.showwarning("提示", "请选择或拖入题目图片"))
+            return None
+        if not Path(img).exists():
+            self.win.after(0, lambda: messagebox.showerror("错误", f"图片不存在：{img}"))
+            return None
+        return img
+
     def _get_query_loads(self):
         mode = self._mode.get()
         if mode == "image":
-            img = self._image_path.get().strip()
-            if not img:
-                self.win.after(0, lambda: messagebox.showwarning("提示", "请选择或拖入题目图片"))
-                return None
-            if not Path(img).exists():
-                self.win.after(0, lambda: messagebox.showerror("错误", f"图片不存在：{img}"))
-                return None
-            client = ZhipuAI(api_key=ZHIPUAI_API_KEY)
-            result = extract_loads(client, img)
-            return result.get("loads", [])
+            return None
         else:
             if not self._manual_loads:
                 self.win.after(0, lambda: messagebox.showwarning("提示", "请至少添加一条荷载"))
@@ -413,6 +431,14 @@ class App:
     def _update_loads_display(self, loads_list):
         text = "识别荷载：" + loads_to_display(loads_list)
         self.win.after(0, lambda: self.loads_result_label.config(text=text))
+
+    def _show_pipeline_result(self, pipeline_result):
+        self._show_results(pipeline_result.results)
+        if pipeline_result.route.route == "needs_review":
+            self._set_status("需要人工复核")
+        elif pipeline_result.results:
+            suffix = "（已复筛）" if pipeline_result.reranked else ""
+            self._set_status(f"检索完成：{pipeline_result.route.route}{suffix}")
 
     def _run_search(self, query_loads, chapter, query_image_path=None):
         """直接调 search 逻辑，返回结果列表"""

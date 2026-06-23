@@ -266,7 +266,7 @@
 
 ## 2026-06-23 Experimental Multi-Agent Retrieval
 
-- First CLI-only multi-agent retrieval layer was added; it does not replace the existing GUI flow yet.
+- Multi-agent retrieval layer was added and then wired into GUI image search as the default image workflow.
 - New files:
   - `multi_agent_pipeline.py`: defines `QwenClassifier`, `RuleRouter`, `MultiAgentCoordinator`, and shared formatting/search helpers.
   - `scripts/multi_agent_search.py`: CLI entry for the experimental pipeline.
@@ -276,6 +276,10 @@
   - Main bank is used for numeric and assigned-symbol loads; symbolic bank is used for unassigned symbolic loads; mixed/empty/unknown loads are not searched automatically.
   - Zhipu keeps the existing low-latency visual rerank role for Top candidates.
   - Qwen image classification results are cached under `.tmp_multi_agent/qwen_classifier_cache.json` by image hash and model.
+- GUI behavior:
+  - Image search now calls `MultiAgentCoordinator.search_image(...)` and therefore defaults to Qwen classification + bank routing + Zhipu rerank.
+  - Manual load search calls the same coordinator route/search path, but does not rerank because there is no query image for visual comparison.
+  - `DASHSCOPE_API_KEY` can be read from the environment or from local config key `dashscope_api_key`; do not commit that key.
 - CLI examples:
   - `python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter "2静定结构"`
   - `python scripts/multi_agent_search.py --types "均布" --raws "q" --chapter "2静定结构" --no-rerank`
