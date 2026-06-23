@@ -92,6 +92,7 @@
   - 已改为“逐候选打分”：每次只比较查询图和一个候选图，按 `结构形状` 给分，再由代码排序。
   - 2026-06-20 复筛条件进一步收窄：不再判断荷载位置，只用结构形状做视觉复筛。
   - 2026-06-19 增加复筛阈值：荷载相似度低于 50% 的候选不进入 LLM 复筛；过滤后不足 3 个时，只输出过滤后的复筛结果，不用低质量候选硬补 Top 3。
+  - 2026-06-23 更新：如果最终进入复筛的候选数不超过 3 个，直接输出粗筛结果，不再调用 Zhipu 复筛，以减少低收益模型调用。
   - 2026-06-20 复筛排序改为最终相似度；当前权重为荷载粗筛分 50% + 视觉复筛分 50%。用户可见搜索结果只显示最终相似度，不再同时展示荷载相似度、复筛分和计算过程。
   - 2026-06-20 增加 100% 打平复核：如果最终相似度 100% 的候选超过 1 个，才额外调用 LLM 比较杆件长度、跨长、高度和整体比例，并用该分数拉开并列结果。
   - 样本验证：对 `2静定结构/3钢架/1内力图/题目2/3铰/50.jpg` 搜索并复筛时，同图候选从荷载粗筛第 5 名升到复筛第 1 名。
@@ -279,6 +280,7 @@
 - GUI behavior:
   - Image search now calls `MultiAgentCoordinator.search_image(...)` and therefore defaults to Qwen classification + bank routing + Zhipu rerank.
   - Manual load search calls the same coordinator route/search path, but does not rerank because there is no query image for visual comparison.
+  - Manual numeric loads may omit units. The query normalizer fills default units by type: `集中 -> kN`, `均布 -> kN/m`, `弯矩 -> kN·m`; symbolic raws such as `q`, `2P/a`, `F1=2ql` are left unchanged.
   - `DASHSCOPE_API_KEY` can be read from the environment or from local config key `dashscope_api_key`; do not commit that key.
 - CLI examples:
   - `python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter "2静定结构"`
@@ -289,4 +291,5 @@
 - MVP rerank-pool rule:
   - Main bank non-perfect candidates enter Zhipu rerank only when score is at least `65%`.
   - Symbolic bank non-perfect candidates enter Zhipu rerank when score is at least `50%`.
-  - Perfect `100%` candidates always enter rerank for both banks; do not cap them yet, because recall is more important at this stage.
+  - Perfect `100%` candidates always enter the rerank candidate pool for both banks; do not cap them yet, because recall is more important at this stage.
+  - If the final rerank candidate pool has 3 or fewer candidates, skip Zhipu and return the coarse-search result directly.

@@ -53,7 +53,7 @@ _search_mod.LAST_SEARCH_FILE = ROOT / "_last_search.json"
 from search import (
     extract_loads, search as do_search, store as do_store,
     answer as do_answer, load_chapter_excel, rerank_candidates,
-    resolve_question_path
+    resolve_question_path, add_default_numeric_unit, normalize_query_loads
 )
 from multi_agent_pipeline import MultiAgentCoordinator
 from zhipuai import ZhipuAI
@@ -347,6 +347,7 @@ class App:
         if not raw:
             messagebox.showwarning("提示", "请填写荷载标注")
             return
+        raw = add_default_numeric_unit(raw, typ)
         self._manual_loads.append({"type": typ, "raw": raw})
         self._load_raw.set("")
         self._refresh_loads_label()
@@ -487,7 +488,7 @@ class App:
         from search import fix_load_types, compute_similarity, load_chapter_excel, _safe_parse_loads
         import json as _json
 
-        query_loads = fix_load_types(query_loads)
+        query_loads = normalize_query_loads(query_loads)
         df = load_chapter_excel(chapter)
         if df is None:
             return []

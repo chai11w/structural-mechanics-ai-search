@@ -132,7 +132,11 @@ class RuleRouter:
     MAIN_CATEGORIES = {"main_numeric", "main_assigned_symbolic"}
 
     def route(self, loads: list[dict[str, Any]]) -> tuple[RouteDecision, list[dict[str, Any]]]:
-        normalized = [normalize_load_item(item) for item in loads if isinstance(item, dict)]
+        normalized = [
+            normalize_load_item(item)
+            for item in search.normalize_query_loads(loads)
+            if isinstance(item, dict)
+        ]
         category, load_details = classify_loads(normalized)
 
         if category in self.MAIN_CATEGORIES:
@@ -185,6 +189,7 @@ class MultiAgentCoordinator:
         rerank_top: int = 3,
         status_callback=None,
     ) -> PipelineResult:
+        loads = search.normalize_query_loads(loads)
         route, load_details = self.router.route(loads)
         if route.route == "needs_review" or route.excel_root is None:
             return PipelineResult(route, loads, load_details, [], False)
@@ -195,12 +200,15 @@ class MultiAgentCoordinator:
         reranked = False
         if rerank and query_image_path and results:
             rerank_input = select_rerank_candidates(results, route.route)
+            if len(rerank_input) <= rerank_top:
+                rerank_input = []
             if status_callback and rerank_input:
                 status_callback("Zhipu复筛中...")
-            zhipu_results = search.rerank_candidates(query_image_path, rerank_input, top_n=rerank_top)
-            if zhipu_results:
-                results = normalize_rerank_results(zhipu_results)
-                reranked = True
+            if rerank_input:
+                zhipu_results = search.rerank_candidates(query_image_path, rerank_input, top_n=rerank_top)
+                if zhipu_results:
+                    results = normalize_rerank_results(zhipu_results)
+                    reranked = True
 
         write_last_search(results)
         return PipelineResult(route, loads, load_details, results, reranked)
@@ -226,7 +234,7 @@ def rank_bank_candidates(
     if df is None:
         return []
 
-    query_loads = search.fix_load_types([dict(item) for item in query_loads])
+    query_loads = search.normalize_query_loads(query_loads)
     scored: list[tuple[float, str]] = []
     for _, row in df.iterrows():
         db_loads = search._safe_parse_loads(row["荷载"])

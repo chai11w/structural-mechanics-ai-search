@@ -285,6 +285,42 @@ def normalize_load_type(load_type, raw=None):
     return typ
 
 
+DEFAULT_NUMERIC_UNITS = {
+    "集中": "kN",
+    "均布": "kN/m",
+    "弯矩": "kN·m",
+}
+
+
+def add_default_numeric_unit(raw, load_type):
+    """Allow manual numeric input without units under the project default unit system."""
+    text = str(raw or "").strip()
+    typ = normalize_load_type(load_type, text)
+    unit = DEFAULT_NUMERIC_UNITS.get(typ)
+    if not text or not unit:
+        return text
+
+    compact = re.sub(r"\s+", "", text)
+    if _looks_like_numeric_unit(compact):
+        return text
+
+    match = re.fullmatch(r"([A-Za-z][A-Za-z0-9_]*=)?([+-]?\d+(?:\.\d+)?)", compact)
+    if not match:
+        return text
+
+    prefix = match.group(1) or ""
+    value = match.group(2)
+    return f"{prefix}{value}{unit}"
+
+
+def normalize_query_loads(loads):
+    """Normalize user/query loads before routing and similarity comparison."""
+    normalized = fix_load_types([dict(item) for item in loads])
+    for item in normalized:
+        item["raw"] = add_default_numeric_unit(item.get("raw", ""), item.get("type", ""))
+    return normalized
+
+
 def fix_load_types(loads):
     """修正模型输出的荷载类型别名。"""
     for item in loads:
@@ -802,8 +838,8 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
         print(f"ERROR: Chapter '{chapter_name}' not found")
         return
 
-    # 修正查询荷载分类
-    query_loads = fix_load_types(query_loads)
+    # 修正查询荷载分类，并给手动纯数值输入补默认单位
+    query_loads = normalize_query_loads(query_loads)
 
     results = []
     for _, row in df.iterrows():
@@ -851,6 +887,9 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
     print(f"\n结果已保存: {output_path}")
 
     filtered_rerank_paths = [item for item in paths if item["score"] >= RERANK_MIN_LOAD_SCORE]
+    if rerank_image_path and 0 < len(filtered_rerank_paths) <= rerank_top:
+        print(f"\n复筛候选仅 {len(filtered_rerank_paths)} 个，跳过 LLM 复筛，直接输出粗筛结果。")
+        filtered_rerank_paths = []
     if rerank_image_path and filtered_rerank_paths:
         reranked = rerank_candidates(rerank_image_path, filtered_rerank_paths, rerank_top)
         if reranked:
