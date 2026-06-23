@@ -63,28 +63,37 @@ def check_loads_json(raw: object) -> bool:
 
 def check_symbol_normalization() -> list[str]:
     cases = {
-        "q": "0.010",
-        "qL": "0.010",
-        "qL²": "0.010",
-        "2q": "0.011",
-        "F/L": "0.020",
-        "F": "0.020",
-        "FL": "0.020",
-        "P": "0.020",
-        "Fp": "0.020",
-        "F_P": "0.020",
-        "2P": "0.021",
-        "Pa": "0.020",
-        "M/L²": "0.030",
-        "M/L": "0.030",
-        "M": "0.030",
-        "3M": "0.032",
+        ("q", "均布"): "0.010",
+        ("qL", "集中"): "0.010",
+        ("qL²", "弯矩"): "0.010",
+        ("2q", "均布"): "0.011",
+        ("F/L", "均布"): "0.020",
+        ("F", "集中"): "0.020",
+        ("FL", "弯矩"): "0.020",
+        ("P", "集中"): "0.020",
+        ("Fp", "集中"): "0.020",
+        ("F_P", "集中"): "0.020",
+        ("2P", "集中"): "0.021",
+        ("Pa", "弯矩"): "0.020",
+        ("M/L²", "均布"): "0.030",
+        ("M/L", "集中"): "0.030",
+        ("M", "弯矩"): "0.030",
+        ("3M", "弯矩"): "0.032",
+        ("A", "均布"): "0.010",
+        ("AL", "集中"): "0.010",
+        ("AL²", "弯矩"): "0.010",
+        ("A/L", "均布"): "0.020",
+        ("A", "集中"): "0.020",
+        ("AL", "弯矩"): "0.020",
+        ("A/L²", "均布"): "0.030",
+        ("A/L", "集中"): "0.030",
+        ("A", "弯矩"): "0.030",
     }
     failures = []
-    for raw, expected in cases.items():
-        actual = search.normalize_raw(raw)
+    for (raw, load_type), expected in cases.items():
+        actual = search.normalize_raw(raw, load_type)
         if actual != expected:
-            failures.append(f"{raw}: expected {expected}, got {actual}")
+            failures.append(f"{load_type}:{raw}: expected {expected}, got {actual}")
     return failures
 
 
