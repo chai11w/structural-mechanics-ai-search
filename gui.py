@@ -228,14 +228,28 @@ class App:
         result_frame = tk.LabelFrame(self.win, text="检索结果", padx=6, pady=6)
         result_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
-        # 右侧固定预览面板
-        self._right_panel = tk.Frame(result_frame)
-        self._right_panel.pack(side="right", fill="y")
+        yscroll = tk.Scrollbar(result_frame, orient="vertical",
+                               command=self._on_results_yview)
+        yscroll.pack(side="right", fill="y")
 
-        self._preview_box = tk.LabelFrame(self._right_panel, text="第一名预览", padx=4, pady=4)
-        self._preview_box.pack(side="top", fill="both", expand=True, pady=(10, 0))
+        # 固定操作列：只参与纵向滚动，不参与路径横向滚动
+        actions = tk.Frame(result_frame)
+        actions.pack(side="right", fill="y")
+        self._actions_canvas = tk.Canvas(actions, bd=0, highlightthickness=0,
+                                         width=268)
+        self._actions_canvas.pack(side="top", fill="both", expand=True)
+        self._actions_list = tk.Frame(self._actions_canvas)
+        self._actions_window = self._actions_canvas.create_window(
+            (0, 0), window=self._actions_list, anchor="nw"
+        )
+        self._actions_rows = tk.Frame(self._actions_list)
+        self._actions_rows.pack(side="top", anchor="e")
+
+        self._preview_box = tk.LabelFrame(self._actions_list, text="第一名预览", padx=4, pady=4)
+        self._preview_box.pack(side="top", fill="x", padx=(2, 4), pady=(10, 0))
         preview_bg = self.win.cget("bg")
         self._preview_inner = tk.Frame(self._preview_box, bg=preview_bg)
+        self._preview_inner.configure(width=180, height=180)
         self._preview_inner.pack(fill="both", expand=True)
         self._preview_label = tk.Label(
             self._preview_inner,
@@ -270,27 +284,12 @@ class App:
         for w in (self._preview_box, self._preview_inner, self._preview_label, self._preview_prev, self._preview_next):
             w.bind("<Enter>", self._show_preview_arrows)
             w.bind("<Leave>", self._schedule_hide_preview_arrows)
-
-        # 分隔线
-        tk.Frame(result_frame, width=2, bg="#cccccc").pack(side="right", fill="y", padx=2)
-
-        yscroll = tk.Scrollbar(result_frame, orient="vertical",
-                               command=self._on_results_yview)
-        yscroll.pack(side="right", fill="y")
-
-        # 固定操作列：只参与纵向滚动，不参与路径横向滚动
-        actions = tk.Frame(result_frame)
-        actions.pack(side="right", fill="y")
-        self._actions_canvas = tk.Canvas(actions, bd=0, highlightthickness=0,
-                                         width=268)
-        self._actions_canvas.pack(side="top", fill="both", expand=True)
-        self._actions_list = tk.Frame(self._actions_canvas)
-        self._actions_window = self._actions_canvas.create_window(
-            (0, 0), window=self._actions_list, anchor="nw"
-        )
         self._actions_list.bind("<Configure>", self._on_result_resize)
         self._actions_canvas.bind("<Enter>", self._bind_result_mousewheel)
         self._actions_canvas.bind("<Leave>", self._unbind_result_mousewheel)
+
+        # 分隔线
+        tk.Frame(result_frame, width=2, bg="#cccccc").pack(side="right", fill="y", padx=2)
 
         # 左侧：路径，带横向滚动条；纵向滚动与固定操作列同步
         left = tk.Frame(result_frame)
@@ -597,7 +596,7 @@ class App:
 
             # 右侧：% + 按钮
             r = rank
-            actions_row = tk.Frame(self._actions_list)
+            actions_row = tk.Frame(self._actions_rows)
             actions_row.pack(anchor="e", pady=(ROW_PAD, ROW_PAD - 1))
             if rerank_score is None:
                 score_text = f"{pct}%"
@@ -612,17 +611,23 @@ class App:
             tk.Button(actions_row, text="打开答案", width=8,
                       command=lambda rk=r: self._open_answer(rk)).pack(side="left", padx=(2, 4))
 
-        self._set_status("检索完成（已复筛）" if reranked else "检索完成")
         self._set_preview_paths(preview_paths)
+        self._add_result_preview_spacer()
+        self._set_status("检索完成（已复筛）" if reranked else "检索完成")
         # 延迟刷新，等 Tkinter 完成像素级布局
         self.win.after(50, self._refresh_scroll)
 
     def _clear_results(self):
         for w in self.result_list.winfo_children():
             w.destroy()
-        for w in self._actions_list.winfo_children():
+        for w in self._actions_rows.winfo_children():
             w.destroy()
         self._clear_preview()
+
+    def _add_result_preview_spacer(self):
+        self._preview_box.update_idletasks()
+        height = max(self._preview_box.winfo_reqheight() + 10, 160)
+        tk.Frame(self.result_list, height=height).pack(anchor="w", fill="x")
 
     def _clear_preview(self):
         self._preview_paths = []
