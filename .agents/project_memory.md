@@ -249,3 +249,17 @@
 - Verification after writing:
   - Formal symbolic bank validation: every row has valid JSON, existing image path, code-like `raw`, and `original_raw`.
   - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+
+## 2026-06-23 Live Excel Path Repair Rule
+
+- When a live Excel `题目名称` path no longer exists, do not immediately treat the row as invalid. First recursively search under the same chapter/topic question folder, because the user may have moved the image into a newly created subfolder.
+- If exactly matching content/name is found in a new location, update the Excel `题目名称` to the new relative path. Also normalize path casing to match the actual file name, because the classifier/review scripts use exact path strings for cross-checking.
+- If path normalization creates an exact duplicate row with the same `题目名称` and `荷载`, keep one row and remove the duplicate after backing up the live Excel.
+- Applied repair:
+  - Backup: `F:\cc\7-题库检索\backups\live_excel_before_path_repair_20260623_141649`
+  - `4力法.xlsx`: changed `4力法/2钢架/1单未知量/题目1/12.jpg` to `4力法/2钢架/1单未知量/题目1/0/12.jpg`.
+  - `4力法.xlsx`: changed `4力法/2钢架/1单未知量/题目1/51.JPG` to `4力法/2钢架/1单未知量/题目1/51.jpg`, then removed the duplicate `51.jpg` row with the same load.
+  - After repair, `4力法.xlsx` has 71 data rows; full-row path check for this workbook found 0 missing paths and 0 case mismatches.
+  - The same backup folder also includes `3静定结构位移.xlsx`; row 30 had Chinese commas inside the JSON load cell and was repaired to valid JSON without changing the load values.
+  - `scripts/smoke_test.py` was strengthened from first-20-row sampling to full-table checks for load JSON validity, image existence, and exact path casing.
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.

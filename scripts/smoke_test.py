@@ -61,6 +61,46 @@ def check_loads_json(raw: object) -> bool:
     return True
 
 
+def check_exact_image_path(root: Path, relative_path: object) -> tuple[bool, bool, str | None]:
+    """Return (exists, exact_case, actual_relative_path)."""
+    parts = str(relative_path).replace("\\", "/").split("/")
+    current = root
+    exact_case = True
+
+    for part in parts:
+        if not part:
+            continue
+        if not current.is_dir():
+            return False, exact_case, None
+
+        try:
+            children = list(current.iterdir())
+        except OSError:
+            return False, exact_case, None
+
+        exact = next((child for child in children if child.name == part), None)
+        if exact is not None:
+            current = exact
+            continue
+
+        case_match = next((child for child in children if child.name.lower() == part.lower()), None)
+        if case_match is not None:
+            current = case_match
+            exact_case = False
+            continue
+
+        return False, exact_case, None
+
+    if not current.is_file():
+        return False, exact_case, None
+
+    try:
+        actual = current.relative_to(root).as_posix()
+    except ValueError:
+        actual = str(current)
+    return True, exact_case, actual
+
+
 def check_symbol_normalization() -> list[str]:
     cases = {
         ("q", "均布"): "0.010",
@@ -212,26 +252,37 @@ def main() -> int:
 
         bad_json = []
         missing_images = []
-        sample = df.head(20)
-        for index, row in sample.iterrows():
+        case_mismatches = []
+        for index, row in df.iterrows():
             if not check_loads_json(row["荷载"]):
                 bad_json.append(index + 2)
-            image_path = root / str(row["题目名称"])
-            if not image_path.is_file():
+            exists, exact_case, actual_path = check_exact_image_path(root, row["题目名称"])
+            if not exists:
                 missing_images.append((index + 2, str(row["题目名称"])))
+            elif not exact_case:
+                case_mismatches.append((index + 2, str(row["题目名称"]), actual_path))
 
         if bad_json:
             failures += 1
-            fail(f"{chapter}: invalid load JSON in sample rows {bad_json}")
+            fail(f"{chapter}: invalid load JSON in rows {bad_json[:10]}")
         else:
-            ok(f"{chapter}: first {len(sample)} load JSON cells valid")
+            ok(f"{chapter}: all load JSON cells valid")
 
         if missing_images:
-            warnings += 1
+            failures += 1
             preview = "; ".join(f"row {row}: {path}" for row, path in missing_images[:3])
-            warn(f"{chapter}: sample image paths missing ({len(missing_images)}): {preview}")
+            fail(f"{chapter}: image paths missing ({len(missing_images)}): {preview}")
         else:
-            ok(f"{chapter}: first {len(sample)} image paths exist")
+            ok(f"{chapter}: all image paths exist")
+
+        if case_mismatches:
+            failures += 1
+            preview = "; ".join(
+                f"row {row}: {path} -> {actual}" for row, path, actual in case_mismatches[:3]
+            )
+            fail(f"{chapter}: image path case mismatches ({len(case_mismatches)}): {preview}")
+        else:
+            ok(f"{chapter}: image path casing exact")
 
     if failures:
         print(f"SUMMARY FAIL failures={failures} warnings={warnings}")
