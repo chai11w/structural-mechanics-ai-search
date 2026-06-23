@@ -199,3 +199,14 @@
 - 字母荷载归一化要先做小样本验证：确认 `F` 体系（`F/L`、`F`、`FL`）、`q` 体系（`q`、`qL`、`ql²`）和少见的 `M` 体系（`M/L²`、`M/L`、`M`）能被稳定区分，同时各自仍能按均布/集中/弯矩分到正确荷载类型，并且不会和真实小数数值混淆。
 - 当前最重要的主线护栏已建立：`scripts/smoke_test.py`。下一步建议先处理 smoke test 报出的 `4力法` 图片路径缺失，再继续模型识别或相似度优化。
 - 2026-06-20 荷载 raw 归一化兼容裸 `k` 单位：数值荷载里的 `20k`、`20kN`、`20kN/m` 等都按 `20` 比较，因为当前题库默认使用 kN 体系。
+## 2026-06-23 Handoff: Symbolic Bank Split
+
+- Current live question bank Excel files are the files under configured `ROOT`: `D:\桌面\答疑、帮做\结构力学\帮做\*.xlsx`. These are the indexes the GUI/CLI actually read. The repo-root `*.xlsx` copies may mirror them, but the live source for the software is `ROOT`.
+- Qwen3.7-Plus was tested on symbolic-load images through DashScope. First 10 manually checked samples were 10/10 correct. A later 30-image run found 21 exact matches with existing Excel after simple format normalization; the 9 differences were mostly old Excel omissions or format differences, not clear Qwen visual failures.
+- Important correction from user: if problem text assigns symbol values, e.g. `P=40kN`, `q=20kN/m`, `F1=40kN`, the item must be treated as a concrete numeric-load problem, not a pure symbolic-load problem. `search.py` now prompts for assignment-aware extraction and normalizes `F1=40kN -> 40`, `F2=2ql -> 2ql` for similarity.
+- Current decision direction: split the question bank into two tracks:
+  - Main/numeric bank: concrete loads and assigned-symbol loads such as `P=40kN`, `q=20kN/m`, `F1=40kN`.
+  - Symbolic experimental bank: unassigned symbolic loads such as `q`, `ql`, `2P/a`, `M`, `qa²`, `Fp`, etc.
+- Recommended next step before any deletion: export a review sheet of all live Excel rows whose loads are unassigned symbolic expressions, copy those rows into separate symbolic-bank Excel files, and back up the original live Excel files. Only after the export and review should those pure symbolic rows be removed from the main/numeric bank.
+- Do not blindly delete all rows containing letters. Rows with explicit assignments (`P=40kN`, `q=20kN/m`, `F1=40kN`, etc.) belong in the main/numeric bank because similarity can resolve them to concrete values.
+- Recent pushed commit for assignment handling: `9565d85 Handle assigned symbolic loads`. Smoke test passed after this change: `python scripts/smoke_test.py` -> `SUMMARY PASS warnings=0`.
