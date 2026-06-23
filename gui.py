@@ -236,11 +236,11 @@ class App:
         actions = tk.Frame(result_frame)
         actions.pack(side="right", fill="y")
         self._actions_canvas = tk.Canvas(actions, bd=0, highlightthickness=0,
-                                         width=220)
+                                         width=198)
         self._actions_canvas.pack(side="top", fill="both", expand=True)
         self._actions_list = tk.Frame(self._actions_canvas)
         self._actions_window = self._actions_canvas.create_window(
-            (220, 0), window=self._actions_list, anchor="ne"
+            (0, 0), window=self._actions_list, anchor="nw"
         )
         self._actions_rows = tk.Frame(self._actions_list)
         self._actions_rows.pack(side="top", anchor="e")
@@ -711,17 +711,11 @@ class App:
         self._sync_result_scrollregions()
 
     def _on_actions_canvas_resize(self, event):
-        self._actions_canvas.coords(self._actions_window, event.width, 0)
         self._sync_result_scrollregions()
 
     def _refresh_scroll(self):
         self.result_list.update_idletasks()
         self._actions_list.update_idletasks()
-        self._actions_canvas.coords(
-            self._actions_window,
-            self._actions_canvas.winfo_width(),
-            0,
-        )
         self._sync_result_scrollregions()
 
     def _sync_result_scrollregions(self):
