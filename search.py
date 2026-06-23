@@ -74,6 +74,8 @@ SYSTEM_PROMPT = """从图片中提取所有外部荷载信息。严格按以下J
 - 公式: ql²/8, ql/2
 
 符号荷载规则:
+- 先检查题干文字或图片说明里是否给出符号赋值，例如 P=40kN、q=20kN/m、F1=40kN、F2=80kN、M=20kN·m。若符号荷载在图中出现且题干给出赋值，raw 必须保留赋值形式，例如输出 P=40kN、q=20kN/m，而不是只输出 P 或 q。
+- 如果同一符号荷载出现多次且题干只给出一次赋值，每个对应荷载都使用这个赋值 raw；带下标的符号如 F1/F2/P1/P2 要分别匹配自己的赋值。
 - 复合符号要作为整体提取，不要拆分。例如图上是 ql 只输出 ql，不要额外输出 q；图上是 qa² 只输出 qa²，不要额外输出 q。
 - F/L, F, FL 是同一 F 符号体系在不同量纲下的表达；q, qL, ql² 是同一 q 符号体系在不同量纲下的表达；M/L², M/L, M 是同一 M 符号体系在不同量纲下的表达。
 - Pa, ql, qL, qa, qa², ql², FL 这类表达如果作为外荷载标注出现，应保留完整 raw。
@@ -200,16 +202,34 @@ def normalize_symbol_raw(raw, load_type=None, family_override=None):
     return None
 
 
-def normalize_raw(raw, load_type=None, family_override=None):
-    symbol_code = normalize_symbol_raw(raw, load_type, family_override)
-    if symbol_code is not None:
-        return symbol_code
-
+def _assignment_rhs(raw):
     s = str(raw or "").strip()
+    if "=" not in s:
+        return s
+    left, right = s.split("=", 1)
+    if re.fullmatch(r"\s*[A-Za-z][A-Za-z0-9_]*\s*", left) and right.strip():
+        return right.strip()
+    return s
+
+
+def _looks_like_numeric_unit(raw):
+    s = str(raw or "").strip()
+    s = re.sub(r"\s+", "", s).lower()
+    return re.match(r"^\d+(?:\.\d+)?(?:k|kn|n)(?:[/·\.\-*a-z0-9]*)?$", s) is not None
+
+
+def normalize_raw(raw, load_type=None, family_override=None):
+    comparable_raw = _assignment_rhs(raw)
+    if not _looks_like_numeric_unit(comparable_raw):
+        symbol_code = normalize_symbol_raw(comparable_raw, load_type, family_override)
+        if symbol_code is not None:
+            return symbol_code
+
+    s = str(comparable_raw or "").strip()
     s = re.sub(r'\s+', '', s)
     s = s.lower()
-    # 去掉等号前缀: F=10kN→10kN, q=4kN/m→4kN/m, M=20kN·m→20kN·m
-    s = re.sub(r'^[a-z_]+=\s*', '', s)
+    # 去掉等号前缀: F=10kN→10kN, F1=40kN→40kN, q=4kN/m→4kN/m
+    s = re.sub(r'^[a-z][a-z0-9_]*=\s*', '', s)
     # 去掉数值荷载单位后缀，只保留数值/符号（20k/20kN→20, 4kN/m→4, 10kN·m→10）
     # 类型已经由 type 字段区分，单位信息冗余
     s = re.sub(r'(?<=\d)k(?:n)?.*$', '', s)

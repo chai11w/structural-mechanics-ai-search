@@ -93,6 +93,10 @@ def check_symbol_normalization() -> list[str]:
         ("AB²", "弯矩"): "0.010",
         ("A/b²", "均布"): "0.030",
         ("A/b", "集中"): "0.030",
+        ("P=40kN", "集中"): "40",
+        ("q=20kN/m", "均布"): "20",
+        ("F1=40kN", "集中"): "40",
+        ("F2=2ql", "集中"): "0.011",
     }
     failures = []
     for (raw, load_type), expected in cases.items():
