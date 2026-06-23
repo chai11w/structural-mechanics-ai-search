@@ -312,6 +312,15 @@
   - Add `--real-search` only when intentionally calling Qwen/Zhipu/local live search from the dry-run command.
 - Feishu integration state:
   - Text event shell, URL verification, token cache, stale-message filtering, image upload/download method boundaries are present.
-  - Real Feishu image download/upload has not been live-tested yet; next step is configure a dedicated Feishu app and verify image message permissions/endpoints.
+  - User configured dedicated Feishu credentials as Windows user-level env vars: `FEISHU_TIKU_APP_ID`, `FEISHU_TIKU_APP_SECRET`, `FEISHU_TIKU_VERIFICATION_TOKEN`.
+  - `feishu_tiku_bot.py` falls back to reading Windows user-level env vars via registry if the current process environment has not inherited them.
+  - Real Feishu image download/upload has not been live-tested yet; next step is send a real Feishu image message after pasting the latest tunnel URL into Feishu event subscription.
+- One-click runtime:
+  - `启动结构力学题库.bat` calls `scripts/start_tiku_bot.ps1`.
+  - `scripts/start_tiku_bot.ps1` starts hidden `scripts/tiku_bot_watchdog.ps1`; it stops only this project's recorded PID files and port 8788, not Xiaochai/second-brain processes.
+  - `scripts/tiku_bot_watchdog.ps1` starts and health-checks `scripts/feishu_tiku_bot.py --port 8788`, starts this project's own `cloudflared tunnel --url http://127.0.0.1:8788`, and writes the current event URL to `.tmp_feishu_tiku/feishu_tiku_latest_url.txt`.
 - Verification:
   - `python scripts/smoke_test.py` now checks the Feishu tiku bot dry-run state machine.
+  - On 2026-06-23, local `http://127.0.0.1:8788/health` returned `{"ok": true}`.
+  - The temporary trycloudflare `/health` URL also returned `{"ok": true}`.
+  - A local Feishu `url_verification` payload using the configured token returned the expected challenge.

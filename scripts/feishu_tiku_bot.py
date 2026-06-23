@@ -639,9 +639,9 @@ def build_multipart_form_data(
 
 
 def load_options(args: argparse.Namespace) -> FeishuTikuOptions:
-    app_id = os.environ.get(args.app_id_env) or cfg.get("feishu_app_id", "")
-    app_secret = os.environ.get(args.app_secret_env) or cfg.get("feishu_app_secret", "")
-    verification_token = os.environ.get(args.verification_token_env) or cfg.get("feishu_verification_token")
+    app_id = get_env_or_user(args.app_id_env) or cfg.get("feishu_app_id", "")
+    app_secret = get_env_or_user(args.app_secret_env) or cfg.get("feishu_app_secret", "")
+    verification_token = get_env_or_user(args.verification_token_env) or cfg.get("feishu_verification_token")
     return FeishuTikuOptions(
         app_id=app_id,
         app_secret=app_secret,
@@ -653,6 +653,22 @@ def load_options(args: argparse.Namespace) -> FeishuTikuOptions:
         rerank_top=args.rerank_top,
         max_message_age_seconds=args.max_message_age_minutes * 60,
     )
+
+
+def get_env_or_user(name: str) -> str:
+    value = os.environ.get(name)
+    if value:
+        return value
+    if sys.platform != "win32":
+        return ""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            value, _ = winreg.QueryValueEx(key, name)
+            return str(value or "")
+    except OSError:
+        return ""
 
 
 def build_parser() -> argparse.ArgumentParser:
