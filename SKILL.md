@@ -56,3 +56,4 @@ python gui.py
 - 不要跨章节自动搜索；章节必须由用户指定或确认。
 - 不要直接读写 `config.json`、`config.local.json` 里的密钥；需要结构时看 `config.example.json`。
 - 运行前后可用 `python scripts/smoke_test.py` 做只读检查。
+- 字母荷载第一版按体系归一化：`q/qL/qL²` 等为 q 体系，`F/P/Fp` 及 `F/L、FL、P/L、PL、Pa` 等为力体系，`M/L²、M/L、M` 为弯矩体系；同体系按倍数映射为保留小数编码后继续走原相似度算法。

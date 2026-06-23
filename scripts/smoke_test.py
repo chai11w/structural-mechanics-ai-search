@@ -61,6 +61,33 @@ def check_loads_json(raw: object) -> bool:
     return True
 
 
+def check_symbol_normalization() -> list[str]:
+    cases = {
+        "q": "0.010",
+        "qL": "0.010",
+        "qL²": "0.010",
+        "2q": "0.011",
+        "F/L": "0.020",
+        "F": "0.020",
+        "FL": "0.020",
+        "P": "0.020",
+        "Fp": "0.020",
+        "F_P": "0.020",
+        "2P": "0.021",
+        "Pa": "0.020",
+        "M/L²": "0.030",
+        "M/L": "0.030",
+        "M": "0.030",
+        "3M": "0.032",
+    }
+    failures = []
+    for raw, expected in cases.items():
+        actual = search.normalize_raw(raw)
+        if actual != expected:
+            failures.append(f"{raw}: expected {expected}, got {actual}")
+    return failures
+
+
 def main() -> int:
     failures = 0
     warnings = 0
@@ -79,6 +106,13 @@ def main() -> int:
     else:
         warnings += 1
         warn(f"answer_output parent missing: {answer_output.parent}")
+
+    symbol_failures = check_symbol_normalization()
+    if symbol_failures:
+        failures += 1
+        fail("symbol normalization mismatch: " + "; ".join(symbol_failures))
+    else:
+        ok("symbol load normalization rules valid")
 
     for chapter in EXPECTED_CHAPTERS:
         xlsx_path = root / f"{chapter}.xlsx"
