@@ -102,10 +102,7 @@ Set-Content -LiteralPath $WatchdogPidFile -Value $watchdog.Id -Encoding ASCII
 
 if (-not $NoMonitorWindows) {
     $monitors = @(
-        @{ Title = "Tiku Bot Status"; Path = $StatusFile },
-        @{ Title = "Tiku Bot Log"; Path = $BotOutLog },
-        @{ Title = "Tiku Bot Error"; Path = $BotErrLog },
-        @{ Title = "Tiku Bot Tunnel"; Path = $TunnelErrLog }
+        @{ Title = "Tiku Bot Status"; Path = $StatusFile }
     )
     foreach ($monitor in $monitors) {
         $title = $monitor.Title
