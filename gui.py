@@ -228,12 +228,9 @@ class App:
         result_frame = tk.LabelFrame(self.win, text="检索结果", padx=6, pady=6)
         result_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
-        # 右侧固定面板（%+按钮，不随滚动移动）
+        # 右侧固定预览面板
         self._right_panel = tk.Frame(result_frame)
         self._right_panel.pack(side="right", fill="y")
-
-        self._actions_panel = tk.Frame(self._right_panel)
-        self._actions_panel.pack(side="top", fill="x")
 
         self._preview_box = tk.LabelFrame(self._right_panel, text="第一名预览", padx=4, pady=4)
         self._preview_box.pack(side="top", fill="both", expand=True, pady=(10, 0))
@@ -277,20 +274,26 @@ class App:
         # 分隔线
         tk.Frame(result_frame, width=2, bg="#cccccc").pack(side="right", fill="y", padx=2)
 
-        # 左侧：只放路径，带水平滚动条
+        # 左侧：结果行，带横向和纵向滚动条
         left = tk.Frame(result_frame)
         left.pack(side="left", fill="both", expand=True)
 
         self._result_canvas = tk.Canvas(left, bd=0, highlightthickness=0)
+        yscroll = tk.Scrollbar(left, orient="vertical",
+                               command=self._result_canvas.yview)
         xscroll = tk.Scrollbar(left, orient="horizontal",
                                command=self._result_canvas.xview)
-        self._result_canvas.configure(xscrollcommand=xscroll.set)
+        self._result_canvas.configure(xscrollcommand=xscroll.set,
+                                      yscrollcommand=yscroll.set)
+        yscroll.pack(side="right", fill="y")
         xscroll.pack(side="bottom", fill="x")
         self._result_canvas.pack(side="top", fill="both", expand=True)
 
         self.result_list = tk.Frame(self._result_canvas)
-        self._result_canvas.create_window((0, 0), window=self.result_list, anchor="nw")
+        self._result_window = self._result_canvas.create_window((0, 0), window=self.result_list, anchor="nw")
         self.result_list.bind("<Configure>", self._on_result_resize)
+        self._result_canvas.bind("<Enter>", self._bind_result_mousewheel)
+        self._result_canvas.bind("<Leave>", self._unbind_result_mousewheel)
 
         # 初始状态
         self._on_mode_change()
@@ -567,31 +570,32 @@ class App:
             preview_paths.append(full_path)
             pct = round(score * 100)
 
+            result_row = tk.Frame(self.result_list)
+            result_row.pack(anchor="w", fill="x", pady=(ROW_PAD, ROW_PAD + 1))
+
             # 左侧：路径 Entry（中文字符按2倍宽度估算）
             text = f"{rank}.  {full_path}"
             display_w = sum(2 if ord(c) > 127 else 1 for c in text) - 3
-            e = tk.Entry(self.result_list, font=("Consolas", 9),
+            e = tk.Entry(result_row, font=("Consolas", 9),
                          relief="flat", bd=0, readonlybackground="#f0f0f0",
                          width=max(display_w, 80))
             e.insert(0, text)
             e.config(state="readonly")
-            e.pack(anchor="w", pady=(ROW_PAD, ROW_PAD + 1), ipady=6)
+            e.pack(side="left", ipady=6)
 
             # 右侧：% + 按钮
             r = rank
-            right_row = tk.Frame(self._actions_panel)
-            right_row.pack(anchor="e", pady=(ROW_PAD, ROW_PAD - 1))
             if rerank_score is None:
                 score_text = f"{pct}%"
             else:
                 display_score = final_score if final_score is not None else rerank_score
                 score_text = f"{round(float(display_score) * 100)}%"
-            tk.Label(right_row, text=score_text, width=5, anchor="center",
+            tk.Label(result_row, text=score_text, width=5, anchor="center",
                      font=("", 9, "bold"),
-                     fg="#27AE60" if score_text == "100%" else "#333").pack(side="left", padx=2)
-            tk.Button(right_row, text="打开图片", width=8,
+                     fg="#27AE60" if score_text == "100%" else "#333").pack(side="left", padx=(12, 2))
+            tk.Button(result_row, text="打开图片", width=8,
                       command=lambda p=full_path: self._open_file(p)).pack(side="left", padx=2)
-            tk.Button(right_row, text="打开答案", width=8,
+            tk.Button(result_row, text="打开答案", width=8,
                       command=lambda rk=r: self._open_answer(rk)).pack(side="left", padx=(2, 4))
 
         self._set_status("检索完成（已复筛）" if reranked else "检索完成")
@@ -601,8 +605,6 @@ class App:
 
     def _clear_results(self):
         for w in self.result_list.winfo_children():
-            w.destroy()
-        for w in self._actions_panel.winfo_children():
             w.destroy()
         self._clear_preview()
 
@@ -691,6 +693,15 @@ class App:
         bbox = self._result_canvas.bbox("all")
         if bbox:
             self._result_canvas.configure(scrollregion=bbox)
+
+    def _bind_result_mousewheel(self, _event=None):
+        self._result_canvas.bind_all("<MouseWheel>", self._on_result_mousewheel)
+
+    def _unbind_result_mousewheel(self, _event=None):
+        self._result_canvas.unbind_all("<MouseWheel>")
+
+    def _on_result_mousewheel(self, event):
+        self._result_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     # ----------------------------------------------------------
     # 储存
