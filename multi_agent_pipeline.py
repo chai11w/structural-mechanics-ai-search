@@ -30,6 +30,8 @@ from scripts.classify_question_bank import (
 BASE = Path(__file__).resolve().parent
 CACHE_DIR = BASE / ".tmp_multi_agent"
 QWEN_CACHE = CACHE_DIR / "qwen_classifier_cache.json"
+MAIN_RERANK_MIN_SCORE = 0.65
+SYMBOLIC_RERANK_MIN_SCORE = 0.50
 
 
 @dataclass
@@ -189,11 +191,7 @@ class MultiAgentCoordinator:
         results = rank_bank_candidates(loads, chapter, route.excel_root, self.top_k)
         reranked = False
         if rerank and query_image_path and results:
-            rerank_input = [
-                {"rank": item["rank"], "path": item["path"], "score": item["score"], "name": item["name"]}
-                for item in results
-                if item["score"] >= search.RERANK_MIN_LOAD_SCORE
-            ]
+            rerank_input = select_rerank_candidates(results, route.route)
             zhipu_results = search.rerank_candidates(query_image_path, rerank_input, top_n=rerank_top)
             if zhipu_results:
                 results = normalize_rerank_results(zhipu_results)
@@ -246,6 +244,35 @@ def rank_bank_candidates(
             "score": score,
         })
     return results
+
+
+def rerank_threshold_for_route(route: str) -> float:
+    if route == "main":
+        return MAIN_RERANK_MIN_SCORE
+    if route == "symbolic":
+        return SYMBOLIC_RERANK_MIN_SCORE
+    return search.RERANK_MIN_LOAD_SCORE
+
+
+def select_rerank_candidates(results: list[dict[str, Any]], route: str) -> list[dict[str, Any]]:
+    """Keep all perfect matches, then add non-perfect candidates above the route threshold."""
+    threshold = rerank_threshold_for_route(route)
+    selected = []
+    seen_paths = set()
+
+    for item in results:
+        if item["score"] >= 1.0:
+            selected.append({key: item[key] for key in ("rank", "path", "score", "name")})
+            seen_paths.add(item["path"])
+
+    for item in results:
+        if item["path"] in seen_paths:
+            continue
+        if item["score"] >= threshold:
+            selected.append({key: item[key] for key in ("rank", "path", "score", "name")})
+            seen_paths.add(item["path"])
+
+    return selected
 
 
 def normalize_rerank_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:

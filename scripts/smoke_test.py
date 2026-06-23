@@ -18,7 +18,7 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
 import search
-from multi_agent_pipeline import RuleRouter, symbolic_root
+from multi_agent_pipeline import RuleRouter, select_rerank_candidates, symbolic_root
 
 
 EXPECTED_CHAPTERS = [
@@ -232,6 +232,20 @@ def check_multi_agent_routing() -> list[str]:
     expected_symbolic_root = search.ROOT.parent / f"{search.ROOT.name}_字母库"
     if symbolic_root(search.ROOT) != expected_symbolic_root:
         failures.append(f"symbolic root mismatch: {symbolic_root(search.ROOT)}")
+
+    sample_results = [
+        {"rank": 1, "path": "a.jpg", "name": "a.jpg", "score": 1.0},
+        {"rank": 2, "path": "b.jpg", "name": "b.jpg", "score": 1.0},
+        {"rank": 3, "path": "c.jpg", "name": "c.jpg", "score": 0.60},
+        {"rank": 4, "path": "d.jpg", "name": "d.jpg", "score": 0.50},
+    ]
+    main_selected = [item["path"] for item in select_rerank_candidates(sample_results, "main")]
+    if main_selected != ["a.jpg", "b.jpg"]:
+        failures.append(f"main rerank pool mismatch: {main_selected}")
+
+    symbolic_selected = [item["path"] for item in select_rerank_candidates(sample_results, "symbolic")]
+    if symbolic_selected != ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]:
+        failures.append(f"symbolic rerank pool mismatch: {symbolic_selected}")
     return failures
 
 

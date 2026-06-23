@@ -282,3 +282,7 @@
 - Verification:
   - `python scripts/smoke_test.py` now checks multi-agent route rules.
   - Local no-network CLI checks confirmed numeric loads route to main bank, symbolic `q` routes to symbolic bank, and mixed `q + 10kN` routes to `needs_review`.
+- MVP rerank-pool rule:
+  - Main bank non-perfect candidates enter Zhipu rerank only when score is at least `65%`.
+  - Symbolic bank non-perfect candidates enter Zhipu rerank when score is at least `50%`.
+  - Perfect `100%` candidates always enter rerank for both banks; do not cap them yet, because recall is more important at this stage.
