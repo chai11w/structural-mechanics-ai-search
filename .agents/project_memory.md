@@ -210,3 +210,42 @@
 - Recommended next step before any deletion: export a review sheet of all live Excel rows whose loads are unassigned symbolic expressions, copy those rows into separate symbolic-bank Excel files, and back up the original live Excel files. Only after the export and review should those pure symbolic rows be removed from the main/numeric bank.
 - Do not blindly delete all rows containing letters. Rows with explicit assignments (`P=40kN`, `q=20kN/m`, `F1=40kN`, etc.) belong in the main/numeric bank because similarity can resolve them to concrete values.
 - Recent pushed commit for assignment handling: `9565d85 Handle assigned symbolic loads`. Smoke test passed after this change: `python scripts/smoke_test.py` -> `SUMMARY PASS warnings=0`.
+
+## 2026-06-23 Main/Symbolic Bank Update Applied
+
+- Live main bank backup before writing:
+  - `F:\cc\7-题库检索\backups\live_excel_before_main_update_20260623_134752`
+- Qwen3.7-Plus via DashScope was used with `enable_thinking=false`; enabling thinking caused remote disconnects on some symbolic images. The classification script sends upscaled images and records per-image errors as `needs_review` instead of stopping the batch.
+- Full image classification completed:
+  - Existing main-index images classified: 485.
+  - Missing-from-main images classified: 214.
+  - Existing main candidates: 369 `main_numeric`, 38 `main_assigned_symbolic`, 70 `symbolic_unassigned`, 6 `needs_review`, 2 `mixed_symbolic_numeric`.
+  - Missing candidates: 184 `symbolic_unassigned`, 16 `main_numeric`, 8 `main_assigned_symbolic`, 6 `needs_review`.
+- Live main Excel update was applied after backup and review:
+  - Deleted 70 pure unassigned symbolic rows from main bank.
+  - Appended 24 missing main-bank rows (numeric or assigned-symbolic).
+  - Left all `needs_review` and `mixed_symbolic_numeric` rows untouched.
+  - Post-update live main row counts: `2静定结构` 201, `3静定结构位移` 31, `4力法` 72, `5位移法` 57, `6力矩分配` 80.
+  - Application report: `.tmp_symbol_sheets/main_update_applied/main_update_summary.md`.
+- Independent symbolic bank was generated at:
+  - `D:\桌面\答疑、帮做\结构力学\帮做_字母库`
+  - It mirrors the main bank format: one same-name chapter Excel per chapter, columns `题目名称` and `荷载`.
+  - Symbolic-bank row counts: `2静定结构` 90, `3静定结构位移` 26, `4力法` 82, `5位移法` 49, `6力矩分配` 7; total 254.
+- Important symbolic-bank write rule:
+  - `raw` is the similarity code, not the original letter text.
+  - `original_raw` stores the original visual label for review.
+  - Example: `2P/a` becomes `{"type":"均布","raw":"0.021","original_raw":"2P/a"}`.
+  - Similarity computation reads only `type` and `raw`; `original_raw` is metadata and should not affect search scoring.
+- Symbolic encoding rules used:
+  - Distributed-load family base `0.010`: `q`, `ql/qL/qa`, `ql²/qa²`; coefficient code is `base + (factor - 1) * 0.001`.
+  - Force family base `0.020`: `F/P/Fp`, `F/L/P/a/2P/a`, `FL/Pa/FpL`; coefficient code uses the same formula.
+  - Moment family base `0.030`: `M/m`, `M/L`, `M/L²`; coefficient code uses the same formula.
+  - `P/F/Fp/F_P/F_p` share the force family; length symbols may be `L/a/b/l`; `F1=2ql` is symbolic and maps by the right-hand side, while `P=40kN` remains main-bank numeric/assigned.
+- New maintenance scripts:
+  - `scripts/classify_question_bank.py`: scans images and classifies records with Qwen; writes review JSON/XLSX/contact sheet; does not edit live Excel.
+  - `scripts/apply_main_bank_update.py`: after review and backup, removes pure-symbolic rows from main Excel and appends missing main-bank rows. It expands assigned symbols on append, e.g. `P=40kN` with `2P` writes a concrete `80kN` load; `FP=28kN` with `FP/2` writes `14kN`.
+  - `scripts/build_symbolic_bank.py`: builds the separate same-format symbolic bank and writes encoded `raw` plus `original_raw`.
+- `search.py` now supports symbol divided by numeric coefficient, e.g. `P/2` and `FP/2` map to force-family `0.0195`.
+- Verification after writing:
+  - Formal symbolic bank validation: every row has valid JSON, existing image path, code-like `raw`, and `original_raw`.
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.

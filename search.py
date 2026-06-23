@@ -103,9 +103,14 @@ def _format_symbol_code(base, factor):
 
 def _split_symbol_factor(expr):
     match = re.match(r"^(\d+(?:\.\d+)?)(.+)$", expr)
-    if not match:
-        return 1.0, expr
-    return float(match.group(1)), match.group(2)
+    if match:
+        return float(match.group(1)), match.group(2)
+
+    match = re.match(r"^([a-z]+)/(\d+(?:\.\d+)?)$", expr)
+    if match:
+        return 1.0 / float(match.group(2)), match.group(1)
+
+    return 1.0, expr
 
 
 def _canonical_symbol_expr(raw):
