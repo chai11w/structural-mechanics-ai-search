@@ -102,6 +102,52 @@ def check_symbol_normalization() -> list[str]:
     return failures
 
 
+def check_symbol_conflict_resolution() -> list[str]:
+    failures = []
+
+    alias_result = search.postprocess_extracted_loads({
+        "loads": [
+            {"type": "集中力", "raw": "ql"},
+            {"type": "分布力", "raw": "q"},
+            {"type": "集中力偶", "raw": "m"},
+        ]
+    })
+    alias_types = [item["type"] for item in alias_result["loads"]]
+    if alias_types != ["集中", "均布", "弯矩"]:
+        failures.append(f"type aliases not normalized: {alias_types}")
+
+    preserved_q = search.postprocess_extracted_loads({
+        "loads": [
+            {"type": "集中", "raw": "ql"},
+            {"type": "均布", "raw": "q"},
+        ]
+    })
+    if len(preserved_q["loads"]) != 2:
+        failures.append("independent q was removed next to ql")
+
+    glm_b = [
+        {"type": "集中", "raw": "2P"},
+        {"type": "弯矩", "raw": "Pa"},
+        {"type": "集中", "raw": "4P"},
+        {"type": "均布", "raw": "2q"},
+    ]
+    truth_b = [
+        {"type": "集中", "raw": "2P"},
+        {"type": "弯矩", "raw": "Pa"},
+        {"type": "集中", "raw": "4P"},
+        {"type": "均布", "raw": "2P/a"},
+    ]
+    score = search.compute_similarity(glm_b, truth_b)
+    if score != 1.0:
+        failures.append(f"symbol family conflict not resolved: score={score}")
+
+    single_q_code = search.normalize_raw("2q", "均布")
+    if single_q_code != "0.011":
+        failures.append(f"single 2q should stay distributed family, got {single_q_code}")
+
+    return failures
+
+
 def main() -> int:
     failures = 0
     warnings = 0
@@ -127,6 +173,13 @@ def main() -> int:
         fail("symbol normalization mismatch: " + "; ".join(symbol_failures))
     else:
         ok("symbol load normalization rules valid")
+
+    conflict_failures = check_symbol_conflict_resolution()
+    if conflict_failures:
+        failures += 1
+        fail("symbol conflict resolution mismatch: " + "; ".join(conflict_failures))
+    else:
+        ok("symbol family conflict resolution valid")
 
     for chapter in EXPECTED_CHAPTERS:
         xlsx_path = root / f"{chapter}.xlsx"

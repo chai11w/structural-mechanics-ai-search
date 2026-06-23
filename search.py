@@ -172,29 +172,36 @@ def _symbol_family_fallback(body):
     return None
 
 
-def normalize_symbol_raw(raw, load_type=None):
-    """Map letter loads into reserved comparison codes.
-
-    The load type still separates 均布/集中/弯矩. These codes only encode the
-    symbol family and coefficient so the old similarity algorithm can be reused.
-    """
+def _symbol_family_and_factor(raw, load_type=None):
     s = _canonical_symbol_expr(raw)
     factor, body = _split_symbol_factor(s)
     body = body.strip("()")
 
     if not re.search(r"[a-z]", body):
-        return None
+        return None, factor
 
     family = _symbol_family_by_dimension(body, load_type) if load_type else None
     if family is None:
         family = _symbol_family_fallback(body)
+    return family, factor
+
+
+def normalize_symbol_raw(raw, load_type=None, family_override=None):
+    """Map letter loads into reserved comparison codes.
+
+    The load type still separates 均布/集中/弯矩. These codes only encode the
+    symbol family and coefficient so the old similarity algorithm can be reused.
+    """
+    family, factor = _symbol_family_and_factor(raw, load_type)
+    if family_override and family:
+        family = family_override
     if family:
         return _format_symbol_code(SYMBOL_FAMILY_BASES[family], factor)
     return None
 
 
-def normalize_raw(raw, load_type=None):
-    symbol_code = normalize_symbol_raw(raw, load_type)
+def normalize_raw(raw, load_type=None, family_override=None):
+    symbol_code = normalize_symbol_raw(raw, load_type, family_override)
     if symbol_code is not None:
         return symbol_code
 
@@ -223,8 +230,35 @@ def _safe_parse_loads(raw_str):
         return []
 
 
+def normalize_load_type(load_type, raw=None):
+    typ = str(load_type or "").strip()
+    aliases = {
+        "集中": "集中",
+        "集中力": "集中",
+        "单个力": "集中",
+        "点荷载": "集中",
+        "均布": "均布",
+        "均布荷载": "均布",
+        "分布力": "均布",
+        "分布荷载": "均布",
+        "弯矩": "弯矩",
+        "力偶": "弯矩",
+        "集中力偶": "弯矩",
+        "集中弯矩": "弯矩",
+    }
+    if typ in aliases:
+        return aliases[typ]
+
+    family, _ = _symbol_family_and_factor(raw, None)
+    if family == "moment":
+        return "弯矩"
+    return typ
+
+
 def fix_load_types(loads):
-    """修正分类错误"""
+    """修正模型输出的荷载类型别名。"""
+    for item in loads:
+        item["type"] = normalize_load_type(item.get("type", ""), item.get("raw", ""))
     return loads
 
 
@@ -242,28 +276,42 @@ def _canonical_symbol(raw):
 
 
 def postprocess_extracted_loads(result):
-    """Remove obvious symbol fragments hallucinated from composite loads.
-
-    This is intentionally narrow. It fixes cases like `ql + q` or `qa² + q`
-    while avoiding broad de-duplication that could delete real repeated loads.
-    """
+    """Normalize model output without deleting independent symbol loads."""
     loads = result.get("loads", [])
     if not isinstance(loads, list):
         result["loads"] = []
         return result
 
-    symbols = [_canonical_symbol(item.get("raw", "")) for item in loads]
-    has_q_composite = any(sym in {"ql", "qa", "ql²", "qa²"} for sym in symbols)
-
-    cleaned = []
-    for item, sym in zip(loads, symbols):
-        typ = item.get("type", "")
-        if has_q_composite and typ == "均布" and sym == "q":
-            continue
-        cleaned.append(item)
-
-    result["loads"] = cleaned
+    result["loads"] = fix_load_types(loads)
     return result
+
+
+def _dominant_symbol_family(loads):
+    counts = Counter()
+    for item in loads:
+        typ = normalize_load_type(item.get("type", ""), item.get("raw", ""))
+        family, _ = _symbol_family_and_factor(item.get("raw", ""), typ)
+        if family:
+            counts[family] += 1
+    if not counts:
+        return None
+    top_family, top_count = counts.most_common(1)[0]
+    if top_count < 2:
+        return None
+    if len(counts) == 1:
+        return top_family
+    second_count = counts.most_common(2)[1][1]
+    if top_count > second_count:
+        return top_family
+    return None
+
+
+def normalize_load_for_similarity(item, dominant_family=None):
+    typ = normalize_load_type(item.get("type", ""), item.get("raw", ""))
+    raw = item.get("raw", "")
+    family, _ = _symbol_family_and_factor(raw, typ)
+    override = dominant_family if family and dominant_family and family != dominant_family else None
+    return normalize_raw(raw, typ, family_override=override)
 
 
 RERANK_PROMPT = """你是结构力学搜题结果复筛器。候选题已经通过荷载相似度粗筛。
@@ -409,11 +457,11 @@ def compute_similarity(query_loads, db_loads):
     """类型级相似度：每类取交集/各自总数的 min，0/0 跳过，返回 0~1"""
     def group_by_type(loads):
         groups = {"集中": [], "均布": [], "弯矩": []}
+        dominant_family = _dominant_symbol_family(loads)
         for item in loads:
-            typ = item.get("type", "")
-            raw = item.get("raw", "")
+            typ = normalize_load_type(item.get("type", ""), item.get("raw", ""))
             if typ in groups:
-                groups[typ].append(normalize_raw(raw, typ))
+                groups[typ].append(normalize_load_for_similarity(item, dominant_family))
         return groups
 
     q = group_by_type(query_loads)
