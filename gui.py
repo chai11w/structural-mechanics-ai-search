@@ -52,7 +52,8 @@ _search_mod.LAST_SEARCH_FILE = ROOT / "_last_search.json"
 
 from search import (
     extract_loads, search as do_search, store as do_store,
-    answer as do_answer, load_chapter_excel, rerank_candidates
+    answer as do_answer, load_chapter_excel, rerank_candidates,
+    resolve_question_path
 )
 from zhipuai import ZhipuAI
 
@@ -442,8 +443,17 @@ class App:
         top = [r for r in top if r[0] > 0]
 
         # 写 last_search.json（供 answer 命令使用）
-        paths = [{"rank": i+1, "path": str(ROOT / name), "score": score, "name": name}
-                 for i, (score, name) in enumerate(top)]
+        paths = []
+        for i, (score, name) in enumerate(top):
+            resolved_path, resolved_name, repaired = resolve_question_path(
+                name, chapter_name=chapter, update_excel=True
+            )
+            paths.append({
+                "rank": i + 1,
+                "path": str(resolved_path),
+                "score": score,
+                "name": resolved_name if repaired else name,
+            })
         last_file = ROOT / "_last_search.json"
         last_file.write_text(
             _json.dumps([{k: v for k, v in item.items() if k != "name"} for item in paths], ensure_ascii=False),
@@ -476,7 +486,7 @@ class App:
                 last_file.write_text(_json.dumps(last_paths, ensure_ascii=False), encoding="utf-8")
                 return display_results
 
-        return top
+        return paths
 
     def _show_results(self, results):
         self._clear_results()
@@ -574,7 +584,7 @@ class App:
             self._preview_label.config(image="", text="未安装 Pillow", cursor="")
             return
 
-        path = Path(image_path)
+        path, _, _ = resolve_question_path(image_path, update_excel=False)
         if not path.is_file():
             self._preview_label.config(image="", text="图片不存在", cursor="")
             return
@@ -694,7 +704,8 @@ class App:
 
     def _open_file(self, path):
         try:
-            os.startfile(path)
+            resolved, _, _ = resolve_question_path(path, update_excel=False)
+            os.startfile(str(resolved))
         except Exception as e:
             messagebox.showerror("错误", str(e))
 

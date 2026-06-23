@@ -194,6 +194,23 @@ def check_symbol_conflict_resolution() -> list[str]:
     return failures
 
 
+def check_path_repair_resolution() -> list[str]:
+    failures = []
+    cases = {
+        "4力法/2钢架/1单未知量/题目1/12.jpg": "4力法/2钢架/1单未知量/题目1/0/12.jpg",
+        "4力法/2钢架/1单未知量/题目1/51.JPG": "4力法/2钢架/1单未知量/题目1/51.jpg",
+    }
+    for old_rel, expected_rel in cases.items():
+        resolved_path, resolved_rel, repaired = search.resolve_question_path(
+            old_rel, chapter_name="4力法", update_excel=False
+        )
+        if resolved_rel != expected_rel or not resolved_path.is_file() or not repaired:
+            failures.append(
+                f"{old_rel}: expected {expected_rel}, got {resolved_rel}, exists={resolved_path.is_file()}, repaired={repaired}"
+            )
+    return failures
+
+
 def main() -> int:
     failures = 0
     warnings = 0
@@ -226,6 +243,13 @@ def main() -> int:
         fail("symbol conflict resolution mismatch: " + "; ".join(conflict_failures))
     else:
         ok("symbol family conflict resolution valid")
+
+    path_repair_failures = check_path_repair_resolution()
+    if path_repair_failures:
+        failures += 1
+        fail("path repair resolution mismatch: " + "; ".join(path_repair_failures))
+    else:
+        ok("stale question path repair resolution valid")
 
     for chapter in EXPECTED_CHAPTERS:
         xlsx_path = root / f"{chapter}.xlsx"

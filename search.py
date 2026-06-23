@@ -20,6 +20,8 @@ import json
 import re
 import sys
 import argparse
+import shutil
+from datetime import datetime
 from pathlib import Path
 
 os.environ['no_proxy'] = '*'
@@ -54,6 +56,9 @@ RERANK_MIN_LOAD_SCORE = 0.5
 RERANK_LOAD_WEIGHT = 0.5
 RERANK_VISION_WEIGHT = 0.5
 LENGTH_TIE_FINAL_FLOOR = 0.9
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
+_PATH_REPAIR_BACKUPS = set()
+_PATH_REPAIR_BACKUP_DIR = None
 
 SYSTEM_PROMPT = """从图片中提取所有外部荷载信息。严格按以下JSON格式输出，不要输出任何其他内容。
 
@@ -442,10 +447,14 @@ def rerank_candidates(query_image_path, candidates, top_n=3):
 
     usable = []
     for candidate in candidates:
-        path = Path(candidate["path"])
+        path, resolved_name, repaired = resolve_question_path(candidate["path"], update_excel=False)
         if not path.is_file():
             continue
-        usable.append(candidate)
+        item = dict(candidate)
+        item["path"] = str(path)
+        if repaired:
+            item["name"] = resolved_name
+        usable.append(item)
 
     if not usable:
         return []
@@ -609,26 +618,182 @@ def load_chapter_excel(chapter_name):
 
 
 # ============================================================
-# 检索
+# 题目路径解析 / 检索
 # ============================================================
+
+def _rel_path_from_question_path(question_path):
+    p = Path(str(question_path))
+    if p.is_absolute():
+        try:
+            return p.relative_to(ROOT).as_posix()
+        except ValueError:
+            return p.as_posix()
+    return str(question_path).replace("\\", "/")
+
+
+def _exact_case_path(base, relative_path):
+    """Resolve a relative path while preserving actual filesystem casing."""
+    current = Path(base)
+    exact_case = True
+
+    for part in str(relative_path).replace("\\", "/").split("/"):
+        if not part:
+            continue
+        if not current.is_dir():
+            return False, exact_case, None
+        try:
+            children = list(current.iterdir())
+        except OSError:
+            return False, exact_case, None
+
+        exact = next((child for child in children if child.name == part), None)
+        if exact is not None:
+            current = exact
+            continue
+
+        case_match = next((child for child in children if child.name.lower() == part.lower()), None)
+        if case_match is not None:
+            current = case_match
+            exact_case = False
+            continue
+
+        return False, exact_case, None
+
+    return current.is_file(), exact_case, current if current.is_file() else None
+
+
+def _common_prefix_len(left, right):
+    count = 0
+    for a, b in zip(left, right):
+        if a.lower() != b.lower():
+            break
+        count += 1
+    return count
+
+
+def _find_relocated_question_image(relative_path, chapter_name=None):
+    """Find a moved question image by searching the nearest question folder."""
+    rel = str(relative_path).replace("\\", "/")
+    parts = [part for part in rel.split("/") if part]
+    if not parts:
+        return None
+
+    filename = parts[-1].lower()
+    if Path(filename).suffix.lower() not in IMAGE_SUFFIXES:
+        return None
+
+    candidate_anchors = []
+    for end in range(len(parts) - 1, 0, -1):
+        anchor = ROOT.joinpath(*parts[:end])
+        if anchor.is_dir():
+            candidate_anchors.append(anchor)
+            break
+
+    if chapter_name:
+        chapter_anchor = ROOT / chapter_name
+        if chapter_anchor.is_dir() and chapter_anchor not in candidate_anchors:
+            candidate_anchors.append(chapter_anchor)
+    elif len(parts) > 1:
+        chapter_anchor = ROOT / parts[0]
+        if chapter_anchor.is_dir() and chapter_anchor not in candidate_anchors:
+            candidate_anchors.append(chapter_anchor)
+
+    for anchor in candidate_anchors:
+        candidates = [
+            p for p in anchor.rglob("*")
+            if p.is_file()
+            and p.suffix.lower() in IMAGE_SUFFIXES
+            and p.name.lower() == filename
+        ]
+        if not candidates:
+            continue
+        if len(candidates) == 1:
+            return candidates[0]
+
+        scored = []
+        for candidate in candidates:
+            try:
+                cand_rel = candidate.relative_to(ROOT).as_posix().split("/")
+            except ValueError:
+                cand_rel = candidate.as_posix().split("/")
+            scored.append((
+                _common_prefix_len(parts[:-1], cand_rel[:-1]),
+                -abs(len(cand_rel) - len(parts)),
+                candidate,
+            ))
+        scored.sort(reverse=True, key=lambda item: (item[0], item[1]))
+        if len(scored) == 1 or scored[0][:2] != scored[1][:2]:
+            return scored[0][2]
+
+    return None
+
+
+def _backup_excel_for_path_repair(xlsx_path):
+    global _PATH_REPAIR_BACKUP_DIR
+
+    xlsx_path = Path(xlsx_path)
+    if xlsx_path in _PATH_REPAIR_BACKUPS or not xlsx_path.exists():
+        return
+
+    if _PATH_REPAIR_BACKUP_DIR is None:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _PATH_REPAIR_BACKUP_DIR = Path(__file__).parent / "backups" / f"auto_path_repair_{stamp}"
+        _PATH_REPAIR_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+    backup_path = _PATH_REPAIR_BACKUP_DIR / xlsx_path.name
+    if not backup_path.exists():
+        shutil.copy2(xlsx_path, backup_path)
+    _PATH_REPAIR_BACKUPS.add(xlsx_path)
+
 
 def _update_excel_path(chapter_name, old_rel, new_rel):
     """更新 Excel 中失效的题目路径"""
     if old_rel == new_rel:
-        return
+        return False
     xlsx_path = ROOT / f"{chapter_name}.xlsx"
     if not xlsx_path.exists():
         matches = list(ROOT.glob(f"*{chapter_name}*.xlsx"))
         if not matches:
-            return
+            return False
         xlsx_path = matches[0]
     df = pd.read_excel(xlsx_path)
     mask = df["题目名称"] == old_rel
     if not mask.any():
-        return
+        return False
+    _backup_excel_for_path_repair(xlsx_path)
     df.loc[mask, "题目名称"] = new_rel
+    before = len(df)
+    df = df.drop_duplicates(subset=["题目名称", "荷载"], keep="first")
     df.to_excel(xlsx_path, index=False)
-    print(f"[路径更新] {old_rel} -> {new_rel}")
+    removed = before - len(df)
+    suffix = f"，删除重复 {removed} 条" if removed else ""
+    print(f"[路径更新] {old_rel} -> {new_rel}{suffix}")
+    return True
+
+
+def resolve_question_path(question_path, chapter_name=None, update_excel=False):
+    """Resolve stale Excel question paths and optionally repair the workbook."""
+    old_rel = _rel_path_from_question_path(question_path)
+    exists, exact_case, actual_path = _exact_case_path(ROOT, old_rel)
+
+    if exists and actual_path is not None:
+        new_rel = actual_path.relative_to(ROOT).as_posix()
+        repaired = new_rel != old_rel or not exact_case
+        if repaired and update_excel and chapter_name:
+            _update_excel_path(chapter_name, old_rel, new_rel)
+        return actual_path, new_rel, repaired
+
+    relocated = _find_relocated_question_image(old_rel, chapter_name)
+    if relocated is not None and relocated.is_file():
+        try:
+            new_rel = relocated.relative_to(ROOT).as_posix()
+        except ValueError:
+            new_rel = relocated.as_posix()
+        if update_excel and chapter_name:
+            _update_excel_path(chapter_name, old_rel, new_rel)
+        return relocated, new_rel, True
+
+    return ROOT / old_rel, old_rel, False
 
 
 def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, rerank_top=3):
@@ -670,9 +835,14 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
         if score <= 0:
             continue
         pct = round(score * 100)
-        full_path = str(ROOT / name)
+        resolved_path, resolved_name, repaired = resolve_question_path(
+            name, chapter_name=chapter_name, update_excel=True
+        )
+        if repaired:
+            name = resolved_name
+        full_path = str(resolved_path)
         lines.append(f"{rank}. {full_path}    相似度: {pct}%")
-        paths.append({"rank": rank, "path": full_path, "score": score})
+        paths.append({"rank": rank, "path": full_path, "score": score, "name": name})
 
     result_text = "\n".join(lines) if lines else "无匹配结果"
     output_path.write_text(result_text, encoding="utf-8")
@@ -776,7 +946,7 @@ def find_answer_files(question_path):
     规则: 题目路径里以"题目"开头的目录，替换为同级"答案"文件夹，
     然后匹配 {编号}, {编号}+, {编号}++, ... 等所有图片
     """
-    p = Path(question_path)
+    p, _, _ = resolve_question_path(question_path, update_excel=False)
     parts = p.parts
     stem = p.stem  # 文件名不含扩展，如 "3"
 
@@ -891,7 +1061,9 @@ def main():
             df = load_chapter_excel(args.chapter)
             if df is not None:
                 for i, (_, row) in enumerate(df.head(args.top).iterrows()):
-                    full_path = str(ROOT / row["题目名称"])
+                    full_path = str(resolve_question_path(
+                        row["题目名称"], chapter_name=args.chapter, update_excel=True
+                    )[0])
                     print(f"{i+1}. {full_path}    相似度: N/A")
             return
 
