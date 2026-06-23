@@ -304,8 +304,9 @@
 - Current implemented flow:
   - Receive image -> store session -> ask chapter.
   - Chapter replies use chapter numbers `2/3/4/5/6`, not list indices, to avoid confusing `5` with the fifth menu item.
+  - Reply `0` in any waiting state cancels/exits the current tiku session.
   - Search calls `MultiAgentCoordinator.search_image(..., rerank=True, rerank_top=3)`.
-  - Sends Top 3 candidate image paths in dry-run; waits for `1/2/3`.
+  - Sends Top 3 candidate image paths in dry-run; waits for `0/1/2/3`, where `0` means no desired match/exit.
   - Choice calls `answer(rank)` in real mode. In dry-run it does not write answer output and only echoes the selected candidate image.
 - Dry-run command:
   - `python scripts/feishu_tiku_bot.py dry-run-flow --image "D:\path\to\question.jpg" --chapter 5 --choice 1`

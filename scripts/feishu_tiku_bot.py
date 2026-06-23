@@ -236,7 +236,7 @@ class TikuBot:
         if session.state == "waiting_choice":
             choice = parse_choice(clean)
             if choice is None:
-                return BotResponse(texts=["回复 1/2/3 获取对应答案，或回复“取消”。"])
+                return BotResponse(texts=["回复 0/1/2/3 获取对应答案；0 表示没有想要的，退出本次搜题。"])
             return self._answer_choice(sender, session, choice)
 
         chapter = parse_chapter(clean)
@@ -271,14 +271,17 @@ class TikuBot:
         self.sessions.save(sender, session)
 
         texts = [
-            f"已检索：{chapter}\n下面是相似题 Top {len(top_results)}，回复 1/2/3 获取答案。"
+            f"已检索：{chapter}\n下面是相似题 Top {len(top_results)}，回复 0/1/2/3 获取答案；0 表示没有想要的，退出本次搜题。"
         ]
         images = [Path(item["path"]) for item in top_results]
         return BotResponse(texts=texts, images=images)
 
     def _answer_choice(self, sender: str, session: TikuSession, choice: int) -> BotResponse:
+        if choice == 0:
+            self.sessions.clear(sender)
+            return BotResponse(texts=["已退出本次搜题。"])
         if choice < 1 or choice > len(session.results):
-            return BotResponse(texts=[f"当前只有 {len(session.results)} 个候选，请回复有效编号。"])
+            return BotResponse(texts=[f"当前只有 {len(session.results)} 个候选，请回复 0-{len(session.results)}。"])
 
         if self.options.dry_run:
             selected = Path(session.results[choice - 1]["path"])
@@ -451,7 +454,7 @@ def format_chapter_prompt(image_path: Path | None = None) -> str:
     prefix = "收到题图" if image_path else "请选择章节"
     lines = [f"{prefix}，请选择章节："]
     lines.extend(f"- {chapter}" for chapter in CHAPTERS)
-    lines.append("回复章节号 2/3/4/5/6，或直接回复章节名。")
+    lines.append("回复章节号 2/3/4/5/6，或直接回复章节名；回复 0 退出。")
     return "\n".join(lines)
 
 
@@ -469,13 +472,13 @@ def parse_chapter(text: str) -> str | None:
 
 def parse_choice(text: str) -> int | None:
     clean = text.strip()
-    if not re.fullmatch(r"[1-3]", clean):
+    if not re.fullmatch(r"[0-3]", clean):
         return None
     return int(clean)
 
 
 def is_cancel(text: str) -> bool:
-    return text.strip().lower() in {"取消", "cancel", "退出", "算了"}
+    return text.strip().lower() in {"0", "取消", "cancel", "退出", "算了"}
 
 
 def answer_output_files() -> list[Path]:
@@ -689,7 +692,7 @@ def build_parser() -> argparse.ArgumentParser:
     dry = sub.add_parser("dry-run-flow", help="用本地图片模拟图片->章节流程")
     dry.add_argument("--image", required=True, help="本地题图路径")
     dry.add_argument("--chapter", required=True, help="章节编号或章节名")
-    dry.add_argument("--choice", type=int, help="可选：继续模拟选择答案 1/2/3")
+    dry.add_argument("--choice", type=int, help="可选：继续模拟选择答案 0/1/2/3")
     dry.add_argument(
         "--real-search",
         action="store_true",

@@ -276,9 +276,20 @@ def check_feishu_tiku_bot_state() -> list[str]:
     first = bot.receive_image(sender, image)
     if "请选择章节" not in "\n".join(first.texts):
         failures.append("image message should prompt for chapter")
+    cancelled = bot.receive_text(sender, "0")
+    if not any(word in "\n".join(cancelled.texts) for word in ("退出", "取消")):
+        failures.append("0 after image should cancel the session")
+
+    bot.receive_image(sender, image)
     second = bot.receive_text(sender, "5")
     if len(second.images) != 3 or "5位移法" not in "\n".join(second.texts):
         failures.append("chapter reply should return three candidate images for 5位移法")
+    cancelled_choice = bot.receive_text(sender, "0")
+    if not any(word in "\n".join(cancelled_choice.texts) for word in ("退出", "取消")):
+        failures.append("0 after candidates should cancel the session")
+
+    bot.receive_image(sender, image)
+    bot.receive_text(sender, "5")
     third = bot.receive_text(sender, "1")
     if "[dry-run]" not in "\n".join(third.texts) or len(third.images) != 1:
         failures.append("choice reply should return one dry-run answer image")
