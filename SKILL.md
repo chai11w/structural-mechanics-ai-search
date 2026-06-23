@@ -54,6 +54,12 @@ python scripts/search_by_loads.py answer 1
 python gui.py
 ```
 
+题库飞书机器人 dry-run 状态机测试：
+
+```powershell
+python scripts/feishu_tiku_bot.py dry-run-flow --image "D:\path\to\question.jpg" --chapter 5 --choice 1
+```
+
 ## 当前检索流程
 
 - 荷载粗筛逻辑保持原样：默认 Top 5；如果 100% 匹配超过 5 个，则全部进入候选。
@@ -70,6 +76,7 @@ python gui.py
 - GUI 的结果预览、打开图片、打开答案也走同一套路径解析逻辑，所以图片移动到新子文件夹后，正常检索/点击时可自动恢复。
 - 多 Agent 流程已接入 GUI 图片检索：`QwenClassifier` 负责高精度荷载识别和分类，`RuleRouter` 决定查主库、字母库或进入复核区，`Zhipu` 继续负责候选图视觉复筛。
 - 实验多 Agent 复筛候选池按库区分阈值：主库非满分候选需 `>=65%`，字母库非满分候选需 `>=50%`；两类库的 `100%` 候选都全部进入候选池，先保召回。若最终复筛候选数不超过 3 个，则不调用 Zhipu，直接返回粗筛结果。
+- `scripts/feishu_tiku_bot.py` 是本项目原生的专职题库飞书机器人 MVP。第二大脑项目只作为飞书接入参考，不直接复用其业务代码。当前已支持 dry-run 状态机：收图、问章节、返回 Top 3、选择答案；真实飞书图片下载/上传封装在 `FeishuClient` 中，待下一步联调。
 
 ## 注意事项
 

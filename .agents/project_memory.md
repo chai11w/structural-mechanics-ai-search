@@ -293,3 +293,25 @@
   - Symbolic bank non-perfect candidates enter Zhipu rerank when score is at least `50%`.
   - Perfect `100%` candidates always enter the rerank candidate pool for both banks; do not cap them yet, because recall is more important at this stage.
   - If the final rerank candidate pool has 3 or fewer candidates, skip Zhipu and return the coarse-search result directly.
+
+## 2026-06-23 Feishu Tiku Bot MVP
+
+- Direction decision:
+  - Do not directly reuse/couple to `F:\cc\13khoj第二大脑-记忆`; that project is reference only for Feishu event/token patterns.
+  - Build a project-native, dedicated structure-mechanics tiku bot first. Do not generalize into a "lobster platform" until this flow works.
+- New file:
+  - `scripts/feishu_tiku_bot.py`: local Feishu event shell + tiku session state machine.
+- Current implemented flow:
+  - Receive image -> store session -> ask chapter.
+  - Chapter replies use chapter numbers `2/3/4/5/6`, not list indices, to avoid confusing `5` with the fifth menu item.
+  - Search calls `MultiAgentCoordinator.search_image(..., rerank=True, rerank_top=3)`.
+  - Sends Top 3 candidate image paths in dry-run; waits for `1/2/3`.
+  - Choice calls `answer(rank)` in real mode. In dry-run it does not write answer output and only echoes the selected candidate image.
+- Dry-run command:
+  - `python scripts/feishu_tiku_bot.py dry-run-flow --image "D:\path\to\question.jpg" --chapter 5 --choice 1`
+  - Add `--real-search` only when intentionally calling Qwen/Zhipu/local live search from the dry-run command.
+- Feishu integration state:
+  - Text event shell, URL verification, token cache, stale-message filtering, image upload/download method boundaries are present.
+  - Real Feishu image download/upload has not been live-tested yet; next step is configure a dedicated Feishu app and verify image message permissions/endpoints.
+- Verification:
+  - `python scripts/smoke_test.py` now checks the Feishu tiku bot dry-run state machine.

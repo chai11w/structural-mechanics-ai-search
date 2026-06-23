@@ -1,6 +1,10 @@
 {
   "root": "D:\\path\\to\\question-bank",
   "answer_output": "D:\\path\\to\\answer-output",
+  "dashscope_api_key": "",
   "zhipuai_api_key": "",
+  "feishu_app_id": "",
+  "feishu_app_secret": "",
+  "feishu_verification_token": "",
   "top_k": 5
 }

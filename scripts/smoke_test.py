@@ -19,6 +19,7 @@ sys.path.insert(0, str(BASE))
 
 import search
 from multi_agent_pipeline import RuleRouter, select_rerank_candidates, symbolic_root
+from scripts.feishu_tiku_bot import FeishuTikuOptions, MockCoordinator, TikuBot, parse_chapter
 
 
 EXPECTED_CHAPTERS = [
@@ -261,6 +262,29 @@ def check_multi_agent_routing() -> list[str]:
     return failures
 
 
+def check_feishu_tiku_bot_state() -> list[str]:
+    failures = []
+    if parse_chapter("5") != "5位移法":
+        failures.append("chapter number 5 should map to 5位移法")
+    if parse_chapter("2") != "2静定结构":
+        failures.append("chapter number 2 should map to 2静定结构")
+
+    image = Path("mock-question.jpg")
+    options = FeishuTikuOptions(dry_run=True)
+    bot = TikuBot(options=options, coordinator=MockCoordinator([image, image, image]))
+    sender = "smoke"
+    first = bot.receive_image(sender, image)
+    if "请选择章节" not in "\n".join(first.texts):
+        failures.append("image message should prompt for chapter")
+    second = bot.receive_text(sender, "5")
+    if len(second.images) != 3 or "5位移法" not in "\n".join(second.texts):
+        failures.append("chapter reply should return three candidate images for 5位移法")
+    third = bot.receive_text(sender, "1")
+    if "[dry-run]" not in "\n".join(third.texts) or len(third.images) != 1:
+        failures.append("choice reply should return one dry-run answer image")
+    return failures
+
+
 def main() -> int:
     failures = 0
     warnings = 0
@@ -307,6 +331,13 @@ def main() -> int:
         fail("multi-agent routing mismatch: " + "; ".join(routing_failures))
     else:
         ok("multi-agent bank routing rules valid")
+
+    feishu_failures = check_feishu_tiku_bot_state()
+    if feishu_failures:
+        failures += 1
+        fail("Feishu tiku bot state mismatch: " + "; ".join(feishu_failures))
+    else:
+        ok("Feishu tiku bot dry-run state valid")
 
     for chapter in EXPECTED_CHAPTERS:
         xlsx_path = root / f"{chapter}.xlsx"
