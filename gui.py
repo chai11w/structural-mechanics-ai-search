@@ -274,18 +274,33 @@ class App:
         # 分隔线
         tk.Frame(result_frame, width=2, bg="#cccccc").pack(side="right", fill="y", padx=2)
 
-        # 左侧：结果行，带横向和纵向滚动条
+        yscroll = tk.Scrollbar(result_frame, orient="vertical",
+                               command=self._on_results_yview)
+        yscroll.pack(side="right", fill="y")
+
+        # 固定操作列：只参与纵向滚动，不参与路径横向滚动
+        actions = tk.Frame(result_frame)
+        actions.pack(side="right", fill="y")
+        self._actions_canvas = tk.Canvas(actions, bd=0, highlightthickness=0,
+                                         width=268)
+        self._actions_canvas.pack(side="top", fill="both", expand=True)
+        self._actions_list = tk.Frame(self._actions_canvas)
+        self._actions_window = self._actions_canvas.create_window(
+            (0, 0), window=self._actions_list, anchor="nw"
+        )
+        self._actions_list.bind("<Configure>", self._on_result_resize)
+        self._actions_canvas.bind("<Enter>", self._bind_result_mousewheel)
+        self._actions_canvas.bind("<Leave>", self._unbind_result_mousewheel)
+
+        # 左侧：路径，带横向滚动条；纵向滚动与固定操作列同步
         left = tk.Frame(result_frame)
         left.pack(side="left", fill="both", expand=True)
 
         self._result_canvas = tk.Canvas(left, bd=0, highlightthickness=0)
-        yscroll = tk.Scrollbar(left, orient="vertical",
-                               command=self._result_canvas.yview)
         xscroll = tk.Scrollbar(left, orient="horizontal",
                                command=self._result_canvas.xview)
         self._result_canvas.configure(xscrollcommand=xscroll.set,
                                       yscrollcommand=yscroll.set)
-        yscroll.pack(side="right", fill="y")
         xscroll.pack(side="bottom", fill="x")
         self._result_canvas.pack(side="top", fill="both", expand=True)
 
@@ -570,32 +585,31 @@ class App:
             preview_paths.append(full_path)
             pct = round(score * 100)
 
-            result_row = tk.Frame(self.result_list)
-            result_row.pack(anchor="w", fill="x", pady=(ROW_PAD, ROW_PAD + 1))
-
             # 左侧：路径 Entry（中文字符按2倍宽度估算）
             text = f"{rank}.  {full_path}"
             display_w = sum(2 if ord(c) > 127 else 1 for c in text) - 3
-            e = tk.Entry(result_row, font=("Consolas", 9),
+            e = tk.Entry(self.result_list, font=("Consolas", 9),
                          relief="flat", bd=0, readonlybackground="#f0f0f0",
                          width=max(display_w, 80))
             e.insert(0, text)
             e.config(state="readonly")
-            e.pack(side="left", ipady=6)
+            e.pack(anchor="w", pady=(ROW_PAD, ROW_PAD + 1), ipady=6)
 
             # 右侧：% + 按钮
             r = rank
+            actions_row = tk.Frame(self._actions_list)
+            actions_row.pack(anchor="e", pady=(ROW_PAD, ROW_PAD - 1))
             if rerank_score is None:
                 score_text = f"{pct}%"
             else:
                 display_score = final_score if final_score is not None else rerank_score
                 score_text = f"{round(float(display_score) * 100)}%"
-            tk.Label(result_row, text=score_text, width=5, anchor="center",
+            tk.Label(actions_row, text=score_text, width=5, anchor="center",
                      font=("", 9, "bold"),
-                     fg="#27AE60" if score_text == "100%" else "#333").pack(side="left", padx=(12, 2))
-            tk.Button(result_row, text="打开图片", width=8,
+                     fg="#27AE60" if score_text == "100%" else "#333").pack(side="left", padx=2)
+            tk.Button(actions_row, text="打开图片", width=8,
                       command=lambda p=full_path: self._open_file(p)).pack(side="left", padx=2)
-            tk.Button(result_row, text="打开答案", width=8,
+            tk.Button(actions_row, text="打开答案", width=8,
                       command=lambda rk=r: self._open_answer(rk)).pack(side="left", padx=(2, 4))
 
         self._set_status("检索完成（已复筛）" if reranked else "检索完成")
@@ -605,6 +619,8 @@ class App:
 
     def _clear_results(self):
         for w in self.result_list.winfo_children():
+            w.destroy()
+        for w in self._actions_list.winfo_children():
             w.destroy()
         self._clear_preview()
 
@@ -686,13 +702,24 @@ class App:
         self._preview_next.place_forget()
 
     def _on_result_resize(self, event):
-        self._result_canvas.configure(scrollregion=self._result_canvas.bbox("all"))
+        self._sync_result_scrollregions()
 
     def _refresh_scroll(self):
         self.result_list.update_idletasks()
-        bbox = self._result_canvas.bbox("all")
-        if bbox:
-            self._result_canvas.configure(scrollregion=bbox)
+        self._actions_list.update_idletasks()
+        self._sync_result_scrollregions()
+
+    def _sync_result_scrollregions(self):
+        result_bbox = self._result_canvas.bbox("all")
+        if result_bbox:
+            self._result_canvas.configure(scrollregion=result_bbox)
+        actions_bbox = self._actions_canvas.bbox("all")
+        if actions_bbox:
+            self._actions_canvas.configure(scrollregion=actions_bbox)
+
+    def _on_results_yview(self, *args):
+        self._result_canvas.yview(*args)
+        self._actions_canvas.yview(*args)
 
     def _bind_result_mousewheel(self, _event=None):
         self._result_canvas.bind_all("<MouseWheel>", self._on_result_mousewheel)
@@ -701,7 +728,9 @@ class App:
         self._result_canvas.unbind_all("<MouseWheel>")
 
     def _on_result_mousewheel(self, event):
-        self._result_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        delta = int(-1 * (event.delta / 120))
+        self._result_canvas.yview_scroll(delta, "units")
+        self._actions_canvas.yview_scroll(delta, "units")
 
     # ----------------------------------------------------------
     # 储存
