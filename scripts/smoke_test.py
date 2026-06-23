@@ -18,6 +18,7 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
 import search
+from multi_agent_pipeline import RuleRouter, symbolic_root
 
 
 EXPECTED_CHAPTERS = [
@@ -211,6 +212,29 @@ def check_path_repair_resolution() -> list[str]:
     return failures
 
 
+def check_multi_agent_routing() -> list[str]:
+    router = RuleRouter()
+    failures = []
+    cases = [
+        ([{"type": "均布", "raw": "20kN/m"}], "main", "main_numeric"),
+        ([{"type": "集中", "raw": "P=40kN"}, {"type": "集中", "raw": "2P"}], "main", "main_assigned_symbolic"),
+        ([{"type": "均布", "raw": "2P/a"}], "symbolic", "symbolic_unassigned"),
+        ([], "needs_review", "needs_review"),
+        ([{"type": "均布", "raw": "q"}, {"type": "集中", "raw": "10kN"}], "needs_review", "mixed_symbolic_numeric"),
+    ]
+    for loads, expected_route, expected_category in cases:
+        decision, _ = router.route(loads)
+        if decision.route != expected_route or decision.category != expected_category:
+            failures.append(
+                f"{loads}: expected {expected_route}/{expected_category}, got {decision.route}/{decision.category}"
+            )
+
+    expected_symbolic_root = search.ROOT.parent / f"{search.ROOT.name}_字母库"
+    if symbolic_root(search.ROOT) != expected_symbolic_root:
+        failures.append(f"symbolic root mismatch: {symbolic_root(search.ROOT)}")
+    return failures
+
+
 def main() -> int:
     failures = 0
     warnings = 0
@@ -250,6 +274,13 @@ def main() -> int:
         fail("path repair resolution mismatch: " + "; ".join(path_repair_failures))
     else:
         ok("stale question path repair resolution valid")
+
+    routing_failures = check_multi_agent_routing()
+    if routing_failures:
+        failures += 1
+        fail("multi-agent routing mismatch: " + "; ".join(routing_failures))
+    else:
+        ok("multi-agent bank routing rules valid")
 
     for chapter in EXPECTED_CHAPTERS:
         xlsx_path = root / f"{chapter}.xlsx"

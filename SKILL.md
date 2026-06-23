@@ -28,6 +28,18 @@ python scripts/search_by_loads.py loads-search --types "集中" "弯矩" --raws 
 python scripts/search_by_loads.py image-search --image "D:\path\to\question.jpg" --chapter "2静定结构" --rerank
 ```
 
+实验多 Agent 检索（Qwen 识别分类 + 规则路由主库/字母库 + Zhipu 复筛）：
+
+```powershell
+python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter "2静定结构"
+```
+
+不调用模型、只验证路由和检索：
+
+```powershell
+python scripts/multi_agent_search.py --types "均布" --raws "q" --chapter "2静定结构" --no-rerank
+```
+
 按上一次检索排名取答案：
 
 ```powershell
@@ -53,6 +65,7 @@ python gui.py
 - 检索结果路径会自动解析：如果 Excel 里的 `题目名称` 指向的图片不存在或大小写不一致，程序会先在同章节/最近的题目目录下递归查找同名图片；只有候选唯一时才自动更新 live Excel 路径，并删除同路径同荷载的重复行。
 - 自动更新 live Excel 前会在项目 `backups/auto_path_repair_时间戳/` 下备份本次进程触碰到的章节 Excel。
 - GUI 的结果预览、打开图片、打开答案也走同一套路径解析逻辑，所以图片移动到新子文件夹后，正常检索/点击时可自动恢复。
+- 实验多 Agent 流程暂时只接 CLI：`QwenClassifier` 负责高精度荷载识别和分类，`RuleRouter` 决定查主库、字母库或进入复核区，`Zhipu` 继续负责候选图视觉复筛。确认稳定后再接 GUI。
 
 ## 注意事项
 

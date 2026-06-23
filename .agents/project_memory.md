@@ -263,3 +263,22 @@
   - The same backup folder also includes `3静定结构位移.xlsx`; row 30 had Chinese commas inside the JSON load cell and was repaired to valid JSON without changing the load values.
   - `scripts/smoke_test.py` was strengthened from first-20-row sampling to full-table checks for load JSON validity, image existence, and exact path casing.
   - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+
+## 2026-06-23 Experimental Multi-Agent Retrieval
+
+- First CLI-only multi-agent retrieval layer was added; it does not replace the existing GUI flow yet.
+- New files:
+  - `multi_agent_pipeline.py`: defines `QwenClassifier`, `RuleRouter`, `MultiAgentCoordinator`, and shared formatting/search helpers.
+  - `scripts/multi_agent_search.py`: CLI entry for the experimental pipeline.
+- Pipeline design:
+  - Qwen/DashScope is the high-accuracy front classifier for image load extraction and bank category detection.
+  - The local rule router maps loads to `main`, `symbolic`, or `needs_review`.
+  - Main bank is used for numeric and assigned-symbol loads; symbolic bank is used for unassigned symbolic loads; mixed/empty/unknown loads are not searched automatically.
+  - Zhipu keeps the existing low-latency visual rerank role for Top candidates.
+  - Qwen image classification results are cached under `.tmp_multi_agent/qwen_classifier_cache.json` by image hash and model.
+- CLI examples:
+  - `python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter "2静定结构"`
+  - `python scripts/multi_agent_search.py --types "均布" --raws "q" --chapter "2静定结构" --no-rerank`
+- Verification:
+  - `python scripts/smoke_test.py` now checks multi-agent route rules.
+  - Local no-network CLI checks confirmed numeric loads route to main bank, symbolic `q` routes to symbolic bank, and mixed `q + 10kN` routes to `needs_review`.
