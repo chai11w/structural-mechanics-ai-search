@@ -236,11 +236,11 @@ class App:
         actions = tk.Frame(result_frame)
         actions.pack(side="right", fill="y")
         self._actions_canvas = tk.Canvas(actions, bd=0, highlightthickness=0,
-                                         width=268)
+                                         width=220)
         self._actions_canvas.pack(side="top", fill="both", expand=True)
         self._actions_list = tk.Frame(self._actions_canvas)
         self._actions_window = self._actions_canvas.create_window(
-            (0, 0), window=self._actions_list, anchor="nw"
+            (220, 0), window=self._actions_list, anchor="ne"
         )
         self._actions_rows = tk.Frame(self._actions_list)
         self._actions_rows.pack(side="top", anchor="e")
@@ -285,6 +285,7 @@ class App:
             w.bind("<Enter>", self._show_preview_arrows)
             w.bind("<Leave>", self._schedule_hide_preview_arrows)
         self._actions_list.bind("<Configure>", self._on_result_resize)
+        self._actions_canvas.bind("<Configure>", self._on_actions_canvas_resize)
         self._actions_canvas.bind("<Enter>", self._bind_result_mousewheel)
         self._actions_canvas.bind("<Leave>", self._unbind_result_mousewheel)
 
@@ -709,9 +710,18 @@ class App:
     def _on_result_resize(self, event):
         self._sync_result_scrollregions()
 
+    def _on_actions_canvas_resize(self, event):
+        self._actions_canvas.coords(self._actions_window, event.width, 0)
+        self._sync_result_scrollregions()
+
     def _refresh_scroll(self):
         self.result_list.update_idletasks()
         self._actions_list.update_idletasks()
+        self._actions_canvas.coords(
+            self._actions_window,
+            self._actions_canvas.winfo_width(),
+            0,
+        )
         self._sync_result_scrollregions()
 
     def _sync_result_scrollregions(self):
