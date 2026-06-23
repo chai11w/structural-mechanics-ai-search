@@ -376,11 +376,21 @@ class App:
                     if query_image_path is None:
                         return
                     self._set_status("Qwen识别分类中...")
-                    pipeline_result = self._multi_agent.search_image(
-                        query_image_path,
+                    classified = self._multi_agent.qwen.classify_image(query_image_path)
+                    query_loads = classified.get("loads", [])
+                    self._update_loads_display(query_loads)
+                    route, _ = self._multi_agent.router.route(query_loads)
+                    if route.route == "needs_review":
+                        self._set_status("需要人工复核...")
+                    else:
+                        self._set_status(f"{self._route_display_name(route.route)}候选检索中...")
+                    pipeline_result = self._multi_agent.search_loads(
+                        query_loads,
                         chapter,
+                        query_image_path=query_image_path,
                         rerank=True,
                         rerank_top=3,
+                        status_callback=lambda text, r=route.route: self._set_route_status(r, text),
                     )
                 else:
                     query_loads = self._get_query_loads()
@@ -391,6 +401,7 @@ class App:
                         query_loads,
                         chapter,
                         rerank=False,
+                        status_callback=self._set_status,
                     )
                     self.win.after(0, self._clear_loads)
 
@@ -432,13 +443,26 @@ class App:
         text = "识别荷载：" + loads_to_display(loads_list)
         self.win.after(0, lambda: self.loads_result_label.config(text=text))
 
+    def _route_display_name(self, route):
+        return {
+            "main": "主库",
+            "symbolic": "字母库",
+            "needs_review": "复核区",
+        }.get(route, route)
+
+    def _set_route_status(self, route, text):
+        if text.startswith("候选"):
+            self._set_status(f"{self._route_display_name(route)}{text}")
+        else:
+            self._set_status(text)
+
     def _show_pipeline_result(self, pipeline_result):
         self._show_results(pipeline_result.results)
         if pipeline_result.route.route == "needs_review":
             self._set_status("需要人工复核")
         elif pipeline_result.results:
             suffix = "（已复筛）" if pipeline_result.reranked else ""
-            self._set_status(f"检索完成：{pipeline_result.route.route}{suffix}")
+            self._set_status(f"检索完成：{self._route_display_name(pipeline_result.route.route)}{suffix}")
 
     def _run_search(self, query_loads, chapter, query_image_path=None):
         """直接调 search 逻辑，返回结果列表"""
@@ -789,7 +813,10 @@ $files = New-Object System.Collections.Specialized.StringCollection
         self.btn_store.config(state="normal")
 
     def _set_status(self, text):
-        self.status_var.set(text)
+        if threading.current_thread() is threading.main_thread():
+            self.status_var.set(text)
+        else:
+            self.win.after(0, lambda: self.status_var.set(text))
 
 
 # ============================================================

@@ -183,15 +183,20 @@ class MultiAgentCoordinator:
         query_image_path: str | None = None,
         rerank: bool = False,
         rerank_top: int = 3,
+        status_callback=None,
     ) -> PipelineResult:
         route, load_details = self.router.route(loads)
         if route.route == "needs_review" or route.excel_root is None:
             return PipelineResult(route, loads, load_details, [], False)
 
+        if status_callback:
+            status_callback("候选检索中...")
         results = rank_bank_candidates(loads, chapter, route.excel_root, self.top_k)
         reranked = False
         if rerank and query_image_path and results:
             rerank_input = select_rerank_candidates(results, route.route)
+            if status_callback and rerank_input:
+                status_callback("Zhipu复筛中...")
             zhipu_results = search.rerank_candidates(query_image_path, rerank_input, top_n=rerank_top)
             if zhipu_results:
                 results = normalize_rerank_results(zhipu_results)
