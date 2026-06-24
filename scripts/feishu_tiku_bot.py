@@ -25,12 +25,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from PIL import Image
+
+try:
+    import cv2
+    import numpy as np
+except ImportError:  # pragma: no cover - optional multi-question diagram crops.
+    cv2 = None
+    np = None
+
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from multi_agent_pipeline import MultiAgentCoordinator  # noqa: E402
 from search import ANSWER_OUTPUT, answer, cfg  # noqa: E402
+from scripts.classify_question_bank import find_diagram_blocks_cv, safe_crop  # noqa: E402
 
 
 FEISHU_OPEN_API = "https://open.feishu.cn/open-apis"
@@ -61,6 +71,9 @@ class TikuSession:
     image_path: Path | None = None
     chapter: str | None = None
     results: list[dict[str, Any]] = field(default_factory=list)
+    multi_questions: list[dict[str, Any]] = field(default_factory=list)
+    current_question: str | None = None
+    diagram_crops: dict[str, str] = field(default_factory=dict)
     updated_at: float = field(default_factory=time.time)
 
 
@@ -232,6 +245,9 @@ class TikuBot:
 
     def receive_image(self, sender: str, image_path: Path) -> BotResponse:
         if self.chapter_mode(sender) == CHAPTER_MODE_AUTO:
+            layout_response = self._try_start_multi_question_session(sender, image_path)
+            if layout_response is not None:
+                return layout_response
             session = TikuSession(state="searching", image_path=image_path)
             return self._search(sender, session, "auto")
         session = TikuSession(state="waiting_chapter", image_path=image_path)
@@ -241,6 +257,9 @@ class TikuBot:
     def receive_text(self, sender: str, text: str) -> BotResponse:
         clean = text.strip()
         session = self.sessions.get(sender)
+
+        if session.state in {"waiting_multi_question", "waiting_multi_choice"} and clean == "0":
+            return self._handle_multi_text(sender, session, clean)
 
         if is_cancel(clean):
             self.sessions.clear(sender)
@@ -259,6 +278,9 @@ class TikuBot:
             if mode == CHAPTER_MODE_MANUAL:
                 return BotResponse(texts=["已切换到手动章节模式。请重新发送题图，我会先让你选择章节。发送 a 可切回自动。"])
             return BotResponse(texts=["已切换到自动章节模式。请重新发送题图，我会先尝试自动识别章节。发送 a 可切回手动。"])
+
+        if session.state in {"waiting_multi_question", "waiting_multi_choice"}:
+            return self._handle_multi_text(sender, session, clean)
 
         if session.state == "waiting_chapter":
             chapter = parse_chapter(clean)
@@ -280,6 +302,57 @@ class TikuBot:
             return BotResponse(texts=["请先发送题目图片，然后我会用这个章节检索。"])
         mode_label = "自动章节" if self.chapter_mode(sender) == CHAPTER_MODE_AUTO else "手动章节"
         return BotResponse(texts=[f"请先发送题目图片。当前模式：{mode_label}。发送“手动”或“自动”可切换。"])
+
+    def _try_start_multi_question_session(self, sender: str, image_path: Path) -> BotResponse | None:
+        try:
+            layout = self.coordinator.analyze_image_layout(image_path)
+        except Exception as exc:  # noqa: BLE001 - keep the existing single-question flow available.
+            print(f"layout analysis failed, fallback to single flow: {exc}", file=sys.stderr, flush=True)
+            return None
+        if layout.get("question_layout") != "multi":
+            return None
+        questions = normalize_multi_questions(layout.get("questions", []))
+        if len(questions) < 2:
+            return None
+        diagram_crops = prepare_multi_diagram_crops(
+            image_path,
+            questions,
+            self.options.temp_dir / "multi_diagrams",
+        )
+        session = TikuSession(
+            state="waiting_multi_question",
+            image_path=image_path,
+            multi_questions=questions,
+            diagram_crops=diagram_crops,
+        )
+        self.sessions.save(sender, session)
+        return BotResponse(texts=[format_multi_question_list(session)])
+
+    def _handle_multi_text(self, sender: str, session: TikuSession, clean: str) -> BotResponse:
+        if session.state == "waiting_multi_choice" and clean == "0":
+            session.state = "waiting_multi_question"
+            session.results = []
+            session.current_question = None
+            self.sessions.save(sender, session)
+            return BotResponse(texts=[format_multi_question_list(session)])
+        if session.state == "waiting_multi_question" and clean == "0":
+            self.sessions.clear(sender)
+            return BotResponse(texts=["已结束本次多题搜题。"])
+
+        command = parse_multi_command(clean)
+        if not command:
+            return BotResponse(texts=[format_multi_help(session)])
+        question = find_multi_question(session, command["question"])
+        if question is None:
+            return BotResponse(texts=[f"没有找到第 {command['question']} 题。\n\n{format_multi_question_list(session)}"])
+
+        if command["kind"] == "answer":
+            if session.state != "waiting_multi_choice" or normalize_question_key(session.current_question) != normalize_question_key(question["label"]):
+                return BotResponse(texts=[f"请先回复 {question['label']} 检索第{question['label']}题，再选择答案。"])
+            return self._answer_multi_choice(sender, session, question, int(command["value"]))
+
+        chapter = command["value"] if command["kind"] == "chapter" else None
+        return self._search_multi_question(sender, session, question, chapter)
 
     def _search(self, sender: str, session: TikuSession, chapter: str) -> BotResponse:
         assert session.image_path is not None
@@ -315,6 +388,88 @@ class TikuBot:
         texts = [format_candidate_reply(chapter_text, top_results)]
         images = [Path(item["path"]) for item in top_results]
         return BotResponse(texts=texts, images=images)
+
+    def _search_multi_question(
+        self,
+        sender: str,
+        session: TikuSession,
+        question: dict[str, Any],
+        chapter_override: str | None,
+    ) -> BotResponse:
+        loads = question.get("loads", [])
+        if not loads:
+            return BotResponse(texts=[f"第{question['label']}题没有识别到可检索荷载，请单独裁剪后重发。"])
+
+        chapter = chapter_override or effective_question_chapter(question)
+        if not chapter:
+            return BotResponse(texts=[format_multi_question_needs_chapter(question)])
+        if chapter == "unsupported":
+            return BotResponse(texts=[f"第{question['label']}题暂不在当前 2-6 章题库范围内。"])
+
+        diagram_crop = session.diagram_crops.get(normalize_question_key(question["label"]))
+        result = self.coordinator.search_loads(
+            loads,
+            chapter,
+            query_image_path=diagram_crop,
+            rerank=bool(diagram_crop),
+            rerank_top=self.options.rerank_top,
+            force_rerank=bool(diagram_crop),
+            status_callback=None,
+        )
+        if result.route.route == "needs_review":
+            return BotResponse(texts=[f"第{question['label']}题暂时不能自动检索，需要人工复核。\n分类：{result.route.category}"])
+        if result.route.route == "needs_chapter":
+            return BotResponse(texts=[format_multi_question_needs_chapter(question)])
+        if not result.results:
+            return BotResponse(texts=[f"第{question['label']}题没有找到匹配题目。"])
+
+        top_results = result.results[:3]
+        session.state = "waiting_multi_choice"
+        session.current_question = question["label"]
+        session.chapter = result.chapter or chapter
+        session.results = top_results
+        self.sessions.save(sender, session)
+
+        texts = [format_multi_candidate_reply(question, session.chapter, top_results, reranked=result.reranked)]
+        images = [Path(item["path"]) for item in top_results]
+        return BotResponse(texts=texts, images=images)
+
+    def _answer_multi_choice(
+        self,
+        sender: str,
+        session: TikuSession,
+        question: dict[str, Any],
+        choice: int,
+    ) -> BotResponse:
+        if choice < 1 or choice > len(session.results):
+            return BotResponse(texts=[f"当前第{question['label']}题只有 {len(session.results)} 个候选，请回复 {question['label']}-1 到 {question['label']}-{len(session.results)}。"])
+
+        if self.options.dry_run:
+            selected = Path(session.results[choice - 1]["path"])
+            session.state = "waiting_multi_question"
+            session.results = []
+            session.current_question = None
+            self.sessions.save(sender, session)
+            return BotResponse(
+                texts=[f"[dry-run] 将发送第{question['label']}题第 {choice} 名答案。\n\n{format_multi_question_list(session)}"],
+                images=[selected],
+            )
+
+        before = answer_output_files()
+        answer(choice)
+        after = answer_output_files()
+        new_files = [path for path in after if path not in before]
+        answer_images = new_files or after[-3:]
+        session.state = "waiting_multi_question"
+        session.results = []
+        session.current_question = None
+        self.sessions.save(sender, session)
+        if not answer_images:
+            return BotResponse(texts=[f"已执行第{question['label']}题第 {choice} 名答案提取，但没有找到输出图片。\n\n{format_multi_question_list(session)}"])
+        return BotResponse(
+            texts=[f"第{question['label']}题第 {choice} 名答案：\n\n{format_multi_question_list(session)}"],
+            images=answer_images,
+        )
 
     def chapter_mode(self, sender: str) -> str:
         with self._mode_lock:
@@ -391,6 +546,43 @@ class MockCoordinator:
                 "chapter_hint": "5位移法",
                 "chapter_confidence": 1.0,
                 "chapter_evidence": "mock",
+                "results": [
+                    {
+                        "rank": index,
+                        "path": str(path),
+                        "name": path.name,
+                        "score": 1.0,
+                    }
+                    for index, path in enumerate(self.image_paths, 1)
+                ],
+            },
+        )()
+
+    def analyze_image_layout(self, image_path: Path) -> dict[str, Any]:
+        del image_path
+        return {"question_layout": "single", "questions": []}
+
+    def search_loads(
+        self,
+        loads: list[dict[str, Any]],
+        chapter: str,
+        *,
+        rerank: bool = False,
+        force_rerank: bool = False,
+        status_callback=None,
+    ) -> Any:
+        del loads, rerank, force_rerank, status_callback
+        return type(
+            "MockPipelineResult",
+            (),
+            {
+                "route": type(
+                    "MockRoute",
+                    (),
+                    {"route": "main", "category": "main_numeric"},
+                )(),
+                "chapter": chapter,
+                "reranked": False,
                 "results": [
                     {
                         "rank": index,
@@ -566,6 +758,185 @@ def format_candidate_reply(chapter: str, results: list[dict[str, Any]]) -> str:
         "0：结束",
         "a：切换手动识别章节",
     ])
+
+
+def format_multi_question_list(session: TikuSession) -> str:
+    lines = ["识别到多题："]
+    for question in session.multi_questions:
+        label = question["label"]
+        chapter_text = display_question_chapter(question)
+        loads_text = format_loads(question.get("loads", []))
+        lines.append(f"第{label}题：{chapter_text}，荷载 {loads_text}")
+    example = session.multi_questions[0]["label"] if session.multi_questions else "1"
+    lines.extend([
+        "",
+        "回复：",
+        f"{example}        查第{example}题，按识别章节",
+        f"{example}-力法   查第{example}题，指定力法",
+        "0        结束",
+    ])
+    return "\n".join(lines)
+
+
+def format_multi_help(session: TikuSession) -> str:
+    return "没有识别到有效指令。\n\n" + format_multi_question_list(session)
+
+
+def format_multi_question_needs_chapter(question: dict[str, Any]) -> str:
+    label = question["label"]
+    return "\n".join([
+        f"第{label}题章节不确定，请指定章节后检索。",
+        f"例如：{label}-力法、{label}-位移法、{label}-静定结构",
+    ])
+
+
+def format_multi_candidate_reply(question: dict[str, Any], chapter: str, results: list[dict[str, Any]], *, reranked: bool = False) -> str:
+    label = question["label"]
+    scores = "、".join(format_result_score(item) for item in results)
+    mode = "已复筛" if reranked else "未复筛"
+    lines = [
+        f"第{label}题：{chapter}（{mode}）",
+        f"下面是相似题目 Top {len(results)}，相似比分别为：{scores}",
+        "",
+        "回复：",
+    ]
+    lines.extend(f"{label}-{index}      获取第{label}题第{index}个答案" for index in range(1, len(results) + 1))
+    lines.append("0        返回多题列表")
+    return "\n".join(lines)
+
+
+def normalize_multi_questions(raw_questions: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_questions, list):
+        return []
+    questions = []
+    for index, raw in enumerate(raw_questions, 1):
+        if not isinstance(raw, dict):
+            continue
+        label = str(raw.get("label") or index).strip() or str(index)
+        loads = [item for item in raw.get("loads", []) if isinstance(item, dict)]
+        questions.append({
+            "label": label,
+            "key": normalize_question_key(label),
+            "loads": loads,
+            "chapter_hint": str(raw.get("chapter_hint") or "unknown").strip(),
+            "chapter_confidence": safe_float(raw.get("chapter_confidence")),
+            "chapter_evidence": str(raw.get("chapter_evidence") or "").strip(),
+        })
+    return questions
+
+
+def prepare_multi_diagram_crops(
+    image_path: Path,
+    questions: list[dict[str, Any]],
+    output_root: Path,
+) -> dict[str, str]:
+    try:
+        if cv2 is None or np is None:
+            return {}
+        image = cv2.imdecode(np.fromfile(str(image_path), dtype=np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            return {}
+        boxes = find_diagram_blocks_cv(image)
+        if not boxes:
+            return {}
+        output_dir = output_root / f"{int(time.time() * 1000)}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        crops: dict[str, str] = {}
+        with Image.open(image_path).convert("RGB") as pil:
+            for index, question in enumerate(questions):
+                if index >= len(boxes):
+                    break
+                label = str(question.get("label") or index + 1).strip()
+                key = normalize_question_key(label)
+                x, y, w, h, _area = boxes[index]
+                crop = safe_crop(pil, [x, y, x + w, y + h], padding_ratio=0.06)
+                if crop is None:
+                    continue
+                crop_path = output_dir / f"question_{safe_filename_part(label)}_diagram.jpg"
+                crop.save(crop_path, quality=94)
+                crops[key] = str(crop_path)
+        return crops
+    except Exception as exc:  # noqa: BLE001 - crop is optional; fall back to non-reranked multi search.
+        print(f"multi diagram crop failed: {exc}", file=sys.stderr, flush=True)
+        return {}
+
+
+def display_question_chapter(question: dict[str, Any]) -> str:
+    chapter = effective_question_chapter(question)
+    if chapter == "unsupported":
+        return "不在当前题库范围"
+    if chapter:
+        return chapter
+    return "章节未知"
+
+
+def effective_question_chapter(question: dict[str, Any]) -> str | None:
+    evidence = str(question.get("chapter_evidence") or "")
+    if "影响线" in evidence:
+        return "unsupported"
+    hint = str(question.get("chapter_hint") or "").strip()
+    confidence = safe_float(question.get("chapter_confidence"))
+    if hint in CHAPTERS and confidence >= 0.8:
+        return hint
+    return None
+
+
+def format_loads(loads: list[dict[str, Any]]) -> str:
+    parts = []
+    for item in loads:
+        typ = str(item.get("type") or "").strip()
+        raw = str(item.get("raw") or "").strip()
+        if typ and raw:
+            parts.append(f"{typ}:{raw}")
+        elif raw:
+            parts.append(raw)
+    return "、".join(parts) if parts else "未识别"
+
+
+def parse_multi_command(text: str) -> dict[str, Any] | None:
+    clean = text.strip()
+    if not clean:
+        return None
+    if "-" not in clean:
+        return {"kind": "search", "question": clean, "value": None}
+    left, right = clean.split("-", 1)
+    left = left.strip()
+    right = right.strip()
+    if not left or not right:
+        return None
+    if right.isdigit():
+        return {"kind": "answer", "question": left, "value": int(right)}
+    chapter = parse_chapter(right)
+    if not chapter:
+        return None
+    return {"kind": "chapter", "question": left, "value": chapter}
+
+
+def find_multi_question(session: TikuSession, raw_label: str) -> dict[str, Any] | None:
+    key = normalize_question_key(raw_label)
+    for question in session.multi_questions:
+        if normalize_question_key(question.get("label")) == key:
+            return question
+    return None
+
+
+def normalize_question_key(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"第|题|图|[()\uff08\uff09\s]", "", text)
+    return text
+
+
+def safe_filename_part(value: object) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]+", "_", text)
+    return text.strip("_") or "question"
+
+
+def safe_float(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def format_result_score(item: dict[str, Any]) -> str:

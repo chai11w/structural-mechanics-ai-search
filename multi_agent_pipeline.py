@@ -26,6 +26,7 @@ from scripts.classify_question_bank import (
     normalize_load_item,
     normalize_chapter_confidence,
     normalize_chapter_hint,
+    qwen_analyze_layout,
     qwen_extract_loads,
 )
 
@@ -125,6 +126,19 @@ class QwenClassifier:
             self._save_cache(cache)
         return result
 
+    def analyze_layout(self, image_path: str | Path) -> dict[str, Any]:
+        path = Path(image_path)
+        api_key = os.environ.get("DASHSCOPE_API_KEY", "") or search.cfg.get("dashscope_api_key", "")
+        if not api_key:
+            raise RuntimeError("DASHSCOPE_API_KEY is not set")
+        return qwen_analyze_layout(
+            path,
+            model=self.model,
+            endpoint=self.endpoint,
+            api_key=api_key,
+            timeout=self.timeout,
+        )
+
     def _cache_key(self, path: Path) -> str:
         digest = hashlib.md5(path.read_bytes()).hexdigest()
         return f"{QWEN_CACHE_SCHEMA_VERSION}:{self.model}:{digest}"
@@ -196,6 +210,9 @@ class MultiAgentCoordinator:
             classified=classified,
         )
 
+    def analyze_image_layout(self, image_path: str | Path) -> dict[str, Any]:
+        return self.qwen.analyze_layout(image_path)
+
     def search_loads(
         self,
         loads: list[dict[str, Any]],
@@ -204,6 +221,7 @@ class MultiAgentCoordinator:
         query_image_path: str | None = None,
         rerank: bool = False,
         rerank_top: int = 3,
+        force_rerank: bool = False,
         status_callback=None,
         classified: dict[str, Any] | None = None,
     ) -> PipelineResult:
@@ -228,7 +246,7 @@ class MultiAgentCoordinator:
         reranked = False
         if rerank and query_image_path and results:
             rerank_input = select_rerank_candidates(results, route.route)
-            if len(rerank_input) <= rerank_top:
+            if len(rerank_input) <= rerank_top and not force_rerank:
                 rerank_input = []
             if status_callback and rerank_input:
                 status_callback("Zhipu复筛中...")

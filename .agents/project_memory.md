@@ -421,3 +421,51 @@
 - Verification:
   - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
   - In-memory syntax compile for `gui.py` passed. Direct `python -m py_compile gui.py` was blocked by existing `__pycache__` permission on this machine, not by syntax.
+
+## 2026-06-24 Feishu Multi Question MVP
+
+- Goal: support photos/pages that contain multiple independent structure-mechanics questions without changing the existing single-question Feishu flow.
+- Layout detection:
+  - `scripts/classify_question_bank.py` now has `qwen_analyze_layout()` and `--layout-image`.
+  - Output fields include `question_layout` (`single`/`multi`/`uncertain`) and per-question `label`, `bbox`, `loads`, `chapter_hint`, `chapter_confidence`, `chapter_evidence`.
+  - `bbox` is retained for inspection/debugging, but the Feishu MVP does not use cropping.
+- Feishu behavior:
+  - Auto chapter mode first runs layout detection.
+  - `single` or `uncertain` falls back to the old single-question flow unchanged.
+  - `multi` starts a multi-question session and initially returns only a summary, e.g. question label, chapter status, and loads.
+  - User replies with the question label to search that question using the recognized chapter.
+  - User replies with `label-章节名` (for example `5-力法`) to override the chapter for that question.
+  - After candidates are shown, user replies with `label-rank` (for example `6-2`) to get that answer.
+  - In the multi-question candidate state, `0` returns to the multi-question list. In the list state, `0` ends the multi-question session.
+- Retrieval rule:
+  - Multi-question sessions now pre-crop structure diagrams at image receive time with OpenCV.
+  - The CV path finds large line-art blocks by illumination normalization, adaptive thresholding, morphological close/dilate, and connected components.
+  - Blocks are sorted top-to-bottom and bound to the layout question labels in order, e.g. labels `5/6/7/8` map to diagram blocks `1/2/3/4`.
+  - When the user searches one question, the bot uses the pre-cropped diagram as `query_image_path` and forces Zhipu rerank even if the candidate pool is `<= rerank_top`.
+  - If no crop is available, it falls back to load-only search.
+  - Unknown chapters are not searched until the user specifies a chapter.
+  - Questions identified as outside the current 2-6 chapter scope, such as influence-line questions, are reported as unsupported rather than searched.
+- Verification:
+  - Real page image with questions 5/6/7/8 was detected as `multi`.
+  - The bot summary showed question 5 as unknown chapter, question 6 as `5位移法` with `均布:q`, question 7 as `6力矩分配` with `集中:200kN` and `均布:10kN/m`, and question 8 as unsupported influence-line scope.
+  - OpenCV crop experiment on the same real page found four diagram blocks after filtering the top desk edge. Question 7 crop correctly contained the `200kN + 10kN/m` beam diagram.
+  - Stable version timing on question 7: image receive/listing about `12.85s`; reply `7` returned in about `1.75s` with `已复筛`.
+  - Replying `6` in a local bot dry-run searched question 6 in `5位移法` and returned Top 3 candidates.
+  - Replying `0` from the candidate state returned to the multi-question list.
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+
+## 2026-06-24 Rerank Load Position Signal
+
+- `search.RERANK_PROMPT` now scores candidates by both:
+  - structural shape similarity;
+  - load relative position/direction consistency.
+- The old instruction `不要判断荷载位置` was removed.
+- The prompt still tells the model not to solve the problem, not to recalculate exact load counts/types, and not to penalize question numbers, node letters, or dimension labels.
+- Reason output was shortened to keep latency low.
+- A/B check on the real multi-question page question 7:
+  - previous shape-only prompt: about `4.85s` for 3 candidates in one run;
+  - minimal shape+load-position prompt before shortening reasons: about `7.81s`;
+  - final shortened official prompt: about `4.30s` for 3 candidates.
+- Final checked scores on that sample:
+  - exact matching candidate stayed `1.0`;
+  - final wording `荷载位置和方向是否相同` scored the two mismatched candidates lower (`0.2` and `0.4` in the check), matching the goal of finding the same problem rather than loosely similar ones.
