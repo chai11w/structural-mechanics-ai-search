@@ -460,6 +460,7 @@ class FeishuTikuBridge:
             image_key = extract_image_key(message)
             if not image_key:
                 return BotResponse(texts=["收到图片消息，但没有拿到 image_key。"])
+            self.client.reply_text(message_id, "收到题图，正在识别和检索...")
             output = self.options.temp_dir / "incoming" / f"{message_id}_{image_key}.jpg"
             image_path = self.client.download_message_image(message_id, image_key, output)
             return self.bot.receive_image(sender, image_path)
