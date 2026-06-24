@@ -374,3 +374,25 @@
 - Next step:
   - Wire this into Feishu first: after receiving an image, call image search with `chapter="auto"`. If route is `needs_chapter`, ask the user for 2/3/4/5/6; otherwise skip the chapter question and return candidates.
   - GUI can be wired after Feishu by adding an “自动识别章节” option in the chapter dropdown.
+
+## 2026-06-24 Feishu Auto Chapter Mode
+
+- Feishu tiku bot now defaults each sender to auto chapter mode.
+- Auto mode behavior:
+  - User sends image.
+  - Bot calls `MultiAgentCoordinator.search_image(..., chapter="auto")`.
+  - If auto chapter succeeds, bot immediately returns Top candidates and includes `已自动识别章节：...`.
+  - If route is `needs_chapter`, bot saves the image session and asks for chapter `2/3/4/5/6`.
+- Manual fallback:
+  - User can send `手动`, `manual`, or `m` to switch that sender to manual chapter mode.
+  - User can send `自动`, `auto`, or `a` to switch back to auto chapter mode.
+  - Switching modes clears the current search session; user should re-upload the image after switching.
+- If auto-selected chapter is not desired, the intended user flow is:
+  - Reply `手动` or `m`.
+  - Re-upload the same题图.
+  - Choose chapter number manually.
+- Existing `0` cancel behavior remains unchanged in waiting states and candidate-choice states.
+- `scripts/feishu_tiku_bot.py dry-run-flow` preserves the old manual flow for local dry-run testing by setting the dry-run sender to manual mode before sending the mock image.
+- Verification:
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+  - Dry-run command verified image -> chapter -> candidates -> `0` cancel flow still works.

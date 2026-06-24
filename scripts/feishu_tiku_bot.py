@@ -36,6 +36,8 @@ from search import ANSWER_OUTPUT, answer, cfg  # noqa: E402
 FEISHU_OPEN_API = "https://open.feishu.cn/open-apis"
 CHAPTERS = ["2静定结构", "3静定结构位移", "4力法", "5位移法", "6力矩分配"]
 DEFAULT_SESSION_TTL_SECONDS = 10 * 60
+CHAPTER_MODE_AUTO = "auto"
+CHAPTER_MODE_MANUAL = "manual"
 
 
 @dataclass
@@ -210,8 +212,13 @@ class TikuBot:
         self.options = options
         self.coordinator = coordinator or MultiAgentCoordinator(top_k=options.top_k)
         self.sessions = sessions or TikuSessionStore(options.session_ttl_seconds)
+        self._chapter_modes: dict[str, str] = {}
+        self._mode_lock = threading.Lock()
 
     def receive_image(self, sender: str, image_path: Path) -> BotResponse:
+        if self.chapter_mode(sender) == CHAPTER_MODE_AUTO:
+            session = TikuSession(state="searching", image_path=image_path)
+            return self._search(sender, session, "auto")
         session = TikuSession(state="waiting_chapter", image_path=image_path)
         self.sessions.save(sender, session)
         return BotResponse(texts=[format_chapter_prompt(image_path)])
@@ -223,6 +230,14 @@ class TikuBot:
         if is_cancel(clean):
             self.sessions.clear(sender)
             return BotResponse(texts=["已取消本次搜题。"])
+
+        mode = parse_chapter_mode(clean)
+        if mode:
+            self.set_chapter_mode(sender, mode)
+            self.sessions.clear(sender)
+            if mode == CHAPTER_MODE_MANUAL:
+                return BotResponse(texts=["已切换到手动章节模式。请重新发送题图，我会先让你选择章节。"])
+            return BotResponse(texts=["已切换到自动章节模式。请重新发送题图，我会先尝试自动识别章节。"])
 
         if session.state == "waiting_chapter":
             chapter = parse_chapter(clean)
@@ -242,7 +257,8 @@ class TikuBot:
         chapter = parse_chapter(clean)
         if chapter:
             return BotResponse(texts=["请先发送题目图片，然后我会用这个章节检索。"])
-        return BotResponse(texts=["请先发送题目图片。我收到图片后会让你选择章节。"])
+        mode_label = "自动章节" if self.chapter_mode(sender) == CHAPTER_MODE_AUTO else "手动章节"
+        return BotResponse(texts=[f"请先发送题目图片。当前模式：{mode_label}。发送“手动”或“自动”可切换。"])
 
     def _search(self, sender: str, session: TikuSession, chapter: str) -> BotResponse:
         assert session.image_path is not None
@@ -252,6 +268,10 @@ class TikuBot:
             rerank=True,
             rerank_top=self.options.rerank_top,
         )
+        if result.route.route == "needs_chapter":
+            session.state = "waiting_chapter"
+            self.sessions.save(sender, session)
+            return BotResponse(texts=[format_chapter_prompt(session.image_path, result)])
         if result.route.route == "needs_review":
             self.sessions.clear(sender)
             return BotResponse(
@@ -266,15 +286,27 @@ class TikuBot:
 
         top_results = result.results[:3]
         session.state = "waiting_choice"
-        session.chapter = chapter
+        session.chapter = result.chapter or chapter
         session.results = top_results
         self.sessions.save(sender, session)
 
+        chapter_text = result.chapter or chapter
+        prefix = ""
+        if chapter == "auto":
+            prefix = f"已自动识别章节：{chapter_text}\n"
         texts = [
-            f"已检索：{chapter}\n下面是相似题 Top {len(top_results)}，回复 0/1/2/3 获取答案；0 表示没有想要的，退出本次搜题。"
+            f"{prefix}已检索：{chapter_text}\n下面是相似题 Top {len(top_results)}，回复 0/1/2/3 获取答案；0 表示没有想要的，退出本次搜题。\n若章节不对，回复“手动”切换后重新发送题图。"
         ]
         images = [Path(item["path"]) for item in top_results]
         return BotResponse(texts=texts, images=images)
+
+    def chapter_mode(self, sender: str) -> str:
+        with self._mode_lock:
+            return self._chapter_modes.get(sender, CHAPTER_MODE_AUTO)
+
+    def set_chapter_mode(self, sender: str, mode: str) -> None:
+        with self._mode_lock:
+            self._chapter_modes[sender] = mode
 
     def _answer_choice(self, sender: str, session: TikuSession, choice: int) -> BotResponse:
         if choice == 0:
@@ -300,8 +332,9 @@ class TikuBot:
 
 
 class MockCoordinator:
-    def __init__(self, image_paths: list[Path]) -> None:
+    def __init__(self, image_paths: list[Path], *, auto_needs_chapter: bool = False) -> None:
         self.image_paths = image_paths
+        self.auto_needs_chapter = auto_needs_chapter
 
     def search_image(
         self,
@@ -311,7 +344,24 @@ class MockCoordinator:
         rerank: bool = True,
         rerank_top: int = 3,
     ) -> Any:
-        del image_path, chapter, rerank, rerank_top
+        del image_path, rerank, rerank_top
+        if self.auto_needs_chapter and str(chapter).strip().lower() == "auto":
+            return type(
+                "MockPipelineResult",
+                (),
+                {
+                    "route": type(
+                        "MockRoute",
+                        (),
+                        {"route": "needs_chapter", "category": "main_numeric"},
+                    )(),
+                    "results": [],
+                    "chapter": None,
+                    "chapter_hint": "unknown",
+                    "chapter_confidence": 0.1,
+                    "chapter_evidence": "mock",
+                },
+            )()
         return type(
             "MockPipelineResult",
             (),
@@ -321,6 +371,10 @@ class MockCoordinator:
                     (),
                     {"route": "main", "category": "main_numeric"},
                 )(),
+                "chapter": "5位移法",
+                "chapter_hint": "5位移法",
+                "chapter_confidence": 1.0,
+                "chapter_evidence": "mock",
                 "results": [
                     {
                         "rank": index,
@@ -450,11 +504,20 @@ class FeishuHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def format_chapter_prompt(image_path: Path | None = None) -> str:
+def format_chapter_prompt(image_path: Path | None = None, result: Any | None = None) -> str:
     prefix = "收到题图" if image_path else "请选择章节"
     lines = [f"{prefix}，请选择章节："]
+    if result is not None:
+        hint = getattr(result, "chapter_hint", "")
+        confidence = getattr(result, "chapter_confidence", 0.0)
+        evidence = getattr(result, "chapter_evidence", "")
+        if hint and hint != "unknown":
+            lines.append(f"自动识别不够确定：{hint}（{round(float(confidence) * 100)}%）")
+        elif evidence:
+            lines.append("未能自动确定章节。")
     lines.extend(f"- {chapter}" for chapter in CHAPTERS)
     lines.append("回复章节号 2/3/4/5/6，或直接回复章节名；回复 0 退出。")
+    lines.append("发送“自动/a”或“手动/m”可切换章节模式。")
     return "\n".join(lines)
 
 
@@ -475,6 +538,15 @@ def parse_choice(text: str) -> int | None:
     if not re.fullmatch(r"[0-3]", clean):
         return None
     return int(clean)
+
+
+def parse_chapter_mode(text: str) -> str | None:
+    clean = text.strip().lower()
+    if clean in {"自动", "auto", "a"}:
+        return CHAPTER_MODE_AUTO
+    if clean in {"手动", "manual", "m"}:
+        return CHAPTER_MODE_MANUAL
+    return None
 
 
 def is_cancel(text: str) -> bool:
@@ -716,6 +788,7 @@ def run_dry_flow(args: argparse.Namespace, options: FeishuTikuOptions) -> int:
         coordinator = MockCoordinator([image, image, image])
     bot = TikuBot(options=options, coordinator=coordinator)
     sender = "dry-run"
+    bot.set_chapter_mode(sender, CHAPTER_MODE_MANUAL)
     print_response(bot.receive_image(sender, Path(args.image)))
     print_response(bot.receive_text(sender, args.chapter))
     if args.choice is not None:
