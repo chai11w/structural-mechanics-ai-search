@@ -33,8 +33,11 @@ from scripts.classify_question_bank import (
 BASE = Path(__file__).resolve().parent
 CACHE_DIR = BASE / ".tmp_multi_agent"
 QWEN_CACHE = CACHE_DIR / "qwen_classifier_cache.json"
+QWEN_CACHE_SCHEMA_VERSION = "chapter-v1"
 MAIN_RERANK_MIN_SCORE = 0.65
 SYMBOLIC_RERANK_MIN_SCORE = 0.50
+AUTO_CHAPTER_VALUES = {"", "auto", "自动", "自动识别", "自动识别章节"}
+AUTO_CHAPTER_MIN_CONFIDENCE = 0.8
 
 
 @dataclass
@@ -52,6 +55,10 @@ class PipelineResult:
     load_details: list[dict[str, Any]]
     results: list[dict[str, Any]]
     reranked: bool
+    chapter: str | None = None
+    chapter_hint: str = CHAPTER_UNKNOWN
+    chapter_confidence: float = 0.0
+    chapter_evidence: str = ""
 
 
 def symbolic_root(main_root: Path | None = None) -> Path:
@@ -120,7 +127,7 @@ class QwenClassifier:
 
     def _cache_key(self, path: Path) -> str:
         digest = hashlib.md5(path.read_bytes()).hexdigest()
-        return f"{self.model}:{digest}"
+        return f"{QWEN_CACHE_SCHEMA_VERSION}:{self.model}:{digest}"
 
     def _load_cache(self) -> dict[str, Any]:
         if not self.cache_path.exists():
@@ -174,7 +181,7 @@ class MultiAgentCoordinator:
     def search_image(
         self,
         image_path: str | Path,
-        chapter: str,
+        chapter: str | None,
         *,
         rerank: bool = True,
         rerank_top: int = 3,
@@ -186,26 +193,38 @@ class MultiAgentCoordinator:
             query_image_path=str(image_path),
             rerank=rerank,
             rerank_top=rerank_top,
+            classified=classified,
         )
 
     def search_loads(
         self,
         loads: list[dict[str, Any]],
-        chapter: str,
+        chapter: str | None,
         *,
         query_image_path: str | None = None,
         rerank: bool = False,
         rerank_top: int = 3,
         status_callback=None,
+        classified: dict[str, Any] | None = None,
     ) -> PipelineResult:
         loads = search.normalize_query_loads(loads)
         route, load_details = self.router.route(loads)
         if route.route == "needs_review" or route.excel_root is None:
-            return PipelineResult(route, loads, load_details, [], False)
+            return make_pipeline_result(route, loads, load_details, [], False, chapter, classified)
+
+        effective_chapter = resolve_effective_chapter(chapter, classified)
+        if not effective_chapter:
+            needs_chapter = RouteDecision(
+                "needs_chapter",
+                route.category,
+                "chapter auto-detection missing or low confidence",
+                None,
+            )
+            return make_pipeline_result(needs_chapter, loads, load_details, [], False, None, classified)
 
         if status_callback:
             status_callback("候选检索中...")
-        results = rank_bank_candidates(loads, chapter, route.excel_root, self.top_k)
+        results = rank_bank_candidates(loads, effective_chapter, route.excel_root, self.top_k)
         reranked = False
         if rerank and query_image_path and results:
             rerank_input = select_rerank_candidates(results, route.route)
@@ -220,7 +239,48 @@ class MultiAgentCoordinator:
                     reranked = True
 
         write_last_search(results)
-        return PipelineResult(route, loads, load_details, results, reranked)
+        return make_pipeline_result(route, loads, load_details, results, reranked, effective_chapter, classified)
+
+
+def is_auto_chapter(chapter: str | None) -> bool:
+    if chapter is None:
+        return True
+    return str(chapter).strip().lower() in AUTO_CHAPTER_VALUES
+
+
+def resolve_effective_chapter(chapter: str | None, classified: dict[str, Any] | None = None) -> str | None:
+    if not is_auto_chapter(chapter):
+        return str(chapter).strip()
+    if not classified:
+        return None
+    chapter_hint = normalize_chapter_hint(classified.get("chapter_hint"))
+    confidence = normalize_chapter_confidence(classified.get("chapter_confidence"))
+    if chapter_hint != CHAPTER_UNKNOWN and confidence >= AUTO_CHAPTER_MIN_CONFIDENCE:
+        return chapter_hint
+    return None
+
+
+def make_pipeline_result(
+    route: RouteDecision,
+    loads: list[dict[str, Any]],
+    load_details: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+    reranked: bool,
+    chapter: str | None,
+    classified: dict[str, Any] | None = None,
+) -> PipelineResult:
+    classified = classified or {}
+    return PipelineResult(
+        route,
+        loads,
+        load_details,
+        results,
+        reranked,
+        chapter=chapter,
+        chapter_hint=normalize_chapter_hint(classified.get("chapter_hint")),
+        chapter_confidence=normalize_chapter_confidence(classified.get("chapter_confidence")),
+        chapter_evidence=str(classified.get("chapter_evidence") or "").strip(),
+    )
 
 
 def load_bank_excel(excel_root: Path, chapter: str) -> pd.DataFrame | None:
@@ -331,11 +391,20 @@ def format_pipeline_result(result: PipelineResult) -> str:
         f"route={result.route.route}",
         f"category={result.route.category}",
         f"reason={result.route.reason}",
+        f"chapter={result.chapter or ''}",
+        f"chapter_hint={result.chapter_hint}",
+        f"chapter_confidence={result.chapter_confidence:.2f}",
         "loads=" + json.dumps({"loads": result.loads}, ensure_ascii=False),
     ]
+    if result.chapter_evidence:
+        lines.append(f"chapter_evidence={result.chapter_evidence}")
     if result.load_details:
         details = "; ".join(f"{item['type']}:{item['raw']}->{item['load_class']}" for item in result.load_details)
         lines.append(f"load_classes={details}")
+
+    if result.route.route == "needs_chapter":
+        lines.append("needs_chapter: 请手动选择章节后重试")
+        return "\n".join(lines)
 
     if result.route.route == "needs_review":
         lines.append("needs_review: not searching any bank")

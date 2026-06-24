@@ -350,3 +350,27 @@
     - `6力矩分配/2多节点分配/不可简化/题目aa/6.jpg` -> `6力矩分配` because evidence quotes `弯矩分配法`.
 - Next step:
   - Wire `chapter=auto` into `MultiAgentCoordinator` and CLI/GUI/Feishu only after deciding the confidence threshold. Recommended first threshold: accept only non-unknown hints with confidence `>=0.8`, otherwise ask the user to choose chapter.
+
+## 2026-06-24 Auto Chapter Coordinator MVP
+
+- `MultiAgentCoordinator` now supports `chapter=None` or `chapter="auto"` for image/manual-load pipeline calls.
+- Qwen cache key now includes schema version `chapter-v1`, so pre-chapter cached classifications are not reused for auto chapter detection.
+- Auto chapter rule:
+  - If a concrete chapter is passed, it always wins. Do not override user-selected chapters.
+  - If chapter is `auto`, only use Qwen `chapter_hint` when it is not `unknown` and `chapter_confidence >= 0.8`.
+  - If auto chapter is missing or low confidence, return route `needs_chapter` with no search results. Do not search across all chapters.
+- `PipelineResult` now carries chapter metadata:
+  - `chapter`: actual chapter used, or `None`.
+  - `chapter_hint`, `chapter_confidence`, `chapter_evidence`.
+- `scripts/multi_agent_search.py` now has `--chapter auto` as the default. Image search can use it; manual `--loads/--types` with `auto` returns `needs_chapter` because there is no Qwen image classification to infer chapter from.
+- Exit codes:
+  - `0`: searched normally.
+  - `3`: `needs_review`.
+  - `4`: `needs_chapter`.
+- Verification:
+  - `scripts/smoke_test.py` checks manual-chapter priority, high/low confidence auto chapter behavior, unknown rejection, and manual-load `auto` fallback to `needs_chapter`.
+  - Real CLI check: `5位移法/1梁/1单未知量/题目/1.jpg` with `--chapter auto --no-rerank` auto-selected `5位移法` and searched successfully.
+  - Real CLI check: `2静定结构/1单跨梁/题目a/1力/13.jpg` with `--chapter auto --no-rerank` returned `needs_chapter` and exit code `4`.
+- Next step:
+  - Wire this into Feishu first: after receiving an image, call image search with `chapter="auto"`. If route is `needs_chapter`, ask the user for 2/3/4/5/6; otherwise skip the chapter question and return candidates.
+  - GUI can be wired after Feishu by adding an “自动识别章节” option in the chapter dropdown.

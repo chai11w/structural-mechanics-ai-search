@@ -18,7 +18,14 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
 import search
-from multi_agent_pipeline import RuleRouter, select_rerank_candidates, symbolic_root
+from multi_agent_pipeline import (
+    AUTO_CHAPTER_MIN_CONFIDENCE,
+    MultiAgentCoordinator,
+    RuleRouter,
+    resolve_effective_chapter,
+    select_rerank_candidates,
+    symbolic_root,
+)
 from scripts.classify_question_bank import (
     guard_chapter_prediction,
     normalize_chapter_confidence,
@@ -264,6 +271,26 @@ def check_multi_agent_routing() -> list[str]:
     symbolic_selected = [item["path"] for item in select_rerank_candidates(sample_results, "symbolic")]
     if symbolic_selected != ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]:
         failures.append(f"symbolic rerank pool mismatch: {symbolic_selected}")
+
+    classified = {
+        "chapter_hint": "5位移法",
+        "chapter_confidence": AUTO_CHAPTER_MIN_CONFIDENCE,
+        "chapter_evidence": "题目文字明确说明“用位移法计算图示结构”",
+    }
+    if resolve_effective_chapter("auto", classified) != "5位移法":
+        failures.append("auto chapter should accept high-confidence chapter_hint")
+    if resolve_effective_chapter("4力法", classified) != "4力法":
+        failures.append("manual chapter should override auto chapter_hint")
+    low_confidence = dict(classified, chapter_confidence=AUTO_CHAPTER_MIN_CONFIDENCE - 0.01)
+    if resolve_effective_chapter("auto", low_confidence) is not None:
+        failures.append("auto chapter should reject low-confidence chapter_hint")
+    if resolve_effective_chapter("auto", {"chapter_hint": "unknown", "chapter_confidence": 1.0}) is not None:
+        failures.append("auto chapter should reject unknown chapter_hint")
+
+    coordinator = MultiAgentCoordinator(top_k=1)
+    needs_chapter = coordinator.search_loads([{"type": "集中", "raw": "10kN"}], "auto", rerank=False)
+    if needs_chapter.route.route != "needs_chapter":
+        failures.append(f"manual loads with auto chapter should need chapter, got {needs_chapter.route.route}")
     return failures
 
 
