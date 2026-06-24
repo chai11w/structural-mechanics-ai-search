@@ -469,3 +469,16 @@
 - Final checked scores on that sample:
   - exact matching candidate stayed `1.0`;
   - final wording `荷载位置和方向是否相同` scored the two mismatched candidates lower (`0.2` and `0.4` in the check), matching the goal of finding the same problem rather than loosely similar ones.
+
+## 2026-06-24 Feishu No Match Diagnostics
+
+- Feishu no-result replies now include diagnostic context instead of only saying `没有找到匹配题目。`
+- Single-question no-match reply includes:
+  - recognized/used chapter;
+  - recognized loads;
+  - route category when available;
+  - suggestion to switch chapter or crop the question and retry.
+- Multi-question no-match reply includes the same context and keeps the question label, plus a hint like `5-章节名` to retry that question with another chapter.
+- Search behavior is unchanged; this is only response text.
+- Verification:
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
