@@ -394,7 +394,8 @@
   - Choose chapter number manually.
 - Existing `0` cancel behavior remains unchanged in waiting states and candidate-choice states.
 - Image receive acknowledgement:
-  - After Feishu image messages provide an `image_key`, the bridge immediately replies `收到题图，正在识别和检索...` before downloading/running Qwen/Zhipu, so the user can see the bot is working during slow model calls.
+  - After Feishu image messages provide an `image_key`, the bridge immediately adds an `OK` reaction to the original image message before downloading/running Qwen/Zhipu, so the user can see the bot is working during slow model calls.
+  - `--working-reaction` controls the Feishu `emoji_type`; default is `OK`, empty disables it.
 - `scripts/feishu_tiku_bot.py dry-run-flow` preserves the old manual flow for local dry-run testing by setting the dry-run sender to manual mode before sending the mock image.
 - Verification:
   - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.

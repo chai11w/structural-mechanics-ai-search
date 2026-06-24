@@ -52,6 +52,7 @@ class FeishuTikuOptions:
     top_k: int = 5
     rerank_top: int = 3
     max_message_age_seconds: int = 15 * 60
+    working_reaction: str | None = "OK"
 
 
 @dataclass
@@ -133,6 +134,19 @@ class FeishuClient:
         }
         request_json(
             f"{FEISHU_OPEN_API}/im/v1/messages/{message_id}/reply",
+            method="POST",
+            payload=body,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    def add_reaction(self, message_id: str, emoji_type: str) -> None:
+        if self.dry_run:
+            print(f"[dry-run] add_reaction {message_id}: {emoji_type}", flush=True)
+            return
+        token = self.tenant_access_token()
+        body = {"reaction_type": {"emoji_type": emoji_type}}
+        request_json(
+            f"{FEISHU_OPEN_API}/im/v1/messages/{message_id}/reactions",
             method="POST",
             payload=body,
             headers={"Authorization": f"Bearer {token}"},
@@ -460,11 +474,31 @@ class FeishuTikuBridge:
             image_key = extract_image_key(message)
             if not image_key:
                 return BotResponse(texts=["收到图片消息，但没有拿到 image_key。"])
-            self.client.reply_text(message_id, "收到题图，正在识别和检索...")
+            self._mark_working_async(message_id)
             output = self.options.temp_dir / "incoming" / f"{message_id}_{image_key}.jpg"
             image_path = self.client.download_message_image(message_id, image_key, output)
             return self.bot.receive_image(sender, image_path)
         return BotResponse(texts=["当前只支持题图图片和章节/编号文字。"])
+
+    def _mark_working_async(self, message_id: str) -> None:
+        if not self.options.working_reaction:
+            return
+        thread = threading.Thread(
+            target=self._mark_working,
+            args=(message_id,),
+            daemon=True,
+        )
+        thread.start()
+
+    def _mark_working(self, message_id: str) -> None:
+        emoji_type = self.options.working_reaction
+        if not emoji_type:
+            return
+        try:
+            self.client.add_reaction(message_id, emoji_type)
+            print(f"reacted to {message_id}: {emoji_type}", flush=True)
+        except Exception as exc:
+            print(f"failed to react {message_id}: {exc}", file=sys.stderr, flush=True)
 
     def _valid_token(self, payload: dict[str, Any]) -> bool:
         expected = self.options.verification_token
@@ -737,6 +771,7 @@ def load_options(args: argparse.Namespace) -> FeishuTikuOptions:
         top_k=args.top,
         rerank_top=args.rerank_top,
         max_message_age_seconds=args.max_message_age_minutes * 60,
+        working_reaction=args.working_reaction or None,
     )
 
 
@@ -769,6 +804,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-message-age-minutes", type=int, default=15)
     parser.add_argument("--top", type=int, default=5)
     parser.add_argument("--rerank-top", type=int, default=3)
+    parser.add_argument(
+        "--working-reaction",
+        default="OK",
+        help="收到图片后给原消息添加的 emoji_type；留空则关闭",
+    )
 
     sub = parser.add_subparsers(dest="cmd")
     dry = sub.add_parser("dry-run-flow", help="用本地图片模拟图片->章节流程")
