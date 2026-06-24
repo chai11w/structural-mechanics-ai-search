@@ -476,9 +476,8 @@
 - Single-question no-match reply includes:
   - recognized/used chapter;
   - recognized loads;
-  - route category when available;
-  - suggestion to switch chapter or crop the question and retry.
-- Multi-question no-match reply includes the same context and keeps the question label, plus a hint like `5-章节名` to retry that question with another chapter.
+- no route category or retry suggestion, to keep the Feishu message concise.
+- Multi-question no-match reply includes the same context and keeps the question label.
 - Search behavior is unchanged; this is only response text.
 - Verification:
   - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.

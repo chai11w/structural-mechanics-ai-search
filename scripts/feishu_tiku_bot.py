@@ -764,19 +764,11 @@ def format_no_match_reply(result: Any, question_label: str | None = None) -> str
     prefix = f"第{question_label}题：" if question_label else ""
     chapter = getattr(result, "chapter", None) or getattr(result, "chapter_hint", None) or "未知"
     loads = getattr(result, "loads", []) or []
-    route = getattr(result, "route", None)
-    category = getattr(route, "category", "") if route is not None else ""
     lines = [
         f"{prefix}没有找到匹配题目。",
         f"识别章节：{chapter}",
         f"识别荷载：{format_loads(loads)}",
     ]
-    if category:
-        lines.append(f"检索分类：{category}")
-    if question_label:
-        lines.append(f"可以回复 {question_label}-章节名 换章节重搜，或单独裁剪这题重发。")
-    else:
-        lines.append("可以手动切换章节后重发，或单独裁剪题图再试。")
     return "\n".join(lines)
 
 
