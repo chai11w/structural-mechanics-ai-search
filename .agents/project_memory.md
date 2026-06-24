@@ -325,3 +325,28 @@
   - On 2026-06-23, local `http://127.0.0.1:8788/health` returned `{"ok": true}`.
   - The temporary trycloudflare `/health` URL also returned `{"ok": true}`.
   - A local Feishu `url_verification` payload using the configured token returned the expected challenge.
+
+## 2026-06-24 Chapter Hint Extraction MVP
+
+- Direction: reduce manual chapter selection, but do not silently guess chapters. The first step is only to add chapter suggestion fields to the existing Qwen image classification result; GUI/Feishu automatic chapter usage is not wired yet.
+- `scripts/classify_question_bank.py` Qwen prompt now asks for:
+  - `chapter_hint`: one of `2静定结构`, `3静定结构位移`, `4力法`, `5位移法`, `6力矩分配`, `unknown`.
+  - `chapter_confidence`: 0-1 float.
+  - `chapter_evidence`: visible text/method evidence for the decision.
+- Important guardrail from sample testing:
+  - Qwen initially guessed `4力法/1梁/1单未知量/题目/2跨/11.jpg` as `6力矩分配` just because the image looked like a continuous beam with EI. This is unsafe.
+  - Prompt was tightened: for `4力法`, `5位移法`, and `6力矩分配`, do not infer from continuous beams, EI/stiffness, support count, or hyperstatic appearance; require explicit method text.
+  - Qwen also guessed `4力法/6超静定位移计算/题目/3.jpg` as `3静定结构位移` because it saw “求 B 点的转角” and hallucinated graph multiplication. Therefore “求位移/求转角” alone must not imply `3静定结构位移`.
+- Programmatic guardrail:
+  - `guard_chapter_prediction()` only accepts a non-unknown chapter hint when `chapter_evidence` contains quoted visible text with chapter trigger words.
+  - Accepted trigger examples: quoted `图乘法` or `静定结构位移` for chapter 3, quoted `力法` for chapter 4, quoted `位移法`/`转角位移` for chapter 5, quoted `力矩分配`/`弯矩分配` for chapter 6.
+  - Otherwise the result is downgraded to `unknown` with confidence capped at `0.49`.
+- `multi_agent_pipeline.QwenClassifier.classify_image()` now carries `chapter_hint`, `chapter_confidence`, and `chapter_evidence` through cache/results, while keeping old cache entries backward-compatible.
+- Verification:
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+  - Qwen sample results after guardrail:
+    - `3静定结构位移/1梁/题目a/1跨/12.jpg` -> `3静定结构位移` because evidence quotes `图乘法`.
+    - `4力法/6超静定位移计算/题目/3.jpg` -> downgraded to `unknown` because only “求 B 点的转角” is explicit.
+    - `6力矩分配/2多节点分配/不可简化/题目aa/6.jpg` -> `6力矩分配` because evidence quotes `弯矩分配法`.
+- Next step:
+  - Wire `chapter=auto` into `MultiAgentCoordinator` and CLI/GUI/Feishu only after deciding the confidence threshold. Recommended first threshold: accept only non-unknown hints with confidence `>=0.8`, otherwise ask the user to choose chapter.

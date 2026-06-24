@@ -21,8 +21,11 @@ import search
 from scripts.classify_question_bank import (
     DEFAULT_ENDPOINT,
     DEFAULT_MODEL,
+    CHAPTER_UNKNOWN,
     classify_loads,
     normalize_load_item,
+    normalize_chapter_confidence,
+    normalize_chapter_hint,
     qwen_extract_loads,
 )
 
@@ -81,6 +84,9 @@ class QwenClassifier:
         if self.use_cache and cache_key in cache:
             cached = dict(cache[cache_key])
             cached["from_cache"] = True
+            cached.setdefault("chapter_hint", CHAPTER_UNKNOWN)
+            cached.setdefault("chapter_confidence", 0.0)
+            cached.setdefault("chapter_evidence", "")
             return cached
 
         api_key = os.environ.get("DASHSCOPE_API_KEY", "") or search.cfg.get("dashscope_api_key", "")
@@ -100,6 +106,9 @@ class QwenClassifier:
             "loads": loads,
             "category": category,
             "load_details": load_details,
+            "chapter_hint": normalize_chapter_hint(extracted.get("chapter_hint")),
+            "chapter_confidence": normalize_chapter_confidence(extracted.get("chapter_confidence")),
+            "chapter_evidence": str(extracted.get("chapter_evidence") or "").strip(),
             "model": self.model,
             "from_cache": False,
         }

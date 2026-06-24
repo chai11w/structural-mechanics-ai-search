@@ -19,6 +19,11 @@ sys.path.insert(0, str(BASE))
 
 import search
 from multi_agent_pipeline import RuleRouter, select_rerank_candidates, symbolic_root
+from scripts.classify_question_bank import (
+    guard_chapter_prediction,
+    normalize_chapter_confidence,
+    normalize_chapter_hint,
+)
 from scripts.feishu_tiku_bot import FeishuTikuOptions, MockCoordinator, TikuBot, parse_chapter
 
 
@@ -262,6 +267,38 @@ def check_multi_agent_routing() -> list[str]:
     return failures
 
 
+def check_chapter_hint_normalization() -> list[str]:
+    failures = []
+    cases = {
+        "2": "2静定结构",
+        "5": "5位移法",
+        "力法": "4力法",
+        "用位移法计算": "5位移法",
+        "力矩分配法": "6力矩分配",
+        "图乘法求转角": "3静定结构位移",
+        "求转角": "unknown",
+        "unknown": "unknown",
+        "": "unknown",
+    }
+    for raw, expected in cases.items():
+        actual = normalize_chapter_hint(raw)
+        if actual != expected:
+            failures.append(f"{raw!r}: expected {expected}, got {actual}")
+    if normalize_chapter_confidence("1.4") != 1.0:
+        failures.append("chapter confidence should clamp above 1")
+    if normalize_chapter_confidence("-0.2") != 0.0:
+        failures.append("chapter confidence should clamp below 0")
+
+    guarded = guard_chapter_prediction("3静定结构位移", 0.95, "题干明确要求'求B点的转角'，典型利用图乘法")
+    if guarded[0] != "unknown":
+        failures.append(f"unguarded turn-angle evidence should become unknown, got {guarded}")
+
+    accepted = guard_chapter_prediction("6力矩分配", 1.0, "题干明确说明'试用弯矩分配法计算图示刚架'")
+    if accepted[0] != "6力矩分配":
+        failures.append(f"quoted moment-distribution evidence should be accepted, got {accepted}")
+    return failures
+
+
 def check_feishu_tiku_bot_state() -> list[str]:
     failures = []
     if parse_chapter("5") != "5位移法":
@@ -342,6 +379,13 @@ def main() -> int:
         fail("multi-agent routing mismatch: " + "; ".join(routing_failures))
     else:
         ok("multi-agent bank routing rules valid")
+
+    chapter_hint_failures = check_chapter_hint_normalization()
+    if chapter_hint_failures:
+        failures += 1
+        fail("chapter hint normalization mismatch: " + "; ".join(chapter_hint_failures))
+    else:
+        ok("chapter hint normalization rules valid")
 
     feishu_failures = check_feishu_tiku_bot_state()
     if feishu_failures:
