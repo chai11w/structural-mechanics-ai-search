@@ -393,6 +393,12 @@
   - Re-upload the same题图.
   - Choose chapter number manually.
 - Existing `0` cancel behavior remains unchanged in waiting states and candidate-choice states.
+- Candidate reply format was shortened:
+  - First line: `章节：...`
+  - Second line: `下面是相似题目 Top N，相似比分别为：...`
+  - Third line: `0：结束`
+  - Fourth line: `a：切换手动识别章节`
+  - Do not repeat `已自动识别章节` and `已检索`; the concise chapter line is enough.
 - Image receive acknowledgement:
   - After Feishu image messages provide an `image_key`, the bridge immediately adds an `OK` reaction to the original image message before downloading/running Qwen/Zhipu, so the user can see the bot is working during slow model calls.
   - `--working-reaction` controls the Feishu `emoji_type`; default is `OK`, empty disables it.

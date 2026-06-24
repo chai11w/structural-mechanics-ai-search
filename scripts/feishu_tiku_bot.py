@@ -312,12 +312,7 @@ class TikuBot:
         self.sessions.save(sender, session)
 
         chapter_text = result.chapter or chapter
-        prefix = ""
-        if chapter == "auto":
-            prefix = f"已自动识别章节：{chapter_text}\n"
-        texts = [
-            f"{prefix}已检索：{chapter_text}\n下面是相似题 Top {len(top_results)}，回复 0/1/2/3 获取答案；0 表示没有想要的，退出本次搜题。\n若章节不对，回复 a 切换到手动模式后重新发送题图。"
-        ]
+        texts = [format_candidate_reply(chapter_text, top_results)]
         images = [Path(item["path"]) for item in top_results]
         return BotResponse(texts=texts, images=images)
 
@@ -561,6 +556,24 @@ def format_chapter_prompt(image_path: Path | None = None, result: Any | None = N
     lines.append("回复章节号 2/3/4/5/6，或直接回复章节名；回复 0 退出。")
     lines.append("发送 a 可在自动/手动章节模式之间切换。")
     return "\n".join(lines)
+
+
+def format_candidate_reply(chapter: str, results: list[dict[str, Any]]) -> str:
+    scores = "、".join(format_result_score(item) for item in results)
+    return "\n".join([
+        f"章节：{chapter}",
+        f"下面是相似题目 Top {len(results)}，相似比分别为：{scores}",
+        "0：结束",
+        "a：切换手动识别章节",
+    ])
+
+
+def format_result_score(item: dict[str, Any]) -> str:
+    score = item.get("final_score") if item.get("final_score") is not None else item.get("score", 0)
+    try:
+        return f"{round(float(score) * 100)}%"
+    except (TypeError, ValueError):
+        return "未知"
 
 
 def parse_chapter(text: str) -> str | None:

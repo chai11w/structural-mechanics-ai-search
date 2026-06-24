@@ -340,8 +340,11 @@ def check_feishu_tiku_bot_state() -> list[str]:
     bot = TikuBot(options=options, coordinator=MockCoordinator([image, image, image]))
     sender = "smoke"
     first = bot.receive_image(sender, image)
-    if len(first.images) != 3 or "已自动识别章节" not in "\n".join(first.texts):
+    first_text = "\n".join(first.texts)
+    if len(first.images) != 3 or "章节：5位移法" not in first_text:
         failures.append("default auto mode should search immediately when chapter is detected")
+    if "相似比分别为" not in first_text or "0：结束" not in first_text or "a：切换手动识别章节" not in first_text:
+        failures.append("candidate reply should include compact score and shortcut lines")
     cancelled_auto = bot.receive_text(sender, "0")
     if not any(word in "\n".join(cancelled_auto.texts) for word in ("退出", "取消")):
         failures.append("0 after auto candidates should cancel the session")
@@ -374,7 +377,7 @@ def check_feishu_tiku_bot_state() -> list[str]:
     if "自动章节模式" not in "\n".join(switched_auto.texts):
         failures.append("a should toggle from manual back to auto chapter mode")
     auto_again = bot.receive_image(sender, image)
-    if len(auto_again.images) != 3 or "已自动识别章节" not in "\n".join(auto_again.texts):
+    if len(auto_again.images) != 3 or "章节：5位移法" not in "\n".join(auto_again.texts):
         failures.append("auto mode after toggle should search immediately")
     bot.receive_text(sender, "0")
 
