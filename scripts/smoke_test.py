@@ -332,7 +332,7 @@ def check_feishu_tiku_bot_state() -> list[str]:
         failures.append("chapter number 5 should map to 5位移法")
     if parse_chapter("2") != "2静定结构":
         failures.append("chapter number 2 should map to 2静定结构")
-    if parse_chapter_mode("手动") != "manual" or parse_chapter_mode("a") != "auto":
+    if parse_chapter_mode("手动") != "manual" or parse_chapter_mode("a") != "toggle":
         failures.append("chapter mode shortcuts should parse")
 
     image = Path("mock-question.jpg")
@@ -346,9 +346,9 @@ def check_feishu_tiku_bot_state() -> list[str]:
     if not any(word in "\n".join(cancelled_auto.texts) for word in ("退出", "取消")):
         failures.append("0 after auto candidates should cancel the session")
 
-    switched_manual = bot.receive_text(sender, "手动")
+    switched_manual = bot.receive_text(sender, "a")
     if "手动章节模式" not in "\n".join(switched_manual.texts):
-        failures.append("manual shortcut should switch chapter mode")
+        failures.append("a should toggle from auto to manual chapter mode")
     first = bot.receive_image(sender, image)
     if "请选择章节" not in "\n".join(first.texts):
         failures.append("manual mode image should prompt for chapter")
@@ -369,6 +369,14 @@ def check_feishu_tiku_bot_state() -> list[str]:
     third = bot.receive_text(sender, "1")
     if "[dry-run]" not in "\n".join(third.texts) or len(third.images) != 1:
         failures.append("choice reply should return one dry-run answer image")
+
+    switched_auto = bot.receive_text(sender, "a")
+    if "自动章节模式" not in "\n".join(switched_auto.texts):
+        failures.append("a should toggle from manual back to auto chapter mode")
+    auto_again = bot.receive_image(sender, image)
+    if len(auto_again.images) != 3 or "已自动识别章节" not in "\n".join(auto_again.texts):
+        failures.append("auto mode after toggle should search immediately")
+    bot.receive_text(sender, "0")
 
     bot_auto_fallback = TikuBot(
         options=options,

@@ -384,11 +384,12 @@
   - If auto chapter succeeds, bot immediately returns Top candidates and includes `已自动识别章节：...`.
   - If route is `needs_chapter`, bot saves the image session and asks for chapter `2/3/4/5/6`.
 - Manual fallback:
-  - User can send `手动`, `manual`, or `m` to switch that sender to manual chapter mode.
-  - User can send `自动`, `auto`, or `a` to switch back to auto chapter mode.
+  - User can send `a` to toggle that sender between auto chapter mode and manual chapter mode.
+  - User can send `手动`, `manual`, or `m` to explicitly switch to manual chapter mode.
+  - User can send `自动` or `auto` to explicitly switch back to auto chapter mode.
   - Switching modes clears the current search session; user should re-upload the image after switching.
 - If auto-selected chapter is not desired, the intended user flow is:
-  - Reply `手动` or `m`.
+  - Reply `a` to switch to manual mode.
   - Re-upload the same题图.
   - Choose chapter number manually.
 - Existing `0` cancel behavior remains unchanged in waiting states and candidate-choice states.
