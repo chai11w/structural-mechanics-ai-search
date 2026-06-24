@@ -39,6 +39,7 @@ ROOT = Path(cfg.get("root", r"D:\桌面\答疑、帮做\结构力学\帮做"))
 ANSWER_OUTPUT = Path(cfg.get("answer_output", r"D:\桌面\答疑、帮做\答案输出"))
 ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY") or cfg.get("zhipuai_api_key", "")
 TOP_K = cfg.get("top_k", 5)
+AUTO_CHAPTER_LABEL = "自动识别章节"
 
 # 把配置注入 search 模块
 os.environ.setdefault("ZHIPUAI_API_KEY", ZHIPUAI_API_KEY)
@@ -369,16 +370,17 @@ class App:
 
     def _refresh_chapters(self):
         chapters = get_chapters()
-        self._ch_cb["values"] = chapters
-        if chapters and not self._chapter.get():
-            self._chapter.set(chapters[0])
+        values = [AUTO_CHAPTER_LABEL] + chapters
+        self._ch_cb["values"] = values
+        if not self._chapter.get() or self._chapter.get() not in values:
+            self._chapter.set(AUTO_CHAPTER_LABEL)
 
     # ----------------------------------------------------------
     # 检索
     # ----------------------------------------------------------
 
     def _do_search(self):
-        chapter = self._chapter.get().strip()
+        chapter = self._chapter_for_search()
         if not chapter:
             messagebox.showwarning("提示", "请选择章节")
             return
@@ -424,10 +426,19 @@ class App:
                     )
                     self.win.after(0, self._clear_loads)
 
-                self._update_loads_display(pipeline_result.loads)
+                self._update_loads_display(
+                    pipeline_result.loads,
+                    chapter_text=self._pipeline_chapter_display(pipeline_result, chapter),
+                )
                 if pipeline_result.route.route == "needs_review":
                     msg = f"{pipeline_result.route.category}: {pipeline_result.route.reason}"
                     self.win.after(0, lambda m=msg: messagebox.showwarning("需要复核", m))
+                elif pipeline_result.route.route == "needs_chapter":
+                    if self._mode.get() == "image":
+                        msg = "未能从题图自动识别章节，请手动选择章节后重新检索。"
+                    else:
+                        msg = "手动输入荷载时请先选择具体章节。"
+                    self.win.after(0, lambda m=msg: messagebox.showwarning("请选择章节", m))
                 self.win.after(0, lambda r=pipeline_result: self._show_pipeline_result(r))
             except Exception as e:
                 import traceback
@@ -437,6 +448,12 @@ class App:
                 self.win.after(0, self._restore_buttons)
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _chapter_for_search(self):
+        chapter = self._chapter.get().strip()
+        if chapter == AUTO_CHAPTER_LABEL:
+            return "auto"
+        return chapter
 
     def _get_query_image_path(self):
         img = self._image_path.get().strip()
@@ -458,15 +475,29 @@ class App:
                 return None
             return list(self._manual_loads)
 
-    def _update_loads_display(self, loads_list):
+    def _update_loads_display(self, loads_list, chapter_text=None):
         text = "识别荷载：" + loads_to_display(loads_list)
+        if chapter_text:
+            text += f"\n章节：{chapter_text}"
         self.win.after(0, lambda: self.loads_result_label.config(text=text))
+
+    def _pipeline_chapter_display(self, pipeline_result, requested_chapter):
+        if pipeline_result.route.route == "needs_chapter":
+            return "未确定（请手动选择）"
+        if pipeline_result.chapter:
+            if requested_chapter == "auto":
+                return f"{pipeline_result.chapter}（自动识别）"
+            return f"{pipeline_result.chapter}（手动选择）"
+        if requested_chapter != "auto":
+            return f"{requested_chapter}（手动选择）"
+        return None
 
     def _route_display_name(self, route):
         return {
             "main": "主库",
             "symbolic": "字母库",
             "needs_review": "复核区",
+            "needs_chapter": "待选章节",
         }.get(route, route)
 
     def _set_route_status(self, route, text):
@@ -476,6 +507,10 @@ class App:
             self._set_status(text)
 
     def _show_pipeline_result(self, pipeline_result):
+        if pipeline_result.route.route == "needs_chapter":
+            self._show_results([])
+            self._set_status("未能自动识别章节，请手动选择")
+            return
         self._show_results(pipeline_result.results)
         if pipeline_result.route.route == "needs_review":
             self._set_status("需要人工复核")

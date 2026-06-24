@@ -406,3 +406,18 @@
 - Verification:
   - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
   - Dry-run command verified image -> chapter -> candidates -> `0` cancel flow still works.
+
+## 2026-06-24 GUI Auto Chapter Selection
+
+- GUI chapter combobox now includes `自动识别章节` as the first/default item.
+- GUI image search behavior:
+  - If chapter dropdown is `自动识别章节`, GUI passes `chapter="auto"` into `MultiAgentCoordinator.search_loads(...)` with the Qwen classification result.
+  - If Qwen chapter hint is accepted by coordinator, result metadata displays `章节：X（自动识别）`.
+  - If route is `needs_chapter`, GUI shows warning `未能从题图自动识别章节，请手动选择章节后重新检索。` and does not search all chapters.
+- Manual chapter priority:
+  - If the user selects a concrete chapter (`2静定结构` ... `6力矩分配`), GUI passes that concrete chapter and does not use/override with auto chapter.
+  - Result metadata displays `章节：X（手动选择）`.
+- Manual load input with `自动识别章节` will also return `needs_chapter`; user should choose a concrete chapter for manual-load search.
+- Verification:
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+  - In-memory syntax compile for `gui.py` passed. Direct `python -m py_compile gui.py` was blocked by existing `__pycache__` permission on this machine, not by syntax.

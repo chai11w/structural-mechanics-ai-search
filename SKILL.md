@@ -77,7 +77,7 @@ python scripts/feishu_tiku_bot.py dry-run-flow --image "D:\path\to\question.jpg"
 ## 当前检索流程
 
 - 荷载粗筛逻辑保持原样：默认 Top 5；如果 100% 匹配超过 5 个，则全部进入候选。
-- GUI 图片检索默认走多 Agent 流程并启用复筛：Qwen 识别分类，RuleRouter 路由到主库/字母库/复核区，Zhipu 输出复筛 Top 3。
+- GUI 图片检索默认走多 Agent 流程并启用复筛：Qwen 识别分类，RuleRouter 路由到主库/字母库/复核区，Zhipu 输出复筛 Top 3。章节下拉默认是“自动识别章节”；只有选择该项时才会使用 `chapter=auto`，若用户选择具体章节则完全尊重用户选择，不自动覆盖。
 - GUI 手动荷载检索也走 RuleRouter，可按荷载类型路由到主库或字母库；由于没有查询图，手动模式不做 Zhipu 视觉复筛。
 - CLI 图片检索需要显式添加 `--rerank` 才启用复筛。
 - 实验多 Agent CLI 支持 `--chapter auto`。自动章节只在 Qwen 输出非 `unknown`、置信度不低于 `0.8`、并且章节证据包含明确题干/方法文字时使用；否则返回 `needs_chapter`，不要跨章节搜索。
@@ -98,7 +98,7 @@ python scripts/feishu_tiku_bot.py dry-run-flow --image "D:\path\to\question.jpg"
 
 ## 注意事项
 
-- 不要跨章节自动搜索；章节必须由用户指定、确认，或由 `chapter=auto` 在高置信明确文字证据下自动确定。自动识别失败时必须让用户选择章节。
+- 不要跨章节自动搜索；章节必须由用户指定、确认，或由 `chapter=auto` 在高置信明确文字证据下自动确定。自动识别失败时必须让用户选择章节；GUI/飞书都不能自动遍历所有章节。
 - 不要直接读写 `config.json`、`config.local.json` 里的密钥；需要结构时看 `config.example.json`。
 - 运行前后可用 `python scripts/smoke_test.py` 做只读检查；它会全表检查荷载 JSON、图片路径存在性、路径大小写，并验证旧路径自修复案例。
 - 当前主库是数值题和已赋值符号题库。独立字母库位于 live 主库旁边的 `帮做_字母库`，章节 Excel 名称和主库一致，列仍是 `题目名称`、`荷载`。
