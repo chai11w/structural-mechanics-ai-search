@@ -481,3 +481,61 @@
 - Search behavior is unchanged; this is only response text.
 - Verification:
   - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+
+## 2026-06-24 Unindexed Question Audit
+
+- Added a read-only path scan tool for catching question images that exist on disk but are missing from Excel indexes.
+- Command:
+  - `python scripts/audit_unindexed_questions.py`
+- Behavior:
+  - Scans the configured live main root under chapter folders `2静定结构` through `6力矩分配`.
+  - Only counts image files under directories whose segment starts with `题目`; skips answer/hidden/temp-style folders.
+  - Loads both main chapter Excel files and the separate symbolic-bank Excel files, then treats the union of their `题目名称` paths as already stored.
+  - Defaults to reading `special_unindexed_questions.json`; paths in that file are reported as special exclusions instead of missing records.
+  - Uses case-insensitive normalized relative paths for matching to reduce Windows path casing false positives.
+  - Writes a Markdown report under `.tmp_audit/` by default; optional `--json-out` can emit machine-readable output.
+- Guardrail:
+  - The audit does not call Qwen/Zhipu, does not classify loads, does not auto-store records, and does not modify live Excel.
+
+## 2026-06-24 Store Unindexed Questions
+
+- Added `scripts/store_unindexed_questions.py` to turn the path audit into an optional补库 workflow.
+- Default command is dry-run:
+  - `python scripts/store_unindexed_questions.py`
+- Apply command:
+  - `python scripts/store_unindexed_questions.py --apply`
+- Behavior:
+  - Reuses `audit_unindexed_questions.py` to find missing images, respecting `special_unindexed_questions.json`.
+  - Calls the existing Qwen classifier only for missing images.
+  - Uses `RuleRouter` to route recognized loads to main bank or symbolic bank; review/empty/unsupported cases are reported but not written.
+  - Main-bank rows use the existing assigned-symbol normalization from `apply_main_bank_update.py`.
+  - Symbolic-bank rows use the existing symbolic load mapping from `build_symbolic_bank.py`.
+  - `--apply` appends rows only; it does not delete or edit existing rows. Before saving a touched workbook, it backs it up under `backups/store_unindexed_时间戳/`.
+- Verification:
+  - On 2026-06-24, dry-run found one real missing image: `6力矩分配/题目/5.jpg`.
+  - It routed to main bank as `main_assigned_symbolic` with loads `集中:Fp=60kN` and `弯矩:40kN.m`.
+  - `python scripts/store_unindexed_questions.py --apply` appended it to `6力矩分配.xlsx`.
+  - Post-apply audit reported `scanned=705 special=7 missing=0`.
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+
+## 2026-06-24 GUI One-Click Audit Store
+
+- GUI now has a top-right `一键审查` button in the input-mode frame.
+- Behavior:
+  - Runs in a background thread so the GUI does not freeze.
+  - Uses the same audit/store functions as `scripts/store_unindexed_questions.py`.
+  - Scans for unindexed question images, respects `special_unindexed_questions.json`, classifies only true missing images, routes to main/symbolic bank, appends ready records, and backs up touched Excel files.
+  - After completion, a popup reports:
+    - found unindexed count;
+    - auto-storable count;
+    - actually appended count;
+    - needs-review count;
+    - special exclusions;
+    - report path and backup path when applicable.
+- Guardrail:
+  - The GUI button does not reimplement classification/storage rules; it reuses the existing store-unindexed workflow.
+  - `SKILL.md` was intentionally not updated for this internal GUI button.
+- Verification:
+  - `python -B -c "import gui; print('gui import ok')"` passed.
+  - `python scripts/audit_unindexed_questions.py --limit 20` reported `scanned=705 special=7 missing=0`.
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.

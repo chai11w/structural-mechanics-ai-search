@@ -1,0 +1,6 @@
+pandas
+openpyxl
+Pillow
+zhipuai
+tkinterdnd2
+opencv-python

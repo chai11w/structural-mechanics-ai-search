@@ -1,0 +1,33 @@
+{
+  "description": "Intentionally unindexed special question images. These files stay on disk but are excluded from missing-index audits.",
+  "paths": [
+    {
+      "path": "3静定结构位移/6温度/题目/1.jpg",
+      "reason": "special question not included in retrieval bank"
+    },
+    {
+      "path": "3静定结构位移/6温度/题目/2.jpg",
+      "reason": "special question not included in retrieval bank"
+    },
+    {
+      "path": "3静定结构位移/6温度/题目/3.jpg",
+      "reason": "special question not included in retrieval bank"
+    },
+    {
+      "path": "4力法/1梁/1单未知量/题目/1跨/14.jpg",
+      "reason": "special question not included in retrieval bank"
+    },
+    {
+      "path": "5位移法/1梁/2多未知量/题目/4.jpg",
+      "reason": "special question not included in retrieval bank"
+    },
+    {
+      "path": "5位移法/1梁/题目/2.jpg",
+      "reason": "special question not included in retrieval bank"
+    },
+    {
+      "path": "5位移法/2钢架/2多未知量/题目aa/2门/40.jpg",
+      "reason": "special question not included in retrieval bank"
+    }
+  ]
+}

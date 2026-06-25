@@ -7,6 +7,7 @@ import json
 import re
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 os.environ['no_proxy'] = '*'
@@ -56,7 +57,18 @@ from search import (
     answer as do_answer, load_chapter_excel, rerank_candidates,
     resolve_question_path, add_default_numeric_unit, normalize_query_loads
 )
-from multi_agent_pipeline import MultiAgentCoordinator
+from multi_agent_pipeline import MultiAgentCoordinator, QwenClassifier, RuleRouter, symbolic_root
+from scripts.audit_unindexed_questions import (
+    CHAPTERS as AUDIT_CHAPTERS,
+    DEFAULT_SPECIAL_INDEX,
+    audit_chapter,
+    load_special_index,
+)
+from scripts.store_unindexed_questions import (
+    apply_ready_plans,
+    classify_missing,
+    write_reports as write_store_unindexed_reports,
+)
 from zhipuai import ZhipuAI
 
 try:
@@ -142,6 +154,17 @@ class App:
                        value="image", command=self._on_mode_change).pack(side="left", padx=8)
         tk.Radiobutton(mode_frame, text="手动输入荷载", variable=self._mode,
                        value="manual", command=self._on_mode_change).pack(side="left", padx=8)
+
+        self.btn_audit_store = tk.Button(
+            mode_frame,
+            text="一键审查",
+            width=9,
+            bg="#F5A623",
+            fg="white",
+            font=("", 9, "bold"),
+            command=self._do_audit_store,
+        )
+        self.btn_audit_store.pack(side="right", padx=8)
 
         # === 输入区容器（固定高度，两个子面板叠放，切换时 lift）===
         self.input_container = tk.Frame(self.win, height=80)
@@ -834,6 +857,90 @@ class App:
         threading.Thread(target=run, daemon=True).start()
 
     # ----------------------------------------------------------
+    # 一键审查补库
+    # ----------------------------------------------------------
+
+    def _do_audit_store(self):
+        self.btn_search.config(state="disabled")
+        self.btn_store.config(state="disabled")
+        self.btn_audit_store.config(state="disabled")
+        self._set_status("扫描漏存题目中...")
+
+        def run():
+            try:
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                symbolic = symbolic_root(ROOT)
+                special_index = DEFAULT_SPECIAL_INDEX
+                special_keys = load_special_index(special_index, main_root=ROOT)
+
+                audits = [audit_chapter(ROOT, symbolic, chapter, special_keys) for chapter in AUDIT_CHAPTERS]
+                missing = sorted(
+                    [rel for audit in audits for rel in audit.missing],
+                    key=lambda item: item.casefold(),
+                )
+                special_count = sum(len(audit.ignored_special) for audit in audits)
+
+                output_dir = Path(__file__).resolve().parent / ".tmp_audit" / f"gui_store_unindexed_{stamp}"
+                backup_dir = Path(__file__).resolve().parent / "backups" / f"gui_store_unindexed_{stamp}"
+
+                if missing:
+                    self._set_status(f"识别并入库中...（{len(missing)}题）")
+                    plans = classify_missing(
+                        missing,
+                        root=ROOT,
+                        symbolic=symbolic,
+                        qwen=QwenClassifier(timeout=180, use_cache=True),
+                        router=RuleRouter(),
+                        sleep=0.0,
+                    )
+                    apply_results = apply_ready_plans(plans, dry_run=False, backup_dir=backup_dir)
+                else:
+                    plans = []
+                    apply_results = []
+
+                write_store_unindexed_reports(
+                    plans,
+                    apply_results,
+                    output_dir=output_dir,
+                    root=ROOT,
+                    symbolic=symbolic,
+                    dry_run=False,
+                    special_index=special_index,
+                    backup_dir=backup_dir,
+                )
+
+                ready_count = sum(1 for plan in plans if plan.status == "ready")
+                review_count = sum(1 for plan in plans if plan.status != "ready")
+                appended_count = sum(len(result.appended) for result in apply_results)
+                skipped_count = sum(len(result.skipped_existing) for result in apply_results)
+
+                message = (
+                    f"发现未入库：{len(missing)}\n"
+                    f"可自动入库：{ready_count}\n"
+                    f"已入库：{appended_count}\n"
+                    f"需人工复核：{review_count}\n"
+                    f"特殊排除：{special_count}"
+                )
+                if skipped_count:
+                    message += f"\n已存在跳过：{skipped_count}"
+                message += f"\n\n报告：{output_dir / 'store_unindexed_report.md'}"
+                if appended_count:
+                    message += f"\n备份：{backup_dir}"
+
+                self.win.after(0, lambda: messagebox.showinfo("一键审查完成", message))
+                self.win.after(0, lambda: self._set_status(f"一键审查完成：已入库 {appended_count}，需复核 {review_count}"))
+                self.win.after(0, self._refresh_chapters)
+            except Exception:
+                import traceback
+                msg = traceback.format_exc()
+                self.win.after(0, lambda m=msg: messagebox.showerror("一键审查失败", m))
+                self.win.after(0, lambda: self._set_status("一键审查失败"))
+            finally:
+                self.win.after(0, self._restore_buttons)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    # ----------------------------------------------------------
     # 答案 / 打开文件
     # ----------------------------------------------------------
 
@@ -896,6 +1003,7 @@ $files = New-Object System.Collections.Specialized.StringCollection
     def _restore_buttons(self):
         self.btn_search.config(state="normal")
         self.btn_store.config(state="normal")
+        self.btn_audit_store.config(state="normal")
 
     def _set_status(self, text):
         if threading.current_thread() is threading.main_thread():
