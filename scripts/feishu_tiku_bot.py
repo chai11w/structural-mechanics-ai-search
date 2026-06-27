@@ -676,6 +676,7 @@ class FeishuTikuBridge:
             self.client.reply_image(message_id, image)
 
     def _response_for_message(self, message_id: str, sender: str, message: dict[str, Any]) -> BotResponse:
+        self._mark_working_async(message_id)
         message_type = message.get("message_type")
         if message_type == "text":
             return self.bot.receive_text(sender, extract_text_message(message))
@@ -683,7 +684,6 @@ class FeishuTikuBridge:
             image_key = extract_image_key(message)
             if not image_key:
                 return BotResponse(texts=["收到图片消息，但没有拿到 image_key。"])
-            self._mark_working_async(message_id)
             output = self.options.temp_dir / "incoming" / f"{message_id}_{image_key}.jpg"
             image_path = self.client.download_message_image(message_id, image_key, output)
             return self.bot.receive_image(sender, image_path)
