@@ -560,3 +560,14 @@
   - `python -B -c "import gui; print('gui import ok')"` passed.
   - `python scripts/feishu_tiku_bot.py dry-run-flow --image "D:\桌面\答疑、帮做\结构力学\帮做\5位移法\题目\3.jpg" --chapter 5 --choice 1` passed.
   - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+
+## 2026-06-27 Static Structure Diagram Chapter Guard
+
+- Auto chapter detection now accepts `2静定结构` when the evidence contains `静定` plus an internal-force diagram phrase:
+  - `内力图`
+  - `弯矩图`
+  - `剪力图`
+  - `轴力图`
+- The rule intentionally does not care whether the text says beam, frame, multi-span beam, or another structure. Examples such as `静定梁弯矩图和剪力图`, `静定多跨梁弯矩图`, and `静定钢架内力图` should all be accepted as `2静定结构`.
+- Guardrail retained: evidence with only `内力图/弯矩图/剪力图` and no `静定` remains `unknown`; evidence containing `超静定` or `不静定` is not accepted as `2静定结构`.
+- Verification: `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.

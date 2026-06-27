@@ -347,6 +347,15 @@ def check_chapter_hint_normalization() -> list[str]:
     static_frame = guard_chapter_prediction("2静定结构", 1.0, "题干明确说明'静定刚架结构'，并要求作内力图")
     if static_frame[0] != "2静定结构":
         failures.append(f"quoted static-frame evidence should be accepted, got {static_frame}")
+    static_beam_diagrams = guard_chapter_prediction("2静定结构", 1.0, "题干写有静定梁弯矩图和剪力图")
+    if static_beam_diagrams[0] != "2静定结构":
+        failures.append(f"static beam diagram evidence should be accepted, got {static_beam_diagrams}")
+    static_multi_span = guard_chapter_prediction("2静定结构", 1.0, "题干要求作静定多跨梁的弯矩图")
+    if static_multi_span[0] != "2静定结构":
+        failures.append(f"static multi-span diagram evidence should be accepted, got {static_multi_span}")
+    static_steel_frame = guard_chapter_prediction("2静定结构", 1.0, "题干说明静定钢架内力图")
+    if static_steel_frame[0] != "2静定结构":
+        failures.append(f"static steel-frame diagram evidence should be accepted, got {static_steel_frame}")
     force_diagram_only = guard_chapter_prediction("2静定结构", 1.0, "题干明确要求'作弯矩图和剪力图'")
     if force_diagram_only[0] != "unknown":
         failures.append(f"force-diagram-only evidence should not become 2静定结构, got {force_diagram_only}")
