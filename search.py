@@ -62,12 +62,24 @@ _PATH_REPAIR_BACKUP_DIR = None
 
 SYSTEM_PROMPT = """从图片中提取所有外部荷载信息。严格按以下JSON格式输出，不要输出任何其他内容。
 
-{"loads": [{"type": "<荷载类型>", "raw": "<图中标注>"}]}
+{"loads": [{"type": "<荷载类型>", "raw": "<去掉单位后的荷载标注>"}]}
 
 荷载类型只有三种:
 - "集中": 集中力, 如 10kN, P, F=20kN, Fp=100kN
 - "均布": 均布荷载/分布荷载, 如 q=4kN/m, 20kN/m, q, F/L
 - "弯矩": 弯矩/力偶, 如 10kN·m, M=20kN·m, FL, ql²
+
+荷载类型必须根据图形形态判断，不要根据单位判断:
+- 直箭头/集中箭头是集中力。
+- 一排分布箭头是均布荷载。
+- 弧形箭头/力偶符号才是弯矩。
+- 如果图形是均布荷载但文字单位误写成 kN·m 或 kN.m，仍输出均布，不要额外输出弯矩。
+
+raw 不要输出单位:
+- 5kN、5kN/m、5kN·m、5kN.m 都只输出 5。
+- q=20kN/m 输出 q=20。
+- M=20kN·m 输出 M=20。
+- q、P、2P/a、ql² 等纯符号表达保持原样。
 
 不是荷载的(忽略):
 - 刚度: EI, 2EI, EA
@@ -85,7 +97,7 @@ SYSTEM_PROMPT = """从图片中提取所有外部荷载信息。严格按以下J
 - F/L, F, FL 是同一 F 符号体系在不同量纲下的表达；q, qL, ql² 是同一 q 符号体系在不同量纲下的表达；M/L², M/L, M 是同一 M 符号体系在不同量纲下的表达。
 - Pa, ql, qL, qa, qa², ql², FL 这类表达如果作为外荷载标注出现，应保留完整 raw。
 
-raw字段保留图中原标注。无荷载输出{"loads":[]}。按集中→均布→弯矩排序。"""
+无荷载输出{"loads":[]}。按集中→均布→弯矩排序。"""
 
 
 # ============================================================
@@ -228,8 +240,30 @@ def _looks_like_numeric_unit(raw):
     return re.match(r"^\d+(?:\.\d+)?(?:k|kn|n)(?:[/·\.\-*a-z0-9]*)?$", s) is not None
 
 
+LOAD_UNIT_PATTERNS = [
+    r"kN[·.\-*×]?m",
+    r"N[·.\-*×]?m",
+    r"kN/m",
+    r"N/m",
+    r"kN",
+    r"(?<=\d)k\b",
+    r"\bN\b",
+]
+
+
+def strip_load_unit(raw):
+    """Remove physical units from a load label while keeping symbols/assignments."""
+    text = str(raw or "").strip()
+    text = re.sub(r"\s+", "", text)
+    text = text.replace("KN", "kN").replace("kn", "kN")
+    for pattern in LOAD_UNIT_PATTERNS:
+        text = re.sub(pattern, "", text, flags=re.I)
+    text = text.strip(".·*-×/")
+    return text
+
+
 def normalize_raw(raw, load_type=None, family_override=None):
-    comparable_raw = _assignment_rhs(raw)
+    comparable_raw = _assignment_rhs(strip_load_unit(raw))
     if not _looks_like_numeric_unit(comparable_raw):
         symbol_code = normalize_symbol_raw(comparable_raw, load_type, family_override)
         if symbol_code is not None:
@@ -293,31 +327,16 @@ DEFAULT_NUMERIC_UNITS = {
 
 
 def add_default_numeric_unit(raw, load_type):
-    """Allow manual numeric input without units under the project default unit system."""
+    """Normalize manual input under the unitless storage/search rule."""
     text = str(raw or "").strip()
-    typ = normalize_load_type(load_type, text)
-    unit = DEFAULT_NUMERIC_UNITS.get(typ)
-    if not text or not unit:
-        return text
-
-    compact = re.sub(r"\s+", "", text)
-    if _looks_like_numeric_unit(compact):
-        return text
-
-    match = re.fullmatch(r"([A-Za-z][A-Za-z0-9_]*=)?([+-]?\d+(?:\.\d+)?)", compact)
-    if not match:
-        return text
-
-    prefix = match.group(1) or ""
-    value = match.group(2)
-    return f"{prefix}{value}{unit}"
+    return strip_load_unit(text)
 
 
 def normalize_query_loads(loads):
     """Normalize user/query loads before routing and similarity comparison."""
     normalized = fix_load_types([dict(item) for item in loads])
     for item in normalized:
-        item["raw"] = add_default_numeric_unit(item.get("raw", ""), item.get("type", ""))
+        item["raw"] = strip_load_unit(item.get("raw", ""))
     return normalized
 
 
@@ -349,6 +368,8 @@ def postprocess_extracted_loads(result):
         return result
 
     result["loads"] = fix_load_types(loads)
+    for item in result["loads"]:
+        item["raw"] = strip_load_unit(item.get("raw", ""))
     return result
 
 

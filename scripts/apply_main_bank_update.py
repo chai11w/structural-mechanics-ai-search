@@ -69,11 +69,31 @@ def _normalize_unit(unit: str) -> str:
     return unit
 
 
+LOAD_UNIT_PATTERNS = [
+    r"kN[·.\-*×]?m",
+    r"N[·.\-*×]?m",
+    r"kN/m",
+    r"N/m",
+    r"kN",
+    r"(?<=\d)k\b",
+    r"\bN\b",
+]
+
+
+def strip_load_unit(raw: object) -> str:
+    text = str(raw or "").strip()
+    text = re.sub(r"\s+", "", text)
+    text = text.replace("KN", "kN").replace("kn", "kN")
+    for pattern in LOAD_UNIT_PATTERNS:
+        text = re.sub(pattern, "", text, flags=re.I)
+    return text.strip(".·*-×/")
+
+
 def _assignment_map(loads: list[dict]) -> dict[str, tuple[float, str]]:
     assignments: dict[str, tuple[float, str]] = {}
     pattern = re.compile(
         r"^\s*([A-Za-z][A-Za-z0-9_]*)\s*=\s*(\d+(?:\.\d+)?)\s*"
-        r"((?:kN|KN|N)(?:/m|[·.]m|m)?)\s*$"
+        r"((?:kN|KN|N)(?:/m|[·.]m|m)?)?\s*$"
     )
     for item in loads:
         raw = str(item.get("raw", "")).strip()
@@ -81,7 +101,7 @@ def _assignment_map(loads: list[dict]) -> dict[str, tuple[float, str]]:
         if not match:
             continue
         symbol, value, unit = match.groups()
-        assignments[_clean_symbol(symbol)] = (float(value), _normalize_unit(unit))
+        assignments[_clean_symbol(symbol)] = (float(value), _normalize_unit(unit or ""))
     return assignments
 
 
@@ -96,25 +116,25 @@ def _expand_assigned_symbol(raw: str, assignments: dict[str, tuple[float, str]])
     for symbol in sorted(assignments, key=len, reverse=True):
         value, unit = assignments[symbol]
         if compact == symbol:
-            return f"{_format_number(value)}{unit}"
+            return _format_number(value)
         match = re.fullmatch(rf"(\d+(?:\.\d+)?)?{re.escape(symbol)}(?:/(\d+(?:\.\d+)?))?", compact)
         if match:
             coeff = float(match.group(1) or 1)
             denom = float(match.group(2) or 1)
-            return f"{_format_number(value * coeff / denom)}{unit}"
+            return _format_number(value * coeff / denom)
     return None
 
 
 def normalized_main_loads(record: dict) -> list[dict]:
     loads = [dict(item) for item in record.get("loads", [])]
     assignments = _assignment_map(loads)
-    if not assignments:
-        return loads
     normalized = []
     for item in loads:
         expanded = _expand_assigned_symbol(str(item.get("raw", "")), assignments)
         if expanded:
             item["raw"] = expanded
+        else:
+            item["raw"] = strip_load_unit(item.get("raw", ""))
         normalized.append(item)
     return normalized
 

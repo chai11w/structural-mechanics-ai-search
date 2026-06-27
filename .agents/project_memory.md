@@ -539,3 +539,24 @@
   - `python -B -c "import gui; print('gui import ok')"` passed.
   - `python scripts/audit_unindexed_questions.py --limit 20` reported `scanned=705 special=7 missing=0`.
   - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+
+## 2026-06-27 Unitless Load Raw Rule
+
+- The question-bank load `raw` field now stores no physical units. `type` carries the quantity family:
+  - `集中:5`, `均布:5`, and `弯矩:5` are distinct because their `type` differs.
+  - `5kN`, `5kN/m`, `5kN·m`, and `5kN.m` are normalized to `5`.
+  - Assignments keep the symbol relation but drop units, e.g. `P=40kN` -> `P=40`, `q=20kN/m` -> `q=20`, `M=20kN·m` -> `M=20`.
+- Extraction prompts in `search.py` and `scripts/classify_question_bank.py` now tell the model to classify load type by arrow/force-couple shape, not by the printed unit. This specifically handles typo images where a distributed load is mislabeled as `kN.m`.
+- `search.strip_load_unit()` is the shared normalization entry for search/storage. `normalize_query_loads()` and `postprocess_extracted_loads()` both strip units.
+- GUI single-image storage now uses the same Qwen classifier path as search/audit instead of the older Zhipu-only `extract_loads` path.
+- Existing live Excel indexes were migrated with `scripts/normalize_excel_load_units.py --apply`.
+  - Backup: `backups/normalize_load_units_20260627_112923`.
+  - Rows scanned: 706; rows changed: 448; parse errors: 0.
+  - Known correction applied: `5位移法/题目/3.jpg` is now exactly `{"loads":[{"type":"均布","raw":"5"}]}`.
+- Verification:
+  - Qwen classification on `5位移法/题目/3.jpg` returned only `均布:5`.
+  - Unit residue scan over live Excel found `0` remaining `kN`/`kN.m`/`kN/m` raw values.
+  - CLI/multi-agent search with both `均布:5` and `均布:5kN/m` found `5位移法/题目/3.jpg` at `100%`.
+  - `python -B -c "import gui; print('gui import ok')"` passed.
+  - `python scripts/feishu_tiku_bot.py dry-run-flow --image "D:\桌面\答疑、帮做\结构力学\帮做\5位移法\题目\3.jpg" --chapter 5 --choice 1` passed.
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.

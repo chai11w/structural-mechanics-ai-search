@@ -851,9 +851,9 @@ class App:
 
         def run():
             try:
-                client = ZhipuAI(api_key=ZHIPUAI_API_KEY)
-                result = extract_loads(client, img)
-                loads_list = result.get("loads", [])
+                classified = self._multi_agent.qwen.classify_image(img)
+                loads_list = normalize_query_loads(classified.get("loads", []))
+                result = {"loads": loads_list}
 
                 rel_path = str(Path(img).relative_to(ROOT)).replace("\\", "/")
                 import json as _json

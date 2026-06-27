@@ -21,7 +21,7 @@ import pandas as pd
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
-from search import _dominant_symbol_family, normalize_load_for_similarity, normalize_load_type
+from search import _dominant_symbol_family, normalize_load_for_similarity, normalize_load_type, strip_load_unit
 
 DEFAULT_EXISTING_RESULTS = BASE / ".tmp_symbol_sheets" / "classify_existing_full_qwen_no_thinking" / "classification_results.json"
 DEFAULT_MISSING_RESULTS = BASE / ".tmp_symbol_sheets" / "classify_missing_full_qwen_no_thinking" / "classification_results.json"
@@ -58,7 +58,7 @@ def mapped_symbolic_loads(loads: list[dict]) -> list[dict]:
     mapped = []
     for item in loads:
         typ = normalize_load_type(item.get("type", ""), item.get("raw", ""))
-        original_raw = str(item.get("raw", ""))
+        original_raw = strip_load_unit(item.get("raw", ""))
         code = normalize_load_for_similarity(item, dominant_family)
         mapped.append({
             "type": typ,

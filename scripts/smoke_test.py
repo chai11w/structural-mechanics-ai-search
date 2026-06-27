@@ -169,15 +169,27 @@ def check_symbol_normalization() -> list[str]:
             failures.append(f"{load_type}:{raw}: expected {expected}, got {actual}")
 
     unit_cases = {
-        ("10", "集中"): "10kN",
-        ("2.5", "均布"): "2.5kN/m",
-        ("F=40", "集中"): "F=40kN",
+        ("10", "集中"): "10",
+        ("2.5kN/m", "均布"): "2.5",
+        ("5kN.m", "均布"): "5",
+        ("F=40kN", "集中"): "F=40",
+        ("M=12kN·m", "弯矩"): "M=12",
         ("q", "均布"): "q",
     }
     for (raw, load_type), expected in unit_cases.items():
         actual = search.add_default_numeric_unit(raw, load_type)
         if actual != expected:
-            failures.append(f"default unit {load_type}:{raw}: expected {expected}, got {actual}")
+            failures.append(f"unitless raw {load_type}:{raw}: expected {expected}, got {actual}")
+
+    extracted = search.postprocess_extracted_loads({
+        "loads": [
+            {"type": "均布", "raw": "5kN.m"},
+            {"type": "集中", "raw": "F=40kN"},
+        ]
+    })
+    raws = [item["raw"] for item in extracted["loads"]]
+    if raws != ["5", "F=40"]:
+        failures.append(f"postprocess should strip units, got {raws}")
     return failures
 
 
@@ -248,8 +260,9 @@ def check_multi_agent_routing() -> list[str]:
     router = RuleRouter()
     failures = []
     cases = [
+        ([{"type": "均布", "raw": "20"}], "main", "main_numeric"),
         ([{"type": "均布", "raw": "20kN/m"}], "main", "main_numeric"),
-        ([{"type": "集中", "raw": "P=40kN"}, {"type": "集中", "raw": "2P"}], "main", "main_assigned_symbolic"),
+        ([{"type": "集中", "raw": "P=40"}, {"type": "集中", "raw": "2P"}], "main", "main_assigned_symbolic"),
         ([{"type": "均布", "raw": "2P/a"}], "symbolic", "symbolic_unassigned"),
         ([{"type": "集中", "raw": "10"}], "main", "main_numeric"),
         ([], "needs_review", "needs_review"),

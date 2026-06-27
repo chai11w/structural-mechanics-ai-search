@@ -34,7 +34,7 @@ from scripts.classify_question_bank import (
 BASE = Path(__file__).resolve().parent
 CACHE_DIR = BASE / ".tmp_multi_agent"
 QWEN_CACHE = CACHE_DIR / "qwen_classifier_cache.json"
-QWEN_CACHE_SCHEMA_VERSION = "chapter-v1"
+QWEN_CACHE_SCHEMA_VERSION = "unitless-loads-v1"
 MAIN_RERANK_MIN_SCORE = 0.65
 SYMBOLIC_RERANK_MIN_SCORE = 0.50
 AUTO_CHAPTER_VALUES = {"", "auto", "自动", "自动识别", "自动识别章节"}
