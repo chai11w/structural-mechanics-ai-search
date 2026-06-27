@@ -115,6 +115,22 @@ def _path_to_display_name(path):
     except ValueError:
         return str(p)
 
+def _chapter_counts_from_apply_results(apply_results):
+    counts = {}
+    for result in apply_results:
+        for rel_path in getattr(result, "appended", []):
+            chapter = str(rel_path).replace("\\", "/").split("/", 1)[0]
+            if chapter:
+                counts[chapter] = counts.get(chapter, 0) + 1
+
+    ordered = [(chapter, counts[chapter]) for chapter in AUDIT_CHAPTERS if chapter in counts]
+    ordered.extend(
+        (chapter, count)
+        for chapter, count in sorted(counts.items())
+        if chapter not in AUDIT_CHAPTERS
+    )
+    return ordered
+
 # ============================================================
 # 主窗口
 # ============================================================
@@ -913,6 +929,7 @@ class App:
                 review_count = sum(1 for plan in plans if plan.status != "ready")
                 appended_count = sum(len(result.appended) for result in apply_results)
                 skipped_count = sum(len(result.skipped_existing) for result in apply_results)
+                chapter_counts = _chapter_counts_from_apply_results(apply_results)
 
                 message = (
                     f"发现未入库：{len(missing)}\n"
@@ -923,9 +940,11 @@ class App:
                 )
                 if skipped_count:
                     message += f"\n已存在跳过：{skipped_count}"
-                message += f"\n\n报告：{output_dir / 'store_unindexed_report.md'}"
-                if appended_count:
-                    message += f"\n备份：{backup_dir}"
+                message += "\n\n入库章节："
+                if chapter_counts:
+                    message += "\n" + "\n".join(f"{chapter}：{count}题" for chapter, count in chapter_counts)
+                else:
+                    message += "无"
 
                 self.win.after(0, lambda: messagebox.showinfo("一键审查完成", message))
                 self.win.after(0, lambda: self._set_status(f"一键审查完成：已入库 {appended_count}，需复核 {review_count}"))

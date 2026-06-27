@@ -56,6 +56,7 @@ class PipelineResult:
     load_details: list[dict[str, Any]]
     results: list[dict[str, Any]]
     reranked: bool
+    rerank_note: str = ""
     chapter: str | None = None
     chapter_hint: str = CHAPTER_UNKNOWN
     chapter_confidence: float = 0.0
@@ -244,9 +245,11 @@ class MultiAgentCoordinator:
             status_callback("候选检索中...")
         results = rank_bank_candidates(loads, effective_chapter, route.excel_root, self.top_k)
         reranked = False
+        rerank_note = ""
         if rerank and query_image_path and results:
             rerank_input = select_rerank_candidates(results, route.route)
             if len(rerank_input) <= rerank_top and not force_rerank:
+                rerank_note = f"复筛候选 {len(rerank_input)} 个，不超过 {rerank_top} 个，已跳过复筛。"
                 rerank_input = []
             if status_callback and rerank_input:
                 status_callback("Zhipu复筛中...")
@@ -255,9 +258,10 @@ class MultiAgentCoordinator:
                 if zhipu_results:
                     results = normalize_rerank_results(zhipu_results)
                     reranked = True
+                    rerank_note = ""
 
         write_last_search(results)
-        return make_pipeline_result(route, loads, load_details, results, reranked, effective_chapter, classified)
+        return make_pipeline_result(route, loads, load_details, results, reranked, effective_chapter, classified, rerank_note=rerank_note)
 
 
 def is_auto_chapter(chapter: str | None) -> bool:
@@ -286,6 +290,8 @@ def make_pipeline_result(
     reranked: bool,
     chapter: str | None,
     classified: dict[str, Any] | None = None,
+    *,
+    rerank_note: str = "",
 ) -> PipelineResult:
     classified = classified or {}
     return PipelineResult(
@@ -294,6 +300,7 @@ def make_pipeline_result(
         load_details,
         results,
         reranked,
+        rerank_note=rerank_note,
         chapter=chapter,
         chapter_hint=normalize_chapter_hint(classified.get("chapter_hint")),
         chapter_confidence=normalize_chapter_confidence(classified.get("chapter_confidence")),

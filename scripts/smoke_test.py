@@ -31,7 +31,15 @@ from scripts.classify_question_bank import (
     normalize_chapter_confidence,
     normalize_chapter_hint,
 )
-from scripts.feishu_tiku_bot import FeishuTikuOptions, MockCoordinator, TikuBot, parse_chapter, parse_chapter_mode
+from scripts.feishu_tiku_bot import (
+    FeishuTikuOptions,
+    MockCoordinator,
+    TikuSession,
+    TikuBot,
+    normalize_question_key,
+    parse_chapter,
+    parse_chapter_mode,
+)
 
 
 EXPECTED_CHAPTERS = [
@@ -323,6 +331,15 @@ def check_chapter_hint_normalization() -> list[str]:
     accepted = guard_chapter_prediction("6力矩分配", 1.0, "题干明确说明'试用弯矩分配法计算图示刚架'")
     if accepted[0] != "6力矩分配":
         failures.append(f"quoted moment-distribution evidence should be accepted, got {accepted}")
+    static_frame = guard_chapter_prediction("2静定结构", 1.0, "题干明确说明'静定刚架结构'，并要求作内力图")
+    if static_frame[0] != "2静定结构":
+        failures.append(f"quoted static-frame evidence should be accepted, got {static_frame}")
+    force_diagram_only = guard_chapter_prediction("2静定结构", 1.0, "题干明确要求'作弯矩图和剪力图'")
+    if force_diagram_only[0] != "unknown":
+        failures.append(f"force-diagram-only evidence should not become 2静定结构, got {force_diagram_only}")
+    indeterminate_frame = guard_chapter_prediction("2静定结构", 1.0, "题干明确说明'超静定刚架结构'")
+    if indeterminate_frame[0] != "unknown":
+        failures.append(f"superstatic evidence should not be accepted as 2静定结构, got {indeterminate_frame}")
     return failures
 
 
@@ -334,6 +351,17 @@ def check_feishu_tiku_bot_state() -> list[str]:
         failures.append("chapter number 2 should map to 2静定结构")
     if parse_chapter_mode("手动") != "manual" or parse_chapter_mode("a") != "toggle":
         failures.append("chapter mode shortcuts should parse")
+    question_key_cases = {
+        "5": "5",
+        "五": "5",
+        "第五题": "5",
+        "题五图": "5",
+        "十二": "12",
+    }
+    for raw, expected in question_key_cases.items():
+        actual = normalize_question_key(raw)
+        if actual != expected:
+            failures.append(f"question key {raw}: expected {expected}, got {actual}")
 
     image = Path("mock-question.jpg")
     options = FeishuTikuOptions(dry_run=True)
@@ -372,6 +400,27 @@ def check_feishu_tiku_bot_state() -> list[str]:
     third = bot.receive_text(sender, "1")
     if "[dry-run]" not in "\n".join(third.texts) or len(third.images) != 1:
         failures.append("choice reply should return one dry-run answer image")
+
+    multi_session = TikuSession(
+        state="waiting_multi_choice",
+        multi_questions=[{"label": "五", "loads": [{"type": "均布", "raw": "q"}]}],
+        current_question="五",
+        chapter="4力法",
+        results=[
+            {"rank": 1, "path": str(image), "score": 1.0},
+            {"rank": 2, "path": str(image), "score": 0.9},
+        ],
+    )
+    bot.sessions.save(sender, multi_session)
+    multi_first = bot.receive_text(sender, "5-1")
+    if "5-2" not in "\n".join(multi_first.texts):
+        failures.append("multi answer reply should keep current candidate menu after first answer")
+    multi_second = bot.receive_text(sender, "五-2")
+    if "[dry-run]" not in "\n".join(multi_second.texts) or len(multi_second.images) != 1:
+        failures.append("multi session should allow another answer choice without re-searching")
+    returned_list = bot.receive_text(sender, "0")
+    if "识别到多题" not in "\n".join(returned_list.texts):
+        failures.append("0 after multi candidate answers should return to multi list")
 
     switched_auto = bot.receive_text(sender, "a")
     if "自动章节模式" not in "\n".join(switched_auto.texts):
