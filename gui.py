@@ -550,7 +550,7 @@ class App:
             self._show_results([])
             self._set_status("未能自动识别章节，请手动选择")
             return
-        self._show_results(pipeline_result.results)
+        self._show_results(pipeline_result.results[:3])
         if pipeline_result.route.route == "needs_review":
             self._set_status("需要人工复核")
         elif pipeline_result.results:
