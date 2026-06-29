@@ -525,13 +525,7 @@
   - Runs in a background thread so the GUI does not freeze.
   - Uses the same audit/store functions as `scripts/store_unindexed_questions.py`.
   - Scans for unindexed question images, respects `special_unindexed_questions.json`, classifies only true missing images, routes to main/symbolic bank, appends ready records, and backs up touched Excel files.
-  - After completion, a popup reports:
-    - found unindexed count;
-    - auto-storable count;
-    - actually appended count;
-    - needs-review count;
-    - special exclusions;
-    - report path and backup path when applicable.
+  - After completion, a popup reports found/auto-storable/appended/needs-review/special counts and a per-chapter appended summary such as `5位移法：2题`; it intentionally does not show report/backup paths in the user-facing popup.
 - Guardrail:
   - The GUI button does not reimplement classification/storage rules; it reuses the existing store-unindexed workflow.
   - `SKILL.md` was intentionally not updated for this internal GUI button.
@@ -571,3 +565,36 @@
 - The rule intentionally does not care whether the text says beam, frame, multi-span beam, or another structure. Examples such as `静定梁弯矩图和剪力图`, `静定多跨梁弯矩图`, and `静定钢架内力图` should all be accepted as `2静定结构`.
 - Guardrail retained: evidence with only `内力图/弯矩图/剪力图` and no `静定` remains `unknown`; evidence containing `超静定` or `不静定` is not accepted as `2静定结构`.
 - Verification: `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+
+## 2026-06-29 Handoff Notes
+
+- New chat minimal context:
+  1. Read `AGENTS.md`.
+  2. Read the last sections of `.agents/project_memory.md`, especially `Unitless Load Raw Rule`, `Static Structure Diagram Chapter Guard`, and this handoff section.
+  3. Read `SKILL.md` sections `当前检索流程` and `注意事项`.
+  4. Only then read task-specific code:
+     - Feishu: `scripts/feishu_tiku_bot.py`.
+     - GUI: `gui.py`.
+     - Auto chapter / retrieval chain: `multi_agent_pipeline.py` and `scripts/classify_question_bank.py`.
+     - Store/audit: `scripts/store_unindexed_questions.py`, `scripts/audit_unindexed_questions.py`.
+- Current important behavior:
+  - Load `raw` is unitless everywhere. Do not reintroduce `kN/kN/m/kN·m` into Excel raw values; type carries the unit family.
+  - GUI image search should display only Top 3 results even when rerank is skipped; do not force rerank merely to reduce display count.
+  - Feishu now adds the configured OK reaction for all accepted message types, not only image messages. Existing running bot must be restarted before this code is live.
+  - Feishu no-match replies include recognized chapter and loads.
+  - Feishu skipped-rerank replies include the reason, e.g. rerank candidates not exceeding `rerank_top`.
+- Current known risk / next likely issue:
+  - Multi-question image receive can be slow. Current flow is:
+    1. Qwen layout analysis on the whole image decides `single/multi/uncertain` and extracts each question's label/load/chapter.
+    2. If multi, OpenCV finds diagram blocks with `find_diagram_blocks_cv`.
+    3. If CV block count equals question count, blocks are bound to questions by top-to-bottom order.
+    4. If counts differ and a DashScope key is available, `prepare_multi_diagram_crops()` calls Qwen `qwen_verify_diagram()` to verify crop/question matching.
+  - Recent Feishu logs showed `multi diagram verify failed` with SSL/remote-close errors. This means the slow path is likely the optional Qwen crop verification when CV block count and question count differ. A good next optimization is to log timing/counts and consider skipping or sharply timing out verification when order-binding is good enough.
+- Recent data deletion:
+  - Deleted from live bank per user request: `2静定结构/3钢架/2弯矩图/题目a/2门/11.jpg`.
+  - Deleted corresponding answer file: `2静定结构/3钢架/2弯矩图/答案/11.jpg`.
+  - Removed its Excel row from `2静定结构.xlsx`; backup is `backups/delete_question_20260629_104110/2静定结构.xlsx`.
+  - Verification after deletion: `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+- Latest verification before handoff:
+  - `python scripts/smoke_test.py` passed after GUI Top3 display fix and after the deletion.
+  - `git status --short --branch` was clean after commit `7dd566c Show top 3 GUI image results`, before this memory-only update.
