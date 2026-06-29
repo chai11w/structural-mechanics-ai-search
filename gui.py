@@ -57,7 +57,7 @@ from search import (
     answer as do_answer, load_chapter_excel, rerank_candidates,
     resolve_question_path, add_default_numeric_unit, normalize_query_loads
 )
-from multi_agent_pipeline import MultiAgentCoordinator, QwenClassifier, RuleRouter, symbolic_root
+from multi_agent_pipeline import MultiAgentCoordinator, QwenClassifier, RuleRouter, symbolic_root, write_last_search
 from scripts.audit_unindexed_questions import (
     CHAPTERS as AUDIT_CHAPTERS,
     DEFAULT_SPECIAL_INDEX,
@@ -450,6 +450,7 @@ class App:
                         query_image_path=query_image_path,
                         rerank=True,
                         rerank_top=3,
+                        classified=classified,
                         status_callback=lambda text, r=route.route: self._set_route_status(r, text),
                     )
                 else:
@@ -550,7 +551,10 @@ class App:
             self._show_results([])
             self._set_status("未能自动识别章节，请手动选择")
             return
-        self._show_results(pipeline_result.results[:3])
+        display_results = pipeline_result.results[:3]
+        if display_results:
+            write_last_search(display_results)
+        self._show_results(display_results)
         if pipeline_result.route.route == "needs_review":
             self._set_status("需要人工复核")
         elif pipeline_result.results:

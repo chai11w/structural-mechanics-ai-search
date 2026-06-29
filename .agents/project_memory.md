@@ -579,7 +579,7 @@
      - Store/audit: `scripts/store_unindexed_questions.py`, `scripts/audit_unindexed_questions.py`.
 - Current important behavior:
   - Load `raw` is unitless everywhere. Do not reintroduce `kN/kN/m/kN·m` into Excel raw values; type carries the unit family.
-  - GUI image search should display only Top 3 results even when rerank is skipped; do not force rerank merely to reduce display count.
+  - GUI image search should display only Top 3 results even when rerank is skipped; do not force rerank merely to reduce display count. The displayed Top 3 must also be written back to `_last_search.json` so `打开答案` matches the visible ranking, same as Feishu sessions.
   - Feishu now adds the configured OK reaction for all accepted message types, not only image messages. Existing running bot must be restarted before this code is live.
   - Feishu no-match replies include recognized chapter and loads.
   - Feishu skipped-rerank replies include the reason, e.g. rerank candidates not exceeding `rerank_top`.
