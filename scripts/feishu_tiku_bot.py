@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 try:
     import cv2
@@ -44,7 +44,8 @@ from scripts.classify_question_bank import (  # noqa: E402
     DEFAULT_ENDPOINT,
     DEFAULT_MODEL,
     find_diagram_blocks_cv,
-    qwen_verify_diagram,
+    image_to_data_url,
+    parse_model_json,
     safe_crop,
 )
 
@@ -55,6 +56,22 @@ DEFAULT_SESSION_TTL_SECONDS = 10 * 60
 CHAPTER_MODE_AUTO = "auto"
 CHAPTER_MODE_MANUAL = "manual"
 CHAPTER_MODE_TOGGLE = "toggle"
+
+BLOCK_FILTER_PROMPT = """你是结构力学图块筛选助手。图片里有若干编号 block。
+请只判断哪些 block 是完整或接近完整的结构力学结构图/受力图。
+
+返回 true 的情况:
+- 包含梁、刚架、桁架、杆件、支座、荷载箭头、弯矩箭头等主体结构。
+- 图形基本完整，即使缺少少量边缘也可以。
+
+返回 false 的情况:
+- 纯题干文字、页眉页脚、水印。
+- 只有尺寸线、图名、题号。
+- 只有局部支座或局部标注。
+- 残缺到看不出主体结构。
+
+只输出 JSON:
+{"structure_blocks":[2,3,4],"rejected_blocks":[1,5,6],"reason":"简短说明"}"""
 
 
 @dataclass
@@ -310,20 +327,33 @@ class TikuBot:
         return BotResponse(texts=[f"请先发送题目图片。当前模式：{mode_label}。发送“手动”或“自动”可切换。"])
 
     def _try_start_multi_question_session(self, sender: str, image_path: Path) -> BotResponse | None:
+        started = time.perf_counter()
         try:
             layout = self.coordinator.analyze_image_layout(image_path)
         except Exception as exc:  # noqa: BLE001 - keep the existing single-question flow available.
             print(f"layout analysis failed, fallback to single flow: {exc}", file=sys.stderr, flush=True)
             return None
+        layout_seconds = time.perf_counter() - started
         if layout.get("question_layout") != "multi":
             return None
         questions = normalize_multi_questions(layout.get("questions", []))
         if len(questions) < 2:
             return None
+        crop_started = time.perf_counter()
         diagram_crops = prepare_multi_diagram_crops(
             image_path,
             questions,
             self.options.temp_dir / "multi_diagrams",
+        )
+        crop_seconds = time.perf_counter() - crop_started
+        print(
+            "multi question session: "
+            f"questions={len(questions)} crops={len(diagram_crops)} "
+            f"layout_seconds={layout_seconds:.2f} "
+            f"crop_seconds={crop_seconds:.2f} "
+            f"total_seconds={time.perf_counter() - started:.2f}",
+            file=sys.stderr,
+            flush=True,
         )
         session = TikuSession(
             state="waiting_multi_question",
@@ -464,7 +494,7 @@ class TikuBot:
             return BotResponse(
                 texts=[
                     f"[dry-run] 将发送第{question['label']}题第 {choice} 名答案。"
-                    f"\n\n{format_multi_candidate_reply(question, session.chapter or '', session.results)}"
+                    f"\n\n{format_multi_next_actions(question, len(session.results))}"
                 ],
                 images=[selected],
             )
@@ -479,13 +509,13 @@ class TikuBot:
             return BotResponse(
                 texts=[
                     f"已执行第{question['label']}题第 {choice} 名答案提取，但没有找到输出图片。"
-                    f"\n\n{format_multi_candidate_reply(question, session.chapter or '', session.results)}"
+                    f"\n\n{format_multi_next_actions(question, len(session.results))}"
                 ]
             )
         return BotResponse(
             texts=[
                 f"第{question['label']}题第 {choice} 名答案："
-                f"\n\n{format_multi_candidate_reply(question, session.chapter or '', session.results)}"
+                f"\n\n{format_multi_next_actions(question, len(session.results))}"
             ],
             images=answer_images,
         )
@@ -801,9 +831,12 @@ def format_multi_question_list(session: TikuSession) -> str:
     lines = ["识别到多题："]
     for question in session.multi_questions:
         label = question["label"]
-        chapter_text = display_question_chapter(question)
-        loads_text = format_loads(question.get("loads", []))
-        lines.append(f"第{label}题：{chapter_text}，荷载 {loads_text}")
+        chapter_text = display_summary_chapter(question)
+        loads_text = format_summary_loads(question.get("loads", []))
+        lines.extend([
+            f"第{label}题：章节：{chapter_text}",
+            f"荷载：{loads_text}",
+        ])
     example_label = session.multi_questions[0]["label"] if session.multi_questions else "1"
     example = question_command_label(example_label)
     lines.extend([
@@ -847,8 +880,19 @@ def format_multi_candidate_reply(
     ]
     if rerank_note:
         lines.append(rerank_note)
-    lines.extend(["", "回复："])
-    lines.extend(f"{command_label}-{index}      获取第{label}题第{index}个答案" for index in range(1, len(results) + 1))
+    lines.extend(["", format_multi_action_lines(question, len(results), heading="回复：")])
+    return "\n".join(lines)
+
+
+def format_multi_next_actions(question: dict[str, Any], result_count: int) -> str:
+    return format_multi_action_lines(question, result_count, heading="请继续回复：")
+
+
+def format_multi_action_lines(question: dict[str, Any], result_count: int, *, heading: str) -> str:
+    label = question["label"]
+    command_label = question_command_label(label)
+    lines = [heading]
+    lines.extend(f"{command_label}-{index}      获取第{label}题第{index}个答案" for index in range(1, result_count + 1))
     lines.append("0        返回多题列表")
     return "\n".join(lines)
 
@@ -869,12 +913,128 @@ def normalize_multi_questions(raw_questions: Any) -> list[dict[str, Any]]:
         questions.append({
             "label": label,
             "key": normalize_question_key(label),
+            "bbox": raw.get("bbox"),
             "loads": loads,
             "chapter_hint": str(raw.get("chapter_hint") or "unknown").strip(),
             "chapter_confidence": safe_float(raw.get("chapter_confidence")),
             "chapter_evidence": str(raw.get("chapter_evidence") or "").strip(),
         })
     return questions
+
+
+def is_probable_structure_block(box: tuple[int, int, int, int, int], image_shape: tuple[int, ...]) -> bool:
+    x, _y, w, h, area = box
+    image_height, image_width = image_shape[:2]
+    area_ratio = area / max(1, image_width * image_height)
+    height_ratio = h / max(1, image_height)
+    width_ratio = w / max(1, image_width)
+    aspect_ratio = w / max(1, h)
+    fill_ratio = area / max(1, w * h)
+
+    if height_ratio < 0.08:
+        return False
+    if area_ratio < 0.012:
+        return False
+    if width_ratio < 0.18:
+        return False
+    if aspect_ratio > 8:
+        return False
+    if fill_ratio > 0.75 and height_ratio < 0.12:
+        return False
+    if x > image_width * 0.68 and width_ratio < 0.16:
+        return False
+    return True
+
+
+def finalize_ordered_multi_crops(
+    questions: list[dict[str, Any]],
+    selected_paths: list[Path],
+    output_dir: Path,
+) -> dict[str, str]:
+    crops: dict[str, str] = {}
+    for index, (question, selected_path) in enumerate(zip(questions, selected_paths), 1):
+        label = str(question.get("label") or index).strip()
+        key = normalize_question_key(label)
+        final_path = output_dir / f"question_{safe_filename_part(label)}_diagram.jpg"
+        if selected_path != final_path:
+            final_path.write_bytes(selected_path.read_bytes())
+        crops[key] = str(final_path)
+    return crops
+
+
+def build_block_contact_sheet(block_paths: list[Path], output_path: Path) -> Path:
+    thumb_width = 380
+    thumb_height = 260
+    columns = 2
+    rows = max(1, (len(block_paths) + columns - 1) // columns)
+    sheet = Image.new("RGB", (thumb_width * columns, thumb_height * rows), "white")
+    for index, path in enumerate(block_paths, 1):
+        with Image.open(path).convert("RGB") as image:
+            image.thumbnail((thumb_width - 20, thumb_height - 42))
+            tile = Image.new("RGB", (thumb_width, thumb_height), "white")
+            tile.paste(image, ((thumb_width - image.width) // 2, 34))
+        draw = ImageDraw.Draw(tile)
+        draw.text((10, 8), f"block_{index}", fill="black")
+        x = (index - 1) % columns * thumb_width
+        y = (index - 1) // columns * thumb_height
+        sheet.paste(tile, (x, y))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(output_path, quality=92)
+    return output_path
+
+
+def qwen_filter_structure_blocks(block_paths: list[Path], output_dir: Path, api_key: str) -> list[Path]:
+    if not block_paths:
+        return []
+    contact_sheet = build_block_contact_sheet(block_paths, output_dir / "block_contact_sheet.jpg")
+    payload = {
+        "model": DEFAULT_MODEL,
+        "messages": [
+            {"role": "system", "content": BLOCK_FILTER_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_to_data_url(contact_sheet)}},
+                    {"type": "text", "text": "只输出JSON。"},
+                ],
+            },
+        ],
+        "temperature": 0,
+        "max_tokens": 256,
+        "enable_thinking": False,
+    }
+    request = urllib.request.Request(
+        DEFAULT_ENDPOINT,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    started = time.perf_counter()
+    with urllib.request.urlopen(request, timeout=120) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    seconds = time.perf_counter() - started
+    content = data["choices"][0]["message"]["content"]
+    parsed = parse_model_json(content)
+    indexes = parsed.get("structure_blocks", [])
+    selected: list[Path] = []
+    if isinstance(indexes, list):
+        for value in indexes:
+            try:
+                index = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= index <= len(block_paths):
+                selected.append(block_paths[index - 1])
+    print(
+        "multi diagram qwen block filter: "
+        f"selected={len(selected)} seconds={seconds:.2f}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return selected
 
 
 def prepare_multi_diagram_crops(
@@ -894,6 +1054,7 @@ def prepare_multi_diagram_crops(
         output_dir = output_root / f"{int(time.time() * 1000)}"
         output_dir.mkdir(parents=True, exist_ok=True)
         candidates: list[Path] = []
+        probable_structure_paths: list[Path] = []
         with Image.open(image_path).convert("RGB") as pil:
             for index, box in enumerate(boxes, 1):
                 x, y, w, h, _area = box
@@ -903,64 +1064,41 @@ def prepare_multi_diagram_crops(
                 crop_path = output_dir / f"block_{index}_diagram.jpg"
                 crop.save(crop_path, quality=94)
                 candidates.append(crop_path)
+                if is_probable_structure_block(box, image.shape):
+                    probable_structure_paths.append(crop_path)
 
         if not candidates:
             return {}
 
-        crops: dict[str, str] = {}
-        used: set[Path] = set()
+        print(
+            "multi diagram crops: "
+            f"questions={len(questions)} cv_blocks={len(candidates)} "
+            f"local_structure_blocks={len(probable_structure_paths)}",
+            file=sys.stderr,
+            flush=True,
+        )
+        if len(probable_structure_paths) == len(questions):
+            return finalize_ordered_multi_crops(questions, probable_structure_paths, output_dir)
+
         api_key = os.environ.get("DASHSCOPE_API_KEY", "") or cfg.get("dashscope_api_key", "")
-        should_verify = bool(api_key) and len(candidates) != len(questions)
+        if api_key:
+            try:
+                qwen_structure_paths = qwen_filter_structure_blocks(candidates, output_dir, api_key)
+            except Exception as exc:  # noqa: BLE001 - fallback to load-only multi search.
+                print(f"multi diagram qwen block filter failed: {exc}", file=sys.stderr, flush=True)
+                qwen_structure_paths = []
+            if len(qwen_structure_paths) == len(questions):
+                return finalize_ordered_multi_crops(questions, qwen_structure_paths, output_dir)
 
-        for index, question in enumerate(questions):
-            label = str(question.get("label") or index + 1).strip()
-            key = normalize_question_key(label)
-            ordered = candidates[index] if index < len(candidates) else None
-            selected = ordered
-
-            if should_verify and ordered is not None:
-                selected = verify_question_crop_candidate(question, ordered, api_key) or None
-                if selected is None:
-                    for candidate in candidates:
-                        if candidate in used or candidate == ordered:
-                            continue
-                        selected = verify_question_crop_candidate(question, candidate, api_key)
-                        if selected is not None:
-                            break
-                if selected is None:
-                    selected = ordered
-
-            if selected is None:
-                continue
-            used.add(selected)
-            final_path = output_dir / f"question_{safe_filename_part(label)}_diagram.jpg"
-            if selected != final_path:
-                final_path.write_bytes(selected.read_bytes())
-            crops[key] = str(final_path)
-        return crops
+        print(
+            "multi diagram crops: no reliable binding; fallback to load-only search",
+            file=sys.stderr,
+            flush=True,
+        )
+        return {}
     except Exception as exc:  # noqa: BLE001 - crop is optional; fall back to non-reranked multi search.
         print(f"multi diagram crop failed: {exc}", file=sys.stderr, flush=True)
         return {}
-
-
-def verify_question_crop_candidate(question: dict[str, Any], crop_path: Path, api_key: str) -> Path | None:
-    try:
-        result = qwen_verify_diagram(
-            crop_path,
-            question_label=str(question.get("label") or ""),
-            expected_loads=question.get("loads", []),
-            chapter_hint=str(question.get("chapter_hint") or ""),
-            model=DEFAULT_MODEL,
-            endpoint=DEFAULT_ENDPOINT,
-            api_key=api_key,
-            timeout=120,
-        )
-    except Exception as exc:  # noqa: BLE001 - verification is optional.
-        print(f"multi diagram verify failed for {crop_path}: {exc}", file=sys.stderr, flush=True)
-        return crop_path
-    if result.get("is_match"):
-        return crop_path
-    return None
 
 
 def display_question_chapter(question: dict[str, Any]) -> str:
@@ -970,6 +1108,15 @@ def display_question_chapter(question: dict[str, Any]) -> str:
     if chapter:
         return chapter
     return "章节未知"
+
+
+def display_summary_chapter(question: dict[str, Any]) -> str:
+    chapter = display_question_chapter(question)
+    return re.sub(r"^\d+", "", chapter)
+
+
+def format_summary_loads(loads: list[dict[str, Any]]) -> str:
+    return format_loads(loads).replace(":", "：")
 
 
 def effective_question_chapter(question: dict[str, Any]) -> str | None:

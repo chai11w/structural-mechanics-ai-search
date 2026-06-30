@@ -583,13 +583,11 @@
   - Feishu now adds the configured OK reaction for all accepted message types, not only image messages. Existing running bot must be restarted before this code is live.
   - Feishu no-match replies include recognized chapter and loads.
   - Feishu skipped-rerank replies include the reason, e.g. rerank candidates not exceeding `rerank_top`.
-- Current known risk / next likely issue:
-  - Multi-question image receive can be slow. Current flow is:
-    1. Qwen layout analysis on the whole image decides `single/multi/uncertain` and extracts each question's label/load/chapter.
-    2. If multi, OpenCV finds diagram blocks with `find_diagram_blocks_cv`.
-    3. If CV block count equals question count, blocks are bound to questions by top-to-bottom order.
-    4. If counts differ and a DashScope key is available, `prepare_multi_diagram_crops()` calls Qwen `qwen_verify_diagram()` to verify crop/question matching.
-  - Recent Feishu logs showed `multi diagram verify failed` with SSL/remote-close errors. This means the slow path is likely the optional Qwen crop verification when CV block count and question count differ. A good next optimization is to log timing/counts and consider skipping or sharply timing out verification when order-binding is good enough.
+- Current Feishu multi-question behavior:
+  - Qwen layout analysis still decides `single/multi/uncertain` and extracts each question's label/load/chapter.
+  - Multi-question diagram preparation no longer calls Qwen once per question/candidate. It first lets OpenCV find candidate line-art blocks, locally filters obvious non-structure blocks, and directly binds top-to-bottom when the filtered block count equals the question count.
+  - If local filtering does not produce exactly the question count, the bot builds a numbered contact sheet of OpenCV blocks and calls Qwen once to select complete structure diagrams. If that still does not match the question count, it returns the multi-question list without pre-cropped diagrams; the later search falls back to load-only behavior.
+  - Timing logs are written to `tiku_bot.err.log`, including layout seconds, crop seconds, local block counts, Qwen block-filter seconds, and total seconds.
 - Recent data deletion:
   - Deleted from live bank per user request: `2静定结构/3钢架/2弯矩图/题目a/2门/11.jpg`.
   - Deleted corresponding answer file: `2静定结构/3钢架/2弯矩图/答案/11.jpg`.
@@ -598,3 +596,27 @@
 - Latest verification before handoff:
   - `python scripts/smoke_test.py` passed after GUI Top3 display fix and after the deletion.
   - `git status --short --branch` was clean after commit `7dd566c Show top 3 GUI image results`, before this memory-only update.
+
+## 2026-06-30 Feishu Multi Question UX and Crop Speed
+
+- Feishu multi-question list output was shortened for mobile readability:
+  - Each question now uses separate lines for chapter and loads, e.g. `第四题：章节：静定结构` then `荷载：均布：1、集中：2`.
+  - Chapter numbers are hidden in the summary display only; internal chapter names remain unchanged for search.
+- After a multi-question answer command such as `4-1`, the bot no longer repeats the full candidate summary. It sends the answer image plus a short `请继续回复：` action list.
+- Multi-question crop flow was changed to reduce slow Qwen verification:
+  1. Qwen whole-image layout identifies question count, labels, loads, and chapter hints.
+  2. OpenCV finds candidate diagram/line-art blocks.
+  3. Local rules filter obvious non-structure blocks such as title text strips, page/footer strips, tiny dimension fragments, and watermark-like blocks.
+  4. If the filtered count equals the question count, blocks are bound to questions top-to-bottom without calling Qwen verify.
+  5. If counts differ, the bot builds a numbered contact sheet and asks Qwen once which blocks are complete structure diagrams.
+  6. If Qwen-selected count equals the question count, blocks are bound top-to-bottom.
+  7. If counts still differ, pre-cropping is abandoned and the multi-question list is returned; selecting a question later falls back to load-only search.
+- Old per-question/candidate `qwen_verify_diagram()` verification was removed from the Feishu multi-question receive path.
+- Measured on a real 3-question page:
+  - OpenCV found 6 blocks; local filter kept the 3 real structure diagrams in about `0.07s`.
+  - The one-shot Qwen block-filter fallback selected blocks 2/3/4 in about `3.2s`.
+  - Expected receive latency is now mainly Qwen layout time plus local crop time, with one-shot Qwen fallback only when local filtering is ambiguous.
+- Verification:
+  - `python -B -c "import scripts.feishu_tiku_bot; print('feishu_tiku_bot import ok')"` passed.
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+  - Existing running Feishu bot must be restarted before the new crop flow and message formatting are live.
