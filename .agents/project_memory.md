@@ -620,3 +620,32 @@
   - `python -B -c "import scripts.feishu_tiku_bot; print('feishu_tiku_bot import ok')"` passed.
   - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
   - Existing running Feishu bot must be restarted before the new crop flow and message formatting are live.
+
+## 2026-06-30 Feishu Store Mode MVP
+
+- Feishu tiku bot now has a conservative single-question store mode in the same bot/service, not a separate Feishu app or port.
+- Commands:
+  - `+` enters store mode.
+  - `0` cancels the current store flow.
+  - During answer collection, `1` means answer images are complete and moves to the confirmation page.
+  - On the confirmation page, `1` confirms and writes to the question bank.
+- First-version scope:
+  - One question image.
+  - One or more answer images.
+  - Store only under the chapter root folders, e.g. `4力法/题目/` and `4力法/答案/`; no subfolder classification yet.
+  - Answer naming follows the existing plus convention: `31.jpg`, `31+.jpg`, `31++.jpg`.
+  - New question number is computed as max existing numeric prefix in the chapter root `题目`/`答案` folders plus one, with overwrite checks before writing.
+- Safety behavior:
+  - Nothing is copied to the live bank and no Excel is written before the user confirms.
+  - If auto chapter is missing or low confidence, the bot asks the user to choose `2/3/4/5/6`, matching search-mode chapter handling.
+  - Empty loads or `needs_review` routing are not auto-stored.
+  - On confirm, the bot writes the question image, answer image(s), and appends the Excel row after backing up the target workbook.
+  - Main vs symbolic Excel routing uses the existing `RuleRouter`: numeric/assigned-symbol loads go to the main bank; unassigned symbolic loads go to the symbolic Excel bank while images still live under the main bank chapter folders.
+- Implementation:
+  - `scripts/feishu_store_flow.py` contains store-mode planning, numbering, naming, JPEG saving, backup, and Excel append logic.
+  - `scripts/feishu_tiku_bot.py` only owns the Feishu entry point and state transitions.
+- Verification:
+  - Dry-run store flow was tested with mock Qwen through `+ -> question image -> multiple answer images -> 1 -> 1`.
+  - Live-bank dry-run planning was checked on examples from `4力法`, `5位移法`, and `6力矩分配`; no live files or Excel were written.
+  - `python scripts/smoke_test.py` now includes a dry-run store-mode state check and passed with `SUMMARY PASS warnings=0`.
+  - Existing running Feishu bot must be restarted before store mode is live.

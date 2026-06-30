@@ -40,6 +40,16 @@ if str(BASE) not in sys.path:
 
 from multi_agent_pipeline import MultiAgentCoordinator  # noqa: E402
 from search import ANSWER_OUTPUT, answer, cfg  # noqa: E402
+from scripts.feishu_store_flow import (  # noqa: E402
+    FeishuStoreService,
+    StoreDraft,
+    format_answer_prompt,
+    format_answer_received,
+    format_store_chapter_prompt,
+    format_store_confirmation,
+    format_store_success,
+    is_store_entry_command,
+)
 from scripts.classify_question_bank import (  # noqa: E402
     DEFAULT_ENDPOINT,
     DEFAULT_MODEL,
@@ -56,6 +66,7 @@ DEFAULT_SESSION_TTL_SECONDS = 10 * 60
 CHAPTER_MODE_AUTO = "auto"
 CHAPTER_MODE_MANUAL = "manual"
 CHAPTER_MODE_TOGGLE = "toggle"
+STORE_STATES = {"store_waiting_question", "store_waiting_chapter", "store_waiting_answers", "store_confirm"}
 
 BLOCK_FILTER_PROMPT = """你是结构力学图块筛选助手。图片里有若干编号 block。
 请只判断哪些 block 是完整或接近完整的结构力学结构图/受力图。
@@ -97,6 +108,7 @@ class TikuSession:
     multi_questions: list[dict[str, Any]] = field(default_factory=list)
     current_question: str | None = None
     diagram_crops: dict[str, str] = field(default_factory=dict)
+    store: StoreDraft | None = None
     updated_at: float = field(default_factory=time.time)
 
 
@@ -259,14 +271,20 @@ class TikuBot:
         options: FeishuTikuOptions,
         coordinator: MultiAgentCoordinator | None = None,
         sessions: TikuSessionStore | None = None,
+        store_service: FeishuStoreService | None = None,
     ) -> None:
         self.options = options
         self.coordinator = coordinator or MultiAgentCoordinator(top_k=options.top_k)
         self.sessions = sessions or TikuSessionStore(options.session_ttl_seconds)
+        self.store_service = store_service or FeishuStoreService(dry_run=options.dry_run)
         self._chapter_modes: dict[str, str] = {}
         self._mode_lock = threading.Lock()
 
     def receive_image(self, sender: str, image_path: Path) -> BotResponse:
+        session = self.sessions.get(sender)
+        if session.state in STORE_STATES:
+            return self._handle_store_image(sender, session, image_path)
+
         if self.chapter_mode(sender) == CHAPTER_MODE_AUTO:
             layout_response = self._try_start_multi_question_session(sender, image_path)
             if layout_response is not None:
@@ -280,6 +298,14 @@ class TikuBot:
     def receive_text(self, sender: str, text: str) -> BotResponse:
         clean = text.strip()
         session = self.sessions.get(sender)
+
+        if is_store_entry_command(clean):
+            session = TikuSession(state="store_waiting_question")
+            self.sessions.save(sender, session)
+            return BotResponse(texts=["已进入新增题目模式，请发送题目图。\n\n0  取消"])
+
+        if session.state in STORE_STATES:
+            return self._handle_store_text(sender, session, clean)
 
         if session.state in {"waiting_multi_question", "waiting_multi_choice"} and clean == "0":
             return self._handle_multi_text(sender, session, clean)
@@ -325,6 +351,97 @@ class TikuBot:
             return BotResponse(texts=["请先发送题目图片，然后我会用这个章节检索。"])
         mode_label = "自动章节" if self.chapter_mode(sender) == CHAPTER_MODE_AUTO else "手动章节"
         return BotResponse(texts=[f"请先发送题目图片。当前模式：{mode_label}。发送“手动”或“自动”可切换。"])
+
+    def _handle_store_image(self, sender: str, session: TikuSession, image_path: Path) -> BotResponse:
+        if session.state == "store_waiting_question":
+            try:
+                draft = self.store_service.classify_question(image_path, self.coordinator)
+            except Exception as exc:  # noqa: BLE001 - let the user retry or cancel.
+                session.state = "store_waiting_question"
+                self.sessions.save(sender, session)
+                return BotResponse(texts=[f"题目图识别失败：{exc}\n请重新发送题目图，或回复 0 取消。"])
+
+            if not draft.loads:
+                session.state = "store_waiting_question"
+                self.sessions.save(sender, session)
+                return BotResponse(texts=["未识别到可入库荷载，暂不自动入库。\n请重新发送题目图，或回复 0 取消。"])
+            if draft.route not in {"main", "symbolic"}:
+                session.state = "store_waiting_question"
+                self.sessions.save(sender, session)
+                return BotResponse(texts=[f"这题需要人工复核，暂不自动入库。\n分类：{draft.category}\n原因：{draft.reason}\n请重新发送题目图，或回复 0 取消。"])
+
+            session.store = draft
+            if not draft.chapter:
+                session.state = "store_waiting_chapter"
+                self.sessions.save(sender, session)
+                return BotResponse(texts=[format_store_chapter_prompt(draft)])
+            session.state = "store_waiting_answers"
+            self.sessions.save(sender, session)
+            return BotResponse(texts=[f"题目图已识别。\n章节：{draft.chapter}\n荷载：{format_loads(draft.loads)}\n\n{format_answer_prompt()}"])
+
+        if session.state == "store_waiting_answers":
+            if not session.store:
+                session.state = "store_waiting_question"
+                self.sessions.save(sender, session)
+                return BotResponse(texts=["新增会话缺少题目图，请重新发送题目图。\n\n0  取消"])
+            session.store.answer_image_paths.append(str(image_path))
+            self.sessions.save(sender, session)
+            return BotResponse(texts=[format_answer_received(len(session.store.answer_image_paths))])
+
+        return BotResponse(texts=["当前新增流程不需要图片。\n回复 1 继续，或回复 0 取消。"])
+
+    def _handle_store_text(self, sender: str, session: TikuSession, clean: str) -> BotResponse:
+        if clean == "0" or is_cancel(clean):
+            self.sessions.clear(sender)
+            return BotResponse(texts=["已取消本次新增。"])
+
+        if session.state == "store_waiting_question":
+            return BotResponse(texts=["请发送题目图。\n\n0  取消"])
+
+        if session.state == "store_waiting_chapter":
+            if not session.store:
+                session.state = "store_waiting_question"
+                self.sessions.save(sender, session)
+                return BotResponse(texts=["新增会话缺少题目图，请重新发送题目图。\n\n0  取消"])
+            chapter = parse_chapter(clean)
+            if not chapter:
+                return BotResponse(texts=[format_store_chapter_prompt(session.store)])
+            session.store.chapter = chapter
+            session.state = "store_waiting_answers"
+            self.sessions.save(sender, session)
+            return BotResponse(texts=[f"章节已设为：{chapter}\n\n{format_answer_prompt()}"])
+
+        if session.state == "store_waiting_answers":
+            if clean != "1":
+                return BotResponse(texts=["请继续发送答案图；发完回复 1，取消回复 0。"])
+            if not session.store:
+                session.state = "store_waiting_question"
+                self.sessions.save(sender, session)
+                return BotResponse(texts=["新增会话缺少题目图，请重新发送题目图。\n\n0  取消"])
+            if not session.store.answer_image_paths:
+                return BotResponse(texts=["还没有收到答案图，请先发送答案图；取消回复 0。"])
+            try:
+                plan = self.store_service.prepare_plan(session.store)
+            except Exception as exc:  # noqa: BLE001
+                return BotResponse(texts=[f"暂不能进入确认：{exc}\n请继续发送答案图，或回复 0 取消。"])
+            session.state = "store_confirm"
+            self.sessions.save(sender, session)
+            return BotResponse(texts=[format_store_confirmation(plan)])
+
+        if session.state == "store_confirm":
+            if clean != "1":
+                return BotResponse(texts=["回复 1 确认新增并写入题库，或回复 0 取消。"])
+            if not session.store:
+                self.sessions.clear(sender)
+                return BotResponse(texts=["新增会话已失效，请重新发送 + 开始。"])
+            try:
+                result = self.store_service.apply_plan(session.store)
+            except Exception as exc:  # noqa: BLE001
+                return BotResponse(texts=[f"新增失败：{exc}\n未完成写入，请检查后重试或回复 0 取消。"])
+            self.sessions.clear(sender)
+            return BotResponse(texts=[format_store_success(result)])
+
+        return BotResponse(texts=["新增会话状态异常，请回复 0 取消后重新开始。"])
 
     def _try_start_multi_question_session(self, sender: str, image_path: Path) -> BotResponse | None:
         started = time.perf_counter()
@@ -555,6 +672,18 @@ class MockCoordinator:
     def __init__(self, image_paths: list[Path], *, auto_needs_chapter: bool = False) -> None:
         self.image_paths = image_paths
         self.auto_needs_chapter = auto_needs_chapter
+        self.qwen = type(
+            "MockQwen",
+            (),
+            {
+                "classify_image": lambda _self, _image_path: {
+                    "loads": [{"type": "集中", "raw": "10kN"}],
+                    "chapter_hint": "5位移法",
+                    "chapter_confidence": 1.0,
+                    "chapter_evidence": "mock",
+                }
+            },
+        )()
 
     def search_image(
         self,

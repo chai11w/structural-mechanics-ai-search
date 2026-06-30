@@ -40,6 +40,7 @@ from scripts.feishu_tiku_bot import (
     parse_chapter,
     parse_chapter_mode,
 )
+from scripts.feishu_store_flow import FeishuStoreService
 
 
 EXPECTED_CHAPTERS = [
@@ -462,6 +463,28 @@ def check_feishu_tiku_bot_state() -> list[str]:
     fallback_search = bot_auto_fallback.receive_text(sender, "5")
     if len(fallback_search.images) != 3 or "5位移法" not in "\n".join(fallback_search.texts):
         failures.append("chapter reply after auto fallback should search selected chapter")
+
+    store_bot = TikuBot(
+        options=options,
+        coordinator=MockCoordinator([image, image, image]),
+        store_service=FeishuStoreService(root=Path("mock-bank"), symbolic=Path("mock-symbolic"), dry_run=True),
+    )
+    store_sender = "store-smoke"
+    store_start = store_bot.receive_text(store_sender, "+")
+    if "新增题目模式" not in "\n".join(store_start.texts):
+        failures.append("+ should enter store mode")
+    store_question = store_bot.receive_image(store_sender, image)
+    if "请发送答案图" not in "\n".join(store_question.texts):
+        failures.append("store mode should ask for answer image after question image")
+    store_answer = store_bot.receive_image(store_sender, Path("mock-answer.jpg"))
+    if "已收到答案图 1 张" not in "\n".join(store_answer.texts):
+        failures.append("store mode should collect answer images")
+    store_confirm = store_bot.receive_text(store_sender, "1")
+    if "准备新增" not in "\n".join(store_confirm.texts) or "1  确认新增并写入题库" not in "\n".join(store_confirm.texts):
+        failures.append("store mode should show confirmation after answer collection")
+    store_done = store_bot.receive_text(store_sender, "1")
+    if "[dry-run] 已新增题目" not in "\n".join(store_done.texts):
+        failures.append("store mode dry-run confirmation should finish without writing")
     return failures
 
 
