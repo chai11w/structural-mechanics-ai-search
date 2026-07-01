@@ -649,3 +649,23 @@
   - Live-bank dry-run planning was checked on examples from `4力法`, `5位移法`, and `6力矩分配`; no live files or Excel were written.
   - `python scripts/smoke_test.py` now includes a dry-run store-mode state check and passed with `SUMMARY PASS warnings=0`.
   - Existing running Feishu bot must be restarted before store mode is live.
+
+## 2026-07-01 Tiku Agent MVP Sidecar
+
+- Added a first-version question-bank Agent as a sidecar, not wired into the existing Feishu bot flow yet.
+- Goal: allow natural-language maintenance commands without replacing the current shortcut-driven search/store behavior until the user explicitly confirms the switch.
+- New modules:
+  - `scripts/tiku_agent_router.py`: conservative local natural-language intent routing for search/store/inspect/replace/delete/recent-ops style commands.
+  - `scripts/tiku_agent_tools.py`: controlled tools for inspecting a question, planning answer replacement, and planning soft deletion. Write-capable methods support dry-run and require an explicit apply call.
+  - `scripts/tiku_agent_memory.py`: operation-memory JSONL helper for future real write logs under `data/agent_operations.jsonl`.
+  - `scripts/tiku_agent_smoke.py`: standalone smoke test for the Agent sidecar.
+- Safety boundary:
+  - The sidecar does not let the model directly edit files or Excel.
+  - Write operations are represented as plans first; real apply paths back up or soft-delete, and dry-run does not touch the live bank.
+  - Destructive/overwrite plans require a unique question reference. In old nested-bank folders, a bare pair such as `4力法 第1题` can match many `1.jpg` files; the Agent must refuse delete/replace in that case and ask the user to inspect or provide a specific path/context.
+  - The current Feishu `receive_text` / `receive_image` logic is unchanged; existing `+`, `0`, `1`, multi-question, and answer-choice behavior still owns production flow.
+- Verification:
+  - `python -B scripts/tiku_agent_smoke.py` passed with `SUMMARY PASS`.
+  - Live dry-run ambiguity check on `4力法 第1题` found 11 candidate question locations and correctly refused to plan soft deletion.
+  - `python -B -c "import scripts.tiku_agent_router; import scripts.tiku_agent_tools; import scripts.tiku_agent_memory; print('agent modules ok')"` passed.
+  - `python -B scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
