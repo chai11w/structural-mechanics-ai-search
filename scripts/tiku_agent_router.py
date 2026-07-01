@@ -63,21 +63,35 @@ def route_text(text: str) -> AgentIntent:
         return AgentIntent("list_recent_ops", raw_text=raw, confidence=0.95)
 
     if has_any(clean, ["删除", "删掉", "移除", "不要了"]):
-        intent = AgentIntent("soft_delete_question", chapter, question_no, raw_text=raw, confidence=0.9)
+        intent = AgentIntent(
+            "soft_delete_question",
+            chapter,
+            question_no,
+            answer_rank=answer_rank,
+            raw_text=raw,
+            confidence=0.9,
+        )
+        if answer_rank is not None:
+            return intent
         require(intent, "chapter", chapter)
         require(intent, "question_no", question_no)
         return intent
 
-    if has_any(clean, ["替换答案", "换答案", "答案换", "答案不对", "改答案"]):
+    if has_any(clean, ["替换答案", "换答案", "答案换", "答案不对", "改答案"]) or (
+        "答案" in clean and has_any(clean, ["替换", "更换", "换掉", "改"])
+    ):
         intent = AgentIntent(
             "replace_answer",
             chapter,
             question_no,
+            answer_rank=answer_rank,
             target="answers",
             needs_image=True,
             raw_text=raw,
             confidence=0.9,
         )
+        if answer_rank is not None:
+            return intent
         require(intent, "chapter", chapter)
         require(intent, "question_no", question_no)
         return intent
@@ -146,7 +160,7 @@ def extract_answer_rank(text: str) -> int | None:
     digit_match = re.search(r"第([1-9])个", text)
     if digit_match:
         return int(digit_match.group(1))
-    chinese = {"一": 1, "二": 2, "三": 3}
+    chinese = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5}
     for key, value in chinese.items():
         if f"第{key}个" in text or f"第{key}名" in text:
             return value

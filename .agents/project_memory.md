@@ -669,3 +669,21 @@
   - Live dry-run ambiguity check on `4力法 第1题` found 11 candidate question locations and correctly refused to plan soft deletion.
   - `python -B -c "import scripts.tiku_agent_router; import scripts.tiku_agent_tools; import scripts.tiku_agent_memory; print('agent modules ok')"` passed.
   - `python -B scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+
+## 2026-07-01 Feishu Agent Target Resolver Integration
+
+- The sidecar Agent is now wired into Feishu text handling for maintenance commands while keeping old shortcuts first.
+- Supported natural-language maintenance flows:
+  - After a normal search returns Top 3, the user can say `删除第一个` or `替换第一个答案`; the Agent resolves the exact candidate path from the session result instead of requiring the user to know the bank number.
+  - The user can say `查看 4力法 1题`, `删除 4力法 1题`, or `替换 4力法 1题答案`. If that chapter/number maps to multiple nested old-bank paths, the bot lists paths and asks the user to reply with a target index.
+  - Replace flow collects one or more new answer images, then `1` shows the confirmation plan; delete and replace both require `1` confirmation or `0` cancel.
+- Target safety:
+  - `scripts/tiku_agent_tools.py` now supports exact question refs, e.g. `4力法/题目/1.jpg`, so delete/replace plans affect only that question file, its matching answer files, and exact Excel row(s).
+  - Missing exact paths no longer count as valid targets.
+  - Bare `章节+题号` remains protected by the multi-target guard.
+- Verification:
+  - `python -B scripts/tiku_agent_smoke.py` passed.
+  - `python -B scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+  - Live dry-run Feishu simulation:
+    - search result path `4力法/题目/1.jpg` + `删除第一个` generated a single-target soft-delete plan.
+    - `删除 4力法 1题` listed 11 candidate paths and selecting `11` generated the plan for `4力法/题目/1.jpg`.

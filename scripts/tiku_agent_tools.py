@@ -29,6 +29,7 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 class QuestionInspection:
     chapter: str
     question_no: int
+    question_refs: list[str] = field(default_factory=list)
     question_files: list[Path] = field(default_factory=list)
     answer_files: list[Path] = field(default_factory=list)
     excel_rows: list[dict[str, Any]] = field(default_factory=list)
@@ -87,7 +88,33 @@ class TikuAgentTools:
                 if answer_file not in answer_files:
                     answer_files.append(answer_file)
         excel_rows = find_excel_rows(self.root, self.symbolic, chapter, question_no)
-        return QuestionInspection(chapter, question_no, question_files, answer_files, excel_rows)
+        inspection = QuestionInspection(
+            chapter,
+            question_no,
+            question_files=question_files,
+            answer_files=answer_files,
+            excel_rows=excel_rows,
+        )
+        inspection.question_refs = unique_question_refs(self.root, inspection)
+        return inspection
+
+    def inspect_question_ref(self, question_ref: str | Path) -> QuestionInspection:
+        rel = normalize_question_ref(self.root, question_ref)
+        chapter = infer_chapter_from_ref(rel)
+        question_no = parse_question_no_from_ref(rel)
+        question_file = self.root / rel
+        question_files = [question_file] if question_file.is_file() else []
+        answer_files = search.find_answer_files(question_file) if question_files else []
+        excel_rows = find_excel_rows_by_ref(self.root, self.symbolic, chapter, rel)
+        refs = [rel] if question_files or excel_rows else []
+        return QuestionInspection(
+            chapter=chapter,
+            question_no=question_no,
+            question_refs=refs,
+            question_files=question_files,
+            answer_files=answer_files,
+            excel_rows=excel_rows,
+        )
 
     def plan_replace_answer(
         self,
@@ -110,6 +137,31 @@ class TikuAgentTools:
             chapter=chapter,
             question_no=question_no,
             question_refs=question_refs,
+            new_answer_images=[Path(path) for path in new_answer_images],
+            old_answer_files=inspection.answer_files,
+            target_answer_files=target_answer_files,
+            backup_dir=backup_dir,
+        )
+
+    def plan_replace_answer_ref(
+        self,
+        question_ref: str | Path,
+        new_answer_images: list[Path],
+    ) -> ReplaceAnswerPlan:
+        if not new_answer_images:
+            raise ValueError("还没有收到新答案图")
+        inspection = self.inspect_question_ref(question_ref)
+        ensure_single_question_ref(inspection.chapter, inspection.question_no, inspection.question_refs)
+        answer_dir = answer_dir_for(inspection.chapter, inspection)
+        target_answer_files = [
+            answer_dir / answer_name(inspection.question_no, index)
+            for index in range(len(new_answer_images))
+        ]
+        backup_dir = backup_root("replace_answer") / inspection.chapter / str(inspection.question_no)
+        return ReplaceAnswerPlan(
+            chapter=inspection.chapter,
+            question_no=inspection.question_no,
+            question_refs=inspection.question_refs,
             new_answer_images=[Path(path) for path in new_answer_images],
             old_answer_files=inspection.answer_files,
             target_answer_files=target_answer_files,
@@ -163,6 +215,19 @@ class TikuAgentTools:
             answer_files=inspection.answer_files,
             excel_rows=inspection.excel_rows,
             delete_dir=deleted_root() / chapter / str(question_no),
+        )
+
+    def plan_soft_delete_ref(self, question_ref: str | Path) -> SoftDeletePlan:
+        inspection = self.inspect_question_ref(question_ref)
+        ensure_single_question_ref(inspection.chapter, inspection.question_no, inspection.question_refs)
+        return SoftDeletePlan(
+            chapter=inspection.chapter,
+            question_no=inspection.question_no,
+            question_refs=inspection.question_refs,
+            question_files=inspection.question_files,
+            answer_files=inspection.answer_files,
+            excel_rows=inspection.excel_rows,
+            delete_dir=deleted_root() / inspection.chapter / str(inspection.question_no),
         )
 
     def apply_soft_delete(self, plan: SoftDeletePlan, *, user_id: str | None = None) -> AgentToolResult:
@@ -250,6 +315,35 @@ def find_excel_rows(root: Path, symbolic: Path, chapter: str, question_no: int) 
     return rows
 
 
+def find_excel_rows_by_ref(root: Path, symbolic: Path, chapter: str, question_ref: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    expected = question_ref.replace("\\", "/")
+    for bank, workbook in [("main", root / f"{chapter}.xlsx"), ("symbolic", symbolic / f"{chapter}.xlsx")]:
+        if not workbook.exists():
+            continue
+        wb = load_workbook(workbook)
+        ws = wb.active
+        headers = {str(cell.value): index + 1 for index, cell in enumerate(ws[1]) if cell.value}
+        question_col = headers.get("题目名称")
+        loads_col = headers.get("荷载")
+        if not question_col:
+            wb.close()
+            continue
+        for row_index in range(2, ws.max_row + 1):
+            rel = str(ws.cell(row=row_index, column=question_col).value or "").replace("\\", "/")
+            if rel != expected:
+                continue
+            rows.append({
+                "bank": bank,
+                "workbook": str(workbook),
+                "row": row_index,
+                "question": rel,
+                "loads": ws.cell(row=row_index, column=loads_col).value if loads_col else "",
+            })
+        wb.close()
+    return rows
+
+
 def remove_excel_rows(workbook: Path, question_refs: list[str]) -> list[dict[str, Any]]:
     wb = load_workbook(workbook)
     ws = wb.active
@@ -292,6 +386,36 @@ def unique_question_refs(root: Path, inspection: QuestionInspection) -> list[str
         if question:
             refs.add(question)
     return sorted(refs)
+
+
+def normalize_question_ref(root: Path, question_ref: str | Path) -> str:
+    path = Path(question_ref)
+    if path.is_absolute():
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError:
+            return path.as_posix()
+    return str(question_ref).replace("\\", "/")
+
+
+def infer_chapter_from_ref(question_ref: str) -> str:
+    first = question_ref.replace("\\", "/").split("/", 1)[0]
+    if not first:
+        raise ValueError(f"无法从题目路径判断章节: {question_ref}")
+    return first
+
+
+def parse_question_no_from_ref(question_ref: str) -> int:
+    stem = Path(question_ref.replace("\\", "/")).stem
+    digits = ""
+    for char in stem:
+        if char.isdigit():
+            digits += char
+        else:
+            break
+    if not digits:
+        raise ValueError(f"无法从题目路径判断题号: {question_ref}")
+    return int(digits)
 
 
 def ensure_single_question_ref(chapter: str, question_no: int, refs: list[str]) -> None:
@@ -359,8 +483,13 @@ def soft_delete_plan_details(plan: SoftDeletePlan) -> dict[str, Any]:
 def format_inspection(inspection: QuestionInspection) -> str:
     lines = [
         f"题目信息：{inspection.chapter} 第 {inspection.question_no} 题",
-        f"题图：{len(inspection.question_files)} 张",
+        f"定位：{len(inspection.question_refs)} 个",
     ]
+    for index, ref in enumerate(inspection.question_refs, 1):
+        lines.append(f"{index}. {ref}")
+    lines.extend([
+        f"题图：{len(inspection.question_files)} 张",
+    ])
     lines.extend(short_path(path) for path in inspection.question_files)
     lines.append(f"答案：{len(inspection.answer_files)} 张")
     lines.extend(short_path(path) for path in inspection.answer_files)

@@ -485,6 +485,39 @@ def check_feishu_tiku_bot_state() -> list[str]:
     store_done = store_bot.receive_text(store_sender, "1")
     if "[dry-run] 已新增题目" not in "\n".join(store_done.texts):
         failures.append("store mode dry-run confirmation should finish without writing")
+
+    agent_image = Path(search.ROOT) / "4力法" / "题目" / "1.jpg"
+    if not agent_image.is_file():
+        failures.append(f"agent test image missing: {agent_image}")
+        return failures
+
+    agent_bot = TikuBot(options=options, coordinator=MockCoordinator([agent_image, agent_image, agent_image]))
+    agent_sender = "agent-smoke"
+    agent_search = agent_bot.receive_image(agent_sender, agent_image)
+    if len(agent_search.images) != 3:
+        failures.append("agent smoke setup should return search candidates")
+    agent_delete = agent_bot.receive_text(agent_sender, "删除第一个")
+    delete_text = "\n".join(agent_delete.texts)
+    if "准备执行：软删除题目" not in delete_text or "定位：4力法/题目/1.jpg" not in delete_text:
+        failures.append("natural-language delete should build a dry-run delete plan from last result")
+    agent_delete_done = agent_bot.receive_text(agent_sender, "1")
+    if "[dry-run] 准备执行：软删除题目" not in "\n".join(agent_delete_done.texts):
+        failures.append("dry-run delete confirmation should not touch live bank")
+
+    agent_bot = TikuBot(options=options, coordinator=MockCoordinator([agent_image, agent_image, agent_image]))
+    agent_bot.receive_image(agent_sender, agent_image)
+    agent_replace = agent_bot.receive_text(agent_sender, "替换第一个答案")
+    if "请发送新答案图" not in "\n".join(agent_replace.texts):
+        failures.append("natural-language replace should ask for new answer images")
+    agent_replace_image = agent_bot.receive_image(agent_sender, agent_image)
+    if "已收到新答案图 1 张" not in "\n".join(agent_replace_image.texts):
+        failures.append("replace flow should collect new answer images")
+    agent_replace_confirm = agent_bot.receive_text(agent_sender, "1")
+    if "准备执行：替换答案" not in "\n".join(agent_replace_confirm.texts):
+        failures.append("replace flow should show confirmation after answer collection")
+    agent_replace_done = agent_bot.receive_text(agent_sender, "1")
+    if "[dry-run] 准备执行：替换答案" not in "\n".join(agent_replace_done.texts):
+        failures.append("dry-run replace confirmation should not touch live bank")
     return failures
 
 

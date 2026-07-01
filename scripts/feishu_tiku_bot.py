@@ -50,6 +50,14 @@ from scripts.feishu_store_flow import (  # noqa: E402
     format_store_success,
     is_store_entry_command,
 )
+from scripts.tiku_agent_memory import format_recent_operations  # noqa: E402
+from scripts.tiku_agent_router import route_text  # noqa: E402
+from scripts.tiku_agent_tools import (  # noqa: E402
+    TikuAgentTools,
+    format_inspection,
+    format_replace_answer_plan,
+    format_soft_delete_plan,
+)
 from scripts.classify_question_bank import (  # noqa: E402
     DEFAULT_ENDPOINT,
     DEFAULT_MODEL,
@@ -67,6 +75,12 @@ CHAPTER_MODE_AUTO = "auto"
 CHAPTER_MODE_MANUAL = "manual"
 CHAPTER_MODE_TOGGLE = "toggle"
 STORE_STATES = {"store_waiting_question", "store_waiting_chapter", "store_waiting_answers", "store_confirm"}
+AGENT_STATES = {
+    "agent_waiting_target_choice",
+    "agent_waiting_replace_answers",
+    "agent_confirm_delete",
+    "agent_confirm_replace",
+}
 
 BLOCK_FILTER_PROMPT = """你是结构力学图块筛选助手。图片里有若干编号 block。
 请只判断哪些 block 是完整或接近完整的结构力学结构图/受力图。
@@ -109,6 +123,11 @@ class TikuSession:
     current_question: str | None = None
     diagram_crops: dict[str, str] = field(default_factory=dict)
     store: StoreDraft | None = None
+    agent_action: str | None = None
+    agent_targets: list[str] = field(default_factory=list)
+    agent_target_ref: str | None = None
+    agent_answer_images: list[str] = field(default_factory=list)
+    agent_plan: Any | None = None
     updated_at: float = field(default_factory=time.time)
 
 
@@ -272,16 +291,20 @@ class TikuBot:
         coordinator: MultiAgentCoordinator | None = None,
         sessions: TikuSessionStore | None = None,
         store_service: FeishuStoreService | None = None,
+        agent_tools: TikuAgentTools | None = None,
     ) -> None:
         self.options = options
         self.coordinator = coordinator or MultiAgentCoordinator(top_k=options.top_k)
         self.sessions = sessions or TikuSessionStore(options.session_ttl_seconds)
         self.store_service = store_service or FeishuStoreService(dry_run=options.dry_run)
+        self.agent_tools = agent_tools or TikuAgentTools(dry_run=options.dry_run)
         self._chapter_modes: dict[str, str] = {}
         self._mode_lock = threading.Lock()
 
     def receive_image(self, sender: str, image_path: Path) -> BotResponse:
         session = self.sessions.get(sender)
+        if session.state in AGENT_STATES:
+            return self._handle_agent_image(sender, session, image_path)
         if session.state in STORE_STATES:
             return self._handle_store_image(sender, session, image_path)
 
@@ -306,6 +329,9 @@ class TikuBot:
 
         if session.state in STORE_STATES:
             return self._handle_store_text(sender, session, clean)
+
+        if session.state in AGENT_STATES:
+            return self._handle_agent_text(sender, session, clean)
 
         if session.state in {"waiting_multi_question", "waiting_multi_choice"} and clean == "0":
             return self._handle_multi_text(sender, session, clean)
@@ -343,14 +369,209 @@ class TikuBot:
         if session.state == "waiting_choice":
             choice = parse_choice(clean)
             if choice is None:
+                agent_response = self._maybe_handle_agent_text(sender, session, clean)
+                if agent_response is not None:
+                    return agent_response
                 return BotResponse(texts=["回复 0/1/2/3 获取对应答案；0 表示没有想要的，退出本次搜题。"])
             return self._answer_choice(sender, session, choice)
+
+        agent_response = self._maybe_handle_agent_text(sender, session, clean)
+        if agent_response is not None:
+            return agent_response
 
         chapter = parse_chapter(clean)
         if chapter:
             return BotResponse(texts=["请先发送题目图片，然后我会用这个章节检索。"])
         mode_label = "自动章节" if self.chapter_mode(sender) == CHAPTER_MODE_AUTO else "手动章节"
         return BotResponse(texts=[f"请先发送题目图片。当前模式：{mode_label}。发送“手动”或“自动”可切换。"])
+
+    def _maybe_handle_agent_text(self, sender: str, session: TikuSession, clean: str) -> BotResponse | None:
+        intent = route_text(clean)
+        if intent.intent == "unknown" or intent.confidence < 0.7:
+            return None
+
+        if intent.intent == "store_question":
+            session = TikuSession(state="store_waiting_question")
+            self.sessions.save(sender, session)
+            return BotResponse(texts=["已进入新增题目模式，请发送题目图。\n\n0  取消"])
+
+        if intent.intent == "list_recent_ops":
+            return BotResponse(texts=[format_recent_operations(self.agent_tools.memory.recent(8))])
+
+        if intent.intent == "get_answer":
+            if intent.answer_rank is None:
+                return BotResponse(texts=["你想要第几个答案？可以说“第一个答案”。"])
+            return self._answer_choice(sender, session, intent.answer_rank)
+
+        if intent.intent == "inspect_question":
+            if intent.answer_rank is not None:
+                ref = self._agent_ref_from_rank(session, intent.answer_rank)
+                if not ref:
+                    return BotResponse(texts=["当前没有可引用的检索结果，请先发题图检索。"])
+                inspection = self.agent_tools.inspect_question_ref(ref)
+                session.agent_targets = inspection.question_refs
+                session.agent_action = "inspect_question"
+                self.sessions.save(sender, session)
+                return BotResponse(texts=[format_inspection(inspection)])
+            if intent.chapter and intent.question_no is not None:
+                inspection = self.agent_tools.inspect_question(intent.chapter, intent.question_no)
+                session.agent_targets = inspection.question_refs
+                session.agent_action = "inspect_question"
+                self.sessions.save(sender, session)
+                return BotResponse(texts=[format_inspection(inspection)])
+            return BotResponse(texts=["请说明要查看哪个章节、哪一题，或先发题图检索后说“查看第一个”。"])
+
+        if intent.intent == "soft_delete_question":
+            if intent.answer_rank is not None:
+                ref = self._agent_ref_from_rank(session, intent.answer_rank)
+                if not ref:
+                    return BotResponse(texts=["当前没有可引用的检索结果，请先发题图检索，再说“删除第一个”。"])
+                return self._agent_prepare_delete(sender, session, ref)
+            if intent.chapter and intent.question_no is not None:
+                return self._agent_prepare_by_number(sender, session, intent.chapter, intent.question_no, "soft_delete_question")
+            return BotResponse(texts=["我还不知道要删除哪道题。可以先发题图检索后说“删除第一个”，或说“删除 4力法 31题”。"])
+
+        if intent.intent == "replace_answer":
+            if intent.answer_rank is not None:
+                ref = self._agent_ref_from_rank(session, intent.answer_rank)
+                if not ref:
+                    return BotResponse(texts=["当前没有可引用的检索结果，请先发题图检索，再说“替换第一个答案”。"])
+                return self._agent_start_replace(sender, session, ref)
+            if intent.chapter and intent.question_no is not None:
+                return self._agent_prepare_by_number(sender, session, intent.chapter, intent.question_no, "replace_answer")
+            return BotResponse(texts=["我还不知道要替换哪道题的答案。可以先发题图检索后说“替换第一个答案”，或说“替换 4力法 31题答案”。"])
+
+        return None
+
+    def _handle_agent_image(self, sender: str, session: TikuSession, image_path: Path) -> BotResponse:
+        if session.state == "agent_waiting_replace_answers":
+            session.agent_answer_images.append(str(image_path))
+            self.sessions.save(sender, session)
+            return BotResponse(texts=[f"已收到新答案图 {len(session.agent_answer_images)} 张。\n可继续发送；发完回复 1，取消回复 0。"])
+        return BotResponse(texts=["当前 Agent 流程不需要图片。\n回复 1 确认，或回复 0 取消。"])
+
+    def _handle_agent_text(self, sender: str, session: TikuSession, clean: str) -> BotResponse:
+        if clean == "0" or is_cancel(clean):
+            self.sessions.clear(sender)
+            return BotResponse(texts=["已取消本次 Agent 操作。"])
+
+        if session.state == "agent_waiting_target_choice":
+            index = parse_agent_index(clean, len(session.agent_targets))
+            if index is None:
+                return BotResponse(texts=[format_agent_target_list(session.agent_targets, session.agent_action)])
+            ref = session.agent_targets[index - 1]
+            if session.agent_action == "soft_delete_question":
+                return self._agent_prepare_delete(sender, session, ref)
+            if session.agent_action == "replace_answer":
+                return self._agent_start_replace(sender, session, ref)
+            inspection = self.agent_tools.inspect_question_ref(ref)
+            self.sessions.save(sender, session)
+            return BotResponse(texts=[format_inspection(inspection)])
+
+        if session.state == "agent_waiting_replace_answers":
+            if clean != "1":
+                return BotResponse(texts=["请继续发送新答案图；发完回复 1，取消回复 0。"])
+            if not session.agent_target_ref:
+                self.sessions.clear(sender)
+                return BotResponse(texts=["替换目标已丢失，请重新开始。"])
+            if not session.agent_answer_images:
+                return BotResponse(texts=["还没有收到新答案图，请先发送图片；取消回复 0。"])
+            try:
+                plan = self.agent_tools.plan_replace_answer_ref(
+                    session.agent_target_ref,
+                    [Path(path) for path in session.agent_answer_images],
+                )
+            except Exception as exc:  # noqa: BLE001
+                return BotResponse(texts=[f"暂不能替换：{exc}\n请继续发送答案图，或回复 0 取消。"])
+            session.state = "agent_confirm_replace"
+            session.agent_plan = plan
+            self.sessions.save(sender, session)
+            return BotResponse(texts=[format_replace_answer_plan(plan, dry_run=self.options.dry_run)])
+
+        if session.state == "agent_confirm_delete":
+            if clean != "1":
+                return BotResponse(texts=["回复 1 确认删除，或回复 0 取消。"])
+            if not session.agent_plan:
+                self.sessions.clear(sender)
+                return BotResponse(texts=["删除计划已失效，请重新开始。"])
+            try:
+                result = self.agent_tools.apply_soft_delete(session.agent_plan, user_id=sender)
+            except Exception as exc:  # noqa: BLE001
+                return BotResponse(texts=[f"删除失败：{exc}\n未完成操作，请检查后重试或回复 0 取消。"])
+            self.sessions.clear(sender)
+            return BotResponse(texts=[result.message])
+
+        if session.state == "agent_confirm_replace":
+            if clean != "1":
+                return BotResponse(texts=["回复 1 确认替换答案，或回复 0 取消。"])
+            if not session.agent_plan:
+                self.sessions.clear(sender)
+                return BotResponse(texts=["替换计划已失效，请重新开始。"])
+            try:
+                result = self.agent_tools.apply_replace_answer(session.agent_plan, user_id=sender)
+            except Exception as exc:  # noqa: BLE001
+                return BotResponse(texts=[f"替换失败：{exc}\n未完成操作，请检查后重试或回复 0 取消。"])
+            self.sessions.clear(sender)
+            return BotResponse(texts=[result.message])
+
+        return BotResponse(texts=["Agent 会话状态异常，请回复 0 取消后重新开始。"])
+
+    def _agent_ref_from_rank(self, session: TikuSession, rank: int) -> str | None:
+        if rank < 1 or rank > len(session.results):
+            return None
+        return str(session.results[rank - 1].get("path") or "")
+
+    def _agent_prepare_by_number(
+        self,
+        sender: str,
+        session: TikuSession,
+        chapter: str,
+        question_no: int,
+        action: str,
+    ) -> BotResponse:
+        inspection = self.agent_tools.inspect_question(chapter, question_no)
+        if not inspection.question_refs:
+            return BotResponse(texts=[f"没有找到 {chapter} 第 {question_no} 题。"])
+        if len(inspection.question_refs) > 1:
+            session.state = "agent_waiting_target_choice"
+            session.agent_action = action
+            session.agent_targets = inspection.question_refs
+            self.sessions.save(sender, session)
+            return BotResponse(texts=[format_agent_target_list(inspection.question_refs, action)])
+        ref = inspection.question_refs[0]
+        if action == "soft_delete_question":
+            return self._agent_prepare_delete(sender, session, ref)
+        return self._agent_start_replace(sender, session, ref)
+
+    def _agent_prepare_delete(self, sender: str, session: TikuSession, ref: str) -> BotResponse:
+        try:
+            plan = self.agent_tools.plan_soft_delete_ref(ref)
+        except Exception as exc:  # noqa: BLE001
+            return BotResponse(texts=[f"暂不能删除：{exc}"])
+        session.state = "agent_confirm_delete"
+        session.agent_action = "soft_delete_question"
+        session.agent_target_ref = ref
+        session.agent_plan = plan
+        self.sessions.save(sender, session)
+        return BotResponse(texts=[format_soft_delete_plan(plan, dry_run=self.options.dry_run)])
+
+    def _agent_start_replace(self, sender: str, session: TikuSession, ref: str) -> BotResponse:
+        try:
+            inspection = self.agent_tools.inspect_question_ref(ref)
+        except Exception as exc:  # noqa: BLE001
+            return BotResponse(texts=[f"暂不能替换：{exc}"])
+        session.state = "agent_waiting_replace_answers"
+        session.agent_action = "replace_answer"
+        session.agent_target_ref = inspection.question_refs[0]
+        session.agent_answer_images = []
+        session.agent_plan = None
+        self.sessions.save(sender, session)
+        return BotResponse(texts=[
+            "准备替换答案：\n"
+            f"题目：{inspection.question_refs[0]}\n"
+            f"原答案：{len(inspection.answer_files)} 张\n\n"
+            "请发送新答案图。可连续发送多张；发完回复 1，取消回复 0。"
+        ])
 
     def _handle_store_image(self, sender: str, session: TikuSession, image_path: Path) -> BotResponse:
         if session.state == "store_waiting_question":
@@ -1390,6 +1611,30 @@ def parse_choice(text: str) -> int | None:
     if not re.fullmatch(r"[0-3]", clean):
         return None
     return int(clean)
+
+
+def parse_agent_index(text: str, count: int) -> int | None:
+    clean = text.strip()
+    if not re.fullmatch(r"\d{1,3}", clean):
+        return None
+    value = int(clean)
+    if value < 1 or value > count:
+        return None
+    return value
+
+
+def format_agent_target_list(targets: list[str], action: str | None) -> str:
+    if action == "soft_delete_question":
+        title = "找到多个可能要删除的题目，请回复序号选择："
+    elif action == "replace_answer":
+        title = "找到多个可能要替换答案的题目，请回复序号选择："
+    else:
+        title = "找到多个题目位置："
+    lines = [title]
+    for index, ref in enumerate(targets, 1):
+        lines.append(f"{index}. {ref}")
+    lines.extend(["", "0  取消"])
+    return "\n".join(lines)
 
 
 def parse_chapter_mode(text: str) -> str | None:
