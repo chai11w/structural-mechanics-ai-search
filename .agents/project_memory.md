@@ -687,3 +687,22 @@
   - Live dry-run Feishu simulation:
     - search result path `4力法/题目/1.jpg` + `删除第一个` generated a single-target soft-delete plan.
     - `删除 4力法 1题` listed 11 candidate paths and selecting `11` generated the plan for `4力法/题目/1.jpg`.
+
+## 2026-07-01 Strict LLM Agent Brain
+
+- Feishu Agent now has a real LLM intent brain in `scripts/tiku_agent_llm.py`.
+- Model/provider:
+  - Uses the existing DashScope/Qwen configuration (`DEFAULT_MODEL` / `DEFAULT_ENDPOINT`) for text-only intent routing.
+  - If `DASHSCOPE_API_KEY` / config key is missing, the LLM call fails, times out, or returns invalid JSON, the bot falls back to the local rule router.
+- Boundary:
+  - LLM can only return a JSON intent from a strict whitelist: `help`, `search_question`, `store_question`, `inspect_question`, `replace_answer`, `soft_delete_question`, `get_answer`, `list_recent_ops`, `cancel`, `unknown`.
+  - LLM cannot output file paths, cannot edit Excel, cannot delete/replace directly, and cannot bypass confirmation.
+  - Write operations still go through local TargetResolver, controlled tools, confirmation page, backups, and operation memory.
+- User-facing behavior:
+  - `你好` / `你能做什么` now returns an Agent help message instead of the old "please send question image" fallback.
+  - Existing shortcut behavior remains first for `+`, `0`, `1/2/3`, chapter mode toggles, store states, and multi-question states.
+- Verification:
+  - `python -B -c "import scripts.tiku_agent_llm; import scripts.feishu_tiku_bot; print('llm agent imports ok')"` passed.
+  - `python -B scripts/tiku_agent_smoke.py` passed.
+  - `python -B scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+  - Live Qwen probe with `QwenAgentBrain().route('你好')` returned `help none 1.0`.

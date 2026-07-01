@@ -13,6 +13,7 @@ BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
 
 from scripts.tiku_agent_memory import AgentOperation, OperationMemory, format_recent_operations
+from scripts.tiku_agent_llm import normalize_llm_intent
 from scripts.tiku_agent_router import route_text
 from scripts.tiku_agent_tools import (
     TikuAgentTools,
@@ -51,6 +52,19 @@ def main() -> int:
     recent_intent = route_text("刚才做了什么")
     if recent_intent.intent != "list_recent_ops":
         failures.append(f"recent intent mismatch: {recent_intent}")
+
+    llm_intent = normalize_llm_intent(
+        {
+            "intent": "soft_delete_question",
+            "target": "last_result",
+            "rank": 2,
+            "confidence": 0.91,
+            "reason": "delete second candidate",
+        },
+        "删掉第二个",
+    )
+    if llm_intent.intent != "soft_delete_question" or llm_intent.answer_rank != 2:
+        failures.append(f"LLM intent normalization mismatch: {llm_intent}")
 
     temp_root = BASE / "agent_smoke_tmp"
     temp_root.mkdir(parents=True, exist_ok=True)

@@ -59,6 +59,9 @@ def route_text(text: str) -> AgentIntent:
     if not clean:
         return AgentIntent("unknown", raw_text=raw, reason="empty text", confidence=0.0)
 
+    if clean in {"你好", "您好", "hello", "hi"} or has_any(clean, ["你能做什么", "怎么用", "帮助", "help", "使用说明"]):
+        return AgentIntent("help", raw_text=raw, confidence=0.95)
+
     if has_any(clean, ["最近操作", "刚才做了什么", "操作记录", "今天新增", "今天删", "今天替换"]):
         return AgentIntent("list_recent_ops", raw_text=raw, confidence=0.95)
 

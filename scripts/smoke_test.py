@@ -41,6 +41,7 @@ from scripts.feishu_tiku_bot import (
     parse_chapter_mode,
 )
 from scripts.feishu_store_flow import FeishuStoreService
+from scripts.tiku_agent_llm import FakeAgentBrain, normalize_llm_intent
 
 
 EXPECTED_CHAPTERS = [
@@ -388,7 +389,7 @@ def check_feishu_tiku_bot_state() -> list[str]:
 
     image = Path("mock-question.jpg")
     options = FeishuTikuOptions(dry_run=True)
-    bot = TikuBot(options=options, coordinator=MockCoordinator([image, image, image]))
+    bot = TikuBot(options=options, coordinator=MockCoordinator([image, image, image]), agent_brain=FakeAgentBrain())
     sender = "smoke"
     first = bot.receive_image(sender, image)
     first_text = "\n".join(first.texts)
@@ -456,6 +457,7 @@ def check_feishu_tiku_bot_state() -> list[str]:
     bot_auto_fallback = TikuBot(
         options=options,
         coordinator=MockCoordinator([image, image, image], auto_needs_chapter=True),
+        agent_brain=FakeAgentBrain(),
     )
     fallback = bot_auto_fallback.receive_image(sender, image)
     if "请选择章节" not in "\n".join(fallback.texts):
@@ -468,6 +470,7 @@ def check_feishu_tiku_bot_state() -> list[str]:
         options=options,
         coordinator=MockCoordinator([image, image, image]),
         store_service=FeishuStoreService(root=Path("mock-bank"), symbolic=Path("mock-symbolic"), dry_run=True),
+        agent_brain=FakeAgentBrain(),
     )
     store_sender = "store-smoke"
     store_start = store_bot.receive_text(store_sender, "+")
@@ -491,7 +494,7 @@ def check_feishu_tiku_bot_state() -> list[str]:
         failures.append(f"agent test image missing: {agent_image}")
         return failures
 
-    agent_bot = TikuBot(options=options, coordinator=MockCoordinator([agent_image, agent_image, agent_image]))
+    agent_bot = TikuBot(options=options, coordinator=MockCoordinator([agent_image, agent_image, agent_image]), agent_brain=FakeAgentBrain())
     agent_sender = "agent-smoke"
     agent_search = agent_bot.receive_image(agent_sender, agent_image)
     if len(agent_search.images) != 3:
@@ -504,7 +507,7 @@ def check_feishu_tiku_bot_state() -> list[str]:
     if "[dry-run] 准备执行：软删除题目" not in "\n".join(agent_delete_done.texts):
         failures.append("dry-run delete confirmation should not touch live bank")
 
-    agent_bot = TikuBot(options=options, coordinator=MockCoordinator([agent_image, agent_image, agent_image]))
+    agent_bot = TikuBot(options=options, coordinator=MockCoordinator([agent_image, agent_image, agent_image]), agent_brain=FakeAgentBrain())
     agent_bot.receive_image(agent_sender, agent_image)
     agent_replace = agent_bot.receive_text(agent_sender, "替换第一个答案")
     if "请发送新答案图" not in "\n".join(agent_replace.texts):
@@ -518,6 +521,25 @@ def check_feishu_tiku_bot_state() -> list[str]:
     agent_replace_done = agent_bot.receive_text(agent_sender, "1")
     if "[dry-run] 准备执行：替换答案" not in "\n".join(agent_replace_done.texts):
         failures.append("dry-run replace confirmation should not touch live bank")
+
+    hello_bot = TikuBot(options=options, coordinator=MockCoordinator([image]), agent_brain=FakeAgentBrain())
+    hello = hello_bot.receive_text("hello-smoke", "你好")
+    if "结构力学题库 Agent" not in "\n".join(hello.texts):
+        failures.append("hello/help should return Agent capability summary")
+
+    llm_intent = normalize_llm_intent(
+        {
+            "intent": "replace_answer",
+            "target": "last_result",
+            "rank": 1,
+            "needs_image": True,
+            "confidence": 0.88,
+            "reason": "用户要替换刚才第一个答案",
+        },
+        "这个答案不对，换成我接下来发的图",
+    )
+    if llm_intent.intent != "replace_answer" or llm_intent.answer_rank != 1 or not llm_intent.needs_image:
+        failures.append(f"LLM intent normalization mismatch: {llm_intent}")
     return failures
 
 

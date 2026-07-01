@@ -51,7 +51,7 @@ from scripts.feishu_store_flow import (  # noqa: E402
     is_store_entry_command,
 )
 from scripts.tiku_agent_memory import format_recent_operations  # noqa: E402
-from scripts.tiku_agent_router import route_text  # noqa: E402
+from scripts.tiku_agent_llm import AgentContext, QwenAgentBrain  # noqa: E402
 from scripts.tiku_agent_tools import (  # noqa: E402
     TikuAgentTools,
     format_inspection,
@@ -292,12 +292,14 @@ class TikuBot:
         sessions: TikuSessionStore | None = None,
         store_service: FeishuStoreService | None = None,
         agent_tools: TikuAgentTools | None = None,
+        agent_brain: Any | None = None,
     ) -> None:
         self.options = options
         self.coordinator = coordinator or MultiAgentCoordinator(top_k=options.top_k)
         self.sessions = sessions or TikuSessionStore(options.session_ttl_seconds)
         self.store_service = store_service or FeishuStoreService(dry_run=options.dry_run)
         self.agent_tools = agent_tools or TikuAgentTools(dry_run=options.dry_run)
+        self.agent_brain = agent_brain or QwenAgentBrain()
         self._chapter_modes: dict[str, str] = {}
         self._mode_lock = threading.Lock()
 
@@ -386,9 +388,16 @@ class TikuBot:
         return BotResponse(texts=[f"请先发送题目图片。当前模式：{mode_label}。发送“手动”或“自动”可切换。"])
 
     def _maybe_handle_agent_text(self, sender: str, session: TikuSession, clean: str) -> BotResponse | None:
-        intent = route_text(clean)
+        intent = self.agent_brain.route(clean, self._agent_context(session))
         if intent.intent == "unknown" or intent.confidence < 0.7:
             return None
+
+        if intent.intent == "help":
+            return BotResponse(texts=[format_agent_help()])
+
+        if intent.intent == "cancel":
+            self.sessions.clear(sender)
+            return BotResponse(texts=["已取消当前操作。"])
 
         if intent.intent == "store_question":
             session = TikuSession(state="store_waiting_question")
@@ -442,6 +451,14 @@ class TikuBot:
             return BotResponse(texts=["我还不知道要替换哪道题的答案。可以先发题图检索后说“替换第一个答案”，或说“替换 4力法 31题答案”。"])
 
         return None
+
+    def _agent_context(self, session: TikuSession) -> AgentContext:
+        return AgentContext(
+            state=session.state,
+            has_results=bool(session.results),
+            result_count=len(session.results),
+            current_chapter=session.chapter,
+        )
 
     def _handle_agent_image(self, sender: str, session: TikuSession, image_path: Path) -> BotResponse:
         if session.state == "agent_waiting_replace_answers":
@@ -1635,6 +1652,22 @@ def format_agent_target_list(targets: list[str], action: str | None) -> str:
         lines.append(f"{index}. {ref}")
     lines.extend(["", "0  取消"])
     return "\n".join(lines)
+
+
+def format_agent_help() -> str:
+    return "\n".join([
+        "我是结构力学题库 Agent。",
+        "",
+        "你可以这样说：",
+        "发题图：检索相似题和答案",
+        "新增这题：进入新增题目流程",
+        "删除第一个：删除刚才检索到的候选",
+        "替换第一个答案：用接下来发的图替换答案",
+        "查看 4力法 31题：查看题图、答案和 Excel 信息",
+        "刚才做了什么：查看最近操作",
+        "",
+        "删除和替换都会先给确认页，回复 1 才执行，0 取消。",
+    ])
 
 
 def parse_chapter_mode(text: str) -> str | None:
