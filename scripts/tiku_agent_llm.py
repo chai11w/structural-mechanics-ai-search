@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import time
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
@@ -102,11 +104,19 @@ class QwenAgentBrain:
         self.enabled = enabled
 
     def route(self, text: str, context: AgentContext | None = None) -> AgentIntent:
+        started = time.perf_counter()
+        local = route_text(text)
+        if should_use_local_intent(local):
+            log_agent_brain("rule", local, started)
+            return local
+
         if not self.enabled:
-            return route_text(text)
+            log_agent_brain("rule-disabled", local, started)
+            return local
         api_key = os.environ.get("DASHSCOPE_API_KEY", "") or search.cfg.get("dashscope_api_key", "")
         if not api_key:
-            return route_text(text)
+            log_agent_brain("rule-no-key", local, started)
+            return local
 
         payload = {
             "model": self.model,
@@ -131,9 +141,12 @@ class QwenAgentBrain:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             content = data["choices"][0]["message"]["content"]
-            return normalize_llm_intent(parse_model_json(content), text)
+            intent = normalize_llm_intent(parse_model_json(content), text)
+            log_agent_brain("llm", intent, started)
+            return intent
         except Exception:  # noqa: BLE001 - rule router is the safe fallback.
-            return route_text(text)
+            log_agent_brain("rule-fallback", local, started)
+            return local
 
 
 class FakeAgentBrain:
@@ -193,6 +206,26 @@ def normalize_llm_intent(data: dict[str, Any], raw_text: str) -> AgentIntent:
         confidence=confidence,
         raw_text=raw_text,
         reason=reason,
+    )
+
+
+def should_use_local_intent(intent: AgentIntent) -> bool:
+    if intent.intent == "unknown":
+        return False
+    if intent.confidence < 0.8:
+        return False
+    if intent.missing:
+        return False
+    return True
+
+
+def log_agent_brain(source: str, intent: AgentIntent, started: float) -> None:
+    elapsed = time.perf_counter() - started
+    print(
+        f"agent_brain source={source} intent={intent.intent} "
+        f"confidence={intent.confidence:.2f} elapsed={elapsed:.2f}s",
+        file=sys.stderr,
+        flush=True,
     )
 
 

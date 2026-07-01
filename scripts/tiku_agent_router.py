@@ -83,6 +83,8 @@ def route_text(text: str) -> AgentIntent:
     if has_any(clean, ["替换答案", "换答案", "答案换", "答案不对", "改答案"]) or (
         "答案" in clean and has_any(clean, ["替换", "更换", "换掉", "改"])
     ):
+        if answer_rank is None and has_any(clean, ["这个", "刚才", "上面", "答案不对"]):
+            answer_rank = 1
         intent = AgentIntent(
             "replace_answer",
             chapter,
@@ -99,7 +101,7 @@ def route_text(text: str) -> AgentIntent:
         require(intent, "question_no", question_no)
         return intent
 
-    if has_any(clean, ["新增", "入库", "保存这题", "存这题", "加一道", "添加"]):
+    if has_any(clean, ["新增", "增添", "增加", "录入", "收录", "入库", "保存这题", "存这题", "存入", "加一道", "添加"]):
         return AgentIntent("store_question", chapter, question_no, needs_image=True, raw_text=raw, confidence=0.9)
 
     if has_any(clean, ["查看", "看看", "查一下", "题目信息", "有什么", "现在有什么"]):
@@ -109,7 +111,7 @@ def route_text(text: str) -> AgentIntent:
         return intent
 
     if answer_rank is not None and has_any(clean, ["答案", "第", "top"]):
-        return AgentIntent("get_answer", answer_rank=answer_rank, raw_text=raw, confidence=0.8)
+        return AgentIntent("get_answer", answer_rank=answer_rank, target="last_result", raw_text=raw, confidence=0.9)
 
     if has_any(clean, ["找", "检索", "搜", "答案"]):
         return AgentIntent("search_question", chapter, needs_image=True, raw_text=raw, confidence=0.75)

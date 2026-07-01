@@ -706,3 +706,22 @@
   - `python -B scripts/tiku_agent_smoke.py` passed.
   - `python -B scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
   - Live Qwen probe with `QwenAgentBrain().route('你好')` returned `help none 1.0`.
+
+## 2026-07-01 Feishu Agent Intent Speed Fix
+
+- Problem observed after live testing: every text message went to Qwen first, so simple commands were slow:
+  - `你好`: about 4.1s.
+  - `我要增添题目`: about 12.6s.
+  - `第一个答案`: about 10.4s.
+  - `替换第一个答案`: about 26.7s.
+- Fix:
+  - `QwenAgentBrain.route()` now tries the local rule router first and returns immediately for high-confidence known intents.
+  - Qwen is only used as a fallback when local rules cannot understand the message.
+  - Added lightweight `agent_brain source=... intent=... elapsed=...` stderr timing logs; do not log user text.
+  - Expanded local intent wording:
+    - Store: `增添`, `增加`, `录入`, `收录`, `存入`.
+    - Answer: `第一个答案` now routes locally with rank 1.
+    - Replace: `这个答案不对，换成我接下来发的图` defaults to last-result rank 1.
+- Verification:
+  - Local intent timing for the tested common commands is now `0.00s` and uses `source=rule`.
+  - `python -B scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.

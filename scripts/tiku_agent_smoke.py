@@ -45,6 +45,42 @@ def main() -> int:
     if replace_intent.intent != "replace_answer" or replace_intent.chapter != "4力法" or replace_intent.question_no != 31:
         failures.append(f"replace intent mismatch: {replace_intent}")
 
+    store_synonym_intent = route_text("我想录入一道题")
+    if store_synonym_intent.intent != "store_question":
+        failures.append(f"store synonym intent mismatch: {store_synonym_intent}")
+
+    answer_rank_intent = route_text("第一个答案")
+    if answer_rank_intent.intent != "get_answer" or answer_rank_intent.answer_rank != 1:
+        failures.append(f"answer rank intent mismatch: {answer_rank_intent}")
+
+    implicit_replace_intent = route_text("这个答案不对，换成我接下来发的图")
+    if implicit_replace_intent.intent != "replace_answer" or implicit_replace_intent.answer_rank != 1:
+        failures.append(f"implicit replace intent mismatch: {implicit_replace_intent}")
+
+    store_synonym_intent = route_text("我想录入一道题")
+    if store_synonym_intent.intent != "store_question":
+        failures.append(f"store synonym intent mismatch: {store_synonym_intent}")
+
+    answer_rank_intent = route_text("第一个答案")
+    if answer_rank_intent.intent != "get_answer" or answer_rank_intent.answer_rank != 1:
+        failures.append(f"answer rank intent mismatch: {answer_rank_intent}")
+
+    implicit_replace_intent = route_text("这个答案不对，换成我接下来发的图")
+    if implicit_replace_intent.intent != "replace_answer" or implicit_replace_intent.answer_rank != 1:
+        failures.append(f"implicit replace intent mismatch: {implicit_replace_intent}")
+
+    store_synonym_intent = route_text("我想录入一道题")
+    if store_synonym_intent.intent != "store_question":
+        failures.append(f"store synonym intent mismatch: {store_synonym_intent}")
+
+    answer_rank_intent = route_text("第一个答案")
+    if answer_rank_intent.intent != "get_answer" or answer_rank_intent.answer_rank != 1:
+        failures.append(f"answer rank intent mismatch: {answer_rank_intent}")
+
+    implicit_replace_intent = route_text("这个答案不对，换成我接下来发的图")
+    if implicit_replace_intent.intent != "replace_answer" or implicit_replace_intent.answer_rank != 1:
+        failures.append(f"implicit replace intent mismatch: {implicit_replace_intent}")
+
     delete_intent = route_text("删掉 5位移法 12题")
     if delete_intent.intent != "soft_delete_question" or delete_intent.chapter != "5位移法" or delete_intent.question_no != 12:
         failures.append(f"delete intent mismatch: {delete_intent}")
