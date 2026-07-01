@@ -6,7 +6,6 @@ config.json
 config.local.json
 .env
 .tmp_*
-agent_smoke_tmp/
 backups/
 _last_search.json
 _query.json
