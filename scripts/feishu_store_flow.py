@@ -25,7 +25,7 @@ from scripts.classify_question_bank import normalize_load_item
 from scripts.store_unindexed_questions import backup_workbook, ensure_workbook, existing_rels, json_loads
 
 
-CHAPTERS = ["2静定结构", "3静定结构位移", "4力法", "5位移法", "6力矩分配"]
+CHAPTERS = ["2静定结构", "3静定结构位移", "4力法", "5位移法", "6力矩分配", "7矩阵位移", "8影响线"]
 MAIN_CATEGORIES = {"main_numeric", "main_assigned_symbolic"}
 STORE_ENTRY_COMMANDS = {"+", "新增", "入库", "store"}
 ANSWER_DONE_COMMAND = "1"

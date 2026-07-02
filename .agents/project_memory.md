@@ -10,6 +10,11 @@
 - 当前没有正式测试套件；验证主要依赖 CLI 帮助、脚本运行和人工检索结果检查。
 - `config.json`、`config.local.json` 被 `.gitignore` 忽略，可能包含本地路径或 `zhipuai_api_key`。
 
+## Standing Collaboration Rule
+
+- 用户要求：本项目以后每次完成代码或题库逻辑更改，都要同步写入 `.agents/project_memory.md`，并提交、推送到 GitHub，方便换对话后继续接上最新状态。
+- 常规收尾顺序：更新项目记忆 -> 运行相关验证 -> `git commit` -> `git push`。
+
 ## Implemented
 
 - `search.py` 是核心 CLI 与业务逻辑：
@@ -733,3 +738,79 @@
   - The largest exact load-signature group in the live main bank is `4力法` with `均布:10`, only `10` candidates; all are effectively steel-frame type by path/visual semantics.
   - Running the official coordinator on `4力法/2钢架/1单未知量/题目1/1L/1提横/2固+饺/34.jpg` took about `16.56s`, with `route=main`, `reranked=True`, and Top 1 exact same image.
   - Top repeated main-bank groups mostly have only `4-10` candidates, and hypothetical structure filtering would usually reduce only `0-2` candidates while adding a Qwen structure call. Current decision: do not add structure-type filtering to the main/numeric bank yet.
+
+## 2026-07-02 Symbolic Residue Moved Out Of Main Bank
+
+- User noticed a `均布:q` item still in the main/numeric bank; a scan found two unassigned symbolic-load residues in live main Excel files.
+- Moved both rows from `D:\桌面\答疑、帮做\结构力学\帮做` to `D:\桌面\答疑、帮做\结构力学\帮做_字母库`, keeping the question images in their original chapter folders:
+  - `5位移法/2钢架/题目/4.jpg`, load `均布:q`, added to symbolic `5位移法.xlsx` with `结构类型=钢架`.
+  - `2静定结构/3钢架/2弯矩图/题目a/12.jpg`, load `集中:P`, added to symbolic `2静定结构.xlsx` with `结构类型=钢架`.
+- Backup before writing:
+  - `backups/move_symbolic_residue_20260702_163806`
+- Verification:
+  - Live main-bank scan for unassigned symbolic raw values returned `count 0`.
+  - Both moved rows are absent from main Excel and present once in symbolic Excel.
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+- Later visual recheck of main-bank images found additional confirmed unassigned symbolic-load residues. These were moved from main Excel to symbolic Excel after backup:
+  - `2静定结构/4拱/1内力/题目/5.jpg`: old main row had `均布:2` from adjacent-image contamination; moved as `均布:q`, `结构类型=拱`. Backup: `backups/move_arch_symbolic_20260702_172954`.
+  - `3静定结构位移/3钢架/题目aa/26.jpg`: moved as `集中:P`, `结构类型=钢架`.
+  - `4力法/2钢架/1单未知量/题目1/0/12.jpg`: removed from main and updated existing symbolic row to `集中:F`, `结构类型=钢架`.
+  - `4力法/2钢架/1单未知量/题目1/3门/20.jpg`: moved as `均布:q`, `结构类型=钢架`.
+- Backup for the three-row review batch:
+  - `backups/move_review_batch_symbolic_20260702_174140`
+- Verification after the review-batch move:
+  - The three rows are absent from main Excel and present once in symbolic Excel.
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+
+## 2026-07-02 Chapter 7 Matrix Displacement Added
+
+- Added `7矩阵位移` as the next supported chapter before adding influence-line support.
+- Code/docs updated so the chapter is available to:
+  - Qwen chapter hint normalization and prompts in `scripts/classify_question_bank.py`.
+  - unindexed-image audit/store scripts.
+  - Feishu chapter parsing and manual chapter prompts; replying `7` maps to `7矩阵位移`.
+  - Feishu store flow chapter validation.
+  - smoke-test expected chapter checks.
+  - README / project Skill chapter-scope wording.
+- Live main bank:
+  - Created `D:\桌面\答疑、帮做\结构力学\帮做\7矩阵位移.xlsx`.
+  - Used existing `scripts/store_unindexed_questions.py` storage flow for `7矩阵位移`.
+  - Scanned `13` question images under `7矩阵位移`; all were ready for main bank, none required symbolic-bank routing or manual review.
+  - Appended `13` rows to `7矩阵位移.xlsx`.
+- Verification:
+  - `python scripts/audit_unindexed_questions.py --chapter 7矩阵位移 --no-special-index` reported `scanned=13 special=0 missing=0`.
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`, including `7矩阵位移: Excel readable rows=13`.
+- Later the user added folder `7矩阵位移/2杆端力1+2`; it was processed through the same storage flow:
+  - New scan found `8` missing images.
+  - Appended `6` rows to main bank `D:\桌面\答疑、帮做\结构力学\帮做\7矩阵位移.xlsx`.
+  - Appended `2` unassigned-symbolic rows to symbolic bank `D:\桌面\答疑、帮做\结构力学\帮做_字母库\7矩阵位移.xlsx`.
+  - Backup directory: `backups/store_unindexed_20260702_181454`.
+  - Verification reported `scanned=21 special=0 missing=0`; main workbook has `19` rows and symbolic workbook has `2` rows.
+## 2026-07-02 Chapter 8 Influence Line Added
+
+- Added `8影响线` as a supported chapter after `7矩阵位移`.
+- Code/docs updated so the chapter is available to:
+  - Qwen chapter hint normalization and prompts in `scripts/classify_question_bank.py`.
+  - unindexed-image audit/store scripts.
+  - Feishu chapter parsing and manual chapter prompts; replying `8` maps to `8影响线`.
+  - Feishu store flow chapter validation.
+  - smoke-test expected chapter checks.
+  - README / project Skill chapter-scope wording.
+- Live main bank:
+  - Created `D:\桌面\答疑、帮做\结构力学\帮做\8影响线.xlsx`.
+  - Used existing `scripts/store_unindexed_questions.py` storage flow for `8影响线`.
+  - Scanned `21` question images under `8影响线`; all were ready for main bank, none required symbolic-bank routing or manual review.
+  - Appended `21` rows to `8影响线.xlsx`.
+  - Apply backup directory was `backups/store_unindexed_20260702_182047`; since `8影响线.xlsx` was newly created, there was no previous `8影响线.xlsx` workbook to copy into the backup.
+- Verification:
+  - `python scripts/audit_unindexed_questions.py --chapter 8影响线 --no-special-index` reported `scanned=21 special=0 missing=0`.
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`, including `8影响线: Excel readable rows=21`.
+- Entry-point verification after adding chapters 7/8:
+  - GUI chapter dropdown is driven by live root `*.xlsx`; it now lists `7矩阵位移` and `8影响线`.
+  - GUI one-click audit/store uses `scripts.audit_unindexed_questions.CHAPTERS`, now including 7/8.
+  - Feishu manual chapter prompt lists 2-8; `parse_chapter("7") -> 7矩阵位移`, `parse_chapter("8") -> 8影响线`.
+  - Feishu store dry-run planning accepts `8影响线` and targets `8影响线.xlsx`.
+  - Feishu delete dry-run planning finds rows in `7矩阵位移.xlsx` and `8影响线.xlsx`.
+  - CLI/multi-agent retrieval was tested on both `7矩阵位移` and `8影响线`; both returned candidates from the expected chapter.
+  - `scripts/feishu_tiku_bot.py` dry-run MockCoordinator was corrected so manual dry-run chapter 7/8 echoes the selected chapter, while `chapter=auto` still simulates an auto-detected `5位移法`.
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.

@@ -51,6 +51,8 @@ EXPECTED_CHAPTERS = [
     "4力法",
     "5位移法",
     "6力矩分配",
+    "7矩阵位移",
+    "8影响线",
 ]
 
 
@@ -362,6 +364,8 @@ def check_chapter_hint_normalization() -> list[str]:
         "力法": "4力法",
         "用位移法计算": "5位移法",
         "力矩分配法": "6力矩分配",
+        "矩阵位移法": "7矩阵位移",
+        "影响线": "8影响线",
         "图乘法求转角": "3静定结构位移",
         "求转角": "unknown",
         "unknown": "unknown",
@@ -383,6 +387,12 @@ def check_chapter_hint_normalization() -> list[str]:
     accepted = guard_chapter_prediction("6力矩分配", 1.0, "题干明确说明'试用弯矩分配法计算图示刚架'")
     if accepted[0] != "6力矩分配":
         failures.append(f"quoted moment-distribution evidence should be accepted, got {accepted}")
+    matrix = guard_chapter_prediction("7矩阵位移", 1.0, "题干明确说明'用矩阵位移法计算图示结构'")
+    if matrix[0] != "7矩阵位移":
+        failures.append(f"quoted matrix-displacement evidence should be accepted, got {matrix}")
+    influence = guard_chapter_prediction("8影响线", 1.0, "题干明确说明'作图示梁支座反力的影响线'")
+    if influence[0] != "8影响线":
+        failures.append(f"quoted influence-line evidence should be accepted, got {influence}")
     static_frame = guard_chapter_prediction("2静定结构", 1.0, "题干明确说明'静定刚架结构'，并要求作内力图")
     if static_frame[0] != "2静定结构":
         failures.append(f"quoted static-frame evidence should be accepted, got {static_frame}")
@@ -408,6 +418,10 @@ def check_feishu_tiku_bot_state() -> list[str]:
     failures = []
     if parse_chapter("5") != "5位移法":
         failures.append("chapter number 5 should map to 5位移法")
+    if parse_chapter("7") != "7矩阵位移":
+        failures.append("chapter number 7 should map to 7矩阵位移")
+    if parse_chapter("8") != "8影响线":
+        failures.append("chapter number 8 should map to 8影响线")
     if parse_chapter("2") != "2静定结构":
         failures.append("chapter number 2 should map to 2静定结构")
     if parse_chapter_mode("手动") != "manual" or parse_chapter_mode("a") != "toggle":

@@ -28,7 +28,7 @@ import search
 from multi_agent_pipeline import symbolic_root
 
 
-CHAPTERS = ["2静定结构", "3静定结构位移", "4力法", "5位移法", "6力矩分配"]
+CHAPTERS = ["2静定结构", "3静定结构位移", "4力法", "5位移法", "6力矩分配", "7矩阵位移", "8影响线"]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 SKIP_DIR_PREFIXES = (".", "_")
 SKIP_DIR_KEYWORDS = ("答案", "__pycache__")

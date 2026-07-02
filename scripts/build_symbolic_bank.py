@@ -25,7 +25,7 @@ from search import _dominant_symbol_family, normalize_load_for_similarity, norma
 
 DEFAULT_EXISTING_RESULTS = BASE / ".tmp_symbol_sheets" / "classify_existing_full_qwen_no_thinking" / "classification_results.json"
 DEFAULT_MISSING_RESULTS = BASE / ".tmp_symbol_sheets" / "classify_missing_full_qwen_no_thinking" / "classification_results.json"
-CHAPTERS = ["2静定结构", "3静定结构位移", "4力法", "5位移法", "6力矩分配"]
+CHAPTERS = ["2静定结构", "3静定结构位移", "4力法", "5位移法", "6力矩分配", "7矩阵位移", "8影响线"]
 
 
 def load_config() -> dict:

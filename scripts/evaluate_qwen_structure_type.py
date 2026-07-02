@@ -28,7 +28,7 @@ from scripts.classify_question_bank import DEFAULT_ENDPOINT, DEFAULT_MODEL
 from scripts.structure_type_classifier import VALID_STRUCTURE_TYPES, qwen_structure_type
 
 
-CHAPTERS = ["2静定结构", "3静定结构位移", "4力法", "5位移法", "6力矩分配"]
+CHAPTERS = ["2静定结构", "3静定结构位移", "4力法", "5位移法", "6力矩分配", "7矩阵位移", "8影响线"]
 VALID_TYPES = VALID_STRUCTURE_TYPES
 
 

@@ -68,7 +68,7 @@ from scripts.classify_question_bank import (  # noqa: E402
 
 
 FEISHU_OPEN_API = "https://open.feishu.cn/open-apis"
-CHAPTERS = ["2静定结构", "3静定结构位移", "4力法", "5位移法", "6力矩分配"]
+CHAPTERS = ["2静定结构", "3静定结构位移", "4力法", "5位移法", "6力矩分配", "7矩阵位移", "8影响线"]
 DEFAULT_SESSION_TTL_SECONDS = 10 * 60
 CHAPTER_MODE_AUTO = "auto"
 CHAPTER_MODE_MANUAL = "manual"
@@ -644,7 +644,7 @@ class TikuBot:
         if not chapter:
             return BotResponse(texts=[format_multi_question_needs_chapter(question)])
         if chapter == "unsupported":
-            return BotResponse(texts=[f"第{question['label']}题暂不在当前 2-6 章题库范围内。"])
+            return BotResponse(texts=[f"第{question['label']}题暂不在当前 2-8 章题库范围内。"])
 
         diagram_crop = session.diagram_crops.get(normalize_question_key(question["label"]))
         result = self.coordinator.search_loads(
@@ -799,6 +799,7 @@ class MockCoordinator:
                     "rerank_note": "",
                 },
             )()
+        resolved_chapter = "5位移法" if str(chapter).strip().lower() == "auto" else chapter
         return type(
             "MockPipelineResult",
             (),
@@ -808,8 +809,8 @@ class MockCoordinator:
                     (),
                     {"route": "main", "category": "main_numeric"},
                 )(),
-                "chapter": "5位移法",
-                "chapter_hint": "5位移法",
+                "chapter": resolved_chapter,
+                "chapter_hint": resolved_chapter,
                 "chapter_confidence": 1.0,
                 "chapter_evidence": "mock",
                 "rerank_note": "",
@@ -1013,7 +1014,7 @@ def format_chapter_prompt(image_path: Path | None = None, result: Any | None = N
         elif evidence:
             lines.append("未能自动确定章节。")
     lines.extend(f"- {chapter}" for chapter in CHAPTERS)
-    lines.append("回复章节号 2/3/4/5/6，或直接回复章节名；回复 0 退出。")
+    lines.append("回复章节号 2/3/4/5/6/7/8，或直接回复章节名；回复 0 退出。")
     lines.append("发送 a 可在自动/手动章节模式之间切换。")
     return "\n".join(lines)
 
@@ -1346,9 +1347,6 @@ def format_summary_loads(loads: list[dict[str, Any]]) -> str:
 
 
 def effective_question_chapter(question: dict[str, Any]) -> str | None:
-    evidence = str(question.get("chapter_evidence") or "")
-    if "影响线" in evidence:
-        return "unsupported"
     hint = str(question.get("chapter_hint") or "").strip()
     confidence = safe_float(question.get("chapter_confidence"))
     if hint in CHAPTERS and confidence >= 0.8:
