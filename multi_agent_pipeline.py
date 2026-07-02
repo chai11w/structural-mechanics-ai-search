@@ -29,6 +29,7 @@ from scripts.classify_question_bank import (
     qwen_analyze_layout,
     qwen_extract_loads,
 )
+from scripts.structure_type_classifier import VALID_STRUCTURE_TYPES, qwen_structure_type
 
 
 BASE = Path(__file__).resolve().parent
@@ -61,6 +62,10 @@ class PipelineResult:
     chapter_hint: str = CHAPTER_UNKNOWN
     chapter_confidence: float = 0.0
     chapter_evidence: str = ""
+    structure_type: str = ""
+    structure_type_confidence: float = 0.0
+    structure_type_reason: str = ""
+    structure_filter_applied: bool = False
 
 
 def symbolic_root(main_root: Path | None = None) -> Path:
@@ -133,6 +138,19 @@ class QwenClassifier:
         if not api_key:
             raise RuntimeError("DASHSCOPE_API_KEY is not set")
         return qwen_analyze_layout(
+            path,
+            model=self.model,
+            endpoint=self.endpoint,
+            api_key=api_key,
+            timeout=self.timeout,
+        )
+
+    def classify_structure_type(self, image_path: str | Path) -> dict[str, Any]:
+        path = Path(image_path)
+        api_key = os.environ.get("DASHSCOPE_API_KEY", "") or search.cfg.get("dashscope_api_key", "")
+        if not api_key:
+            raise RuntimeError("DASHSCOPE_API_KEY is not set")
+        return qwen_structure_type(
             path,
             model=self.model,
             endpoint=self.endpoint,
@@ -243,7 +261,29 @@ class MultiAgentCoordinator:
 
         if status_callback:
             status_callback("候选检索中...")
-        results = rank_bank_candidates(loads, effective_chapter, route.excel_root, self.top_k)
+        structure_type = ""
+        structure_filter_applied = False
+        if route.route == "symbolic" and query_image_path:
+            if status_callback:
+                status_callback("结构类型识别中...")
+            try:
+                structure = self.qwen.classify_structure_type(query_image_path)
+                structure_type = normalize_structure_type(structure.get("structure_type"))
+                if classified is not None:
+                    classified["structure_type"] = structure_type
+                    classified["structure_type_confidence"] = structure.get("confidence", 0.0)
+                    classified["structure_type_reason"] = structure.get("reason", "")
+            except Exception as exc:  # noqa: BLE001 - structure type is an optional speed-up.
+                print(f"WARNING: 结构类型识别失败，跳过类型筛选: {exc}")
+
+        results = rank_bank_candidates(
+            loads,
+            effective_chapter,
+            route.excel_root,
+            self.top_k,
+            structure_type=structure_type if route.route == "symbolic" else None,
+        )
+        structure_filter_applied = any(item.get("structure_filter") for item in results)
         reranked = False
         rerank_note = ""
         if rerank and query_image_path and results:
@@ -261,7 +301,17 @@ class MultiAgentCoordinator:
                     rerank_note = ""
 
         write_last_search(results)
-        return make_pipeline_result(route, loads, load_details, results, reranked, effective_chapter, classified, rerank_note=rerank_note)
+        return make_pipeline_result(
+            route,
+            loads,
+            load_details,
+            results,
+            reranked,
+            effective_chapter,
+            classified,
+            rerank_note=rerank_note,
+            structure_filter_applied=structure_filter_applied,
+        )
 
 
 def is_auto_chapter(chapter: str | None) -> bool:
@@ -292,6 +342,7 @@ def make_pipeline_result(
     classified: dict[str, Any] | None = None,
     *,
     rerank_note: str = "",
+    structure_filter_applied: bool = False,
 ) -> PipelineResult:
     classified = classified or {}
     return PipelineResult(
@@ -305,7 +356,16 @@ def make_pipeline_result(
         chapter_hint=normalize_chapter_hint(classified.get("chapter_hint")),
         chapter_confidence=normalize_chapter_confidence(classified.get("chapter_confidence")),
         chapter_evidence=str(classified.get("chapter_evidence") or "").strip(),
+        structure_type=normalize_structure_type(classified.get("structure_type")),
+        structure_type_confidence=normalize_chapter_confidence(classified.get("structure_type_confidence")),
+        structure_type_reason=str(classified.get("structure_type_reason") or "").strip(),
+        structure_filter_applied=structure_filter_applied,
     )
+
+
+def normalize_structure_type(value: object) -> str:
+    text = str(value or "").strip()
+    return text if text in VALID_STRUCTURE_TYPES and text != "unknown" else ""
 
 
 def load_bank_excel(excel_root: Path, chapter: str) -> pd.DataFrame | None:
@@ -323,10 +383,18 @@ def rank_bank_candidates(
     chapter: str,
     excel_root: Path,
     top_k: int,
+    structure_type: str | None = None,
 ) -> list[dict[str, Any]]:
     df = load_bank_excel(excel_root, chapter)
     if df is None:
         return []
+    filter_type = normalize_structure_type(structure_type)
+    structure_filter_applied = False
+    if filter_type and "结构类型" in df.columns:
+        filtered = df[df["结构类型"].astype(str) == filter_type]
+        if not filtered.empty:
+            df = filtered
+            structure_filter_applied = True
 
     query_loads = search.normalize_query_loads(query_loads)
     scored: list[tuple[float, str]] = []
@@ -349,6 +417,8 @@ def rank_bank_candidates(
             "path": str(path),
             "name": resolved_name,
             "score": score,
+            "structure_type": filter_type if structure_filter_applied else "",
+            "structure_filter": structure_filter_applied,
         })
     return results
 

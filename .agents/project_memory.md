@@ -670,3 +670,66 @@
   - `python -B scripts\smoke_test.py` passed with `SUMMARY PASS warnings=0`.
   - Isolated escalated verification on a temporary mock bank confirmed Excel row count became `0`, original question/answer files were removed from their original locations, and two files were moved into `backups/delete_question_20260702_100152/`.
   - Existing running Feishu bot must be restarted before candidate deletion is live.
+
+## 2026-07-02 Symbolic Bank Structure Type Tagging
+
+- To reduce expensive visual rerank pressure from too many `100%` symbolic-load candidates, the first extra筛选因素 was scoped to coarse structure type, not support count or member count.
+- Final first-version categories:
+  - `梁`
+  - `钢架`：includes 刚架、框架、门架、闭口框架、组合结构.
+  - `桁架`
+  - `拱`
+  - `unknown` only for unclear/incomplete images.
+- Added read-only evaluation script:
+  - `python scripts/evaluate_qwen_structure_type.py --limit 20 --random --seed 20260703 --retries 1`
+  - Markdown reports include inline images for manual review.
+- Random 20-image evaluation after switching from `其他` to `桁架`:
+  - Report: `.tmp_support_eval/qwen_structure_type_20260702_153827/summary.md`
+  - Request success: `20/20`
+  - Known path-label matches: `15/15`
+  - Average latency: about `2.14s`, max `2.50s`.
+- Added batch write script:
+  - `scripts/write_symbolic_structure_types.py`
+  - Default mode is classification/dry-run; `--apply` writes Excel after backup.
+  - `--from-results` can reuse a saved `classification_results.json` without re-calling Qwen.
+- Live symbolic bank Excel files under `D:\桌面\答疑、帮做\结构力学\帮做_字母库` were updated with a single new column: `结构类型`.
+- Backup before writing:
+  - `backups/symbolic_structure_types_20260702_155415`
+- Final live symbolic-bank distribution after one manual correction:
+  - `2静定结构.xlsx`: `钢架 42`, `桁架 37`, `梁 10`, `拱 4`
+  - `3静定结构位移.xlsx`: `钢架 13`, `梁 12`, `桁架 3`
+  - `4力法.xlsx`: `钢架 60`, `梁 20`, `桁架 3`
+  - `5位移法.xlsx`: `钢架 49`, `梁 3`
+  - `6力矩分配.xlsx`: `钢架 4`, `梁 3`
+- Manual correction:
+  - `2静定结构/5桁架/指定杆/题目2/46.jpg` was changed from `钢架` to `桁架`; despite containing beam/diagonal/support-like elements, it belongs to the truss set by project semantics.
+- Verification:
+  - Live symbolic Excel columns are exactly `题目名称`, `荷载`, `结构类型`.
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+- Next implementation step: use `结构类型` only to reorder/tie-break symbolic-bank `100%` candidates before Zhipu rerank; do not hard-filter candidates by structure type.
+- 2026-07-02 timing experiment added:
+  - Script: `scripts/experiment_structure_type_filter.py`
+  - Query sample: `4力法/1梁/1单未知量/题目/10.jpg`, symbolic load `均布:q`, query structure type `梁`.
+  - Old flow `章节 -> 荷载排序 -> Zhipu复筛`: ranked/reranked `29` candidates, total about `48.98s`.
+  - New experimental flow `章节 -> 结构类型筛选 -> 荷载排序 -> Zhipu复筛`: filtered to `9` candidates; structure recognition about `2.49s`, rerank about `12.44s`, total with structure recognition about `14.95s`.
+  - On this sample, structure type filtering reduced rerank candidates by about `69%` and saved about `34s`.
+  - Experiment report: `.tmp_support_eval/structure_filter_compare_20260702_160939/summary.md`.
+- 2026-07-02 official pipeline integration:
+  - Added shared helper `scripts/structure_type_classifier.py`.
+  - `MultiAgentCoordinator.search_loads()` now applies structure type filtering only when:
+    - route is `symbolic`;
+    - `query_image_path` exists;
+    - Qwen returns a non-unknown structure type;
+    - the symbolic-bank Excel has a `结构类型` column with at least one matching row.
+  - Main bank searches and manual load-only searches are unchanged.
+  - Feishu single-question image searches and multi-question diagram-crop searches use the same coordinator path, so symbolic image searches now follow `章节 -> 结构类型筛选 -> 荷载排序 -> Zhipu复筛`.
+  - If structure recognition fails or no matching `结构类型` rows exist, retrieval falls back to the previous load-only ranking.
+  - Smoke test now includes a temp Excel check that `structure_type="梁"` keeps only matching symbolic candidates while unfiltered ranking still keeps both perfect candidates.
+  - Verification:
+    - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+  - Direct coordinator check on `4力法/1梁/1单未知量/题目/10.jpg` returned `route=symbolic`, `structure_type=梁`, `structure_filter_applied=True`, `reranked=True`, Top 1 exact same image.
+  - The direct coordinator check showed a sandbox-only warning when writing live `_last_search.json`; this is due to the current Codex filesystem sandbox and does not affect the official service logic.
+- Main-bank check after symbolic integration:
+  - The largest exact load-signature group in the live main bank is `4力法` with `均布:10`, only `10` candidates; all are effectively steel-frame type by path/visual semantics.
+  - Running the official coordinator on `4力法/2钢架/1单未知量/题目1/1L/1提横/2固+饺/34.jpg` took about `16.56s`, with `route=main`, `reranked=True`, and Top 1 exact same image.
+  - Top repeated main-bank groups mostly have only `4-10` candidates, and hypothetical structure filtering would usually reduce only `0-2` candidates while adding a Qwen structure call. Current decision: do not add structure-type filtering to the main/numeric bank yet.

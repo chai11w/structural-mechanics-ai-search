@@ -22,6 +22,7 @@ from multi_agent_pipeline import (
     AUTO_CHAPTER_MIN_CONFIDENCE,
     MultiAgentCoordinator,
     RuleRouter,
+    rank_bank_candidates,
     resolve_effective_chapter,
     select_rerank_candidates,
     symbolic_root,
@@ -309,6 +310,42 @@ def check_multi_agent_routing() -> list[str]:
         failures.append("auto chapter should reject low-confidence chapter_hint")
     if resolve_effective_chapter("auto", {"chapter_hint": "unknown", "chapter_confidence": 1.0}) is not None:
         failures.append("auto chapter should reject unknown chapter_hint")
+
+    tmp_root = BASE / ".tmp_tests" / "structure_filter_smoke"
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    temp_chapter = "测试章节"
+    temp_workbook = tmp_root / f"{temp_chapter}.xlsx"
+    pd.DataFrame(
+        [
+            {
+                "题目名称": "zz_smoke_beam_unique.jpg",
+                "荷载": json.dumps({"loads": [{"type": "均布", "raw": "0.010"}]}, ensure_ascii=False),
+                "结构类型": "梁",
+            },
+            {
+                "题目名称": "zz_smoke_frame_unique.jpg",
+                "荷载": json.dumps({"loads": [{"type": "均布", "raw": "0.010"}]}, ensure_ascii=False),
+                "结构类型": "钢架",
+            },
+        ]
+    ).to_excel(temp_workbook, index=False)
+    filtered = rank_bank_candidates(
+        [{"type": "均布", "raw": "0.010"}],
+        temp_chapter,
+        tmp_root,
+        top_k=5,
+        structure_type="梁",
+    )
+    if [item["name"] for item in filtered] != ["zz_smoke_beam_unique.jpg"]:
+        failures.append(f"structure type filter should keep only beam candidate, got {filtered}")
+    unfiltered = rank_bank_candidates(
+        [{"type": "均布", "raw": "0.010"}],
+        temp_chapter,
+        tmp_root,
+        top_k=5,
+    )
+    if len(unfiltered) != 2:
+        failures.append(f"unfiltered symbolic rank should keep both perfect candidates, got {unfiltered}")
 
     coordinator = MultiAgentCoordinator(top_k=1)
     needs_chapter = coordinator.search_loads([{"type": "集中", "raw": "10kN"}], "auto", rerank=False)
