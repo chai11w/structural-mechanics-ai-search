@@ -649,3 +649,24 @@
   - Live-bank dry-run planning was checked on examples from `4力法`, `5位移法`, and `6力矩分配`; no live files or Excel were written.
   - `python scripts/smoke_test.py` now includes a dry-run store-mode state check and passed with `SUMMARY PASS warnings=0`.
   - Existing running Feishu bot must be restarted before store mode is live.
+
+## 2026-07-02 Feishu Candidate Delete Flow
+
+- Feishu search candidate pages now support deleting wrong bank entries.
+- Commands:
+  - Single-question candidate page: `-1`, `-2`, or `-3` starts deletion for that ranked candidate.
+  - Multi-question flow: first enter a specific question's candidate page, then use `-1`, `-2`, or `-3` to delete the current question's ranked candidate.
+  - Delete confirmation uses `1` to execute and `0` to cancel.
+- Safety behavior:
+  - Delete only works when a candidate list is active; store mode and normal idle text do not treat `-1` as delete.
+  - `scripts/feishu_delete_flow.py` prepares a delete plan from the selected candidate path and current chapter.
+  - It searches both the main bank and `帮做_字母库` workbook for exact matching `题目名称` rows, so symbolic-bank candidates delete the symbolic Excel row while image files still live under the main chapter folder.
+  - Execution backs up the touched workbook(s), moves the question image and all matching answer images into `backups/delete_question_时间戳/files/`, then deletes the matched Excel rows.
+  - If file movement fails, Excel rows are not deleted.
+- UX behavior:
+  - Confirmation text shows chapter, question path, answer filenames, touched bank(s), and row count.
+  - After a successful delete, the selected candidate is removed from the in-memory session result list; remaining candidates can still be answered or deleted.
+- Verification:
+  - `python -B scripts\smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+  - Isolated escalated verification on a temporary mock bank confirmed Excel row count became `0`, original question/answer files were removed from their original locations, and two files were moved into `backups/delete_question_20260702_100152/`.
+  - Existing running Feishu bot must be restarted before candidate deletion is live.

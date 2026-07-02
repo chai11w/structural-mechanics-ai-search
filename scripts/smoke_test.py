@@ -41,6 +41,7 @@ from scripts.feishu_tiku_bot import (
     parse_chapter_mode,
 )
 from scripts.feishu_store_flow import FeishuStoreService
+from scripts.feishu_delete_flow import DeleteApplyResult, DeletePlan, WorkbookDeleteTarget
 
 
 EXPECTED_CHAPTERS = [
@@ -485,6 +486,46 @@ def check_feishu_tiku_bot_state() -> list[str]:
     store_done = store_bot.receive_text(store_sender, "1")
     if "[dry-run] 已新增题目" not in "\n".join(store_done.texts):
         failures.append("store mode dry-run confirmation should finish without writing")
+
+    class FakeDeleteService:
+        def prepare_plan(self, candidate, rank, chapter):
+            return DeletePlan(
+                rank=rank,
+                chapter=chapter,
+                question_path=Path("mock-bank/5位移法/题目/1.jpg"),
+                question_rel_path="5位移法/题目/1.jpg",
+                answer_paths=[Path("mock-bank/5位移法/答案/1.jpg")],
+                workbook_targets=[
+                    WorkbookDeleteTarget("main", Path("mock-bank/5位移法.xlsx"), ["5位移法/题目/1.jpg"], [2])
+                ],
+                candidate=dict(candidate),
+            )
+
+        def apply_plan(self, plan):
+            return DeleteApplyResult(plan=plan, dry_run=True)
+
+    delete_bot = TikuBot(
+        options=options,
+        coordinator=MockCoordinator([image]),
+        delete_service=FakeDeleteService(),
+    )
+    delete_sender = "delete-smoke"
+    delete_session = TikuSession(
+        state="waiting_choice",
+        chapter="5位移法",
+        results=[{"rank": 1, "path": str(image), "name": "5位移法/题目/1.jpg", "score": 1.0}],
+    )
+    delete_bot.sessions.save(delete_sender, delete_session)
+    delete_confirm = delete_bot.receive_text(delete_sender, "-1")
+    if "准备删除第 1 个候选" not in "\n".join(delete_confirm.texts):
+        failures.append("-1 should show delete confirmation for current candidate")
+    delete_cancel = delete_bot.receive_text(delete_sender, "0")
+    if "已取消删除" not in "\n".join(delete_cancel.texts):
+        failures.append("0 should cancel delete confirmation")
+    delete_bot.receive_text(delete_sender, "-1")
+    delete_done = delete_bot.receive_text(delete_sender, "1")
+    if "[dry-run] 已删除第 1 个候选" not in "\n".join(delete_done.texts):
+        failures.append("1 should confirm dry-run candidate deletion")
     return failures
 
 

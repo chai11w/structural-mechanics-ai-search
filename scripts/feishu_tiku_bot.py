@@ -40,6 +40,13 @@ if str(BASE) not in sys.path:
 
 from multi_agent_pipeline import MultiAgentCoordinator  # noqa: E402
 from search import ANSWER_OUTPUT, answer, cfg  # noqa: E402
+from scripts.feishu_delete_flow import (  # noqa: E402
+    DeletePlan,
+    FeishuDeleteService,
+    format_delete_confirmation,
+    format_delete_success,
+    parse_delete_choice,
+)
 from scripts.feishu_store_flow import (  # noqa: E402
     FeishuStoreService,
     StoreDraft,
@@ -67,6 +74,7 @@ CHAPTER_MODE_AUTO = "auto"
 CHAPTER_MODE_MANUAL = "manual"
 CHAPTER_MODE_TOGGLE = "toggle"
 STORE_STATES = {"store_waiting_question", "store_waiting_chapter", "store_waiting_answers", "store_confirm"}
+DELETE_CONFIRM_STATE = "confirm_delete"
 
 BLOCK_FILTER_PROMPT = """你是结构力学图块筛选助手。图片里有若干编号 block。
 请只判断哪些 block 是完整或接近完整的结构力学结构图/受力图。
@@ -109,6 +117,8 @@ class TikuSession:
     current_question: str | None = None
     diagram_crops: dict[str, str] = field(default_factory=dict)
     store: StoreDraft | None = None
+    pending_delete: DeletePlan | None = None
+    delete_return_state: str | None = None
     updated_at: float = field(default_factory=time.time)
 
 
@@ -272,11 +282,13 @@ class TikuBot:
         coordinator: MultiAgentCoordinator | None = None,
         sessions: TikuSessionStore | None = None,
         store_service: FeishuStoreService | None = None,
+        delete_service: FeishuDeleteService | None = None,
     ) -> None:
         self.options = options
         self.coordinator = coordinator or MultiAgentCoordinator(top_k=options.top_k)
         self.sessions = sessions or TikuSessionStore(options.session_ttl_seconds)
         self.store_service = store_service or FeishuStoreService(dry_run=options.dry_run)
+        self.delete_service = delete_service or FeishuDeleteService(dry_run=options.dry_run)
         self._chapter_modes: dict[str, str] = {}
         self._mode_lock = threading.Lock()
 
@@ -298,6 +310,9 @@ class TikuBot:
     def receive_text(self, sender: str, text: str) -> BotResponse:
         clean = text.strip()
         session = self.sessions.get(sender)
+
+        if session.state == DELETE_CONFIRM_STATE:
+            return self._handle_delete_confirmation(sender, session, clean)
 
         if is_store_entry_command(clean):
             session = TikuSession(state="store_waiting_question")
@@ -341,9 +356,12 @@ class TikuBot:
             return self._search(sender, session, chapter)
 
         if session.state == "waiting_choice":
+            delete_choice = parse_delete_choice(clean)
+            if delete_choice is not None:
+                return self._start_delete_candidate(sender, session, delete_choice, "waiting_choice")
             choice = parse_choice(clean)
             if choice is None:
-                return BotResponse(texts=["回复 0/1/2/3 获取对应答案；0 表示没有想要的，退出本次搜题。"])
+                return BotResponse(texts=["回复 0/1/2/3 获取对应答案；回复 -1/-2/-3 删除对应错题；0 退出。"])
             return self._answer_choice(sender, session, choice)
 
         chapter = parse_chapter(clean)
@@ -351,6 +369,70 @@ class TikuBot:
             return BotResponse(texts=["请先发送题目图片，然后我会用这个章节检索。"])
         mode_label = "自动章节" if self.chapter_mode(sender) == CHAPTER_MODE_AUTO else "手动章节"
         return BotResponse(texts=[f"请先发送题目图片。当前模式：{mode_label}。发送“手动”或“自动”可切换。"])
+
+    def _start_delete_candidate(
+        self,
+        sender: str,
+        session: TikuSession,
+        choice: int,
+        return_state: str,
+    ) -> BotResponse:
+        if choice < 1 or choice > len(session.results):
+            return BotResponse(texts=[f"当前只有 {len(session.results)} 个候选，请回复 -1 到 -{len(session.results)} 删除。"])
+        try:
+            plan = self.delete_service.prepare_plan(
+                session.results[choice - 1],
+                choice,
+                session.chapter,
+            )
+        except Exception as exc:  # noqa: BLE001 - user-facing maintenance command.
+            return BotResponse(texts=[f"暂不能删除：{exc}"])
+
+        session.pending_delete = plan
+        session.delete_return_state = return_state
+        session.state = DELETE_CONFIRM_STATE
+        self.sessions.save(sender, session)
+        return BotResponse(texts=[format_delete_confirmation(plan)])
+
+    def _handle_delete_confirmation(self, sender: str, session: TikuSession, clean: str) -> BotResponse:
+        if clean == "0":
+            session.state = session.delete_return_state or "waiting_choice"
+            session.pending_delete = None
+            session.delete_return_state = None
+            self.sessions.save(sender, session)
+            return BotResponse(texts=["已取消删除。"])
+        if clean != "1":
+            return BotResponse(texts=["回复 1 确认删除，回复 0 取消。"])
+        if not session.pending_delete:
+            self.sessions.clear(sender)
+            return BotResponse(texts=["删除会话已失效，请重新检索后再删。"])
+
+        plan = session.pending_delete
+        try:
+            result = self.delete_service.apply_plan(plan)
+        except Exception as exc:  # noqa: BLE001 - keep the candidate session for retry/cancel.
+            return BotResponse(texts=[f"删除失败：{exc}\n请检查后重试，或回复 0 取消。"])
+
+        if 1 <= plan.rank <= len(session.results):
+            del session.results[plan.rank - 1]
+        return_state = session.delete_return_state or "waiting_choice"
+        session.pending_delete = None
+        session.delete_return_state = None
+        session.state = return_state
+
+        success = format_delete_success(result)
+        if not session.results:
+            self.sessions.clear(sender)
+            return BotResponse(texts=[success + "\n\n当前没有剩余候选，已结束本次搜题。"])
+
+        self.sessions.save(sender, session)
+        if return_state == "waiting_multi_choice":
+            question = find_multi_question(session, session.current_question or "")
+            if question:
+                return BotResponse(texts=[
+                    success + "\n\n" + format_multi_action_lines(question, len(session.results), heading="请继续回复：")
+                ])
+        return BotResponse(texts=[success + "\n\n" + format_single_action_lines(len(session.results), heading="请继续回复：")])
 
     def _handle_store_image(self, sender: str, session: TikuSession, image_path: Path) -> BotResponse:
         if session.state == "store_waiting_question":
@@ -491,6 +573,11 @@ class TikuBot:
         if session.state == "waiting_multi_question" and clean == "0":
             self.sessions.clear(sender)
             return BotResponse(texts=["已结束本次多题搜题。"])
+
+        if session.state == "waiting_multi_choice":
+            delete_choice = parse_delete_choice(clean)
+            if delete_choice is not None:
+                return self._start_delete_candidate(sender, session, delete_choice, "waiting_multi_choice")
 
         command = parse_multi_command(clean)
         if not command:
@@ -936,6 +1023,7 @@ def format_candidate_reply(chapter: str, results: list[dict[str, Any]], *, reran
     lines = [
         f"章节：{chapter}",
         f"下面是相似题目 Top {len(results)}，相似比分别为：{scores}",
+        f"-1/-2/-3：删除对应错题",
         "0：结束",
         "a：切换手动识别章节",
     ]
@@ -1022,7 +1110,16 @@ def format_multi_action_lines(question: dict[str, Any], result_count: int, *, he
     command_label = question_command_label(label)
     lines = [heading]
     lines.extend(f"{command_label}-{index}      获取第{label}题第{index}个答案" for index in range(1, result_count + 1))
+    lines.append("-1/-2/-3  删除当前候选错题")
     lines.append("0        返回多题列表")
+    return "\n".join(lines)
+
+
+def format_single_action_lines(result_count: int, *, heading: str) -> str:
+    lines = [heading]
+    lines.extend(f"{index}        获取第{index}名答案" for index in range(1, result_count + 1))
+    lines.append("-1/-2/-3  删除对应错题")
+    lines.append("0        结束")
     return "\n".join(lines)
 
 
