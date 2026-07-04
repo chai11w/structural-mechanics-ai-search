@@ -1,7 +1,8 @@
-"""Append-only chapter judgment logs for prompt/rule iteration.
+"""Append-only Feishu chapter failure logs for prompt/rule iteration.
 
-The log is intentionally lightweight JSONL. It records what the model thought,
-what chapter was finally used, and where the judgment came from.
+The log is intentionally lightweight JSONL. It records only valuable samples:
+Feishu auto chapter recognition failed, then the user manually supplied the
+correct chapter.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from typing import Any
 
 
 BASE = Path(__file__).resolve().parents[1]
-DEFAULT_LOG_PATH = BASE / "data" / "chapter_judgment_log.jsonl"
+DEFAULT_LOG_PATH = BASE / "data" / "feishu_chapter_failure_log.jsonl"
 
 
 def append_chapter_judgment_log(
@@ -31,7 +32,7 @@ def append_chapter_judgment_log(
     log_path: Path = DEFAULT_LOG_PATH,
     extra: dict[str, Any] | None = None,
 ) -> None:
-    """Append one chapter-judgment observation.
+    """Append one failed-auto/manual-chapter observation.
 
     Logging must never break search/store flows, so all filesystem errors are
     swallowed by callers through this helper.

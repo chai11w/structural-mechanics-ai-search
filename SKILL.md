@@ -103,7 +103,7 @@ python scripts/feishu_tiku_bot.py dry-run-flow --image "D:\path\to\question.jpg"
 
 - 不要跨章节自动搜索；章节必须由用户指定、确认，或由 `chapter=auto` 在高置信明确文字证据下自动确定。自动识别失败时必须让用户选择章节；GUI/飞书都不能自动遍历所有章节。
 - 自动章节判断里，“静定 + 内力图/弯矩图/剪力图/轴力图”应判为 `2静定结构`，不要限定后面是梁、钢架、多跨梁还是其他结构；但只有“内力图/弯矩图/剪力图”而没有“静定”时仍不能判静定结构。
-- 2026-07-04 起先收集章节判断日志再放开 prompt：未来 GUI/飞书/CLI 图片检索和新增题流程会写入 `data/chapter_judgment_log.jsonl`，现有题库标签快照在 `data/chapter_judgment_seed.jsonl`。不要在缺少样本评估时直接大幅放宽章节 prompt。
+- 2026-07-04 起先收集飞书章节识别失败样本再放开 prompt：只记录“飞书自动识别章节失败 -> 用户手动输入章节”的样本到 `data/feishu_chapter_failure_log.jsonl`。不要把 GUI/CLI 全量检索或现有 Excel 标签当作 prompt 训练样本；缺少失败样本评估时不要大幅放宽章节 prompt。
 - 多题图不要让 LLM 直接给 bbox 来复筛；坐标容易漂。当前做法是 OpenCV 找结构图块、按题号顺序绑定并裁图；裁图缺失时退回荷载粗筛。章节未知或不在 2-8 章范围内的题不要自动检索，等用户指定章节或单独发图。
 - 不要直接读写 `config.json`、`config.local.json` 里的密钥；需要结构时看 `config.example.json`。
 - 运行前后可用 `python scripts/smoke_test.py` 做只读检查；它会全表检查荷载 JSON、图片路径存在性、路径大小写，并验证旧路径自修复案例。

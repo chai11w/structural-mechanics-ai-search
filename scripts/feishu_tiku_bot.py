@@ -118,6 +118,7 @@ class TikuSession:
     current_question: str | None = None
     diagram_crops: dict[str, str] = field(default_factory=dict)
     store: StoreDraft | None = None
+    pending_chapter_failure: dict[str, Any] | None = None
     pending_delete: DeletePlan | None = None
     delete_return_state: str | None = None
     updated_at: float = field(default_factory=time.time)
@@ -354,6 +355,15 @@ class TikuBot:
             if not session.image_path:
                 self.sessions.clear(sender)
                 return BotResponse(texts=["这次会话里没有题图，请先发送图片。"])
+            if session.pending_chapter_failure:
+                log_manual_chapter_after_failure(
+                    source="feishu_auto_failed_manual_chapter",
+                    image_path=session.image_path,
+                    manual_text=clean,
+                    final_chapter=chapter,
+                    failure=session.pending_chapter_failure,
+                )
+                session.pending_chapter_failure = None
             return self._search(sender, session, chapter)
 
         if session.state == "waiting_choice":
@@ -490,11 +500,11 @@ class TikuBot:
             if not chapter:
                 return BotResponse(texts=[format_store_chapter_prompt(session.store)])
             append_chapter_judgment_log(
-                source="feishu_store_manual_chapter",
+                source="feishu_store_auto_failed_manual_chapter",
                 image_path=session.store.question_image_path,
-                requested_chapter=chapter,
+                requested_chapter="auto",
                 final_chapter=chapter,
-                decision_mode="manual",
+                decision_mode="manual_after_auto_failed",
                 classified={
                     "chapter_hint": session.store.chapter_hint,
                     "chapter_confidence": session.store.chapter_confidence,
@@ -504,6 +514,7 @@ class TikuBot:
                 loads=session.store.loads,
                 route=session.store.route,
                 category=session.store.category,
+                extra={"manual_text": clean},
             )
             session.store.chapter = chapter
             session.state = "store_waiting_answers"
@@ -609,6 +620,23 @@ class TikuBot:
             return self._answer_multi_choice(sender, session, question, int(command["value"]))
 
         chapter = command["value"] if command["kind"] == "chapter" else None
+        if chapter and not effective_question_chapter(question):
+            append_chapter_judgment_log(
+                source="feishu_multi_auto_failed_manual_chapter",
+                image_path=session.image_path,
+                requested_chapter="auto",
+                final_chapter=chapter,
+                decision_mode="manual_after_auto_failed",
+                classified=question,
+                loads=question.get("loads", []),
+                route="",
+                category="",
+                extra={
+                    "manual_text": clean,
+                    "question_label": question.get("label", ""),
+                    "diagram_crop": session.diagram_crops.get(normalize_question_key(question["label"]), ""),
+                },
+            )
         return self._search_multi_question(sender, session, question, chapter)
 
     def _search(self, sender: str, session: TikuSession, chapter: str) -> BotResponse:
@@ -618,10 +646,10 @@ class TikuBot:
             chapter,
             rerank=True,
             rerank_top=self.options.rerank_top,
-            source="feishu_image_search",
         )
         if result.route.route == "needs_chapter":
             session.state = "waiting_chapter"
+            session.pending_chapter_failure = failure_from_pipeline_result(result)
             self.sessions.save(sender, session)
             return BotResponse(texts=[format_chapter_prompt(session.image_path, result)])
         if result.route.route == "needs_review":
@@ -674,7 +702,6 @@ class TikuBot:
             force_rerank=bool(diagram_crop),
             status_callback=None,
             classified=question,
-            source="feishu_multi_question_search",
         )
         if result.route.route == "needs_review":
             return BotResponse(texts=[f"第{question['label']}题暂时不能自动检索，需要人工复核。\n分类：{result.route.category}"])
@@ -1137,6 +1164,48 @@ def format_multi_action_lines(question: dict[str, Any], result_count: int, *, he
     lines.append("-1/-2/-3  删除当前候选错题")
     lines.append("0        返回多题列表")
     return "\n".join(lines)
+
+
+def failure_from_pipeline_result(result: Any) -> dict[str, Any]:
+    return {
+        "chapter_hint": getattr(result, "chapter_hint", "unknown"),
+        "chapter_confidence": getattr(result, "chapter_confidence", 0.0),
+        "chapter_evidence": getattr(result, "chapter_evidence", ""),
+        "loads": getattr(result, "loads", []),
+        "route": getattr(getattr(result, "route", None), "route", ""),
+        "category": getattr(getattr(result, "route", None), "category", ""),
+        "reason": getattr(getattr(result, "route", None), "reason", ""),
+    }
+
+
+def log_manual_chapter_after_failure(
+    *,
+    source: str,
+    image_path: Path | str | None,
+    manual_text: str,
+    final_chapter: str,
+    failure: dict[str, Any],
+) -> None:
+    append_chapter_judgment_log(
+        source=source,
+        image_path=image_path,
+        requested_chapter="auto",
+        final_chapter=final_chapter,
+        decision_mode="manual_after_auto_failed",
+        classified={
+            "chapter_hint": failure.get("chapter_hint", "unknown"),
+            "chapter_confidence": failure.get("chapter_confidence", 0.0),
+            "chapter_evidence": failure.get("chapter_evidence", ""),
+            "loads": failure.get("loads", []),
+        },
+        loads=failure.get("loads", []),
+        route=str(failure.get("route") or ""),
+        category=str(failure.get("category") or ""),
+        extra={
+            "manual_text": manual_text,
+            "failure_reason": str(failure.get("reason") or ""),
+        },
+    )
 
 
 def format_single_action_lines(result_count: int, *, heading: str) -> str:

@@ -18,26 +18,26 @@
 ## 2026-07-04 Chapter Judgment Logging Phase
 
 - User wants automatic chapter recognition to move from the current conservative 3-4/10 recall toward 8/10+ without making retrieval slower or introducing broad cross-chapter mistakes.
-- Decision: do not loosen the chapter prompt immediately. First collect real judgment data from existing and future usage, then tune prompt/rules against observed false-unknown and false-positive cases.
+- Correction from user: do not store broad GUI/CLI/existing-Excel chapter records. Only store valuable Feishu work samples where automatic chapter recognition failed and the user manually supplied the chapter.
+- Decision: do not loosen the chapter prompt immediately. First collect Feishu failed-auto/manual-chapter samples, then tune prompt/rules against observed false-unknown cases.
 - Added append-only log helper `scripts/chapter_judgment_log.py`.
-- Future chapter judgment events write JSONL records to `data/chapter_judgment_log.jsonl`, including:
-  - source entry point such as `gui_image_search`, `feishu_image_search`, `feishu_store_classify`, `feishu_store_manual_chapter`, `cli_image_search`;
+- Future samples write JSONL records to `data/feishu_chapter_failure_log.jsonl`, including:
+  - source entry point: `feishu_auto_failed_manual_chapter`, `feishu_store_auto_failed_manual_chapter`, or `feishu_multi_auto_failed_manual_chapter`;
   - image path;
-  - requested chapter and final chapter;
-  - decision mode `auto`, `manual`, `needs_manual`, or `manual_path`;
+  - requested chapter `auto` and user-supplied final chapter;
+  - decision mode `manual_after_auto_failed`;
   - Qwen `chapter_hint`, `chapter_confidence`, `chapter_evidence`;
-  - loads, route/category, result count, rerank flag where available.
+  - recognized loads, route/category when available;
+  - `manual_text`, plus multi-question label/diagram crop where available.
 - Integrated logging into:
-  - `MultiAgentCoordinator.search_image/search_loads` for GUI/Feishu/CLI retrieval;
-  - Feishu store classification and manual store chapter selection;
-  - GUI legacy store button.
-- Logging intentionally skips records without a real image path and skips mock test images so smoke tests do not pollute the dataset.
-- Exported current live Excel chapter labels with `scripts/export_chapter_judgment_seed.py`; output `data/chapter_judgment_seed.jsonl` currently has `764` existing labeled records from main and symbolic workbooks. This seed is a path/chapter label baseline, not model OCR evidence.
-- A real CLI image search on `8影响线/2数值计算/题目a/2.jpg` wrote a sample log record with `chapter_hint=8影响线`, `final_chapter=8影响线`.
+  - Feishu single-question image search: when auto returns `needs_chapter`, store the failed result in session; when the user replies a chapter, append one sample.
+  - Feishu store flow: when Qwen cannot determine chapter and user manually chooses chapter, append one sample.
+  - Feishu multi-question flow: when a question has no effective chapter and user searches via `题号-章节`, append one sample.
+- Existing local `.tmp_feishu_tiku` files mostly contain incoming images/crops and empty bot stdout/stderr logs; they do not contain the historical manual chapter text, so old failed/manual samples cannot be reliably reconstructed from local files.
+- Removed the broad existing-Excel seed export and broad GUI/CLI logging from the previous attempt.
 - Verification:
-  - `python scripts/export_chapter_judgment_seed.py` reported `seed_records=764`.
   - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
-- Next prompt-tuning threshold: after enough real manual correction samples accumulate, inspect logs for common `unknown -> final_chapter` patterns and only then relax prompt/rules with a small evaluation set.
+- Next prompt-tuning threshold: after enough Feishu failed-auto/manual-chapter samples accumulate, inspect logs for common `unknown -> final_chapter` patterns and only then relax prompt/rules with a small evaluation set.
 
 ## Implemented
 

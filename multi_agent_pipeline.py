@@ -18,7 +18,6 @@ from typing import Any
 import pandas as pd
 
 import search
-from scripts.chapter_judgment_log import append_chapter_judgment_log, decision_mode_for
 from scripts.classify_question_bank import (
     DEFAULT_ENDPOINT,
     DEFAULT_MODEL,
@@ -219,7 +218,6 @@ class MultiAgentCoordinator:
         *,
         rerank: bool = True,
         rerank_top: int = 3,
-        source: str = "multi_agent_image",
     ) -> PipelineResult:
         classified = self.qwen.classify_image(image_path)
         return self.search_loads(
@@ -229,7 +227,6 @@ class MultiAgentCoordinator:
             rerank=rerank,
             rerank_top=rerank_top,
             classified=classified,
-            source=source,
         )
 
     def analyze_image_layout(self, image_path: str | Path) -> dict[str, Any]:
@@ -246,14 +243,11 @@ class MultiAgentCoordinator:
         force_rerank: bool = False,
         status_callback=None,
         classified: dict[str, Any] | None = None,
-        source: str = "multi_agent_loads",
     ) -> PipelineResult:
         loads = search.normalize_query_loads(loads)
         route, load_details = self.router.route(loads)
         if route.route == "needs_review" or route.excel_root is None:
-            result = make_pipeline_result(route, loads, load_details, [], False, chapter, classified)
-            log_pipeline_chapter_judgment(source, query_image_path, chapter, result)
-            return result
+            return make_pipeline_result(route, loads, load_details, [], False, chapter, classified)
 
         effective_chapter = resolve_effective_chapter(chapter, classified)
         if not effective_chapter:
@@ -263,9 +257,7 @@ class MultiAgentCoordinator:
                 "chapter auto-detection missing or low confidence",
                 None,
             )
-            result = make_pipeline_result(needs_chapter, loads, load_details, [], False, None, classified)
-            log_pipeline_chapter_judgment(source, query_image_path, chapter, result)
-            return result
+            return make_pipeline_result(needs_chapter, loads, load_details, [], False, None, classified)
 
         if status_callback:
             status_callback("候选检索中...")
@@ -309,7 +301,7 @@ class MultiAgentCoordinator:
                     rerank_note = ""
 
         write_last_search(results)
-        result = make_pipeline_result(
+        return make_pipeline_result(
             route,
             loads,
             load_details,
@@ -320,8 +312,6 @@ class MultiAgentCoordinator:
             rerank_note=rerank_note,
             structure_filter_applied=structure_filter_applied,
         )
-        log_pipeline_chapter_judgment(source, query_image_path, chapter, result)
-        return result
 
 
 def is_auto_chapter(chapter: str | None) -> bool:
@@ -376,34 +366,6 @@ def make_pipeline_result(
 def normalize_structure_type(value: object) -> str:
     text = str(value or "").strip()
     return text if text in VALID_STRUCTURE_TYPES and text != "unknown" else ""
-
-
-def log_pipeline_chapter_judgment(
-    source: str,
-    image_path: str | None,
-    requested_chapter: str | None,
-    result: PipelineResult,
-) -> None:
-    if not image_path and not result.chapter_hint:
-        return
-    append_chapter_judgment_log(
-        source=source,
-        image_path=image_path,
-        requested_chapter=requested_chapter,
-        final_chapter=result.chapter,
-        decision_mode=decision_mode_for(requested_chapter, result.chapter),
-        classified={
-            "chapter_hint": result.chapter_hint,
-            "chapter_confidence": result.chapter_confidence,
-            "chapter_evidence": result.chapter_evidence,
-            "loads": result.loads,
-        },
-        loads=result.loads,
-        route=result.route.route,
-        category=result.route.category,
-        result_count=len(result.results),
-        extra={"reranked": result.reranked},
-    )
 
 
 def load_bank_excel(excel_root: Path, chapter: str) -> pd.DataFrame | None:
