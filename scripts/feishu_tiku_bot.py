@@ -40,6 +40,7 @@ if str(BASE) not in sys.path:
 
 from multi_agent_pipeline import MultiAgentCoordinator  # noqa: E402
 from search import ANSWER_OUTPUT, answer, cfg  # noqa: E402
+from scripts.chapter_judgment_log import append_chapter_judgment_log  # noqa: E402
 from scripts.feishu_delete_flow import (  # noqa: E402
     DeletePlan,
     FeishuDeleteService,
@@ -488,6 +489,22 @@ class TikuBot:
             chapter = parse_chapter(clean)
             if not chapter:
                 return BotResponse(texts=[format_store_chapter_prompt(session.store)])
+            append_chapter_judgment_log(
+                source="feishu_store_manual_chapter",
+                image_path=session.store.question_image_path,
+                requested_chapter=chapter,
+                final_chapter=chapter,
+                decision_mode="manual",
+                classified={
+                    "chapter_hint": session.store.chapter_hint,
+                    "chapter_confidence": session.store.chapter_confidence,
+                    "chapter_evidence": session.store.chapter_evidence,
+                    "loads": session.store.loads,
+                },
+                loads=session.store.loads,
+                route=session.store.route,
+                category=session.store.category,
+            )
             session.store.chapter = chapter
             session.state = "store_waiting_answers"
             self.sessions.save(sender, session)
@@ -601,6 +618,7 @@ class TikuBot:
             chapter,
             rerank=True,
             rerank_top=self.options.rerank_top,
+            source="feishu_image_search",
         )
         if result.route.route == "needs_chapter":
             session.state = "waiting_chapter"
@@ -655,6 +673,8 @@ class TikuBot:
             rerank_top=self.options.rerank_top,
             force_rerank=bool(diagram_crop),
             status_callback=None,
+            classified=question,
+            source="feishu_multi_question_search",
         )
         if result.route.route == "needs_review":
             return BotResponse(texts=[f"第{question['label']}题暂时不能自动检索，需要人工复核。\n分类：{result.route.category}"])
@@ -779,8 +799,9 @@ class MockCoordinator:
         *,
         rerank: bool = True,
         rerank_top: int = 3,
+        source: str = "mock_image_search",
     ) -> Any:
-        del image_path, rerank, rerank_top
+        del image_path, rerank, rerank_top, source
         if self.auto_needs_chapter and str(chapter).strip().lower() == "auto":
             return type(
                 "MockPipelineResult",
@@ -838,8 +859,10 @@ class MockCoordinator:
         rerank: bool = False,
         force_rerank: bool = False,
         status_callback=None,
+        classified: dict[str, Any] | None = None,
+        source: str = "mock_load_search",
     ) -> Any:
-        del loads, rerank, force_rerank, status_callback
+        del loads, rerank, force_rerank, status_callback, classified, source
         return type(
             "MockPipelineResult",
             (),

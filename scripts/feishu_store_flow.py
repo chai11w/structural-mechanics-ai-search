@@ -19,6 +19,7 @@ from PIL import Image
 
 import search
 from multi_agent_pipeline import MultiAgentCoordinator, RuleRouter, resolve_effective_chapter, symbolic_root
+from scripts.chapter_judgment_log import append_chapter_judgment_log, decision_mode_for
 from scripts.apply_main_bank_update import normalized_main_loads
 from scripts.build_symbolic_bank import mapped_symbolic_loads
 from scripts.classify_question_bank import normalize_load_item
@@ -109,6 +110,17 @@ class FeishuStoreService:
             draft.stored_loads = loads_for_main(draft.question_rel_placeholder(), loads, route.category)
         elif route.route == "symbolic" and route.category == "symbolic_unassigned":
             draft.stored_loads = mapped_symbolic_loads(loads)
+        append_chapter_judgment_log(
+            source="feishu_store_classify",
+            image_path=image_path,
+            requested_chapter="auto",
+            final_chapter=chapter,
+            decision_mode=decision_mode_for("auto", chapter),
+            classified=classified,
+            loads=loads,
+            route=route.route,
+            category=route.category,
+        )
         return draft
 
     def prepare_plan(self, draft: StoreDraft) -> StorePlan:

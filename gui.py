@@ -58,6 +58,7 @@ from search import (
     resolve_question_path, add_default_numeric_unit, normalize_query_loads
 )
 from multi_agent_pipeline import MultiAgentCoordinator, QwenClassifier, RuleRouter, symbolic_root, write_last_search
+from scripts.chapter_judgment_log import append_chapter_judgment_log
 from scripts.audit_unindexed_questions import (
     CHAPTERS as AUDIT_CHAPTERS,
     DEFAULT_SPECIAL_INDEX,
@@ -452,6 +453,7 @@ class App:
                         rerank_top=3,
                         classified=classified,
                         status_callback=lambda text, r=route.route: self._set_route_status(r, text),
+                        source="gui_image_search",
                     )
                 else:
                     query_loads = self._get_query_loads()
@@ -463,6 +465,7 @@ class App:
                         chapter,
                         rerank=False,
                         status_callback=self._set_status,
+                        source="gui_manual_load_search",
                     )
                     self.win.after(0, self._clear_loads)
 
@@ -858,6 +861,17 @@ class App:
                 classified = self._multi_agent.qwen.classify_image(img)
                 loads_list = normalize_query_loads(classified.get("loads", []))
                 result = {"loads": loads_list}
+                append_chapter_judgment_log(
+                    source="gui_store_legacy",
+                    image_path=img,
+                    requested_chapter=chapter,
+                    final_chapter=chapter,
+                    decision_mode="manual_path",
+                    classified=classified,
+                    loads=loads_list,
+                    route="main",
+                    category=str(classified.get("category") or ""),
+                )
 
                 rel_path = str(Path(img).relative_to(ROOT)).replace("\\", "/")
                 import json as _json

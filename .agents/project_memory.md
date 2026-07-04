@@ -15,6 +15,30 @@
 - 用户要求：本项目以后每次完成代码或题库逻辑更改，都要同步写入 `.agents/project_memory.md`，并提交、推送到 GitHub，方便换对话后继续接上最新状态。
 - 常规收尾顺序：更新项目记忆 -> 运行相关验证 -> `git commit` -> `git push`。
 
+## 2026-07-04 Chapter Judgment Logging Phase
+
+- User wants automatic chapter recognition to move from the current conservative 3-4/10 recall toward 8/10+ without making retrieval slower or introducing broad cross-chapter mistakes.
+- Decision: do not loosen the chapter prompt immediately. First collect real judgment data from existing and future usage, then tune prompt/rules against observed false-unknown and false-positive cases.
+- Added append-only log helper `scripts/chapter_judgment_log.py`.
+- Future chapter judgment events write JSONL records to `data/chapter_judgment_log.jsonl`, including:
+  - source entry point such as `gui_image_search`, `feishu_image_search`, `feishu_store_classify`, `feishu_store_manual_chapter`, `cli_image_search`;
+  - image path;
+  - requested chapter and final chapter;
+  - decision mode `auto`, `manual`, `needs_manual`, or `manual_path`;
+  - Qwen `chapter_hint`, `chapter_confidence`, `chapter_evidence`;
+  - loads, route/category, result count, rerank flag where available.
+- Integrated logging into:
+  - `MultiAgentCoordinator.search_image/search_loads` for GUI/Feishu/CLI retrieval;
+  - Feishu store classification and manual store chapter selection;
+  - GUI legacy store button.
+- Logging intentionally skips records without a real image path and skips mock test images so smoke tests do not pollute the dataset.
+- Exported current live Excel chapter labels with `scripts/export_chapter_judgment_seed.py`; output `data/chapter_judgment_seed.jsonl` currently has `764` existing labeled records from main and symbolic workbooks. This seed is a path/chapter label baseline, not model OCR evidence.
+- A real CLI image search on `8影响线/2数值计算/题目a/2.jpg` wrote a sample log record with `chapter_hint=8影响线`, `final_chapter=8影响线`.
+- Verification:
+  - `python scripts/export_chapter_judgment_seed.py` reported `seed_records=764`.
+  - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
+- Next prompt-tuning threshold: after enough real manual correction samples accumulate, inspect logs for common `unknown -> final_chapter` patterns and only then relax prompt/rules with a small evaluation set.
+
 ## Implemented
 
 - `search.py` 是核心 CLI 与业务逻辑：

@@ -55,6 +55,7 @@ def main() -> int:
             args.chapter,
             rerank=not args.no_rerank,
             rerank_top=args.rerank_top,
+            source="cli_image_search",
         )
     elif args.loads:
         loads = json.loads(args.loads).get("loads", [])
@@ -62,6 +63,7 @@ def main() -> int:
             loads,
             args.chapter,
             rerank=False,
+            source="cli_load_search",
         )
     else:
         loads = [{"type": typ, "raw": raw} for typ, raw in zip(args.types, args.raws)]
@@ -69,6 +71,7 @@ def main() -> int:
             loads,
             args.chapter,
             rerank=False,
+            source="cli_load_search",
         )
 
     print(format_pipeline_result(result))
