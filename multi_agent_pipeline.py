@@ -264,17 +264,25 @@ class MultiAgentCoordinator:
         structure_type = ""
         structure_filter_applied = False
         if route.route == "symbolic" and query_image_path:
-            if status_callback:
-                status_callback("结构类型识别中...")
-            try:
-                structure = self.qwen.classify_structure_type(query_image_path)
-                structure_type = normalize_structure_type(structure.get("structure_type"))
+            text_structure = infer_structure_type_from_text(classified)
+            if text_structure:
+                structure_type = text_structure
                 if classified is not None:
                     classified["structure_type"] = structure_type
-                    classified["structure_type_confidence"] = structure.get("confidence", 0.0)
-                    classified["structure_type_reason"] = structure.get("reason", "")
-            except Exception as exc:  # noqa: BLE001 - structure type is an optional speed-up.
-                print(f"WARNING: 结构类型识别失败，跳过类型筛选: {exc}")
+                    classified["structure_type_confidence"] = 1.0
+                    classified["structure_type_reason"] = "题干文字"
+            else:
+                if status_callback:
+                    status_callback("结构类型识别中...")
+                try:
+                    structure = self.qwen.classify_structure_type(query_image_path)
+                    structure_type = normalize_structure_type(structure.get("structure_type"))
+                    if classified is not None:
+                        classified["structure_type"] = structure_type
+                        classified["structure_type_confidence"] = structure.get("confidence", 0.0)
+                        classified["structure_type_reason"] = structure.get("reason", "")
+                except Exception as exc:  # noqa: BLE001 - structure type is an optional speed-up.
+                    print(f"WARNING: 结构类型识别失败，跳过类型筛选: {exc}")
 
         results = rank_bank_candidates(
             loads,
@@ -366,6 +374,32 @@ def make_pipeline_result(
 def normalize_structure_type(value: object) -> str:
     text = str(value or "").strip()
     return text if text in VALID_STRUCTURE_TYPES and text != "unknown" else ""
+
+
+def infer_structure_type_from_text(classified: dict[str, Any] | None) -> str:
+    """Infer structure type from already-extracted problem text/evidence.
+
+    This avoids a second image call when the problem statement already says
+    "静定梁", "静定钢架", "桁架", or "拱".
+    """
+    if not classified:
+        return ""
+    text = " ".join(
+        str(classified.get(key) or "")
+        for key in ("chapter_evidence", "visible_text", "problem_text")
+    )
+    text = text.replace("刚架", "钢架").replace("行架", "桁架")
+    if not text.strip():
+        return ""
+    if "桁架" in text:
+        return "桁架"
+    if "钢架" in text or "框架" in text or "刚构" in text or "门架" in text:
+        return "钢架"
+    if "拱" in text:
+        return "拱"
+    if "梁" in text:
+        return "梁"
+    return ""
 
 
 def load_bank_excel(excel_root: Path, chapter: str) -> pd.DataFrame | None:

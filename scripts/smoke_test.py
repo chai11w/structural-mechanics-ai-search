@@ -22,6 +22,7 @@ from multi_agent_pipeline import (
     AUTO_CHAPTER_MIN_CONFIDENCE,
     MultiAgentCoordinator,
     RuleRouter,
+    infer_structure_type_from_text,
     rank_bank_candidates,
     resolve_effective_chapter,
     select_rerank_candidates,
@@ -312,6 +313,18 @@ def check_multi_agent_routing() -> list[str]:
         failures.append("auto chapter should reject low-confidence chapter_hint")
     if resolve_effective_chapter("auto", {"chapter_hint": "unknown", "chapter_confidence": 1.0}) is not None:
         failures.append("auto chapter should reject unknown chapter_hint")
+
+    text_structure_cases = {
+        "题干明确说明“求图示静定钢架的内力图”": "钢架",
+        "题干写有“静定梁弯矩图”": "梁",
+        "题干要求求指定杆桁架轴力": "桁架",
+        "题干说明三铰拱结构": "拱",
+        "图片只有结构图和荷载": "",
+    }
+    for evidence, expected in text_structure_cases.items():
+        actual = infer_structure_type_from_text({"chapter_evidence": evidence})
+        if actual != expected:
+            failures.append(f"text structure inference {evidence}: expected {expected}, got {actual}")
 
     tmp_root = BASE / ".tmp_tests" / "structure_filter_smoke"
     tmp_root.mkdir(parents=True, exist_ok=True)

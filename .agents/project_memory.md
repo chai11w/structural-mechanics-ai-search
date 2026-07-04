@@ -39,6 +39,18 @@
   - `python scripts/smoke_test.py` passed with `SUMMARY PASS warnings=0`.
 - Next prompt-tuning threshold: after enough Feishu failed-auto/manual-chapter samples accumulate, inspect logs for common `unknown -> final_chapter` patterns and only then relax prompt/rules with a small evaluation set.
 
+## 2026-07-04 Structure Type Text Fast Path
+
+- User noted that after chapter recognition, structure type filtering for the symbolic bank does not always need a second image-based structure classification call.
+- Added a local fast path in `multi_agent_pipeline.py`: for symbolic image search, before calling `QwenClassifier.classify_structure_type()`, inspect already-extracted text fields (`chapter_evidence`, and future `visible_text`/`problem_text` if present).
+- If the text clearly contains structure words, infer `结构类型` locally and skip the extra vision call:
+  - `桁架` / common typo `行架` -> `桁架`
+  - `钢架` / `刚架` / `框架` / `刚构` / `门架` -> `钢架`
+  - `拱` -> `拱`
+  - `梁` -> `梁`
+- If no clear structure word is present, the previous image-based structure type classifier remains the fallback.
+- Smoke test now checks text-based structure inference examples for steel frame, beam, truss, arch, and no-match.
+
 ## Implemented
 
 - `search.py` 是核心 CLI 与业务逻辑：
