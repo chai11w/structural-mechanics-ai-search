@@ -18,7 +18,14 @@ from typing import Any
 from PIL import Image
 
 import search
-from multi_agent_pipeline import MultiAgentCoordinator, RuleRouter, resolve_effective_chapter, symbolic_root
+from multi_agent_pipeline import (
+    MultiAgentCoordinator,
+    RuleRouter,
+    infer_structure_type_from_text,
+    normalize_structure_type,
+    resolve_effective_chapter,
+    symbolic_root,
+)
 from scripts.apply_main_bank_update import normalized_main_loads
 from scripts.build_symbolic_bank import mapped_symbolic_loads
 from scripts.classify_question_bank import normalize_load_item
@@ -41,6 +48,7 @@ class StoreDraft:
     category: str = ""
     route: str = ""
     target_bank: str = ""
+    structure_type: str = ""
     chapter_hint: str = ""
     chapter_confidence: float = 0.0
     chapter_evidence: str = ""
@@ -62,6 +70,7 @@ class StorePlan:
     answer_targets: list[Path]
     loads: list[dict[str, Any]]
     stored_loads: list[dict[str, Any]]
+    structure_type: str = ""
 
 
 @dataclass
@@ -109,6 +118,7 @@ class FeishuStoreService:
             draft.stored_loads = loads_for_main(draft.question_rel_placeholder(), loads, route.category)
         elif route.route == "symbolic" and route.category == "symbolic_unassigned":
             draft.stored_loads = mapped_symbolic_loads(loads)
+            draft.structure_type = classify_store_structure_type(image_path, classified, coordinator)
         return draft
 
     def prepare_plan(self, draft: StoreDraft) -> StorePlan:
@@ -137,6 +147,7 @@ class FeishuStoreService:
             target_bank = "symbolic"
             workbook = self.symbolic / f"{draft.chapter}.xlsx"
             stored_loads = mapped_symbolic_loads(draft.loads)
+        structure_type = draft.structure_type if target_bank == "symbolic" else ""
 
         return StorePlan(
             chapter=draft.chapter,
@@ -148,6 +159,7 @@ class FeishuStoreService:
             answer_targets=answer_targets,
             loads=draft.loads,
             stored_loads=stored_loads,
+            structure_type=structure_type,
         )
 
     def apply_plan(self, draft: StoreDraft) -> StoreApplyResult:
@@ -167,7 +179,7 @@ class FeishuStoreService:
         for source, target in zip(draft.answer_image_paths, plan.answer_targets):
             write_as_jpeg(Path(source), target)
 
-        append_excel_record(plan.workbook, plan.question_rel_path, plan.stored_loads)
+        append_excel_record(plan.workbook, plan.question_rel_path, plan.stored_loads, structure_type=plan.structure_type)
         return StoreApplyResult(plan=plan, dry_run=False, backup_path=backup_path)
 
 
@@ -178,6 +190,21 @@ def is_store_entry_command(text: str) -> bool:
 def loads_for_main(rel_path: str, loads: list[dict[str, Any]], category: str) -> list[dict[str, Any]]:
     record = {"rel_path": rel_path, "loads": loads, "category": category}
     return normalized_main_loads(record)
+
+
+def classify_store_structure_type(
+    image_path: Path,
+    classified: dict[str, Any],
+    coordinator: MultiAgentCoordinator,
+) -> str:
+    structure_type = infer_structure_type_from_text(classified)
+    if structure_type:
+        return structure_type
+    try:
+        structure = coordinator.qwen.classify_structure_type(image_path)
+    except Exception:  # noqa: BLE001 - structure type should not block storing.
+        return ""
+    return normalize_structure_type(structure.get("structure_type"))
 
 
 def answer_file_name(number: int, index: int) -> str:
@@ -226,7 +253,13 @@ def write_as_jpeg(source: Path, target: Path) -> None:
         image.convert("RGB").save(target, format="JPEG", quality=95)
 
 
-def append_excel_record(workbook: Path, rel_path: str, loads: list[dict[str, Any]]) -> None:
+def append_excel_record(
+    workbook: Path,
+    rel_path: str,
+    loads: list[dict[str, Any]],
+    *,
+    structure_type: str = "",
+) -> None:
     workbook.parent.mkdir(parents=True, exist_ok=True)
     wb, ws, headers = ensure_workbook(workbook)
     question_col = headers["题目名称"]
@@ -240,6 +273,9 @@ def append_excel_record(workbook: Path, rel_path: str, loads: list[dict[str, Any
     row = [None] * ws.max_column
     row[question_col - 1] = rel
     row[loads_col - 1] = json_loads(loads)
+    structure_col = headers.get("结构类型")
+    if structure_col and structure_type:
+        row[structure_col - 1] = structure_type
     ws.append(row)
     wb.save(workbook)
     wb.close()

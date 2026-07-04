@@ -51,6 +51,24 @@
 - If no clear structure word is present, the previous image-based structure type classifier remains the fallback.
 - Smoke test now checks text-based structure inference examples for steel frame, beam, truss, arch, and no-match.
 
+## 2026-07-04 Feishu Symbolic Store Structure Type Fix
+
+- User found a newly stored Feishu truss problem with symbolic load `Fp` could not be retrieved after adding symbolic-bank structure type filtering.
+- Root cause: Feishu store mode appended symbolic-bank rows without filling the `结构类型` column. The new retrieval path inferred query type `桁架`, then filtered symbolic candidates by `结构类型=桁架`, so blank new rows were excluded.
+- Fixed `scripts/feishu_store_flow.py`:
+  - `StoreDraft` / `StorePlan` now carry `structure_type` for symbolic-bank writes.
+  - During symbolic store classification, structure type is inferred from recognized problem text first, using the same text fast path as retrieval.
+  - If text does not provide a clear type, it falls back to Qwen image structure classification.
+  - `append_excel_record()` now writes `结构类型` when the target workbook has that column.
+- Added smoke coverage that appending a symbolic store row preserves `结构类型`.
+- Repaired the two affected live symbolic rows:
+  - `2静定结构/题目/8.jpg` -> `结构类型=桁架`
+  - `2静定结构/题目/9.jpg` -> `结构类型=桁架`
+- Backup before repairing the live workbook:
+  - `backups/fix_feishu_symbolic_structure_type_20260704_163916/2静定结构.xlsx`
+- Verification:
+  - Direct multi-agent search on live `D:\桌面\答疑、帮做\结构力学\帮做\2静定结构\题目\9.jpg` routed to the symbolic bank with `集中:Fp`; both repaired rows appeared in the 100% candidate list.
+
 ## Implemented
 
 - `search.py` 是核心 CLI 与业务逻辑：

@@ -42,7 +42,7 @@ from scripts.feishu_tiku_bot import (
     parse_chapter,
     parse_chapter_mode,
 )
-from scripts.feishu_store_flow import FeishuStoreService
+from scripts.feishu_store_flow import FeishuStoreService, append_excel_record
 from scripts.feishu_delete_flow import DeleteApplyResult, DeletePlan, WorkbookDeleteTarget
 
 
@@ -361,6 +361,18 @@ def check_multi_agent_routing() -> list[str]:
     )
     if len(unfiltered) != 2:
         failures.append(f"unfiltered symbolic rank should keep both perfect candidates, got {unfiltered}")
+
+    store_workbook = tmp_root / "store_symbolic.xlsx"
+    pd.DataFrame(columns=["题目名称", "荷载", "结构类型"]).to_excel(store_workbook, index=False)
+    append_excel_record(
+        store_workbook,
+        "2静定结构/题目/smoke_store.jpg",
+        [{"type": "集中", "raw": "0.020"}],
+        structure_type="桁架",
+    )
+    stored = pd.read_excel(store_workbook).iloc[-1].to_dict()
+    if stored.get("结构类型") != "桁架":
+        failures.append(f"symbolic store should persist structure type, got {stored}")
 
     coordinator = MultiAgentCoordinator(top_k=1)
     needs_chapter = coordinator.search_loads([{"type": "集中", "raw": "10kN"}], "auto", rerank=False)
