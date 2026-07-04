@@ -68,6 +68,15 @@
   - `backups/fix_feishu_symbolic_structure_type_20260704_163916/2静定结构.xlsx`
 - Verification:
   - Direct multi-agent search on live `D:\桌面\答疑、帮做\结构力学\帮做\2静定结构\题目\9.jpg` routed to the symbolic bank with `集中:Fp`; both repaired rows appeared in the 100% candidate list.
+- Later same-day live data repair after user had not yet restarted the Feishu bot:
+  - `4力法/题目/4.jpg` was stored into symbolic `4力法.xlsx` with `结构类型` blank; visually confirmed as a steel-frame/frame problem and filled `结构类型=钢架`.
+  - `3静定结构位移/题目/3.jpg` was also blank from the old running bot; visually confirmed as truss and filled `结构类型=桁架`.
+  - `7矩阵位移.xlsx` in the symbolic bank still used the old two-column schema; added `结构类型` and filled both existing rows as `钢架`.
+  - Backups:
+    - `backups/fix_4lifa_symbolic_structure_type_20260704_165002/4力法.xlsx`
+    - `backups/fix_symbolic_missing_structure_types_20260704_165108/3静定结构位移.xlsx`
+    - `backups/fix_symbolic_missing_structure_types_20260704_165108/7矩阵位移.xlsx`
+  - Verification: full symbolic-bank scan showed every workbook has a `结构类型` column and no blank structure type values.
 
 ## Implemented
 
