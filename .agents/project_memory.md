@@ -4,7 +4,7 @@
 
 - 项目位于 `F:\cc\7-题库检索`。
 - 项目目标是结构力学题库检索：按图片或荷载描述检索相似题，并按排名复制答案。
-- 当前阶段：题库检索、飞书检索/入库/删除、字母库结构类型筛选已进入可用维护阶段；下一步重点是继续收集章节识别失败日志，再决定是否放宽自动章节降级规则。
+- 当前阶段：题库检索、飞书检索/入库/删除、字母库结构类型筛选已进入可用维护阶段；2026-07-05 已适度放开自动章节屏障，并开始全量记录飞书章节判断日志。
 - 当前项目说明入口为 `AGENTS.md`、`.agents/project_memory.md`、`SKILL.md`、`README.md`。
 - 旧 `.agents/skills/结构力学/` 已降级为跳转说明，不再作为当前流程来源。
 - 当前验证以 `python scripts/smoke_test.py` 为主，辅以真实图片/飞书流程抽查。
@@ -23,6 +23,26 @@
 
 - 用户要求：本项目以后每次完成代码或题库逻辑更改，都要同步写入 `.agents/project_memory.md`，并提交、推送到 GitHub，方便换对话后继续接上最新状态。
 - 常规收尾顺序：更新项目记忆 -> 运行相关验证 -> `git commit` -> `git push`。
+
+## 2026-07-05 Auto Chapter Barrier Relaxation
+
+- Motivation: summer workload means Feishu failed-auto/manual-chapter samples will grow slowly. User observed that Qwen's pre-guard chapter reasoning was often right, while the project barrier was too strict.
+- Changed auto chapter acceptance threshold in `multi_agent_pipeline.py` from `0.8` to `0.45`.
+- Relaxed chapter prompt and guard rules in `scripts/classify_question_bank.py`:
+  - Still reject pure structure diagrams with only loads/supports/dimensions/EI and no method or task text.
+  - 2静定结构 now allows typical task-text evidence such as truss specified-member axial force and static internal-force diagram wording.
+  - 3静定结构位移 now allows static displacement evidence such as displacement/rotation with truss, EA constant, unit-load method, or graph multiplication clues.
+  - 6力矩分配 accepts OCR-imperfect method words only when they appear in quoted/visible problem text, not from inferred figure numbers.
+  - 7矩阵位移 accepts strong matrix-displacement step evidence such as unit stiffness matrix, global stiffness matrix, load vector, and coordinate numbering.
+  - Guard was tightened after testing so model-inferred “static beam inner force” without quoted task/method evidence does not auto-pass as 2静定结构.
+- Feishu chapter logging is now full decision logging, not failure-only:
+  - Single-image search, store flow, and multi-question layout decisions append records to `data/feishu_chapter_failure_log.jsonl`.
+  - File name is kept for continuity, but records now include `auto_used`, `manual_required`, `manual_after_auto_failed`, and manual decisions.
+- Evaluation:
+  - Smoke test passed with `SUMMARY PASS warnings=0`.
+  - 21 live images tested with Qwen cache disabled: `auto_correct=13`, `auto_wrong=0`, `manual=8`.
+  - Evaluation report archived at `docs/archive/chapter_relax_eval_20260705.md`.
+- Operational note: running Feishu bot must be restarted before the relaxed chapter rules and full logging are active.
 
 ## 2026-07-04 Chapter Judgment Logging Phase
 

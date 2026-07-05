@@ -1,8 +1,8 @@
-"""Append-only Feishu chapter failure logs for prompt/rule iteration.
+"""Append-only Feishu chapter judgment logs for prompt/rule iteration.
 
-The log is intentionally lightweight JSONL. It records only valuable samples:
-Feishu auto chapter recognition failed, then the user manually supplied the
-correct chapter.
+The log is intentionally lightweight JSONL. It records Feishu chapter
+decisions, including auto-used decisions, manual-required decisions, and
+manual chapters supplied after auto recognition failed.
 """
 
 from __future__ import annotations
@@ -32,10 +32,11 @@ def append_chapter_judgment_log(
     log_path: Path = DEFAULT_LOG_PATH,
     extra: dict[str, Any] | None = None,
 ) -> None:
-    """Append one failed-auto/manual-chapter observation.
+    """Append one chapter judgment observation.
 
     Logging must never break search/store flows, so all filesystem errors are
-    swallowed by callers through this helper.
+    swallowed by callers through this helper. The file name is kept for
+    continuity with the first failure-only logging phase.
     """
     normalized_image_path = normalize_path(image_path)
     if not normalized_image_path or Path(normalized_image_path).name.startswith("mock-"):

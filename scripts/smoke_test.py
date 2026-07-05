@@ -311,8 +311,33 @@ def check_multi_agent_routing() -> list[str]:
     low_confidence = dict(classified, chapter_confidence=AUTO_CHAPTER_MIN_CONFIDENCE - 0.01)
     if resolve_effective_chapter("auto", low_confidence) is not None:
         failures.append("auto chapter should reject low-confidence chapter_hint")
+    relaxed_confidence = dict(classified, chapter_confidence=AUTO_CHAPTER_MIN_CONFIDENCE)
+    if resolve_effective_chapter("auto", relaxed_confidence) != "5位移法":
+        failures.append("auto chapter should accept relaxed threshold chapter_hint")
     if resolve_effective_chapter("auto", {"chapter_hint": "unknown", "chapter_confidence": 1.0}) is not None:
         failures.append("auto chapter should reject unknown chapter_hint")
+
+    guarded_hint, guarded_confidence, _guarded_evidence = guard_chapter_prediction(
+        "2静定结构",
+        0.5,
+        "题目文字为“求图示桁架中指定杆的轴力”",
+    )
+    if guarded_hint != "2静定结构" or guarded_confidence != 0.5:
+        failures.append("chapter guard should allow truss specified-member axial-force evidence")
+    guarded_hint, _guarded_confidence, _guarded_evidence = guard_chapter_prediction(
+        "3静定结构位移",
+        0.49,
+        "题干要求试求图示结构 C 点水平位移，各杆 EA 为常数。",
+    )
+    if guarded_hint != "3静定结构位移":
+        failures.append("chapter guard should allow static displacement evidence with EA constant")
+    guarded_hint, guarded_confidence, _guarded_evidence = guard_chapter_prediction(
+        "3静定结构位移",
+        0.7,
+        "题干只说求位移，没有其他章节线索。",
+    )
+    if guarded_hint != "unknown" or guarded_confidence > 0.49:
+        failures.append("chapter guard should still reject generic displacement-only evidence")
 
     text_structure_cases = {
         "题干明确说明“求图示静定钢架的内力图”": "钢架",
@@ -406,8 +431,8 @@ def check_chapter_hint_normalization() -> list[str]:
         failures.append("chapter confidence should clamp below 0")
 
     guarded = guard_chapter_prediction("3静定结构位移", 0.95, "题干明确要求'求B点的转角'，典型利用图乘法")
-    if guarded[0] != "unknown":
-        failures.append(f"unguarded turn-angle evidence should become unknown, got {guarded}")
+    if guarded[0] != "3静定结构位移":
+        failures.append(f"turn-angle evidence with graph multiplication should be accepted, got {guarded}")
 
     accepted = guard_chapter_prediction("6力矩分配", 1.0, "题干明确说明'试用弯矩分配法计算图示刚架'")
     if accepted[0] != "6力矩分配":
@@ -433,9 +458,18 @@ def check_chapter_hint_normalization() -> list[str]:
     force_diagram_only = guard_chapter_prediction("2静定结构", 1.0, "题干明确要求'作弯矩图和剪力图'")
     if force_diagram_only[0] != "unknown":
         failures.append(f"force-diagram-only evidence should not become 2静定结构, got {force_diagram_only}")
+    inferred_static_inner_force = guard_chapter_prediction("2静定结构", 0.9, "题目要求计算指定截面C的内力，结构为带伸臂的静定梁")
+    if inferred_static_inner_force[0] != "unknown":
+        failures.append(f"inferred static beam inner-force evidence should not become 2静定结构, got {inferred_static_inner_force}")
     indeterminate_frame = guard_chapter_prediction("2静定结构", 1.0, "题干明确说明'超静定刚架结构'")
     if indeterminate_frame[0] != "unknown":
         failures.append(f"superstatic evidence should not be accepted as 2静定结构, got {indeterminate_frame}")
+    moment_distribution_ocr = guard_chapter_prediction("6力矩分配", 0.49, "题干文字明确出现'矩分配法计算'，即力矩分配法。")
+    if moment_distribution_ocr[0] != "6力矩分配":
+        failures.append(f"moment-distribution OCR evidence should be accepted, got {moment_distribution_ocr}")
+    matrix_steps = guard_chapter_prediction("7矩阵位移", 0.49, "题干列出编号、建立坐标系、写出单元刚度矩阵、集成整体刚度矩阵、集成荷载列阵。")
+    if matrix_steps[0] != "7矩阵位移":
+        failures.append(f"matrix-displacement steps should be accepted, got {matrix_steps}")
     return failures
 
 

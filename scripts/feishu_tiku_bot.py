@@ -38,7 +38,7 @@ BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-from multi_agent_pipeline import MultiAgentCoordinator  # noqa: E402
+from multi_agent_pipeline import MultiAgentCoordinator, is_auto_chapter  # noqa: E402
 from search import ANSWER_OUTPUT, answer, cfg  # noqa: E402
 from scripts.chapter_judgment_log import append_chapter_judgment_log  # noqa: E402
 from scripts.feishu_delete_flow import (  # noqa: E402
@@ -454,6 +454,8 @@ class TikuBot:
                 self.sessions.save(sender, session)
                 return BotResponse(texts=[f"题目图识别失败：{exc}\n请重新发送题目图，或回复 0 取消。"])
 
+            log_store_chapter_decision(draft)
+
             if not draft.loads:
                 session.state = "store_waiting_question"
                 self.sessions.save(sender, session)
@@ -566,6 +568,8 @@ class TikuBot:
         questions = normalize_multi_questions(layout.get("questions", []))
         if len(questions) < 2:
             return None
+        for question in questions:
+            log_multi_chapter_decision(image_path=image_path, question=question)
         crop_started = time.perf_counter()
         diagram_crops = prepare_multi_diagram_crops(
             image_path,
@@ -646,6 +650,12 @@ class TikuBot:
             chapter,
             rerank=True,
             rerank_top=self.options.rerank_top,
+        )
+        log_search_chapter_decision(
+            source="feishu_chapter_decision",
+            image_path=session.image_path,
+            requested_chapter=chapter,
+            result=result,
         )
         if result.route.route == "needs_chapter":
             session.state = "waiting_chapter"
@@ -1176,6 +1186,85 @@ def failure_from_pipeline_result(result: Any) -> dict[str, Any]:
         "category": getattr(getattr(result, "route", None), "category", ""),
         "reason": getattr(getattr(result, "route", None), "reason", ""),
     }
+
+
+def chapter_decision_mode(*, requested_chapter: str | None, final_chapter: str | None, route: str = "") -> str:
+    if not is_auto_chapter(requested_chapter):
+        return "manual"
+    if final_chapter:
+        return "auto_used"
+    if route == "needs_chapter":
+        return "manual_required"
+    return "auto_no_chapter"
+
+
+def log_search_chapter_decision(
+    *,
+    source: str,
+    image_path: Path | str | None,
+    requested_chapter: str | None,
+    result: Any,
+) -> None:
+    route = str(getattr(getattr(result, "route", None), "route", "") or "")
+    final_chapter = str(getattr(result, "chapter", "") or "")
+    append_chapter_judgment_log(
+        source=source,
+        image_path=image_path,
+        requested_chapter=requested_chapter,
+        final_chapter=final_chapter,
+        decision_mode=chapter_decision_mode(
+            requested_chapter=requested_chapter,
+            final_chapter=final_chapter,
+            route=route,
+        ),
+        classified={
+            "chapter_hint": getattr(result, "chapter_hint", "unknown"),
+            "chapter_confidence": getattr(result, "chapter_confidence", 0.0),
+            "chapter_evidence": getattr(result, "chapter_evidence", ""),
+            "loads": getattr(result, "loads", []),
+        },
+        loads=getattr(result, "loads", []),
+        route=route,
+        category=str(getattr(getattr(result, "route", None), "category", "") or ""),
+        result_count=len(getattr(result, "results", []) or []),
+    )
+
+
+def log_store_chapter_decision(draft: StoreDraft) -> None:
+    append_chapter_judgment_log(
+        source="feishu_store_chapter_decision",
+        image_path=draft.question_image_path,
+        requested_chapter="auto",
+        final_chapter=draft.chapter or "",
+        decision_mode="auto_used" if draft.chapter else "manual_required",
+        classified={
+            "chapter_hint": draft.chapter_hint,
+            "chapter_confidence": draft.chapter_confidence,
+            "chapter_evidence": draft.chapter_evidence,
+            "loads": draft.loads,
+        },
+        loads=draft.loads,
+        route=draft.route,
+        category=draft.category,
+    )
+
+
+def log_multi_chapter_decision(*, image_path: Path | str | None, question: dict[str, Any]) -> None:
+    final_chapter = effective_question_chapter(question)
+    append_chapter_judgment_log(
+        source="feishu_multi_chapter_decision",
+        image_path=image_path,
+        requested_chapter="auto",
+        final_chapter=final_chapter if final_chapter not in {None, "unsupported"} else "",
+        decision_mode="auto_used" if final_chapter and final_chapter != "unsupported" else "manual_required",
+        classified=question,
+        loads=question.get("loads", []),
+        route="",
+        category="",
+        extra={
+            "question_label": question.get("label", ""),
+        },
+    )
 
 
 def log_manual_chapter_after_failure(
