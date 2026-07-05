@@ -4,11 +4,20 @@
 
 - 项目位于 `F:\cc\7-题库检索`。
 - 项目目标是结构力学题库检索：按图片或荷载描述检索相似题，并按排名复制答案。
-- 当前阶段：准备进入优化阶段。优化前已完成一次项目阅读和项目上下文初始化。
-- 当前仓库已有 `.agents/skills/结构力学/` 旧版项目 Skill 说明，根目录也有 `SKILL.md`。
-- 项目没有 `README.md`；当前项目说明主要分散在 `SKILL.md`、旧 `.agents/skills/结构力学/` 和代码注释里。
-- 当前没有正式测试套件；验证主要依赖 CLI 帮助、脚本运行和人工检索结果检查。
+- 当前阶段：题库检索、飞书检索/入库/删除、字母库结构类型筛选已进入可用维护阶段；下一步重点是继续收集章节识别失败日志，再决定是否放宽自动章节降级规则。
+- 当前项目说明入口为 `AGENTS.md`、`.agents/project_memory.md`、`SKILL.md`、`README.md`。
+- 旧 `.agents/skills/结构力学/` 已降级为跳转说明，不再作为当前流程来源。
+- 当前验证以 `python scripts/smoke_test.py` 为主，辅以真实图片/飞书流程抽查。
 - `config.json`、`config.local.json` 被 `.gitignore` 忽略，可能包含本地路径或 `zhipuai_api_key`。
+
+## Documentation Entry Points
+
+- 新对话默认读取顺序：`AGENTS.md` -> `.agents/project_memory.md` -> `SKILL.md` -> `README.md` -> 任务相关代码。
+- `AGENTS.md` 保存项目协作规则和安全边界。
+- `.agents/project_memory.md` 保存当前项目状态、关键决策、已知风险和近期重要修复。
+- `SKILL.md` 是给 AI/Codex 执行检索和维护任务的操作说明。
+- `README.md` 是给人或外部 ChatGPT 快速了解项目的介绍。
+- 根目录 `.tmp_*.md` 实验报告已移入 `docs/archive/`，默认不作为新对话必读材料。
 
 ## Standing Collaboration Rule
 
@@ -101,12 +110,9 @@
 
 ## Current Local Changes
 
-- `build_index.py`、`gui.py`、`search.py` 当前有未提交修改。
-- 这些修改的当前含义：
-  - `ZHIPUAI_API_KEY` 支持从环境变量读取；环境变量为空时回退到本地配置里的 `zhipuai_api_key`。
-  - `search.py` 已禁用搜索后自动打开 Top 结果图片。
-  - `search.py store` 在图片未识别到荷载时会取消储存，避免写入空荷载记录。
-- `.claude/settings.local.json` 也有本地修改，但不是当前项目上下文维护的目标。
+- 开始新任务时以 `git status --short` 为准；不要沿用旧会话里的未提交文件判断。
+- 文档清理前唯一已知本地改动是用户手动编辑过 `data/feishu_chapter_failure_log.jsonl`。
+- 如果工作树出现与当前任务无关的改动，不要回退；只处理任务相关文件。
 
 ## Optimization Direction From Personal Brain
 
@@ -175,7 +181,7 @@
 
 ## Letter Load Evaluation
 
-- 2026-06-19 已从 `2静定结构` 选 5 张历史上带字母荷载的图片调用项目 GLM-5V-Turbo 评测，结果保存在 `.tmp_eval_5_letter_images.md`。
+- 2026-06-19 已从 `2静定结构` 选 5 张历史上带字母荷载的图片调用项目 GLM-5V-Turbo 评测，结果已归档到 `docs/archive/eval_5_letter_images.md`。
 - 期望 vs 实际：
   - `ql`：期望 `集中:ql`；模型输出 `集中:ql`，但额外输出 `均布:q`。
   - `2P/4P/Pa`：期望 `集中:2P`、`集中:4P`、`弯矩:Pa`；模型全部识别到，但额外输出 `均布:2q`。
