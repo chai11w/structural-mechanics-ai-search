@@ -299,48 +299,47 @@ def check_multi_agent_routing() -> list[str]:
     if symbolic_selected != ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]:
         failures.append(f"symbolic rerank pool mismatch: {symbolic_selected}")
 
-    display_all_high = search.select_display_results([
-        {"rank": 1, "path": "a.jpg", "score": 1.00},
-        {"rank": 2, "path": "b.jpg", "score": 0.95},
-        {"rank": 3, "path": "c.jpg", "score": 0.92},
-        {"rank": 4, "path": "d.jpg", "score": 0.91},
-        {"rank": 5, "path": "e.jpg", "score": 0.89},
+    display_very_high = search.select_display_results([
+        {"rank": 1, "path": "a.jpg", "score": 0.96},
+        {"rank": 2, "path": "b.jpg", "score": 0.94},
+        {"rank": 3, "path": "c.jpg", "score": 0.91},
+        {"rank": 4, "path": "d.jpg", "score": 0.89},
     ])
-    if [item["path"] for item in display_all_high] != ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]:
-        failures.append(f"display threshold should keep all >90% results, got {display_all_high}")
-
-    display_high_fill = search.select_display_results([
-        {"rank": 1, "path": "a.jpg", "score": 0.95},
-        {"rank": 2, "path": "b.jpg", "score": 0.85},
-        {"rank": 3, "path": "c.jpg", "score": 0.81},
-        {"rank": 4, "path": "d.jpg", "score": 0.79},
-    ])
-    if [item["path"] for item in display_high_fill] != ["a.jpg", "b.jpg", "c.jpg"]:
-        failures.append(f"display threshold should fill >80% results up to 3 when >90% count is below 3, got {display_high_fill}")
+    if [item["path"] for item in display_very_high] != ["a.jpg", "b.jpg", "c.jpg"]:
+        failures.append(f"rerank display should keep all >90% results only, got {display_very_high}")
 
     display_many = search.select_display_results([
-        {"rank": 1, "path": "a.jpg", "score": 0.90},
-        {"rank": 2, "path": "b.jpg", "score": 0.81},
-        {"rank": 3, "path": "c.jpg", "score": 0.79},
-    ])
-    if [item["path"] for item in display_many] != ["a.jpg", "b.jpg"]:
-        failures.append(f"display threshold should treat 90% as >80%, not >90%, got {display_many}")
-
-    display_medium = search.select_display_results([
         {"rank": 1, "path": "a.jpg", "score": 0.89},
         {"rank": 2, "path": "b.jpg", "score": 0.85},
         {"rank": 3, "path": "c.jpg", "score": 0.81},
         {"rank": 4, "path": "d.jpg", "score": 0.80},
     ])
-    if [item["path"] for item in display_medium] != ["a.jpg", "b.jpg", "c.jpg"]:
-        failures.append(f"display threshold should cap >80% results at 3, got {display_medium}")
+    if [item["path"] for item in display_many] != ["a.jpg", "b.jpg", "c.jpg"]:
+        failures.append(f"rerank display should cap >80% results at 3, got {display_many}")
+
+    display_boundary = search.select_display_results([
+        {"rank": 1, "path": "a.jpg", "score": 0.90},
+        {"rank": 2, "path": "b.jpg", "score": 0.81},
+        {"rank": 3, "path": "c.jpg", "score": 0.79},
+    ])
+    if [item["path"] for item in display_boundary] != ["a.jpg", "b.jpg"]:
+        failures.append(f"rerank display should treat 90% as >80%, not >90%, got {display_boundary}")
 
     display_fallback = search.select_display_results([
+        {"rank": 1, "path": "a.jpg", "score": 0.95},
+        {"rank": 2, "path": "b.jpg", "score": 0.93},
+        {"rank": 3, "path": "c.jpg", "score": 0.91},
+        {"rank": 4, "path": "d.jpg", "score": 0.92},
+    ])
+    if len(display_fallback) != 4:
+        failures.append(f"rerank display should not cap >90% results at 3, got {display_fallback}")
+
+    display_low = search.select_display_results([
         {"rank": 1, "path": "a.jpg", "score": 0.70},
         {"rank": 2, "path": "b.jpg", "score": 0.40},
     ])
-    if [item["path"] for item in display_fallback] != ["a.jpg"]:
-        failures.append(f"display threshold should fall back to the best result, got {display_fallback}")
+    if [item["path"] for item in display_low] != ["a.jpg"]:
+        failures.append(f"rerank display should fall back to the best result, got {display_low}")
 
     classified = {
         "chapter_hint": "5位移法",

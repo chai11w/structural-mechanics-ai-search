@@ -304,7 +304,7 @@ class MultiAgentCoordinator:
             if rerank_input:
                 zhipu_results = search.rerank_candidates(query_image_path, rerank_input, top_n=rerank_top)
                 if zhipu_results:
-                    results = search.select_display_results(normalize_rerank_results(zhipu_results))
+                    results = normalize_rerank_results(zhipu_results)
                     reranked = True
                     rerank_note = ""
 

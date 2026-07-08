@@ -14,14 +14,11 @@
 
 - User found that forcing final output to always show Top 3 can include low-similarity candidates and make the result look worse.
 - Updated reranked-result display policy across core pipeline, CLI, GUI, and Feishu:
-  - Show all results whose user-visible similarity is `>90%`; these are not capped at 3.
-  - Otherwise show `>80%` results capped at the top 3.
-  - If `>90%` results are fewer than 3, later `>80%` results can fill up to 3 total.
-  - If no result exceeds 80%, show only the single highest-similarity result.
-- The threshold applies to the final user-visible score:
-  - after rerank: `final_score`;
-  - this rule is not applied to the initial coarse-screening candidate pool.
-- The initial screening logic must remain unchanged: 100% coarse matches are preserved, otherwise the existing `top_k` coarse pool is used. Do not expand or shrink initial screening based on the 80/90 display thresholds.
+  - After rerank, show all results whose user-visible `final_score` is `>90%`.
+  - If no reranked result exceeds 90%, show `>80%` results capped at the top 3.
+  - If no reranked result exceeds 80%, show only the single highest-similarity reranked result.
+- This rule applies only to reranked output. It must not change initial coarse screening, `rank_bank_candidates()`, or non-reranked output.
+- Initial screening remains unchanged: 100% coarse matches are preserved, otherwise the existing `top_k` coarse pool is used.
 - `_last_search.json` is rewritten from the actual displayed results, so answer commands match the visible candidate count.
 - Feishu candidate and delete prompts now use the actual result count instead of hard-coded `1/2/3` and `-1/-2/-3`.
 

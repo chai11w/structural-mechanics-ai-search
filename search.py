@@ -563,13 +563,13 @@ def select_display_results(
     max_results=DISPLAY_MAX_RESULTS,
     all_score=DISPLAY_ALL_SCORE,
 ):
-    """Show all > high threshold; otherwise cap > min threshold results; fall back to best."""
+    """For reranked results: show all >90%, else top 3 >80%, else the best one."""
     if not results:
         return []
 
-    high_confidence = [item for item in results if display_similarity_score(item) > all_score]
-    if len(high_confidence) >= max_results:
-        selected = high_confidence
+    very_high = [item for item in results if display_similarity_score(item) > all_score]
+    if very_high:
+        selected = very_high
     else:
         high_quality = [item for item in results if display_similarity_score(item) > min_score]
         selected = high_quality[:max_results] if high_quality else [max(results, key=display_similarity_score)]
