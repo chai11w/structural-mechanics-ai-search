@@ -14,9 +14,10 @@
 
 - User found that forcing final output to always show Top 3 can include low-similarity candidates and make the result look worse.
 - Updated final display policy across core pipeline, CLI, GUI, and Feishu:
-  - Show only results whose user-visible similarity is `>=80%`.
-  - If more than 3 results pass, show only the top 3.
-  - If no result reaches 80%, show only the single highest-similarity result.
+  - Show all results whose user-visible similarity is `>90%`; these are not capped at 3.
+  - Otherwise show `>80%` results capped at the top 3.
+  - If `>90%` results are fewer than 3, later `>80%` results can fill up to 3 total.
+  - If no result exceeds 80%, show only the single highest-similarity result.
 - The threshold applies to the final user-visible score:
   - after rerank: `final_score`;
   - without rerank: coarse load `score`.

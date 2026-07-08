@@ -54,6 +54,7 @@ ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY") or cfg.get("zhipuai_api_key"
 TOP_K = cfg.get("top_k", 5)
 RERANK_MIN_LOAD_SCORE = 0.5
 DISPLAY_MIN_SCORE = 0.8
+DISPLAY_ALL_SCORE = 0.9
 DISPLAY_MAX_RESULTS = 3
 RERANK_LOAD_WEIGHT = 0.5
 RERANK_VISION_WEIGHT = 0.5
@@ -543,7 +544,7 @@ def rerank_candidates(query_image_path, candidates, top_n=3):
         ),
         reverse=True,
     )
-    return scored[:top_n]
+    return select_display_results(scored, max_results=top_n)
 
 
 def display_similarity_score(item):
@@ -556,13 +557,22 @@ def display_similarity_score(item):
     return float(item[0] or 0)
 
 
-def select_display_results(results, min_score=DISPLAY_MIN_SCORE, max_results=DISPLAY_MAX_RESULTS):
-    """Show results >= threshold, capped to max_results; fall back to the single best result."""
+def select_display_results(
+    results,
+    min_score=DISPLAY_MIN_SCORE,
+    max_results=DISPLAY_MAX_RESULTS,
+    all_score=DISPLAY_ALL_SCORE,
+):
+    """Show all > high threshold; otherwise cap > min threshold results; fall back to best."""
     if not results:
         return []
 
-    high_quality = [item for item in results if display_similarity_score(item) >= min_score]
-    selected = high_quality[:max_results] if high_quality else [max(results, key=display_similarity_score)]
+    high_confidence = [item for item in results if display_similarity_score(item) > all_score]
+    if len(high_confidence) >= max_results:
+        selected = high_confidence
+    else:
+        high_quality = [item for item in results if display_similarity_score(item) > min_score]
+        selected = high_quality[:max_results] if high_quality else [max(results, key=display_similarity_score)]
 
     renumbered = []
     for rank, item in enumerate(selected, 1):
@@ -905,9 +915,15 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
 
     results.sort(key=lambda x: x[0], reverse=True)
 
-    # 100% 相似的不管几个都输出，不足 top_k 再补次高分
+    # 90% 以上的高相似候选不截断；否则沿用 top_k 粗筛池。
+    high_confidence = [r for r in results if r[0] > DISPLAY_ALL_SCORE]
+    high_quality = [r for r in results if r[0] > DISPLAY_MIN_SCORE]
     perfect = [r for r in results if r[0] >= 1.0]
-    if len(perfect) >= top_k:
+    if len(high_confidence) >= top_k:
+        top = high_confidence
+    elif high_quality:
+        top = high_quality[:top_k]
+    elif len(perfect) >= top_k:
         top = perfect
     else:
         rest = [r for r in results if r[0] < 1.0][:top_k - len(perfect)]
@@ -1123,7 +1139,7 @@ def main():
     p_search.add_argument("--loads", help="荷载 JSON 字符串")
     p_search.add_argument("--chapter", required=True, help="章节名称，如 '2静定结构'")
     p_search.add_argument("--top", type=int, default=TOP_K, help=f"返回条数 (默认 {TOP_K})")
-    p_search.add_argument("--rerank", action="store_true", help="对图片搜索的粗筛结果进行 LLM 复筛，并按 80% 阈值输出")
+    p_search.add_argument("--rerank", action="store_true", help="对图片搜索的粗筛结果进行 LLM 复筛，并按相似度阈值输出")
 
     # store
     p_store = sub.add_parser("store", help="储存新题目")
