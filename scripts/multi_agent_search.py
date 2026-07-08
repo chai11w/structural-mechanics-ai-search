@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--types", nargs="+", help="手动荷载类型列表: 集中 均布 弯矩")
     parser.add_argument("--raws", nargs="+", help="手动荷载标注列表，与 --types 一一对应")
     parser.add_argument("--chapter", default="auto", help="章节名称，如 2静定结构；图片检索可用 auto 自动识别")
-    parser.add_argument("--top", type=int, default=5, help="粗筛返回数量")
+    parser.add_argument("--top", type=int, default=3, help="粗筛返回数量")
     parser.add_argument("--rerank-top", type=int, default=3, help="Zhipu 复筛返回数量")
     parser.add_argument("--no-rerank", action="store_true", help="跳过 Zhipu 视觉复筛")
     parser.add_argument("--no-cache", action="store_true", help="禁用 Qwen 识别缓存")

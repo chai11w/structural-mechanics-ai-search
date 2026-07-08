@@ -22,6 +22,17 @@
 - `_last_search.json` is rewritten from the actual displayed results, so answer commands match the visible candidate count.
 - Feishu candidate and delete prompts now use the actual result count instead of hard-coded `1/2/3` and `-1/-2/-3`.
 
+## 2026-07-08 Default Coarse Top K
+
+- User explicitly changed the default coarse-screening `top_k` from 5 to 3.
+- Updated defaults in:
+  - `search.py` (`TOP_K = cfg.get("top_k", 3)`);
+  - Feishu bot options and CLI `--top` default;
+  - multi-agent CLI `--top` default;
+  - `config.example.json` and README sample config.
+- Initial screening rule remains: if 100% coarse matches exceed the default, all 100% matches are preserved; otherwise results are filled up to `top_k=3`.
+- This is separate from the reranked-output threshold rule.
+
 ## Documentation Entry Points
 
 - 新对话默认读取顺序：`AGENTS.md` -> `.agents/project_memory.md` -> `SKILL.md` -> `README.md` -> 任务相关代码。
@@ -192,7 +203,7 @@
 - LLM 精排只看规则算法难覆盖的视觉因素：
   - 结构形状是否相近。
 - 2026-06-19 已实现一个可选 MVP：`--rerank`。它不改变默认搜索；只在图片搜索显式加 `--rerank` 时启用。
-  - 原有荷载粗筛逻辑保持不变：默认 Top 5；若 100% 匹配超过 5 个，则全部进入候选。
+  - 原有荷载粗筛逻辑保持不变；2026-07-08 起默认 Top 3，若 100% 匹配超过 3 个，则全部进入候选。
   - 复筛阶段只在粗筛候选内工作，最终输出 Top 3，并更新 `_last_search.json`，因此 `answer 1/2/3` 对应复筛后的排名。
   - 第一次尝试“查询图 + 所有候选图一次性排序”失败：查询图本身在候选中却没有排第一，说明多图排序不可靠。
   - 已改为“逐候选打分”：每次只比较查询图和一个候选图，按 `结构形状` 给分，再由代码排序。

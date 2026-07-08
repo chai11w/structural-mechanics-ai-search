@@ -76,7 +76,7 @@ python scripts/feishu_tiku_bot.py dry-run-flow --image "D:\path\to\question.jpg"
 
 ## 当前检索流程
 
-- 荷载粗筛逻辑保持原样：默认 Top 5；如果 100% 匹配超过 5 个，则全部进入候选。
+- 荷载粗筛逻辑保持原样：默认 Top 3；如果 100% 匹配超过 3 个，则全部进入候选。
 - Excel、GUI、飞书和 CLI 的荷载 raw 统一使用无单位格式；单位只由 `type` 表示，检索前会把 `kN`、`kN/m`、`kN·m`、`kN.m` 等单位去掉。模型识别时也要求按箭头/力偶形态判断类型，不根据单位判断类型。
 - GUI 图片检索默认走多 Agent 流程并启用复筛：Qwen 识别分类，RuleRouter 路由到主库/字母库/复核区，Zhipu 输出复筛候选。章节下拉默认是“自动识别章节”；只有选择该项时才会使用 `chapter=auto`，若用户选择具体章节则完全尊重用户选择，不自动覆盖。
 - GUI 手动荷载检索也走 RuleRouter，可按荷载类型路由到主库或字母库；由于没有查询图，手动模式不做 Zhipu 视觉复筛。

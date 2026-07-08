@@ -102,7 +102,7 @@ copy config.example.json config.local.json
   "answer_output": "D:\\path\\to\\answer-output",
   "dashscope_api_key": "",
   "zhipuai_api_key": "",
-  "top_k": 5
+  "top_k": 3
 }
 ```
 

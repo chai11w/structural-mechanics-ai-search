@@ -102,7 +102,7 @@ class FeishuTikuOptions:
     dry_run: bool = False
     session_ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS
     temp_dir: Path = BASE / ".tmp_feishu_tiku"
-    top_k: int = 5
+    top_k: int = 3
     rerank_top: int = 3
     max_message_age_seconds: int = 15 * 60
     working_reaction: str | None = "OK"
@@ -1904,7 +1904,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temp-dir", default=str(BASE / ".tmp_feishu_tiku"))
     parser.add_argument("--session-ttl-minutes", type=int, default=10)
     parser.add_argument("--max-message-age-minutes", type=int, default=15)
-    parser.add_argument("--top", type=int, default=5)
+    parser.add_argument("--top", type=int, default=3)
     parser.add_argument("--rerank-top", type=int, default=3)
     parser.add_argument(
         "--working-reaction",
