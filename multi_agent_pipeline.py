@@ -304,11 +304,10 @@ class MultiAgentCoordinator:
             if rerank_input:
                 zhipu_results = search.rerank_candidates(query_image_path, rerank_input, top_n=rerank_top)
                 if zhipu_results:
-                    results = normalize_rerank_results(zhipu_results)
+                    results = search.select_display_results(normalize_rerank_results(zhipu_results))
                     reranked = True
                     rerank_note = ""
 
-        results = search.select_display_results(results)
         write_last_search(results)
         return make_pipeline_result(
             route,
@@ -440,15 +439,8 @@ def rank_bank_candidates(
         scored.append((score, str(row["题目名称"])))
 
     scored.sort(key=lambda item: item[0], reverse=True)
-    high_confidence = [item for item in scored if item[0] > search.DISPLAY_ALL_SCORE]
-    high_quality = [item for item in scored if item[0] > search.DISPLAY_MIN_SCORE]
     perfect = [item for item in scored if item[0] >= 1.0]
-    if len(high_confidence) >= top_k:
-        top = high_confidence
-    elif high_quality:
-        top = high_quality[:top_k]
-    else:
-        top = perfect if len(perfect) >= top_k else perfect + [item for item in scored if item[0] < 1.0][:top_k - len(perfect)]
+    top = perfect if len(perfect) >= top_k else perfect + [item for item in scored if item[0] < 1.0][:top_k - len(perfect)]
     top = [item for item in top if item[0] > 0]
 
     results = []

@@ -915,15 +915,9 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
 
     results.sort(key=lambda x: x[0], reverse=True)
 
-    # 90% 以上的高相似候选不截断；否则沿用 top_k 粗筛池。
-    high_confidence = [r for r in results if r[0] > DISPLAY_ALL_SCORE]
-    high_quality = [r for r in results if r[0] > DISPLAY_MIN_SCORE]
+    # 100% 相似的不管几个都输出，不足 top_k 再补次高分
     perfect = [r for r in results if r[0] >= 1.0]
-    if len(high_confidence) >= top_k:
-        top = high_confidence
-    elif high_quality:
-        top = high_quality[:top_k]
-    elif len(perfect) >= top_k:
+    if len(perfect) >= top_k:
         top = perfect
     else:
         rest = [r for r in results if r[0] < 1.0][:top_k - len(perfect)]
@@ -948,7 +942,6 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
         paths.append({"rank": rank, "path": full_path, "score": score, "name": name})
 
     all_paths = list(paths)
-    paths = select_display_results(all_paths)
     lines = []
     for item in paths:
         pct = round(display_similarity_score(item) * 100)
@@ -1139,7 +1132,7 @@ def main():
     p_search.add_argument("--loads", help="荷载 JSON 字符串")
     p_search.add_argument("--chapter", required=True, help="章节名称，如 '2静定结构'")
     p_search.add_argument("--top", type=int, default=TOP_K, help=f"返回条数 (默认 {TOP_K})")
-    p_search.add_argument("--rerank", action="store_true", help="对图片搜索的粗筛结果进行 LLM 复筛，并按相似度阈值输出")
+    p_search.add_argument("--rerank", action="store_true", help="对图片搜索的粗筛结果进行 LLM 复筛，并按复筛相似度阈值输出")
 
     # store
     p_store = sub.add_parser("store", help="储存新题目")

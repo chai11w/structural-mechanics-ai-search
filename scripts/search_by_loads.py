@@ -31,7 +31,7 @@ def main():
     p_img = sub.add_parser("image-search", help="图片搜题")
     p_img.add_argument("--image", required=True, help="题目图片路径")
     p_img.add_argument("--chapter", required=True, help="章节名称")
-    p_img.add_argument("--rerank", action="store_true", help="对荷载粗筛结果进行 LLM 复筛，并按相似度阈值输出")
+    p_img.add_argument("--rerank", action="store_true", help="对荷载粗筛结果进行 LLM 复筛，并按复筛相似度阈值输出")
 
     # loads search (new)
     p_loads = sub.add_parser("loads-search", help="荷载描述搜题")

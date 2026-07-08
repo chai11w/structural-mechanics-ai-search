@@ -10,18 +10,18 @@
 - 当前验证以 `python scripts/smoke_test.py` 为主，辅以真实图片/飞书流程抽查。
 - `config.json`、`config.local.json` 被 `.gitignore` 忽略，可能包含本地路径或 `zhipuai_api_key`。
 
-## 2026-07-08 Result Output Threshold
+## 2026-07-08 Rerank Output Threshold
 
 - User found that forcing final output to always show Top 3 can include low-similarity candidates and make the result look worse.
-- Updated final display policy across core pipeline, CLI, GUI, and Feishu:
+- Updated reranked-result display policy across core pipeline, CLI, GUI, and Feishu:
   - Show all results whose user-visible similarity is `>90%`; these are not capped at 3.
   - Otherwise show `>80%` results capped at the top 3.
   - If `>90%` results are fewer than 3, later `>80%` results can fill up to 3 total.
   - If no result exceeds 80%, show only the single highest-similarity result.
 - The threshold applies to the final user-visible score:
   - after rerank: `final_score`;
-  - without rerank: coarse load `score`.
-- This is only a final output/answer-selection rule. It does not shrink the rough candidate pool before Zhipu rerank, so recall for reranking is preserved.
+  - this rule is not applied to the initial coarse-screening candidate pool.
+- The initial screening logic must remain unchanged: 100% coarse matches are preserved, otherwise the existing `top_k` coarse pool is used. Do not expand or shrink initial screening based on the 80/90 display thresholds.
 - `_last_search.json` is rewritten from the actual displayed results, so answer commands match the visible candidate count.
 - Feishu candidate and delete prompts now use the actual result count instead of hard-coded `1/2/3` and `-1/-2/-3`.
 

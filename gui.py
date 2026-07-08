@@ -635,7 +635,7 @@ class App:
                 last_file.write_text(_json.dumps(last_paths, ensure_ascii=False), encoding="utf-8")
                 return display_results
 
-        return select_display_results(paths)
+        return paths
 
     def _show_results(self, results):
         self._clear_results()
