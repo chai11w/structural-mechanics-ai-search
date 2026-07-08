@@ -299,6 +299,21 @@ def check_multi_agent_routing() -> list[str]:
     if symbolic_selected != ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]:
         failures.append(f"symbolic rerank pool mismatch: {symbolic_selected}")
 
+    display_many = search.select_display_results([
+        {"rank": 1, "path": "a.jpg", "score": 0.95},
+        {"rank": 2, "path": "b.jpg", "score": 0.81},
+        {"rank": 3, "path": "c.jpg", "score": 0.79},
+    ])
+    if [item["path"] for item in display_many] != ["a.jpg", "b.jpg"]:
+        failures.append(f"display threshold should keep only >=80% results, got {display_many}")
+
+    display_fallback = search.select_display_results([
+        {"rank": 1, "path": "a.jpg", "score": 0.70},
+        {"rank": 2, "path": "b.jpg", "score": 0.40},
+    ])
+    if [item["path"] for item in display_fallback] != ["a.jpg"]:
+        failures.append(f"display threshold should fall back to the best result, got {display_fallback}")
+
     classified = {
         "chapter_hint": "5位移法",
         "chapter_confidence": AUTO_CHAPTER_MIN_CONFIDENCE,

@@ -10,6 +10,20 @@
 - 当前验证以 `python scripts/smoke_test.py` 为主，辅以真实图片/飞书流程抽查。
 - `config.json`、`config.local.json` 被 `.gitignore` 忽略，可能包含本地路径或 `zhipuai_api_key`。
 
+## 2026-07-08 Result Output Threshold
+
+- User found that forcing final output to always show Top 3 can include low-similarity candidates and make the result look worse.
+- Updated final display policy across core pipeline, CLI, GUI, and Feishu:
+  - Show only results whose user-visible similarity is `>=80%`.
+  - If more than 3 results pass, show only the top 3.
+  - If no result reaches 80%, show only the single highest-similarity result.
+- The threshold applies to the final user-visible score:
+  - after rerank: `final_score`;
+  - without rerank: coarse load `score`.
+- This is only a final output/answer-selection rule. It does not shrink the rough candidate pool before Zhipu rerank, so recall for reranking is preserved.
+- `_last_search.json` is rewritten from the actual displayed results, so answer commands match the visible candidate count.
+- Feishu candidate and delete prompts now use the actual result count instead of hard-coded `1/2/3` and `-1/-2/-3`.
+
 ## Documentation Entry Points
 
 - 新对话默认读取顺序：`AGENTS.md` -> `.agents/project_memory.md` -> `SKILL.md` -> `README.md` -> 任务相关代码。

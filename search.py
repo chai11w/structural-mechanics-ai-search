@@ -53,6 +53,8 @@ LAST_SEARCH_FILE = ROOT / "_last_search.json"
 ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY") or cfg.get("zhipuai_api_key", "")
 TOP_K = cfg.get("top_k", 5)
 RERANK_MIN_LOAD_SCORE = 0.5
+DISPLAY_MIN_SCORE = 0.8
+DISPLAY_MAX_RESULTS = 3
 RERANK_LOAD_WEIGHT = 0.5
 RERANK_VISION_WEIGHT = 0.5
 LENGTH_TIE_FINAL_FLOOR = 0.9
@@ -544,6 +546,35 @@ def rerank_candidates(query_image_path, candidates, top_n=3):
     return scored[:top_n]
 
 
+def display_similarity_score(item):
+    """Return the similarity score shown to users for thresholded result output."""
+    if isinstance(item, dict):
+        final_score = item.get("final_score")
+        if final_score is not None:
+            return float(final_score or 0)
+        return float(item.get("score") or 0)
+    return float(item[0] or 0)
+
+
+def select_display_results(results, min_score=DISPLAY_MIN_SCORE, max_results=DISPLAY_MAX_RESULTS):
+    """Show results >= threshold, capped to max_results; fall back to the single best result."""
+    if not results:
+        return []
+
+    high_quality = [item for item in results if display_similarity_score(item) >= min_score]
+    selected = high_quality[:max_results] if high_quality else [max(results, key=display_similarity_score)]
+
+    renumbered = []
+    for rank, item in enumerate(selected, 1):
+        if isinstance(item, dict):
+            copied = dict(item)
+            copied["rank"] = rank
+            renumbered.append(copied)
+        else:
+            renumbered.append(item)
+    return renumbered
+
+
 def compute_similarity(query_loads, db_loads):
     """类型级相似度：每类取交集/各自总数的 min，0/0 跳过，返回 0~1"""
     def group_by_type(loads):
@@ -898,8 +929,14 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
         if repaired:
             name = resolved_name
         full_path = str(resolved_path)
-        lines.append(f"{rank}. {full_path}    相似度: {pct}%")
         paths.append({"rank": rank, "path": full_path, "score": score, "name": name})
+
+    all_paths = list(paths)
+    paths = select_display_results(all_paths)
+    lines = []
+    for item in paths:
+        pct = round(display_similarity_score(item) * 100)
+        lines.append(f"{item['rank']}. {item['path']}    相似度: {pct}%")
 
     result_text = "\n".join(lines) if lines else "无匹配结果"
     output_path.write_text(result_text, encoding="utf-8")
@@ -907,13 +944,14 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
     print(result_text)
     print(f"\n结果已保存: {output_path}")
 
-    filtered_rerank_paths = [item for item in paths if item["score"] >= RERANK_MIN_LOAD_SCORE]
+    filtered_rerank_paths = [item for item in all_paths if item["score"] >= RERANK_MIN_LOAD_SCORE]
     if rerank_image_path and 0 < len(filtered_rerank_paths) <= rerank_top:
         print(f"\n复筛候选仅 {len(filtered_rerank_paths)} 个，跳过 LLM 复筛，直接输出粗筛结果。")
         filtered_rerank_paths = []
     if rerank_image_path and filtered_rerank_paths:
         reranked = rerank_candidates(rerank_image_path, filtered_rerank_paths, rerank_top)
         if reranked:
+            reranked = select_display_results(reranked)
             rerank_lines = []
             rerank_paths = []
             for rank, item in enumerate(reranked, 1):
@@ -936,7 +974,7 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
             rerank_text = "\n".join(rerank_lines)
             output_path.write_text(rerank_text, encoding="utf-8")
             LAST_SEARCH_FILE.write_text(json.dumps(rerank_paths, ensure_ascii=False), encoding="utf-8")
-            print("\nLLM复筛 Top 3:")
+            print("\nLLM复筛结果:")
             print(rerank_text)
             print(f"\n复筛结果已保存: {output_path}")
 
@@ -1085,7 +1123,7 @@ def main():
     p_search.add_argument("--loads", help="荷载 JSON 字符串")
     p_search.add_argument("--chapter", required=True, help="章节名称，如 '2静定结构'")
     p_search.add_argument("--top", type=int, default=TOP_K, help=f"返回条数 (默认 {TOP_K})")
-    p_search.add_argument("--rerank", action="store_true", help="对图片搜索的粗筛结果进行 LLM 复筛 Top 3")
+    p_search.add_argument("--rerank", action="store_true", help="对图片搜索的粗筛结果进行 LLM 复筛，并按 80% 阈值输出")
 
     # store
     p_store = sub.add_parser("store", help="储存新题目")

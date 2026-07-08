@@ -308,6 +308,7 @@ class MultiAgentCoordinator:
                     reranked = True
                     rerank_note = ""
 
+        results = search.select_display_results(results)
         write_last_search(results)
         return make_pipeline_result(
             route,

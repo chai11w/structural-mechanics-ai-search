@@ -372,7 +372,8 @@ class TikuBot:
                 return self._start_delete_candidate(sender, session, delete_choice, "waiting_choice")
             choice = parse_choice(clean)
             if choice is None:
-                return BotResponse(texts=["回复 0/1/2/3 获取对应答案；回复 -1/-2/-3 删除对应错题；0 退出。"])
+                count = len(session.results)
+                return BotResponse(texts=[f"回复 {choice_shortcuts(count)} 获取对应答案；回复 {delete_shortcuts(count)} 删除对应错题；0 退出。"])
             return self._answer_choice(sender, session, choice)
 
         chapter = parse_chapter(clean)
@@ -674,7 +675,7 @@ class TikuBot:
             self.sessions.clear(sender)
             return BotResponse(texts=[format_no_match_reply(result)])
 
-        top_results = result.results[:3]
+        top_results = result.results
         session.state = "waiting_choice"
         session.chapter = result.chapter or chapter
         session.results = top_results
@@ -720,7 +721,7 @@ class TikuBot:
         if not result.results:
             return BotResponse(texts=[format_no_match_reply(result, question_label=question["label"])])
 
-        top_results = result.results[:3]
+        top_results = result.results
         session.state = "waiting_multi_choice"
         session.current_question = question["label"]
         session.chapter = result.chapter or chapter
@@ -1081,10 +1082,11 @@ def format_chapter_prompt(image_path: Path | None = None, result: Any | None = N
 
 def format_candidate_reply(chapter: str, results: list[dict[str, Any]], *, rerank_note: str = "") -> str:
     scores = "、".join(format_result_score(item) for item in results)
+    count = len(results)
     lines = [
         f"章节：{chapter}",
         f"下面是相似题目 Top {len(results)}，相似比分别为：{scores}",
-        f"-1/-2/-3：删除对应错题",
+        f"{delete_shortcuts(count)}：删除对应错题",
         "0：结束",
         "a：切换手动识别章节",
     ]
@@ -1171,9 +1173,23 @@ def format_multi_action_lines(question: dict[str, Any], result_count: int, *, he
     command_label = question_command_label(label)
     lines = [heading]
     lines.extend(f"{command_label}-{index}      获取第{label}题第{index}个答案" for index in range(1, result_count + 1))
-    lines.append("-1/-2/-3  删除当前候选错题")
+    lines.append(f"{delete_shortcuts(result_count)}  删除当前候选错题")
     lines.append("0        返回多题列表")
     return "\n".join(lines)
+
+
+def choice_shortcuts(count: int) -> str:
+    count = max(0, int(count))
+    if count <= 0:
+        return "0"
+    return "/".join(str(index) for index in range(1, count + 1))
+
+
+def delete_shortcuts(count: int) -> str:
+    count = max(0, int(count))
+    if count <= 0:
+        return "-1"
+    return "/".join(f"-{index}" for index in range(1, count + 1))
 
 
 def failure_from_pipeline_result(result: Any) -> dict[str, Any]:
@@ -1300,7 +1316,7 @@ def log_manual_chapter_after_failure(
 def format_single_action_lines(result_count: int, *, heading: str) -> str:
     lines = [heading]
     lines.extend(f"{index}        获取第{index}名答案" for index in range(1, result_count + 1))
-    lines.append("-1/-2/-3  删除对应错题")
+    lines.append(f"{delete_shortcuts(result_count)}  删除对应错题")
     lines.append("0        结束")
     return "\n".join(lines)
 

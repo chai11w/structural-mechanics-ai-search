@@ -55,7 +55,8 @@ _search_mod.LAST_SEARCH_FILE = ROOT / "_last_search.json"
 from search import (
     extract_loads, search as do_search, store as do_store,
     answer as do_answer, load_chapter_excel, rerank_candidates,
-    resolve_question_path, add_default_numeric_unit, normalize_query_loads
+    resolve_question_path, add_default_numeric_unit, normalize_query_loads,
+    select_display_results,
 )
 from multi_agent_pipeline import MultiAgentCoordinator, QwenClassifier, RuleRouter, symbolic_root, write_last_search
 from scripts.audit_unindexed_questions import (
@@ -551,7 +552,7 @@ class App:
             self._show_results([])
             self._set_status("未能自动识别章节，请手动选择")
             return
-        display_results = pipeline_result.results[:3]
+        display_results = pipeline_result.results
         if display_results:
             write_last_search(display_results)
         self._show_results(display_results)
@@ -611,6 +612,7 @@ class App:
             self._set_status("复筛中...")
             reranked = rerank_candidates(query_image_path, paths, top_n=3)
             if reranked:
+                reranked = select_display_results(reranked)
                 display_results = []
                 last_paths = []
                 for rank, item in enumerate(reranked, 1):
@@ -633,7 +635,7 @@ class App:
                 last_file.write_text(_json.dumps(last_paths, ensure_ascii=False), encoding="utf-8")
                 return display_results
 
-        return paths
+        return select_display_results(paths)
 
     def _show_results(self, results):
         self._clear_results()
