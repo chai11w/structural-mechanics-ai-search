@@ -71,6 +71,32 @@
 - Known local issue:
   - Running `py_compile`/normal imports in this Windows sandbox created locked `tiku_agent/__pycache__` temp pyc files that could not be removed due `Access denied`. Use `python -B` for future checks to avoid adding more pycache files.
 
+## 2026-07-10 Agent Intent Layer MVP
+
+- Added `tiku_agent/intent.py` as the first intent layer for the future Agent.
+- Intent layer is state-aware and rule-first. It does not call an LLM yet and does not execute tools directly.
+- Supported MVP intents:
+  - `search_image`
+  - `set_chapter`
+  - `select_question`
+  - `select_candidate`
+  - `cancel`
+  - `unsupported`
+- State-sensitive parsing is intentional:
+  - `1` in `WAIT_QUESTION_CHOICE` means select question 1.
+  - `1` in `WAIT_CANDIDATE_CHOICE` means select candidate 1.
+  - `4` in `WAIT_CHAPTER` means `4力法`.
+- The layer supports simple natural phrases such as `按力法`, `矩阵位移`, `选第一个`, text image paths, and `2-4力法` question/chapter override commands.
+- Store/delete/repair phrases are explicitly rejected as `unsupported` for this Agent MVP. Those operations remain outside the first retrieval Agent scope.
+- Added `tests/test_tiku_agent_intent.py`.
+- Verification run:
+  - `python -B -m unittest tests.test_tiku_agent_intent tests.test_tiku_agent_tools` passed, 14 tests.
+- Current scope:
+  - Intent parsing only.
+  - No LangGraph graph yet.
+  - No LLM intent fallback yet.
+  - No Feishu integration and no old Feishu runtime state touched.
+
 ## Supported Chapters
 
 - `2静定结构`
