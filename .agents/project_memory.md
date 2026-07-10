@@ -31,6 +31,46 @@
 - 正式数据文件、运行日志、本地配置、密钥、大文件默认不提交；需要提交时先判断是否安全。
 - 当前常见未提交运行产物：`data/feishu_chapter_failure_log.jsonl`，这是飞书章节判断日志，通常不要混进普通代码提交。
 
+## 2026-07-10 Agent Workspace And Feishu Boundary
+
+- User plans to build a new question-bank Agent before connecting it to Feishu.
+- The Agent must be developed and run in a separate workspace/runtime boundary so it does not affect the existing Feishu question-bank bot state.
+- The future Agent will connect to a new Feishu bot. Do not reuse the existing bot's app credentials, event URL, local port, cloudflared tunnel, session state, `.tmp_feishu_tiku` directory, or runtime logs unless the user explicitly requests a migration.
+- Do not stop, restart, or reshape the current `scripts/feishu_tiku_bot.py` production-like service while building the Agent prototype. The first Agent version should be an independent entry point.
+- New Agent runtime files must be separated by config/path:
+  - checkpoints / LangGraph state;
+  - Feishu event records;
+  - downloaded/uploaded temporary images;
+  - session/user state;
+  - operation/audit logs;
+  - test outputs.
+- The existing live question bank may be used as a read-only retrieval data source during early Agent work.
+- Any write operation to live bank data, including store/delete/path repair, must still follow `plan -> confirm -> execute`, create backups, and remain visibly separate from old Feishu bot state.
+- This boundary is a project rule, not only an implementation detail. Future conversations should preserve it before choosing filenames, ports, state directories, or Feishu integration paths.
+
+## 2026-07-10 Agent Retrieval Tool Layer MVP
+
+- Added a new isolated package `tiku_agent/` for the future Agent tool layer. It is not wired into the existing Feishu bot.
+- Default Agent runtime directory is `.tmp_tiku_agent`, not `.tmp_feishu_tiku`.
+- Implemented first-version 7 coarse retrieval tools in `tiku_agent/tools.py`:
+  - `analyze_image_tool`: Qwen-based image analysis for layout/chapter/load data, using an Agent-local Qwen cache.
+  - `route_bank_tool`: wraps `RuleRouter` to choose main/symbolic/review lanes.
+  - `classify_structure_tool`: structure type tool for symbolic image searches; skips non-symbolic routes and first uses text fast path.
+  - `coarse_search_tool`: read-only coarse search. It does not write `_last_search.json` and uses `resolve_question_path(..., update_excel=False)` to avoid live Excel path repair side effects.
+  - `rerank_candidates_tool`: reranks candidates and returns visible candidates only; it does not answer automatically.
+  - `parse_candidate_action_tool`: parses candidate-page actions such as `1`, `-1`, and `0` based on the current state.
+  - `answer_candidate_tool`: returns/copies the chosen candidate's answer into `.tmp_tiku_agent/answer_output`, not the existing configured `answer_output`.
+- Added standard-library tests in `tests/test_tiku_agent_tools.py`; no pytest dependency is required.
+- Verification run:
+  - `python -B -m unittest tests.test_tiku_agent_tools` passed, 4 tests.
+  - `python -B -c "from tiku_agent.tools import AgentToolConfig; print(AgentToolConfig().runtime_dir)"` printed `.tmp_tiku_agent`.
+- Current scope:
+  - Tool layer only; no LangGraph graph yet.
+  - No new Feishu bot yet.
+  - No existing Feishu runtime files, ports, tunnels, sessions, or `.tmp_feishu_tiku` state touched.
+- Known local issue:
+  - Running `py_compile`/normal imports in this Windows sandbox created locked `tiku_agent/__pycache__` temp pyc files that could not be removed due `Access denied`. Use `python -B` for future checks to avoid adding more pycache files.
+
 ## Supported Chapters
 
 - `2静定结构`
