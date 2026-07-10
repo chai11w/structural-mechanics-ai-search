@@ -74,7 +74,8 @@
 ## 2026-07-10 Agent Intent Layer MVP
 
 - Added `tiku_agent/intent.py` as the first intent layer for the future Agent.
-- Intent layer is state-aware and rule-first. It does not call an LLM yet and does not execute tools directly.
+- Intent layer is now LLM-first and state-aware. It does not execute tools directly.
+- Natural-language user input is sent to Qwen/DashScope for a fixed JSON intent; Python validation then checks state legality, chapter range, candidate/question bounds, and unsupported actions.
 - Supported MVP intents:
   - `search_image`
   - `set_chapter`
@@ -82,6 +83,12 @@
   - `select_candidate`
   - `cancel`
   - `unsupported`
+- Core functions:
+  - `build_intent_prompt(...)`
+  - `call_qwen_intent(...)`
+  - `validate_intent_payload(...)`
+  - `parse_user_intent(...)`
+- Rule parsing remains only as an explicit fallback if the LLM call fails; the intended path is LLM -> validation -> Agent graph/tool selection.
 - State-sensitive parsing is intentional:
   - `1` in `WAIT_QUESTION_CHOICE` means select question 1.
   - `1` in `WAIT_CANDIDATE_CHOICE` means select candidate 1.
@@ -90,11 +97,14 @@
 - Store/delete/repair phrases are explicitly rejected as `unsupported` for this Agent MVP. Those operations remain outside the first retrieval Agent scope.
 - Added `tests/test_tiku_agent_intent.py`.
 - Verification run:
-  - `python -B -m unittest tests.test_tiku_agent_intent tests.test_tiku_agent_tools` passed, 14 tests.
+  - `python -B -m unittest tests.test_tiku_agent_intent tests.test_tiku_agent_tools` passed, 18 tests.
+  - Live Qwen intent smoke passed:
+    - `第二题按力法` in `WAIT_QUESTION_CHOICE` -> `select_question`, `question_index=2`, `chapter_override=4力法`.
+    - `给我第一个答案` in `WAIT_CANDIDATE_CHOICE` -> `select_candidate`, `rank=1`.
+    - `删掉第一个` in `WAIT_CANDIDATE_CHOICE` -> rejected as `unsupported`, `requested_action=delete`.
 - Current scope:
   - Intent parsing only.
   - No LangGraph graph yet.
-  - No LLM intent fallback yet.
   - No Feishu integration and no old Feishu runtime state touched.
 
 ## Supported Chapters
