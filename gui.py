@@ -56,7 +56,8 @@ from search import (
     extract_loads, search as do_search, store as do_store,
     answer as do_answer, load_chapter_excel, rerank_candidates,
     resolve_question_path, add_default_numeric_unit, normalize_query_loads,
-    select_display_results,
+    select_display_results, rerank_results_complete, rerank_incomplete_note,
+    mark_rerank_incomplete,
 )
 from multi_agent_pipeline import MultiAgentCoordinator, QwenClassifier, RuleRouter, symbolic_root, write_last_search
 from scripts.audit_unindexed_questions import (
@@ -611,7 +612,7 @@ class App:
         if query_image_path and paths:
             self._set_status("复筛中...")
             reranked = rerank_candidates(query_image_path, paths, top_n=3)
-            if reranked:
+            if reranked and rerank_results_complete(reranked):
                 reranked = select_display_results(reranked)
                 display_results = []
                 last_paths = []
@@ -634,6 +635,8 @@ class App:
                     })
                 last_file.write_text(_json.dumps(last_paths, ensure_ascii=False), encoding="utf-8")
                 return display_results
+            if reranked:
+                return mark_rerank_incomplete(paths, rerank_incomplete_note(reranked))
 
         return paths
 
@@ -695,7 +698,8 @@ class App:
 
         self._set_preview_paths(preview_paths)
         self._add_result_preview_spacer()
-        self._set_status("检索完成（已复筛）" if reranked else "检索完成")
+        incomplete = any(isinstance(item, dict) and item.get("rerank_status") == "incomplete" for item in results)
+        self._set_status("复筛未完成，已回退粗筛" if incomplete else "检索完成（已复筛）" if reranked else "检索完成")
         # 延迟刷新，等 Tkinter 完成像素级布局
         self.win.after(50, self._refresh_scroll)
 

@@ -300,10 +300,13 @@ class MultiAgentCoordinator:
                 status_callback("Zhipu复筛中...")
             if rerank_input:
                 zhipu_results = search.rerank_candidates(query_image_path, rerank_input, top_n=rerank_top)
-                if zhipu_results:
+                if zhipu_results and search.rerank_results_complete(zhipu_results):
                     results = normalize_rerank_results(zhipu_results)
                     reranked = True
                     rerank_note = ""
+                elif zhipu_results:
+                    rerank_note = search.rerank_incomplete_note(zhipu_results)
+                    results = search.mark_rerank_incomplete(results, rerank_note)
 
         write_last_search(results)
         return make_pipeline_result(
@@ -495,6 +498,7 @@ def normalize_rerank_results(results: list[dict[str, Any]]) -> list[dict[str, An
             "length_score": item.get("length_score"),
             "length_reason": item.get("length_reason"),
             "rerank_reason": item.get("rerank_reason"),
+            "rerank_status": item.get("rerank_status"),
         })
     return normalized
 

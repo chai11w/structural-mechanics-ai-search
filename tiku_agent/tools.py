@@ -312,10 +312,22 @@ def rerank_candidates_tool(
                 next_state="WAIT_CANDIDATE_CHOICE",
             )
         reranked = search.rerank_candidates(query_image_path, rerank_input, top_n=rerank_top)
-        visible = normalize_rerank_results(reranked) if reranked else _renumber(candidates)
+        if reranked and search.rerank_results_complete(reranked):
+            visible = normalize_rerank_results(reranked)
+            rerank_note = ""
+        elif reranked:
+            rerank_note = search.rerank_incomplete_note(reranked)
+            visible = _renumber(search.mark_rerank_incomplete(candidates, rerank_note))
+        else:
+            visible = _renumber(candidates)
+            rerank_note = ""
         return ToolResult(
             ok=True,
-            data={"reranked": bool(reranked), "visible_candidates": visible, "rerank_note": ""},
+            data={
+                "reranked": bool(reranked) and search.rerank_results_complete(reranked),
+                "visible_candidates": visible,
+                "rerank_note": rerank_note,
+            },
             next_state="WAIT_CANDIDATE_CHOICE",
         )
     except Exception as exc:  # noqa: BLE001

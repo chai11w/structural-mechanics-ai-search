@@ -38,6 +38,8 @@ def main() -> int:
     parser.add_argument("--rerank-top", type=int, default=3)
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--candidate-timeout", type=float, default=None)
+    parser.add_argument("--retry-timeout", type=float, default=None)
+    parser.add_argument("--retry-max-candidates", type=int, default=0)
     parser.add_argument("--chapter", help="Run one explicit symbolic-bank chapter.")
     parser.add_argument("--query-path", help="Run one explicit query path stored in that chapter Excel.")
     parser.add_argument("--concurrent-only", action="store_true")
@@ -83,6 +85,8 @@ def main() -> int:
             top_n=args.rerank_top,
             max_workers=args.max_workers,
             candidate_timeout_seconds=args.candidate_timeout,
+            retry_timeout_seconds=args.retry_timeout,
+            retry_max_candidates=args.retry_max_candidates,
             on_candidate_scored=candidate_timings.append,
         )
         concurrent_seconds = time.perf_counter() - concurrent_start
@@ -120,6 +124,8 @@ def main() -> int:
         "candidate_limit": args.candidate_limit,
         "max_workers": args.max_workers,
         "candidate_timeout_seconds": args.candidate_timeout,
+        "retry_timeout_seconds": args.retry_timeout,
+        "retry_max_candidates": args.retry_max_candidates,
         "serial_avg_seconds": avg(row["serial_seconds"] for row in rows if row["serial_seconds"] is not None),
         "concurrent_avg_seconds": avg(row["concurrent_seconds"] for row in rows),
         "avg_speedup": avg(row["speedup"] for row in rows if row["speedup"] is not None),

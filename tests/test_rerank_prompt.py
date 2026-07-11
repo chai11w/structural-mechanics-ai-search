@@ -60,3 +60,55 @@ class RerankPromptTest(unittest.TestCase):
         self.assertIsNone(result["rerank_score"])
         self.assertEqual(result["final_score"], 0.9)
         self.assertEqual(result["rerank_status"], "timeout")
+
+    def test_timeout_candidate_is_retried_and_ranked_when_retry_succeeds(self):
+        candidates = [{"rank": 1, "path": "slow.jpg", "name": "slow.jpg", "score": 0.8}]
+        responses = [TimeoutError("Request timed out."), (0.9, "补评完成")]
+
+        with (
+            patch("search.prepare_rerank_candidates", return_value=candidates),
+            patch("search.ZhipuAI", return_value=object()),
+            patch("search.score_candidate_pair", side_effect=responses),
+        ):
+            results = search.rerank_candidates_concurrent(
+                "query.jpg",
+                candidates,
+                max_workers=1,
+                candidate_timeout_seconds=1,
+                retry_timeout_seconds=2,
+                retry_max_candidates=1,
+            )
+
+        self.assertTrue(search.rerank_results_complete(results))
+        self.assertEqual(results[0]["rerank_status"], "retried")
+        self.assertEqual(results[0]["rerank_attempts"], 2)
+        self.assertAlmostEqual(results[0]["final_score"], 0.85)
+
+    def test_unfinished_retry_returns_marked_coarse_fallback(self):
+        candidates = [{"rank": 1, "path": "slow.jpg", "name": "slow.jpg", "score": 0.8}]
+
+        with (
+            patch("search.prepare_rerank_candidates", return_value=candidates),
+            patch("search.ZhipuAI", return_value=object()),
+            patch("search.score_candidate_pair", side_effect=TimeoutError("Request timed out.")),
+        ):
+            results = search.rerank_candidates_concurrent(
+                "query.jpg",
+                candidates,
+                max_workers=1,
+                candidate_timeout_seconds=1,
+                retry_timeout_seconds=2,
+                retry_max_candidates=1,
+            )
+
+        self.assertFalse(search.rerank_results_complete(results))
+        self.assertEqual(results[0]["rerank_status"], "incomplete")
+        self.assertNotIn("final_score", results[0])
+
+    def test_default_rerank_uses_shared_concurrency_policy(self):
+        with patch("search.rerank_candidates_concurrent", return_value=[]) as concurrent:
+            search.rerank_candidates("query.jpg", [{"rank": 1, "path": "a.jpg", "score": 1.0}])
+
+        self.assertEqual(concurrent.call_args.kwargs["max_workers"], search.RERANK_CONCURRENT_MAX_WORKERS)
+        self.assertEqual(concurrent.call_args.kwargs["candidate_timeout_seconds"], search.RERANK_PRIMARY_TIMEOUT_SECONDS)
+        self.assertEqual(concurrent.call_args.kwargs["retry_timeout_seconds"], search.RERANK_RETRY_TIMEOUT_SECONDS)

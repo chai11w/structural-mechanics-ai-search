@@ -449,6 +449,13 @@ reason 必须少于6个汉字。"""
 
 RERANK_PROMPT = SHAPE_RERANK_PROMPT
 
+# Shared defaults for GUI, Feishu, CLI, and the isolated Agent. Keep the first
+# pass bounded, then retry only the most promising timed-out candidates.
+RERANK_CONCURRENT_MAX_WORKERS = 10
+RERANK_PRIMARY_TIMEOUT_SECONDS = 8.0
+RERANK_RETRY_TIMEOUT_SECONDS = 10.0
+RERANK_RETRY_MAX_CANDIDATES = 3
+
 
 LENGTH_TIE_PROMPT = """你是结构力学搜题结果打平复核器。候选题已经被判定为高度相似。
 
@@ -622,20 +629,42 @@ def finalize_rerank_results(client, query_image_path, scored, top_n=3, timeout_s
 
 
 def rerank_candidates(query_image_path, candidates, top_n=3):
-    """Use the vision model to rerank already-selected search candidates."""
-    if not query_image_path or not candidates:
-        return []
+    """Rerank candidates with the shared bounded-concurrency policy."""
+    return rerank_candidates_concurrent(
+        query_image_path,
+        candidates,
+        top_n=top_n,
+        max_workers=RERANK_CONCURRENT_MAX_WORKERS,
+        candidate_timeout_seconds=RERANK_PRIMARY_TIMEOUT_SECONDS,
+        retry_timeout_seconds=RERANK_RETRY_TIMEOUT_SECONDS,
+        retry_max_candidates=RERANK_RETRY_MAX_CANDIDATES,
+    )
 
-    usable = prepare_rerank_candidates(candidates)
-    if not usable:
-        return []
 
-    client = ZhipuAI(api_key=ZHIPUAI_API_KEY)
-    scored = []
-    for candidate in usable:
-        scored.append(score_rerank_candidate(query_image_path, candidate, client=client))
+def rerank_results_complete(results):
+    """Whether a rerank result is safe to present as a final visual ranking."""
+    unfinished = {"timeout", "failed", "incomplete"}
+    return bool(results) and all(item.get("rerank_status") not in unfinished for item in results)
 
-    return finalize_rerank_results(client, query_image_path, scored, top_n=top_n)
+
+def rerank_incomplete_note(results):
+    for item in results:
+        if item.get("rerank_status") == "incomplete":
+            return str(item.get("rerank_reason") or "部分候选复筛未完成，已回退粗筛排序。")
+    return "部分候选复筛未完成，已回退粗筛排序。"
+
+
+def mark_rerank_incomplete(candidates, note):
+    """Keep the original coarse order when a visual rerank batch is incomplete."""
+    marked = []
+    for candidate in candidates:
+        item = dict(candidate)
+        item["rerank_status"] = "incomplete"
+        item["rerank_reason"] = note
+        item.pop("rerank_score", None)
+        item.pop("final_score", None)
+        marked.append(item)
+    return marked
 
 
 def rerank_candidates_concurrent(
@@ -644,13 +673,15 @@ def rerank_candidates_concurrent(
     top_n=3,
     max_workers=3,
     candidate_timeout_seconds=None,
+    retry_timeout_seconds=None,
+    retry_max_candidates=0,
     on_candidate_scored=None,
 ):
-    """Experimental concurrent rerank; default search flow still uses rerank_candidates.
+    """Concurrent rerank with bounded timeouts and a selective retry.
 
-    A request timeout keeps the candidate at its coarse score and marks it as
-    ``rerank_status=timeout``. Callers must present that result as pending,
-    rather than treating it as a verified final rerank.
+    Timed-out candidates can be retried one at a time. If any candidate remains
+    unfinished, return the original coarse list marked ``incomplete`` rather
+    than mixing unverified items into a final visual ranking.
     """
     if not query_image_path or not candidates:
         return []
@@ -675,10 +706,44 @@ def rerank_candidates_concurrent(
         for future in as_completed(futures):
             item = future.result()
             scored.append(item)
-            if on_candidate_scored is not None:
-                on_candidate_scored(dict(item))
+    timed_out = [item for item in scored if item.get("rerank_status") == "timeout"]
+    retry_limit = max(0, int(retry_max_candidates or 0))
+    for first_attempt in sorted(timed_out, key=lambda item: float(item.get("score") or 0), reverse=True)[:retry_limit]:
+        retried = score_rerank_candidate(
+            query_image_path,
+            first_attempt,
+            timeout_seconds=retry_timeout_seconds,
+            collect_timing=on_candidate_scored is not None,
+        )
+        initial_seconds = float(first_attempt.get("rerank_seconds") or 0)
+        retry_seconds = float(retried.get("rerank_seconds") or 0)
+        retried["rerank_attempts"] = 2
+        retried["rerank_initial_seconds"] = round(initial_seconds, 3)
+        retried["rerank_retry_seconds"] = round(retry_seconds, 3)
+        retried["rerank_seconds"] = round(initial_seconds + retry_seconds, 3)
+        if retried.get("rerank_status") == "completed":
+            retried["rerank_status"] = "retried"
+        scored = [
+            retried if item.get("path") == first_attempt.get("path") else item
+            for item in scored
+        ]
 
-    client = ZhipuAI(api_key=ZHIPUAI_API_KEY)
+    if not rerank_results_complete(scored):
+        note = "部分候选两次复筛仍未完成，已回退粗筛排序。"
+        fallback = mark_rerank_incomplete(usable, note)
+        if on_candidate_scored is not None:
+            for item in fallback:
+                on_candidate_scored(dict(item))
+        return fallback
+
+    if on_candidate_scored is not None:
+        for item in scored:
+            on_candidate_scored(dict(item))
+
+    client = ZhipuAI(
+        api_key=ZHIPUAI_API_KEY,
+        max_retries=0 if candidate_timeout_seconds is not None else 3,
+    )
     return finalize_rerank_results(
         client,
         query_image_path,
@@ -1097,7 +1162,7 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
     filtered_rerank_paths = [item for item in all_paths if item["score"] >= RERANK_MIN_LOAD_SCORE]
     if rerank_image_path and filtered_rerank_paths:
         reranked = rerank_candidates(rerank_image_path, filtered_rerank_paths, rerank_top)
-        if reranked:
+        if reranked and rerank_results_complete(reranked):
             reranked = select_display_results(reranked)
             rerank_lines = []
             rerank_paths = []
@@ -1124,6 +1189,9 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
             print("\nLLM复筛结果:")
             print(rerank_text)
             print(f"\n复筛结果已保存: {output_path}")
+        elif reranked:
+            note = rerank_incomplete_note(reranked)
+            print(f"\n{note}")
 
     # （已禁用自动弹图片）
 
