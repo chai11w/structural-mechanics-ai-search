@@ -4,7 +4,7 @@
 
 - 项目位于 `F:\cc\7-题库检索`。
 - 项目目标：维护结构力学题库，按题目图片或荷载描述检索相似题，并按排名复制/发送答案。
-- 当前阶段：CLI、GUI、飞书检索、飞书入库、候选删除、章节 2-8、主库/字母库分流、字母库结构类型筛选都已进入可用维护阶段。
+- 当前阶段：CLI、飞书检索、飞书入库、候选删除、章节 2-8、主库/字母库分流、字母库结构类型筛选都已进入可用维护阶段；隔离 Agent 已具备单题编排 MVP。
 - 当前项目说明入口为 `AGENTS.md`、`.agents/project_memory.md`、`SKILL.md`、`README.md`。
 - 旧 `.agents/skills/结构力学/` 已降级为跳转说明，不再作为当前流程来源。
 - 当前验证以 `python scripts/smoke_test.py` 为主，必要时用真实题图或飞书 dry-run 抽查。
@@ -157,7 +157,7 @@
 
 ## 2026-07-11 Unified Rerank Policy
 
-- Updated the shared rerank policy so GUI image search, Feishu single/multi search, base CLI search, and the new Agent tool layer no longer skip rerank just because the candidate count is `<= rerank_top`.
+- Updated the shared rerank policy so Feishu single/multi search, base CLI search, and the new Agent tool layer no longer skip rerank just because the candidate count is `<= rerank_top`.
 - `select_rerank_candidates(...)` still respects route-specific coarse-score thresholds (`main` 0.65, `symbolic` 0.50); the change is only that a small threshold-qualified pool, such as 1-2 candidates, still enters rerank.
 - Motivation: user wants displayed retrieval similarity to be the final rerank-aware similarity (`final_score`) whenever a query image and candidates are available.
 - Existing `force_rerank` parameters remain for call-site compatibility, but they are no longer needed to bypass the old small-candidate skip rule.
@@ -210,7 +210,7 @@
 - `7矩阵位移`
 - `8影响线`
 
-GUI、飞书手动章节、自动章节提示、入库、删除、审计和 smoke test 均应支持 2-8 章。
+飞书手动章节、自动章节提示、入库、删除、审计和 smoke test 均应支持 2-8 章。
 
 ## Core Architecture
 
@@ -220,11 +220,9 @@ GUI、飞书手动章节、自动章节提示、入库、删除、审计和 smok
   - 初筛规则：如果 100% 粗筛匹配数超过 `top_k`，保留全部 100%；否则补到 `top_k`。
 - `multi_agent_pipeline.py`
   - Qwen 图片识别、章节判断、RuleRouter 路由、主库/字母库检索、Zhipu 复筛协调。
-  - GUI 图片检索和飞书检索主要走这个 pipeline。
+  - 飞书检索和 CLI 多 Agent 检索主要走这个 pipeline；隔离 Agent 复用其中的分类、路由和候选规则。
 - `scripts/search_by_loads.py`
   - Skill/CLI 用的轻量包装：`loads-search`、`image-search`、`answer`。
-- `gui.py`
-  - Tkinter 桌面端，支持图片检索、手动荷载、预览、答案入口、入库和一键审查。
 - `scripts/feishu_tiku_bot.py`
   - 飞书机器人入口，支持单题/多题检索、自动/手动章节、取答案、入库、删除、OK reaction。
 - `scripts/feishu_store_flow.py`
@@ -246,9 +244,9 @@ GUI、飞书手动章节、自动章节提示、入库、删除、审计和 smok
 - 旧视觉复筛 prompt 仍保留为 `LEGACY_RERANK_PROMPT`，仅用于对比评测，不作为默认复筛。
 - 2026-07-11 用 `scripts/evaluate_shape_rerank_prompt.py` 对 10 组钢架/多跨梁图片做旧 prompt vs shape-only prompt 对比；按同形 `>=0.8`、异形 `<=0.5` 计，旧 prompt 4/10，新 prompt 9/10；旧 prompt 平均 1.081s，新 prompt 平均 1.558s。唯一失败样本是“2跨-2跨”，两图支座/连接差异较大，真值标签本身有争议。
 - 2026-07-11 追加同 10 组的 Qwen shape-only 对比；本轮 GLM shape-only 为 9/10、平均 0.934s，Qwen shape-only 为 7/10、平均 1.93s。Qwen 对 T-L、2跨-3跨 等“同类但关键骨架不同”的异形压分不够，暂不建议把默认视觉复筛从 GLM 切到 Qwen。
-- 2026-07-11 并发复筛已成为共享默认：`rerank_candidates(...)` 调用 `rerank_candidates_concurrent(...)`，因此 GUI、飞书 pipeline、基础 CLI 和隔离 Agent 工具共享同一策略。默认最多 10 个候选同时调用 GLM；字母库 `5位移法/题目/7.jpg` 前 10 个候选实测串行 26.48s、10 并发 4.01s，提速 6.603x，Top 路径一致。模型存在长尾，最慢单候选不同轮为 10.721s、2.829s，不能把某张题图固定视为慢图。
+- 2026-07-11 并发复筛已成为共享默认：`rerank_candidates(...)` 调用 `rerank_candidates_concurrent(...)`，因此飞书 pipeline、基础 CLI 和隔离 Agent 工具共享同一策略。默认最多 10 个候选同时调用 GLM；字母库 `5位移法/题目/7.jpg` 前 10 个候选实测串行 26.48s、10 并发 4.01s，提速 6.603x，Top 路径一致。模型存在长尾，最慢单候选不同轮为 10.721s、2.829s，不能把某张题图固定视为慢图。
 - 默认超时恢复策略：首轮单候选 8s，超时项按粗筛分从高到低最多串行补评 3 个、每项 10s；显式超时模式关闭 SDK 自动重试，否则 1s 请求会因多次重试拖到约 11s。补评成功标为 `rerank_status=retried` 并正常参与最终排序；只要仍有任一候选未完成，整批回退到原始粗筛排序并标为 `rerank_status=incomplete`，不混合未验证视觉分和最终排序。真实强制超时测试中，首轮 0.1s 超时后同一候选补评约 1.868s 成功。
-- 该策略已写入 GUI、飞书 pipeline、CLI 和 Agent 工具代码，但没有重启、停止或修改既有飞书服务运行进程；运行中的旧进程需要用户另行决定是否重启才会加载新代码。
+- 该策略已写入飞书 pipeline、CLI 和 Agent 工具代码，但没有重启、停止或修改既有飞书服务运行进程；运行中的旧进程需要用户另行决定是否重启才会加载新代码。
 - 复筛输出规则：
   - `final_score > 90%` 的结果全部输出；
   - 如果没有 `>90%`，输出 `>80%` 的前 3 个；
@@ -314,7 +312,6 @@ python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter
 python scripts/multi_agent_search.py --types "均布" --raws "q" --chapter "2静定结构" --no-rerank
 python scripts/search_by_loads.py loads-search --types "均布" --raws "20" --chapter "2静定结构"
 python scripts/search_by_loads.py answer 1
-python gui.py
 python scripts/feishu_tiku_bot.py dry-run-flow --image "D:\path\to\question.jpg" --chapter 5 --choice 1
 python scripts/audit_unindexed_questions.py
 python scripts/store_unindexed_questions.py
@@ -330,6 +327,12 @@ python scripts/smoke_test.py
 
 ## Known Risks
 
+- `search.py` 的荷载识别 prompt 同时要求 raw 去单位，又在符号赋值示例中要求输出 `P=40kN`，存在互相矛盾的模型指令。
+- 复筛并发数、首轮超时和补评上限目前是代码常量；同粗筛分的超时候选只按分数排序，补评顺序可能受线程完成顺序影响。
+- `search.py` 和 `scripts/feishu_tiku_bot.py` 体量较大、职责较多；飞书与 Agent 还各自保留章节/中文序号解析，后续容易行为漂移。
+- 当前单元测试以 mock 和纯函数为主，缺少 pipeline 级超时回退、真实飞书事件和持久状态恢复测试。
+- `requirements.txt` 没有版本约束，换机器安装时存在依赖行为变化风险。
+- 当前项目记忆仍偏长并保留较多阶段历史；后续应归档历史，只保留当前事实。
 - `config.json` / `config.local.json` 会覆盖代码默认值，例如 `top_k`；改默认值时要检查有效配置。
 - PowerShell `Set-Content -Encoding UTF8` 可能写入 BOM，导致 Python `json.load(..., encoding="utf-8")` 读取配置时报 `Unexpected UTF-8 BOM`；写 JSON 配置时要保持 UTF-8 no BOM。
 - 飞书正在运行的旧进程可能还没加载最新代码，修改后需要重启服务。
@@ -347,6 +350,7 @@ python scripts/smoke_test.py
 
 ## Next Best Step
 
-- 继续观察飞书章节判断日志，等样本足够后再针对常见 `unknown -> 手动章节` 模式微调章节 prompt/guard。
-- 如果检索准确率继续卡住，优先复盘真实失败样本，再决定是否增加新的稳定初筛因素；不要先扩大复杂视觉识别。
-- 若继续动检索输出规则，先明确是“初筛候选池”还是“复筛后展示”，避免再把两层逻辑混在一起。
+- 先统一荷载识别 prompt 的单位规则，并补充赋值符号回归样本。
+- 再把复筛并发/超时参数配置化，给同分超时候选增加确定性排序，并补 pipeline 集成测试。
+- 然后拆分飞书会话、消息适配、多题裁图和维护命令，复用 Agent 的章节/序号解析基础能力。
+- Agent 方向优先完成多题编排，再考虑 LangGraph checkpoint 和新飞书机器人接入。

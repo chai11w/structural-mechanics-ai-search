@@ -383,7 +383,7 @@ def answer_candidate_tool(
 
     By default answers are copied to the new Agent runtime output directory,
     not the existing configured `answer_output`, so this tool does not disturb
-    the current GUI/Feishu answer output state.
+    the existing Feishu/CLI answer output state.
     """
 
     config = config or AgentToolConfig()

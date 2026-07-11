@@ -449,7 +449,7 @@ reason 必须少于6个汉字。"""
 
 RERANK_PROMPT = SHAPE_RERANK_PROMPT
 
-# Shared defaults for GUI, Feishu, CLI, and the isolated Agent. Keep the first
+# Shared defaults for Feishu, CLI, and the isolated Agent. Keep the first
 # pass bounded, then retry only the most promising timed-out candidates.
 RERANK_CONCURRENT_MAX_WORKERS = 10
 RERANK_PRIMARY_TIMEOUT_SECONDS = 8.0
