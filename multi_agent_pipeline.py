@@ -463,13 +463,22 @@ def rerank_threshold_for_route(route: str) -> float:
 
 
 def select_rerank_candidates(results: list[dict[str, Any]], route: str) -> list[dict[str, Any]]:
-    """Send every coarse candidate to vision rerank so displayed scores are final scores."""
-    del route
-    return [
-        {key: item[key] for key in ("rank", "path", "score", "name")}
-        for item in results
-        if item.get("path") and item.get("score", 0) > 0
-    ]
+    """Keep rerank-threshold candidates; do not skip just because the pool is small."""
+    threshold = rerank_threshold_for_route(route)
+    selected = []
+    seen_paths = set()
+
+    for item in results:
+        if not item.get("path") or item.get("score", 0) <= 0:
+            continue
+        if item.get("score", 0) < threshold:
+            continue
+        if item["path"] in seen_paths:
+            continue
+        selected.append({key: item[key] for key in ("rank", "path", "score", "name")})
+        seen_paths.add(item["path"])
+
+    return selected
 
 
 def normalize_rerank_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:

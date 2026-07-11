@@ -146,7 +146,7 @@
 ## 2026-07-11 Unified Rerank Policy
 
 - Updated the shared rerank policy so GUI image search, Feishu single/multi search, base CLI search, and the new Agent tool layer no longer skip rerank just because the candidate count is `<= rerank_top`.
-- `select_rerank_candidates(...)` now sends every positive coarse candidate to vision rerank, instead of filtering by route-specific coarse-score thresholds.
+- `select_rerank_candidates(...)` still respects route-specific coarse-score thresholds (`main` 0.65, `symbolic` 0.50); the change is only that a small threshold-qualified pool, such as 1-2 candidates, still enters rerank.
 - Motivation: user wants displayed retrieval similarity to be the final rerank-aware similarity (`final_score`) whenever a query image and candidates are available.
 - Existing `force_rerank` parameters remain for call-site compatibility, but they are no longer needed to bypass the old small-candidate skip rule.
 - If the vision rerank call fails or returns no results, callers still fall back to coarse candidates rather than dropping the search.

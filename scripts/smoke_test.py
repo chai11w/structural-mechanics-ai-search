@@ -292,7 +292,7 @@ def check_multi_agent_routing() -> list[str]:
         {"rank": 4, "path": "d.jpg", "name": "d.jpg", "score": 0.50},
     ]
     main_selected = [item["path"] for item in select_rerank_candidates(sample_results, "main")]
-    if main_selected != ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]:
+    if main_selected != ["a.jpg", "b.jpg"]:
         failures.append(f"main rerank pool mismatch: {main_selected}")
 
     symbolic_selected = [item["path"] for item in select_rerank_candidates(sample_results, "symbolic")]

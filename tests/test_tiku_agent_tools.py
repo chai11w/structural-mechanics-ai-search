@@ -45,7 +45,8 @@ class TikuAgentToolsTest(unittest.TestCase):
     def test_agent_rerank_runs_even_when_candidate_count_does_not_exceed_top(self):
         candidates = [
             {"rank": 1, "path": "q1.jpg", "score": 0.75, "name": "q1.jpg"},
-            {"rank": 2, "path": "q2.jpg", "score": 0.55, "name": "q2.jpg"},
+            {"rank": 2, "path": "q2.jpg", "score": 0.70, "name": "q2.jpg"},
+            {"rank": 3, "path": "q3.jpg", "score": 0.40, "name": "q3.jpg"},
         ]
 
         def fake_rerank(query_image_path, rerank_input, top_n=3):
@@ -57,7 +58,7 @@ class TikuAgentToolsTest(unittest.TestCase):
                     "rank": 2,
                     "path": "q2.jpg",
                     "name": "q2.jpg",
-                    "score": 0.55,
+                    "score": 0.70,
                     "rerank_score": 0.95,
                     "final_score": 0.75,
                 }
