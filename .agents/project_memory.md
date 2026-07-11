@@ -2,355 +2,89 @@
 
 ## Current State
 
-- 项目位于 `F:\cc\7-题库检索`。
-- 项目目标：维护结构力学题库，按题目图片或荷载描述检索相似题，并按排名复制/发送答案。
-- 当前阶段：CLI、飞书检索、飞书入库、候选删除、章节 2-8、主库/字母库分流、字母库结构类型筛选都已进入可用维护阶段；隔离 Agent 已具备单题编排 MVP。
-- 当前项目说明入口为 `AGENTS.md`、`.agents/project_memory.md`、`SKILL.md`、`README.md`。
-- 旧 `.agents/skills/结构力学/` 已降级为跳转说明，不再作为当前流程来源。
-- 当前验证以 `python scripts/smoke_test.py` 为主，必要时用真实题图或飞书 dry-run 抽查。
-- `config.json`、`config.local.json` 被 `.gitignore` 忽略，可能包含本地路径或 API key；不要读取或提交完整内容。
-- 本地 live 主库位于配置 `root` 指向的结构力学题库目录；独立字母库默认位于主库旁边的 `帮做_字母库`。
+- 项目位于 `F:\cc\7-题库检索`，用于维护结构力学题库并按图片或荷载检索相似题、返回答案。
+- CLI、现有飞书检索/入库/删除、章节 2-8、主库/字母库分流和字母库结构类型筛选处于可用维护阶段。
+- 独立 `tiku_agent/` 已完成工具层、LLM intent、对话状态和单题编排 MVP；多题编排、LangGraph checkpoint 和新飞书机器人尚未接入。
+- Agent 使用 `.tmp_tiku_agent`，现有飞书使用 `.tmp_feishu_tiku`；两套运行状态必须持续隔离。
+- 视觉复筛采用 GLM shape-only 轮廓评分，与粗筛荷载分各占 50%；CLI、飞书 pipeline 和 Agent 工具共享并发、超时补评和整批回退策略。
+- 验证入口是 `python -B scripts/smoke_test.py`；Agent 测试使用 `python -B -m unittest`。
+- 本地配置可能包含路径或密钥，只查看 `config.example.json` 的结构，不读取或提交完整本地配置。
+- 当前分支为 `codex/llm-rerank-support-filter`；`data/feishu_chapter_failure_log.jsonl` 是运行日志，不混入普通提交。
 
-## Reading Order
+## Implemented
 
-1. `AGENTS.md`
-2. `.agents/project_memory.md`
-3. `SKILL.md`
-4. `README.md`
-5. `multi_agent_pipeline.py`
-6. `scripts/feishu_tiku_bot.py`
-7. `scripts/feishu_store_flow.py`
-8. 任务相关脚本、配置示例和测试
+- `search.py`：粗筛、并发视觉复筛、答案定位和基础 CLI；默认 `top_k=3`，本地配置可覆盖。
+- `multi_agent_pipeline.py`：图片识别、章节判断、主库/字母库路由、结构类型筛选和复筛协调。
+- `scripts/search_by_loads.py`：`loads-search`、`image-search`、`answer` 的轻量 CLI 包装。
+- `scripts/feishu_tiku_bot.py`：现有飞书单题/多题检索、章节选择、答案返回、入库和候选删除。
+- `scripts/feishu_store_flow.py` 与 `scripts/feishu_delete_flow.py`：带计划、确认和备份的题库写操作。
+- `tiku_agent/tools.py`：隔离的分析、路由、结构分类、粗筛、复筛、候选选择和答案工具。
+- `tiku_agent/intent.py`：Qwen LLM-first intent，支持搜题、改章节、选择题目/候选、重发答案和取消。
+- `tiku_agent/state.py`：支持章节纠正、多题当前裁图、候选切换、答案回看和错误恢复。
+- `tiku_agent/agent.py` 与 `render.py`：单题自然语言编排，可在候选或回答后改章节重搜、改选答案。
+- 共享复筛不再因候选少于 `rerank_top` 而跳过；候选达到路由粗筛阈值就进入复筛。
+- 并发复筛最多 10 个候选；首轮单候选 8 秒，超时项最多补评 3 个、每项 10 秒，仍不完整则整批回退粗筛排序。
+- 视觉复筛只看主杆件骨架、整体轮廓、主要杆件数量和连接位置，忽略荷载、尺寸、文字、题号和支座细节。
+- 用户可见分数为 `0.5 * 粗筛荷载分 + 0.5 * 视觉轮廓分`，复筛输出遵守 90/80 阈值规则。
 
-默认不要读取全局记忆，也不要把全局偏好写入项目文件。
+## In Progress
 
-## Standing Collaboration Rule
+- Agent 处于单题 MVP 后的迭代阶段，下一块能力是多题识别、题目选择和逐题检索编排。
 
-- 用户要求：每次完成代码、题库逻辑或项目文档更改，都要同步更新项目记忆，并提交、推送到 GitHub。
-- 常规收尾：更新文档/记忆 -> 运行验证 -> 检查 `git status` -> 只提交相关文件 -> `git commit` -> `git push`。
-- 正式数据文件、运行日志、本地配置、密钥、大文件默认不提交；需要提交时先判断是否安全。
-- 当前常见未提交运行产物：`data/feishu_chapter_failure_log.jsonl`，这是飞书章节判断日志，通常不要混进普通代码提交。
+## Not Implemented
 
-## 2026-07-10 Agent Workspace And Feishu Boundary
+- Agent 多题编排尚未连接现有多题裁图能力。
+- 尚未引入 LangGraph 图、checkpoint 或持久会话恢复。
+- 尚未创建或连接新的飞书机器人；现有飞书机器人不是 Agent 入口。
+- 复筛并发数、首轮超时和补评上限尚未配置化。
+- 缺少 pipeline 级超时回退、真实飞书事件和持久状态恢复集成测试。
 
-- User plans to build a new question-bank Agent before connecting it to Feishu.
-- The Agent must be developed and run in a separate workspace/runtime boundary so it does not affect the existing Feishu question-bank bot state.
-- The future Agent will connect to a new Feishu bot. Do not reuse the existing bot's app credentials, event URL, local port, cloudflared tunnel, session state, `.tmp_feishu_tiku` directory, or runtime logs unless the user explicitly requests a migration.
-- Do not stop, restart, or reshape the current `scripts/feishu_tiku_bot.py` production-like service while building the Agent prototype. The first Agent version should be an independent entry point.
-- New Agent runtime files must be separated by config/path:
-  - checkpoints / LangGraph state;
-  - Feishu event records;
-  - downloaded/uploaded temporary images;
-  - session/user state;
-  - operation/audit logs;
-  - test outputs.
-- The existing live question bank may be used as a read-only retrieval data source during early Agent work.
-- Any write operation to live bank data, including store/delete/path repair, must still follow `plan -> confirm -> execute`, create backups, and remain visibly separate from old Feishu bot state.
-- This boundary is a project rule, not only an implementation detail. Future conversations should preserve it before choosing filenames, ports, state directories, or Feishu integration paths.
+## Architecture Rules
 
-## 2026-07-10 Agent Retrieval Tool Layer MVP
+- 新 Agent 必须使用独立入口、配置、机器人凭据、事件 URL、端口、隧道、session、日志、checkpoint、临时图片和测试输出。
+- 不停止、重启或改造正在使用的 `scripts/feishu_tiku_bot.py` 服务来测试 Agent；是否重启由用户另行决定。
+- 早期 Agent 可以只读使用 live 题库；入库、删除和修复必须走 `plan -> confirm -> execute` 并备份。
+- 章节必须由用户指定、确认，或由 `chapter=auto` 根据题干/题型文字证据确定；纯结构图不能跨章节猜测。
+- 荷载类型只使用 `集中`、`均布`、`弯矩`；`raw` 保留原始标注并做单位归一化。
+- 主库保存数值荷载和已赋值符号题，字母库保存未赋值字母题；字母库图片检索才使用结构类型筛选。
+- 复筛只处理粗筛候选，不反向改变候选池；未完成批次不能混合视觉分形成最终排序。
+- `_last_search.json` 按最终显示结果重写，保证答案序号和用户所见排名一致。
+- 修改检索、储存、索引或 Agent 共享逻辑时，同步检查 CLI、飞书、Agent 和项目 Skill 文档。
 
-- Added a new isolated package `tiku_agent/` for the future Agent tool layer. It is not wired into the existing Feishu bot.
-- Default Agent runtime directory is `.tmp_tiku_agent`, not `.tmp_feishu_tiku`.
-- Implemented first-version 7 coarse retrieval tools in `tiku_agent/tools.py`:
-  - `analyze_image_tool`: Qwen-based image analysis for layout/chapter/load data, using an Agent-local Qwen cache.
-  - `route_bank_tool`: wraps `RuleRouter` to choose main/symbolic/review lanes.
-  - `classify_structure_tool`: structure type tool for symbolic image searches; skips non-symbolic routes and first uses text fast path.
-  - `coarse_search_tool`: read-only coarse search. It does not write `_last_search.json` and uses `resolve_question_path(..., update_excel=False)` to avoid live Excel path repair side effects.
-  - `rerank_candidates_tool`: reranks candidates and returns visible candidates only; it does not answer automatically.
-  - `parse_candidate_action_tool`: parses candidate-page actions such as `1`, `-1`, and `0` based on the current state.
-  - `answer_candidate_tool`: returns/copies the chosen candidate's answer into `.tmp_tiku_agent/answer_output`, not the existing configured `answer_output`.
-- Added standard-library tests in `tests/test_tiku_agent_tools.py`; no pytest dependency is required.
-- Verification run:
-  - `python -B -m unittest tests.test_tiku_agent_tools` passed, 4 tests.
-  - `python -B -c "from tiku_agent.tools import AgentToolConfig; print(AgentToolConfig().runtime_dir)"` printed `.tmp_tiku_agent`.
-- Current scope:
-  - Tool layer only; no LangGraph graph yet.
-  - No new Feishu bot yet.
-  - No existing Feishu runtime files, ports, tunnels, sessions, or `.tmp_feishu_tiku` state touched.
-- Known local issue:
-  - Running `py_compile`/normal imports in this Windows sandbox created locked `tiku_agent/__pycache__` temp pyc files that could not be removed due `Access denied`. Use `python -B` for future checks to avoid adding more pycache files.
+## Known Risks
 
-## 2026-07-10 Agent Intent Layer MVP
+- `search.py` 荷载识别 prompt 对 `raw` 去单位与赋值符号示例仍有矛盾，可能造成输出漂移。
+- 同粗筛分的超时候选补评顺序可能受线程完成顺序影响，尚未建立确定性次序。
+- `search.py` 和 `scripts/feishu_tiku_bot.py` 体量较大；章节和中文序号解析仍有多处实现，存在行为漂移风险。
+- 单元测试以 mock 和纯函数为主，外部模型、飞书事件和状态恢复覆盖不足。
+- `requirements.txt` 没有版本约束，换机器安装存在依赖行为变化风险。
+- 本地配置会覆盖代码默认值，调整默认参数时必须检查有效配置。
+- PowerShell 写 JSON 可能产生 UTF-8 BOM，导致 Python `json.load(..., encoding="utf-8")` 失败。
+- 现有飞书运行进程可能尚未加载磁盘上的最新复筛代码，这是预期运行边界。
 
-- Added `tiku_agent/intent.py` as the first intent layer for the future Agent.
-- Intent layer is now LLM-first and state-aware. It does not execute tools directly.
-- Natural-language user input is sent to Qwen/DashScope for a fixed JSON intent; Python validation then checks state legality, chapter range, candidate/question bounds, and unsupported actions.
-- Supported MVP intents:
-  - `search_image`
-  - `set_chapter`
-  - `select_question`
-  - `select_candidate`
-  - `cancel`
-  - `unsupported`
-- Core functions:
-  - `build_intent_prompt(...)`
-  - `call_qwen_intent(...)`
-  - `validate_intent_payload(...)`
-  - `parse_user_intent(...)`
-- Rule parsing remains only as an explicit fallback if the LLM call fails; the intended path is LLM -> validation -> Agent graph/tool selection.
-- State-sensitive parsing is intentional:
-  - `1` in `WAIT_QUESTION_CHOICE` means select question 1.
-  - `1` in `WAIT_CANDIDATE_CHOICE` means select candidate 1.
-  - `4` in `WAIT_CHAPTER` means `4力法`.
-- The layer supports simple natural phrases such as `按力法`, `矩阵位移`, `选第一个`, text image paths, and `2-4力法` question/chapter override commands.
-- Store/delete/repair phrases are explicitly rejected as `unsupported` for this Agent MVP. Those operations remain outside the first retrieval Agent scope.
-- Added `tests/test_tiku_agent_intent.py`.
-- Verification run:
-  - `python -B -m unittest tests.test_tiku_agent_intent tests.test_tiku_agent_tools` passed, 18 tests.
-  - Live Qwen intent smoke passed:
-    - `第二题按力法` in `WAIT_QUESTION_CHOICE` -> `select_question`, `question_index=2`, `chapter_override=4力法`.
-    - `给我第一个答案` in `WAIT_CANDIDATE_CHOICE` -> `select_candidate`, `rank=1`.
-    - `删掉第一个` in `WAIT_CANDIDATE_CHOICE` -> rejected as `unsupported`, `requested_action=delete`.
-- Current scope:
-  - Intent parsing only.
-  - No LangGraph graph yet.
-  - No Feishu integration and no old Feishu runtime state touched.
+## Do Not Do
 
-## 2026-07-11 Agent Dialogue State Layer
+- 不提交、展示或写入 API key、token、密码和完整本地配置。
+- 不回退用户已有改动，不把全局记忆写入项目文件。
+- 不复用或覆盖现有飞书机器人的运行状态来开发 Agent。
+- 不直接修改 live 题库数据；写操作必须确认并备份。
+- 不让 LLM 直接用多题 bbox 做复筛；继续使用 OpenCV 图块流程并仅在不确定时调用模型。
+- 不用复筛 80/90 输出规则改变粗筛候选池。
+- 不把 `data/feishu_chapter_failure_log.jsonl` 等运行日志混入普通代码提交。
 
-- Upgraded `tiku_agent/state.py` from a narrow retrieval-flow state to an Agent dialogue state.
-- The state layer still does not call LLMs, search tools, Feishu APIs, or existing Feishu runtime state.
-- The state now stores context a user may naturally refer to in later turns:
-  - `session_id`
-  - `phase`
-  - `current_image_path`
-  - `current_question_image_path`
-  - `current_loads`
-  - `current_chapter`
-  - `current_route`
-  - `current_structure_type`
-  - `questions`
-  - `selected_question`
-  - `candidates`
-  - `selected_rank`
-  - `last_answer_paths`
-  - `last_intent`
-  - `last_error`
-  - `revision_count`
-- Supported dialogue phases include:
-  - `IDLE`
-  - `PROCESSING`
-  - `WAIT_CHAPTER`
-  - `WAIT_QUESTION_CHOICE`
-  - `WAIT_CANDIDATE_CHOICE`
-  - `READY_TO_ROUTE`
-  - `READY_FOR_SEARCH`
-  - `ANSWERED`
-  - `CANCELLED`
-  - `ERROR`
-  - `NO_MATCH`
-- `ANSWERED` is intentionally not terminal, because users may still ask for the previous answer, choose another candidate, or correct the chapter/question.
-- Backward-compatible aliases remain for earlier code/tests: `state`, `image_path`, `chapter`, `loads`, `route`, and `structure_type` map to the new `phase/current_*` fields.
-- The state supports Agent behaviors that the old 11-field MVP could not represent well:
-  - chapter correction after candidates or answers, such as "不对，应该是第三章";
-  - re-search by clearing stale candidates and incrementing `revision_count`;
-  - multi-question current crop tracking via `current_question_image_path`;
-  - answer recall via `last_answer_paths`;
-  - debugging/guarding via `last_intent` and `last_error`.
-- Added/updated `tests/test_tiku_agent_state.py` using standard-library `unittest`.
-- Current scope:
-  - Dialogue state data model only.
-  - No orchestration layer yet.
-  - No LangGraph graph yet.
-  - No Feishu integration and no old Feishu runtime state touched.
+## Next Best Step
 
-## 2026-07-11 Unified Rerank Policy
-
-- Updated the shared rerank policy so Feishu single/multi search, base CLI search, and the new Agent tool layer no longer skip rerank just because the candidate count is `<= rerank_top`.
-- `select_rerank_candidates(...)` still respects route-specific coarse-score thresholds (`main` 0.65, `symbolic` 0.50); the change is only that a small threshold-qualified pool, such as 1-2 candidates, still enters rerank.
-- Motivation: user wants displayed retrieval similarity to be the final rerank-aware similarity (`final_score`) whenever a query image and candidates are available.
-- Existing `force_rerank` parameters remain for call-site compatibility, but they are no longer needed to bypass the old small-candidate skip rule.
-- If the vision rerank call fails or returns no results, callers still fall back to coarse candidates rather than dropping the search.
-- Added regression coverage:
-  - `tests/test_multi_agent_rerank_policy.py`
-  - new Agent tool test confirming 2 candidates still call rerank.
-
-## 2026-07-11 Agent Single-Question Orchestration MVP
-
-- Added the first orchestration layer for the isolated Agent:
-  - `tiku_agent/agent.py`
-  - `tiku_agent/render.py`
-- Exported `TikuSearchAgent` and `AgentResponse` from `tiku_agent/__init__.py`.
-- The orchestration layer wires together:
-  - LLM/rule intent parsing from `tiku_agent/intent.py`;
-  - dialogue state from `tiku_agent/state.py`;
-  - isolated retrieval tools from `tiku_agent/tools.py`;
-  - user-facing text rendering from `tiku_agent/render.py`.
-- Current supported single-question flow:
-  - `handle_image(image_path)` starts a new search.
-  - `analyze_image_tool` extracts loads and optional auto chapter.
-  - Missing chapter enters `WAIT_CHAPTER` and asks the user to supply a chapter.
-  - User chapter input continues route -> structure type -> coarse search -> rerank -> candidate list.
-  - User candidate choice calls `answer_candidate_tool` and stores `last_answer_paths`.
-  - User can ask to resend the previous answer through the new `resend_answer` intent.
-  - User can correct the chapter after candidates/answer, such as "不对，应该是第三章"; the Agent clears stale candidates/answers, increments `revision_count`, and reruns search with existing loads/image context.
-  - User can choose another candidate after an answer, such as "第二个".
-  - `cancel` is supported.
-- Intent layer updates:
-  - Added `ANSWERED` state awareness.
-  - Added `resend_answer` intent.
-  - Allows `set_chapter` and `select_candidate` while `ANSWERED`.
-  - Parses natural chapter correction phrases such as `第三章`.
-- Added `tests/test_tiku_agent_agent.py` with fake tools so orchestration tests do not call Qwen, Zhipu, live Feishu, or mutate old Feishu runtime state.
-- Current scope:
-  - Single-question Agent MVP only.
-  - Multi-question state is present but multi-question orchestration is not connected yet.
-  - No LangGraph graph yet.
-  - No new Feishu bot yet.
-  - No existing Feishu runtime files, ports, tunnels, sessions, or `.tmp_feishu_tiku` state touched.
-
-## Supported Chapters
-
-- `2静定结构`
-- `3静定结构位移`
-- `4力法`
-- `5位移法`
-- `6力矩分配`
-- `7矩阵位移`
-- `8影响线`
-
-飞书手动章节、自动章节提示、入库、删除、审计和 smoke test 均应支持 2-8 章。
-
-## Core Architecture
-
-- `search.py`
-  - 基础荷载相似度、路径解析、答案定位、基础 CLI。
-  - `TOP_K` 默认是 `3`，但本地 `config.json` / `config.local.json` 的 `top_k` 会覆盖它。
-  - 初筛规则：如果 100% 粗筛匹配数超过 `top_k`，保留全部 100%；否则补到 `top_k`。
-- `multi_agent_pipeline.py`
-  - Qwen 图片识别、章节判断、RuleRouter 路由、主库/字母库检索、Zhipu 复筛协调。
-  - 飞书检索和 CLI 多 Agent 检索主要走这个 pipeline；隔离 Agent 复用其中的分类、路由和候选规则。
-- `scripts/search_by_loads.py`
-  - Skill/CLI 用的轻量包装：`loads-search`、`image-search`、`answer`。
-- `scripts/feishu_tiku_bot.py`
-  - 飞书机器人入口，支持单题/多题检索、自动/手动章节、取答案、入库、删除、OK reaction。
-- `scripts/feishu_store_flow.py`
-  - 飞书新增题目入库，负责计划、编号、备份和 Excel 追加。
-- `scripts/feishu_delete_flow.py`
-  - 飞书候选错题删除，删除前备份 Excel 和图片。
-
-## Retrieval Rules
-
-- 章节必须由用户指定、确认，或由 `chapter=auto` 在题干/题型文字证据下自动确定。
-- 不要跨章节盲搜。纯结构图、荷载、尺寸、支座、EI 不能自动猜章节。
-- 荷载类型只使用 `集中`、`均布`、`弯矩`。
-- `raw` 保留图中或用户描述的原始标注，但单位会归一化为无单位数字/表达。
-- 默认粗筛 `top_k=3`；若 100% 粗筛匹配超过 3 个，全部进入候选。
-- 复筛只作用于粗筛候选，不应反向改变初筛候选池。
-- 复筛后的用户可见相似度使用 `final_score`。
-- 当前视觉复筛 prompt 已改为 shape-only：只看主杆件骨架、整体外轮廓、主要杆件数量和主要连接位置；忽略荷载、尺寸、文字、节点编号、题号和支座符号细节。
-- 当前 `final_score` 仍保留 `0.5 * 粗筛荷载分 + 0.5 * 视觉轮廓分`；本轮只把视觉分替换为 shape-only 轮廓判断。
-- 旧视觉复筛 prompt 仍保留为 `LEGACY_RERANK_PROMPT`，仅用于对比评测，不作为默认复筛。
-- 2026-07-11 用 `scripts/evaluate_shape_rerank_prompt.py` 对 10 组钢架/多跨梁图片做旧 prompt vs shape-only prompt 对比；按同形 `>=0.8`、异形 `<=0.5` 计，旧 prompt 4/10，新 prompt 9/10；旧 prompt 平均 1.081s，新 prompt 平均 1.558s。唯一失败样本是“2跨-2跨”，两图支座/连接差异较大，真值标签本身有争议。
-- 2026-07-11 追加同 10 组的 Qwen shape-only 对比；本轮 GLM shape-only 为 9/10、平均 0.934s，Qwen shape-only 为 7/10、平均 1.93s。Qwen 对 T-L、2跨-3跨 等“同类但关键骨架不同”的异形压分不够，暂不建议把默认视觉复筛从 GLM 切到 Qwen。
-- 2026-07-11 并发复筛已成为共享默认：`rerank_candidates(...)` 调用 `rerank_candidates_concurrent(...)`，因此飞书 pipeline、基础 CLI 和隔离 Agent 工具共享同一策略。默认最多 10 个候选同时调用 GLM；字母库 `5位移法/题目/7.jpg` 前 10 个候选实测串行 26.48s、10 并发 4.01s，提速 6.603x，Top 路径一致。模型存在长尾，最慢单候选不同轮为 10.721s、2.829s，不能把某张题图固定视为慢图。
-- 默认超时恢复策略：首轮单候选 8s，超时项按粗筛分从高到低最多串行补评 3 个、每项 10s；显式超时模式关闭 SDK 自动重试，否则 1s 请求会因多次重试拖到约 11s。补评成功标为 `rerank_status=retried` 并正常参与最终排序；只要仍有任一候选未完成，整批回退到原始粗筛排序并标为 `rerank_status=incomplete`，不混合未验证视觉分和最终排序。真实强制超时测试中，首轮 0.1s 超时后同一候选补评约 1.868s 成功。
-- 该策略已写入飞书 pipeline、CLI 和 Agent 工具代码，但没有重启、停止或修改既有飞书服务运行进程；运行中的旧进程需要用户另行决定是否重启才会加载新代码。
-- 复筛输出规则：
-  - `final_score > 90%` 的结果全部输出；
-  - 如果没有 `>90%`，输出 `>80%` 的前 3 个；
-  - 如果一个都没有超过 80%，输出复筛分最高的 1 个。
-- 上述 80/90 规则只用于复筛后的输出，不用于初筛，也不用于未复筛输出。
-- `_last_search.json` 必须按最终显示结果重写，确保 `answer 1/2/3...` 对应用户看到的排名。
-
-## Main Bank And Symbolic Bank
-
-- 主库保存数值荷载题和已赋值符号题，例如 `P=40`、`q=20`。
-- 字母库保存未赋值字母题，例如 `q`、`2P/a`、`M`。
-- 字母库 Excel 列为：`题目名称`、`荷载`、`结构类型`。
-- 字母库的 `raw` 写入相似度编码，`original_raw` 保留原始字母标注。
-- 字母荷载按三个量纲体系归一化：均布力主题、集中力主题、集中弯矩主题。
-- 长度符号不固定为 `L`，`a/b/l` 等字母都可作为长度占位。
-- 字母荷载相似度会做同题体系冲突消解：同题内某主题体系占主导时，孤立冲突项仅在相似度内部归入主导体系，不改写原始 `raw`。
-- 飞书新增字母题写入字母库时必须同步写入 `结构类型`，否则后续结构类型筛选可能漏掉新题。
-
-## Structure Type Filtering
-
-- 字母库结构类型枚举：`梁`、`钢架`、`桁架`、`拱`、`unknown`。
-- `钢架` 包括刚架、框架、门架、闭口框架、组合结构。
-- 结构类型筛选只用于字母库图片检索。
-- 结构类型优先从题干文字推断；题干没有明确类型时，才调用结构图视觉分类。
-- 主库/数值库暂不加结构类型筛选；主库常见重复组候选数不大，加一次结构识别通常不划算。
-
-## Chapter Recognition And Logging
-
-- 自动章节阈值：`AUTO_CHAPTER_MIN_CONFIDENCE = 0.45`。
-- Qwen 输出 `unknown` 时仍需要用户选择章节；不要把 `unknown` 当低阈值章节。
-- 2/3 章允许典型题型文字推断，例如桁架指定杆轴力、静定结构位移、图乘法、单位荷载法、EA 为常数。
-- 4/5/6/7/8 章仍主要依赖明确方法词或强方法步骤证据。
-- 飞书章节日志现在是全量判断日志，写入 `data/feishu_chapter_failure_log.jsonl`。
-- 该文件名沿用早期“失败日志”命名，但内容包括自动采用、需要手动、手动补章节等样本。
-- 日志用于以后训练/收紧章节 prompt；普通代码提交不要默认提交这个运行日志。
-
-## Feishu Behavior
-
-- 飞书机器人默认自动章节模式。
-- 用户可发送 `a` 切换自动/手动章节模式；也可发送 `手动`/`m`、`自动`/`auto`。
-- 收到图片并拿到 `image_key` 后会给原消息添加 `OK` reaction，避免用户以为机器人没响应。
-- 单题检索：收图 -> 章节判断 -> 检索 -> 候选页 -> 回复序号取答案。
-- 多题图：先返回题号、章节、荷载摘要；用户回复题号后再逐题检索。
-- 多题裁图：OpenCV 找结构图块，能本地绑定就不调用 Qwen；不确定时才用一次 Qwen block-filter。
-- 候选页支持删除错题：回复对应负数，如 `-1`、`-2`；删除前必须二次确认。
-- 入库模式：`+` 进入，`0` 取消，确认后写入题目图、答案图和 Excel，写前备份。
-- 修改飞书逻辑后，正在运行的飞书服务通常需要重启才生效。
-
-## Data Maintenance Rules
-
-- 不要直接按“是否含字母”移动或删除数据；维护主库/字母库拆分时先导出 review，再备份 live Excel，最后用应用脚本写回。
-- 删除题库项必须先备份 Excel 和图片文件。
-- 自动路径修复会在写 Excel 前备份到 `backups/auto_path_repair_时间戳/`。
-- `special_unindexed_questions.json` 记录确认不参与题库检索的特殊题，审计时会排除。
-- 题库图片、答案图片和真实配置属于本地资产，不随仓库公开。
+1. 为独立 Agent 接入多题识别结果、题目选择和逐题检索编排，并用 fake tools 覆盖状态转换测试。
+2. 统一荷载识别 prompt 的单位规则，补充赋值符号回归样本。
+3. 将复筛并发/超时参数配置化，增加同分候选确定性排序和 pipeline 集成测试。
 
 ## Important Commands
 
 ```powershell
-python scripts/search_by_loads.py --help
-python search.py --help
-python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter auto
-python scripts/multi_agent_search.py --types "均布" --raws "q" --chapter "2静定结构" --no-rerank
-python scripts/search_by_loads.py loads-search --types "均布" --raws "20" --chapter "2静定结构"
-python scripts/search_by_loads.py answer 1
-python scripts/feishu_tiku_bot.py dry-run-flow --image "D:\path\to\question.jpg" --chapter 5 --choice 1
-python scripts/audit_unindexed_questions.py
-python scripts/store_unindexed_questions.py
-python scripts/store_unindexed_questions.py --apply
-python scripts/smoke_test.py
+python -B scripts/smoke_test.py
+python -B -m unittest tests.test_tiku_agent_tools tests.test_tiku_agent_intent tests.test_tiku_agent_state tests.test_tiku_agent_agent
+python -B scripts/search_by_loads.py --help
+python -B search.py --help
+python -B scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter auto
+python -B scripts/feishu_tiku_bot.py dry-run-flow --image "D:\path\to\question.jpg" --chapter 5 --choice 1
 ```
-
-## Verification
-
-- 常规提交前运行：`python scripts/smoke_test.py`。
-- smoke test 会检查 live root、答案输出目录、荷载 JSON、图片路径、字母荷载归一化、路径修复、多 Agent 路由、章节 hint、飞书 dry-run 基础状态。
-- 如果只改文档，可不跑完整模型调用；但仍建议跑 smoke test 或至少说明未跑原因。
-
-## Known Risks
-
-- `search.py` 的荷载识别 prompt 同时要求 raw 去单位，又在符号赋值示例中要求输出 `P=40kN`，存在互相矛盾的模型指令。
-- 复筛并发数、首轮超时和补评上限目前是代码常量；同粗筛分的超时候选只按分数排序，补评顺序可能受线程完成顺序影响。
-- `search.py` 和 `scripts/feishu_tiku_bot.py` 体量较大、职责较多；飞书与 Agent 还各自保留章节/中文序号解析，后续容易行为漂移。
-- 当前单元测试以 mock 和纯函数为主，缺少 pipeline 级超时回退、真实飞书事件和持久状态恢复测试。
-- `requirements.txt` 没有版本约束，换机器安装时存在依赖行为变化风险。
-- 当前项目记忆仍偏长并保留较多阶段历史；后续应归档历史，只保留当前事实。
-- `config.json` / `config.local.json` 会覆盖代码默认值，例如 `top_k`；改默认值时要检查有效配置。
-- PowerShell `Set-Content -Encoding UTF8` 可能写入 BOM，导致 Python `json.load(..., encoding="utf-8")` 读取配置时报 `Unexpected UTF-8 BOM`；写 JSON 配置时要保持 UTF-8 no BOM。
-- 飞书正在运行的旧进程可能还没加载最新代码，修改后需要重启服务。
-- 自动章节仍会对纯结构图返回 unknown，这是预期，不要为降低 unknown 率而跨章节猜。
-- `data/feishu_chapter_failure_log.jsonl` 可能经常有本地改动，提交前注意排除或单独判断。
-
-## Do Not Do
-
-- 不提交、不展示、不写入 API key、token、密码。
-- 不读取完整 `config.json` / `config.local.json` 来展示配置；需要结构时看 `config.example.json`。
-- 不回退用户已有改动；遇到未提交改动时只处理与当前任务相关文件。
-- 不把全局记忆写入本项目文件。
-- 不让 LLM 直接给多题 bbox 做复筛；坐标容易漂，继续用 OpenCV 图块流程。
-- 不用 80/90 复筛输出规则改变初筛候选池。
-
-## Next Best Step
-
-- 先统一荷载识别 prompt 的单位规则，并补充赋值符号回归样本。
-- 再把复筛并发/超时参数配置化，给同分超时候选增加确定性排序，并补 pipeline 集成测试。
-- 然后拆分飞书会话、消息适配、多题裁图和维护命令，复用 Agent 的章节/序号解析基础能力。
-- Agent 方向优先完成多题编排，再考虑 LangGraph checkpoint 和新飞书机器人接入。
