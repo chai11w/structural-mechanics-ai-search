@@ -107,38 +107,50 @@
   - No LangGraph graph yet.
   - No Feishu integration and no old Feishu runtime state touched.
 
-## 2026-07-11 Agent State Layer MVP
+## 2026-07-11 Agent Dialogue State Layer
 
-- Added `tiku_agent/state.py` as the minimal state layer for the future retrieval Agent.
-- The state layer is intentionally small and does not call LLMs, search tools, Feishu APIs, or existing Feishu runtime state.
-- First version keeps exactly 11 core fields:
+- Upgraded `tiku_agent/state.py` from a narrow retrieval-flow state to an Agent dialogue state.
+- The state layer still does not call LLMs, search tools, Feishu APIs, or existing Feishu runtime state.
+- The state now stores context a user may naturally refer to in later turns:
   - `session_id`
-  - `state`
-  - `image_path`
-  - `chapter`
-  - `loads`
-  - `route`
-  - `structure_type`
-  - `candidates`
-  - `selected_rank`
+  - `phase`
+  - `current_image_path`
+  - `current_question_image_path`
+  - `current_loads`
+  - `current_chapter`
+  - `current_route`
+  - `current_structure_type`
   - `questions`
   - `selected_question`
-- Supported state gates include:
+  - `candidates`
+  - `selected_rank`
+  - `last_answer_paths`
+  - `last_intent`
+  - `last_error`
+  - `revision_count`
+- Supported dialogue phases include:
   - `IDLE`
+  - `PROCESSING`
   - `WAIT_CHAPTER`
   - `WAIT_QUESTION_CHOICE`
   - `WAIT_CANDIDATE_CHOICE`
   - `READY_TO_ROUTE`
   - `READY_FOR_SEARCH`
-  - `DONE`
+  - `ANSWERED`
   - `CANCELLED`
   - `ERROR`
   - `NO_MATCH`
-- Multi-question support is preserved at the state layer through `questions` and `selected_question`, but no multi-question orchestration has been added yet.
-- `last_error`, answer output paths, event logs, layout details, chapter confidence/evidence, and full tool traces are intentionally not in the first state schema. Add them later only if orchestration, persistence, or debugging needs prove it.
-- Added `tests/test_tiku_agent_state.py` using standard-library `unittest`.
+- `ANSWERED` is intentionally not terminal, because users may still ask for the previous answer, choose another candidate, or correct the chapter/question.
+- Backward-compatible aliases remain for earlier code/tests: `state`, `image_path`, `chapter`, `loads`, `route`, and `structure_type` map to the new `phase/current_*` fields.
+- The state supports Agent behaviors that the old 11-field MVP could not represent well:
+  - chapter correction after candidates or answers, such as "不对，应该是第三章";
+  - re-search by clearing stale candidates and incrementing `revision_count`;
+  - multi-question current crop tracking via `current_question_image_path`;
+  - answer recall via `last_answer_paths`;
+  - debugging/guarding via `last_intent` and `last_error`.
+- Added/updated `tests/test_tiku_agent_state.py` using standard-library `unittest`.
 - Current scope:
-  - State data model only.
+  - Dialogue state data model only.
   - No orchestration layer yet.
   - No LangGraph graph yet.
   - No Feishu integration and no old Feishu runtime state touched.
