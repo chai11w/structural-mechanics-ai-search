@@ -7,7 +7,7 @@
 - 独立 `tiku_agent/` 已完成工具层、LLM intent、对话状态和单题编排 MVP；多题编排、LangGraph checkpoint 和新飞书机器人尚未接入。
 - Agent 使用 `.tmp_tiku_agent`，现有飞书使用 `.tmp_feishu_tiku`；两套运行状态必须持续隔离。
 - 视觉复筛采用 GLM shape-only 轮廓评分，与粗筛荷载分各占 50%；CLI、飞书 pipeline 和 Agent 工具共享并发、超时补评和整批回退策略。
-- 验证入口是 `python -B scripts/smoke_test.py`；Agent 测试使用 `python -B -m unittest`。
+- 验证入口是 `python -B scripts/smoke_test.py`；完整单元测试使用 `python -B -m unittest discover -s tests -p "test_*.py"`。
 - 本地配置可能包含路径或密钥，只查看 `config.example.json` 的结构，不读取或提交完整本地配置。
 - 当前分支为 `codex/llm-rerank-support-filter`；`data/feishu_chapter_failure_log.jsonl` 是运行日志，不混入普通提交。
 
@@ -22,6 +22,7 @@
 - `tiku_agent/intent.py`：Qwen LLM-first intent，支持搜题、改章节、选择题目/候选、重发答案和取消。
 - `tiku_agent/state.py`：支持章节纠正、多题当前裁图、候选切换、答案回看和错误恢复。
 - `tiku_agent/agent.py` 与 `render.py`：单题自然语言编排，可在候选或回答后改章节重搜、改选答案。
+- 两套荷载提取 prompt 已统一：赋值符号输出无单位的 `符号=数值`；`P=40/q=20/M=20` 路由主库，纯符号仍路由字母库，并有回归测试。
 - 共享复筛不再因候选少于 `rerank_top` 而跳过；候选达到路由粗筛阈值就进入复筛。
 - 并发复筛最多 10 个候选；首轮单候选 8 秒，超时项最多补评 3 个、每项 10 秒，仍不完整则整批回退粗筛排序。
 - 视觉复筛只看主杆件骨架、整体轮廓、主要杆件数量和连接位置，忽略荷载、尺寸、文字、题号和支座细节。
@@ -54,7 +55,6 @@
 
 ## Known Risks
 
-- `search.py` 荷载识别 prompt 对 `raw` 去单位与赋值符号示例仍有矛盾，可能造成输出漂移。
 - 同粗筛分的超时候选补评顺序可能受线程完成顺序影响，尚未建立确定性次序。
 - `search.py` 和 `scripts/feishu_tiku_bot.py` 体量较大；章节和中文序号解析仍有多处实现，存在行为漂移风险。
 - 单元测试以 mock 和纯函数为主，外部模型、飞书事件和状态恢复覆盖不足。
@@ -77,8 +77,8 @@
 ## Next Best Step
 
 1. 为独立 Agent 接入多题识别结果、题目选择和逐题检索编排，并用 fake tools 覆盖状态转换测试。
-2. 统一荷载识别 prompt 的单位规则，补充赋值符号回归样本。
-3. 将复筛并发/超时参数配置化，增加同分候选确定性排序和 pipeline 集成测试。
+2. 将复筛并发/超时参数配置化，增加同分候选确定性排序和 pipeline 集成测试。
+3. 抽取飞书与 Agent 共用的章节、中文序号和题号解析模块，先补兼容测试再逐步拆分飞书入口。
 
 ## Important Commands
 
