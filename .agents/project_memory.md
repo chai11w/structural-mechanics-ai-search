@@ -244,6 +244,7 @@ GUI、飞书手动章节、自动章节提示、入库、删除、审计和 smok
 - 当前视觉复筛 prompt 已改为 shape-only：只看主杆件骨架、整体外轮廓、主要杆件数量和主要连接位置；忽略荷载、尺寸、文字、节点编号、题号和支座符号细节。
 - 旧视觉复筛 prompt 仍保留为 `LEGACY_RERANK_PROMPT`，仅用于对比评测，不作为默认复筛。
 - 2026-07-11 用 `scripts/evaluate_shape_rerank_prompt.py` 对 10 组钢架/多跨梁图片做旧 prompt vs shape-only prompt 对比；按同形 `>=0.8`、异形 `<=0.5` 计，旧 prompt 4/10，新 prompt 9/10；旧 prompt 平均 1.081s，新 prompt 平均 1.558s。唯一失败样本是“2跨-2跨”，两图支座/连接差异较大，真值标签本身有争议。
+- 2026-07-11 追加同 10 组的 Qwen shape-only 对比；本轮 GLM shape-only 为 9/10、平均 0.934s，Qwen shape-only 为 7/10、平均 1.93s。Qwen 对 T-L、2跨-3跨 等“同类但关键骨架不同”的异形压分不够，暂不建议把默认视觉复筛从 GLM 切到 Qwen。
 - 复筛输出规则：
   - `final_score > 90%` 的结果全部输出；
   - 如果没有 `>90%`，输出 `>80%` 的前 3 个；
