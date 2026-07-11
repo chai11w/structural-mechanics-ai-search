@@ -246,6 +246,8 @@ GUI、飞书手动章节、自动章节提示、入库、删除、审计和 smok
 - 旧视觉复筛 prompt 仍保留为 `LEGACY_RERANK_PROMPT`，仅用于对比评测，不作为默认复筛。
 - 2026-07-11 用 `scripts/evaluate_shape_rerank_prompt.py` 对 10 组钢架/多跨梁图片做旧 prompt vs shape-only prompt 对比；按同形 `>=0.8`、异形 `<=0.5` 计，旧 prompt 4/10，新 prompt 9/10；旧 prompt 平均 1.081s，新 prompt 平均 1.558s。唯一失败样本是“2跨-2跨”，两图支座/连接差异较大，真值标签本身有争议。
 - 2026-07-11 追加同 10 组的 Qwen shape-only 对比；本轮 GLM shape-only 为 9/10、平均 0.934s，Qwen shape-only 为 7/10、平均 1.93s。Qwen 对 T-L、2跨-3跨 等“同类但关键骨架不同”的异形压分不够，暂不建议把默认视觉复筛从 GLM 切到 Qwen。
+- 2026-07-11 新增并发复筛实验函数 `rerank_candidates_concurrent(...)` 和脚本 `scripts/evaluate_concurrent_rerank.py`；默认 `rerank_candidates(...)` 仍保持串行，GUI/飞书/Agent 尚未切并发。
+- 字母库实测：3 个样本、每个 6 候选，串行平均 7.651s，并发平均 5.528s，平均 1.552x，Top 路径 3/3 一致；2 个样本、每个 8 候选，串行平均 9.369s，并发平均 4.12s，平均 2.294x，Top 路径 2/2 一致。候选越多，并发收益越明显；仍需继续观察模型长尾和限流。
 - 复筛输出规则：
   - `final_score > 90%` 的结果全部输出；
   - 如果没有 `>90%`，输出 `>80%` 的前 3 个；

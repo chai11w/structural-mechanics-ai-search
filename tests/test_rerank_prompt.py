@@ -1,20 +1,47 @@
 import search
+import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 
-def test_default_rerank_prompt_is_shape_only():
-    assert search.RERANK_PROMPT == search.SHAPE_RERANK_PROMPT
-    assert "只看主杆件骨架" in search.RERANK_PROMPT
-    assert "忽略荷载" in search.RERANK_PROMPT
-    assert "支座符号细节" in search.RERANK_PROMPT
-    assert "荷载位置和方向" not in search.RERANK_PROMPT
+class RerankPromptTest(unittest.TestCase):
+    def test_default_rerank_prompt_is_shape_only(self):
+        self.assertEqual(search.RERANK_PROMPT, search.SHAPE_RERANK_PROMPT)
+        self.assertIn("只看主杆件骨架", search.RERANK_PROMPT)
+        self.assertIn("忽略荷载", search.RERANK_PROMPT)
+        self.assertIn("支座符号细节", search.RERANK_PROMPT)
+        self.assertNotIn("荷载位置和方向", search.RERANK_PROMPT)
 
+    def test_legacy_rerank_prompt_kept_for_comparison(self):
+        self.assertNotEqual(search.LEGACY_RERANK_PROMPT, search.SHAPE_RERANK_PROMPT)
+        self.assertIn("荷载位置和方向", search.LEGACY_RERANK_PROMPT)
 
-def test_legacy_rerank_prompt_kept_for_comparison():
-    assert search.LEGACY_RERANK_PROMPT != search.SHAPE_RERANK_PROMPT
-    assert "荷载位置和方向" in search.LEGACY_RERANK_PROMPT
+    def test_final_rerank_score_keeps_load_and_shape_blend(self):
+        self.assertEqual(search.compute_final_rerank_score(1.0, 0.2), 0.6)
+        self.assertEqual(search.compute_final_rerank_score(0.1, 0.95), 0.525)
+        self.assertEqual(search.compute_final_rerank_score(0.5, 2.0), 0.75)
 
+    def test_concurrent_rerank_matches_serial_scoring_order(self):
+        query = "query.jpg"
+        candidates = [
+            {"rank": 1, "path": "a.jpg", "name": "a.jpg", "score": 0.8},
+            {"rank": 2, "path": "b.jpg", "name": "b.jpg", "score": 0.7},
+            {"rank": 3, "path": "c.jpg", "name": "c.jpg", "score": 0.6},
+        ]
+        vision_scores = {"a.jpg": 0.2, "b.jpg": 0.9, "c.jpg": 0.4}
 
-def test_final_rerank_score_keeps_load_and_shape_blend():
-    assert search.compute_final_rerank_score(1.0, 0.2) == 0.6
-    assert search.compute_final_rerank_score(0.1, 0.95) == 0.525
-    assert search.compute_final_rerank_score(0.5, 2.0) == 0.75
+        def fake_score(client, query_image_path, candidate_path, prompt=search.RERANK_PROMPT):
+            del client, query_image_path, prompt
+            name = Path(candidate_path).name
+            return vision_scores[name], name
+
+        with (
+            patch("search.prepare_rerank_candidates", return_value=candidates),
+            patch("search.ZhipuAI", return_value=object()),
+            patch("search.score_candidate_pair", side_effect=fake_score),
+        ):
+            serial = search.rerank_candidates(query, candidates, top_n=3)
+            concurrent = search.rerank_candidates_concurrent(query, candidates, top_n=3, max_workers=3)
+
+        self.assertEqual([item["path"] for item in concurrent], [item["path"] for item in serial])
+        self.assertEqual([item["final_score"] for item in concurrent], [item["final_score"] for item in serial])

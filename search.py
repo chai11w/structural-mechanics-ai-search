@@ -21,6 +21,7 @@ import re
 import sys
 import argparse
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -526,13 +527,16 @@ def apply_length_tie_break(client, query_image_path, scored):
     return scored
 
 
-def rerank_candidates(query_image_path, candidates, top_n=3):
-    """Use the vision model to rerank already-selected search candidates."""
-    if not query_image_path or not candidates:
-        return []
-
+def prepare_rerank_candidates(candidates):
     usable = []
     for candidate in candidates:
+        direct_path = Path(str(candidate["path"]))
+        if direct_path.is_absolute() and direct_path.is_file():
+            item = dict(candidate)
+            item["path"] = str(direct_path)
+            usable.append(item)
+            continue
+
         path, resolved_name, repaired = resolve_question_path(candidate["path"], update_excel=False)
         if not path.is_file():
             continue
@@ -541,25 +545,26 @@ def rerank_candidates(query_image_path, candidates, top_n=3):
         if repaired:
             item["name"] = resolved_name
         usable.append(item)
+    return usable
 
-    if not usable:
-        return []
 
-    client = ZhipuAI(api_key=ZHIPUAI_API_KEY)
-    scored = []
-    for candidate in usable:
-        path = Path(candidate["path"])
-        try:
-            score, reason = score_candidate_pair(client, query_image_path, str(path))
-        except Exception as exc:  # noqa: BLE001
-            print(f"WARNING: 候选 {candidate['rank']} 复筛失败: {exc}")
-            score, reason = 0.0, "复筛失败"
-        item = dict(candidate)
-        item["rerank_score"] = score
-        item["final_score"] = compute_final_rerank_score(item.get("score", 0), score)
-        item["rerank_reason"] = reason
-        scored.append(item)
+def score_rerank_candidate(query_image_path, candidate, client=None):
+    client = client or ZhipuAI(api_key=ZHIPUAI_API_KEY)
+    path = Path(candidate["path"])
+    try:
+        score, reason = score_candidate_pair(client, query_image_path, str(path))
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: 候选 {candidate['rank']} 复筛失败: {exc}")
+        score, reason = 0.0, "复筛失败"
 
+    item = dict(candidate)
+    item["rerank_score"] = score
+    item["final_score"] = compute_final_rerank_score(item.get("score", 0), score)
+    item["rerank_reason"] = reason
+    return item
+
+
+def finalize_rerank_results(client, query_image_path, scored, top_n=3):
     scored = apply_length_tie_break(client, query_image_path, scored)
     scored.sort(
         key=lambda x: (
@@ -571,6 +576,43 @@ def rerank_candidates(query_image_path, candidates, top_n=3):
         reverse=True,
     )
     return select_display_results(scored, max_results=top_n)
+
+
+def rerank_candidates(query_image_path, candidates, top_n=3):
+    """Use the vision model to rerank already-selected search candidates."""
+    if not query_image_path or not candidates:
+        return []
+
+    usable = prepare_rerank_candidates(candidates)
+    if not usable:
+        return []
+
+    client = ZhipuAI(api_key=ZHIPUAI_API_KEY)
+    scored = []
+    for candidate in usable:
+        scored.append(score_rerank_candidate(query_image_path, candidate, client=client))
+
+    return finalize_rerank_results(client, query_image_path, scored, top_n=top_n)
+
+
+def rerank_candidates_concurrent(query_image_path, candidates, top_n=3, max_workers=3):
+    """Experimental concurrent rerank; default search flow still uses rerank_candidates."""
+    if not query_image_path or not candidates:
+        return []
+
+    usable = prepare_rerank_candidates(candidates)
+    if not usable:
+        return []
+
+    workers = max(1, min(int(max_workers or 1), len(usable)))
+    scored = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(score_rerank_candidate, query_image_path, candidate) for candidate in usable]
+        for future in as_completed(futures):
+            scored.append(future.result())
+
+    client = ZhipuAI(api_key=ZHIPUAI_API_KEY)
+    return finalize_rerank_results(client, query_image_path, scored, top_n=top_n)
 
 
 def display_similarity_score(item):
