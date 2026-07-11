@@ -30,8 +30,8 @@ class RerankPromptTest(unittest.TestCase):
         ]
         vision_scores = {"a.jpg": 0.2, "b.jpg": 0.9, "c.jpg": 0.4}
 
-        def fake_score(client, query_image_path, candidate_path, prompt=search.RERANK_PROMPT):
-            del client, query_image_path, prompt
+        def fake_score(client, query_image_path, candidate_path, prompt=search.RERANK_PROMPT, timeout_seconds=None):
+            del client, query_image_path, prompt, timeout_seconds
             name = Path(candidate_path).name
             return vision_scores[name], name
 
@@ -45,3 +45,18 @@ class RerankPromptTest(unittest.TestCase):
 
         self.assertEqual([item["path"] for item in concurrent], [item["path"] for item in serial])
         self.assertEqual([item["final_score"] for item in concurrent], [item["final_score"] for item in serial])
+
+    def test_timeout_candidate_keeps_coarse_score_and_status(self):
+        candidate = {"rank": 1, "path": "slow.jpg", "score": 0.9}
+
+        with patch("search.score_candidate_pair", side_effect=TimeoutError("request timeout")):
+            result = search.score_rerank_candidate(
+                "query.jpg",
+                candidate,
+                client=object(),
+                timeout_seconds=2,
+            )
+
+        self.assertIsNone(result["rerank_score"])
+        self.assertEqual(result["final_score"], 0.9)
+        self.assertEqual(result["rerank_status"], "timeout")

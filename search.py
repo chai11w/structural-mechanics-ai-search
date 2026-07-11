@@ -21,6 +21,7 @@ import re
 import sys
 import argparse
 import shutil
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -466,7 +467,7 @@ LENGTH_TIE_PROMPT = """你是结构力学搜题结果打平复核器。候选题
 {"score":0.95,"reason":"理由不超过20字"}"""
 
 
-def score_candidate_pair(client, query_image_path, candidate_path, prompt=RERANK_PROMPT):
+def score_candidate_pair(client, query_image_path, candidate_path, prompt=RERANK_PROMPT, timeout_seconds=None):
     content = [
         {"type": "text", "text": prompt},
         {"type": "text", "text": "查询题图片："},
@@ -481,16 +482,20 @@ def score_candidate_pair(client, query_image_path, candidate_path, prompt=RERANK
         },
     ]
 
-    resp = client.chat.completions.create(
-        model="GLM-5V-Turbo",
-        messages=[
+    request = {
+        "model": "GLM-5V-Turbo",
+        "messages": [
             {"role": "system", "content": "你只输出JSON。"},
             {"role": "user", "content": content},
         ],
-        temperature=0.0,
-        max_tokens=128,
-        extra_body={"thinking": {"type": "disabled"}},
-    )
+        "temperature": 0.0,
+        "max_tokens": 128,
+        "extra_body": {"thinking": {"type": "disabled"}},
+    }
+    if timeout_seconds is not None:
+        request["timeout"] = float(timeout_seconds)
+
+    resp = client.chat.completions.create(**request)
     raw_text = resp.choices[0].message.content.strip()
     raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
     raw_text = re.sub(r"\s*```$", "", raw_text)
@@ -506,7 +511,7 @@ def compute_final_rerank_score(load_score, rerank_score):
     return load_score * RERANK_LOAD_WEIGHT + rerank_score * RERANK_VISION_WEIGHT
 
 
-def apply_length_tie_break(client, query_image_path, scored):
+def apply_length_tie_break(client, query_image_path, scored, timeout_seconds=None):
     perfect = [item for item in scored if float(item.get("final_score") or 0) >= 0.999]
     if len(perfect) <= 1:
         return scored
@@ -515,7 +520,11 @@ def apply_length_tie_break(client, query_image_path, scored):
         path = Path(item["path"])
         try:
             length_score, length_reason = score_candidate_pair(
-                client, query_image_path, str(path), prompt=LENGTH_TIE_PROMPT
+                client,
+                query_image_path,
+                str(path),
+                prompt=LENGTH_TIE_PROMPT,
+                timeout_seconds=timeout_seconds,
             )
         except Exception as exc:  # noqa: BLE001
             print(f"WARNING: 候选 {item['rank']} 杆长复核失败: {exc}")
@@ -548,24 +557,58 @@ def prepare_rerank_candidates(candidates):
     return usable
 
 
-def score_rerank_candidate(query_image_path, candidate, client=None):
-    client = client or ZhipuAI(api_key=ZHIPUAI_API_KEY)
+def _is_timeout_error(exc):
+    message = str(exc).lower()
+    return isinstance(exc, TimeoutError) or "timeout" in message or "timed out" in message
+
+
+def score_rerank_candidate(
+    query_image_path,
+    candidate,
+    client=None,
+    timeout_seconds=None,
+    collect_timing=False,
+):
+    # The SDK retries by default. For an explicit per-candidate deadline, retries
+    # would turn a 1s timeout into several delayed attempts, so disable them.
+    client = client or ZhipuAI(
+        api_key=ZHIPUAI_API_KEY,
+        max_retries=0 if timeout_seconds is not None else 3,
+    )
     path = Path(candidate["path"])
+    started = time.perf_counter() if collect_timing else None
+    status = "completed"
     try:
-        score, reason = score_candidate_pair(client, query_image_path, str(path))
+        score, reason = score_candidate_pair(
+            client,
+            query_image_path,
+            str(path),
+            timeout_seconds=timeout_seconds,
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"WARNING: 候选 {candidate['rank']} 复筛失败: {exc}")
-        score, reason = 0.0, "复筛失败"
+        if _is_timeout_error(exc):
+            # A timeout must not silently eliminate a potentially correct candidate.
+            score, reason, status = None, "复筛超时，保留初筛", "timeout"
+        else:
+            score, reason, status = 0.0, "复筛失败", "failed"
 
     item = dict(candidate)
     item["rerank_score"] = score
-    item["final_score"] = compute_final_rerank_score(item.get("score", 0), score)
+    item["final_score"] = (
+        float(item.get("score") or 0)
+        if status == "timeout"
+        else compute_final_rerank_score(item.get("score", 0), score)
+    )
     item["rerank_reason"] = reason
+    item["rerank_status"] = status
+    if started is not None:
+        item["rerank_seconds"] = round(time.perf_counter() - started, 3)
     return item
 
 
-def finalize_rerank_results(client, query_image_path, scored, top_n=3):
-    scored = apply_length_tie_break(client, query_image_path, scored)
+def finalize_rerank_results(client, query_image_path, scored, top_n=3, timeout_seconds=None):
+    scored = apply_length_tie_break(client, query_image_path, scored, timeout_seconds=timeout_seconds)
     scored.sort(
         key=lambda x: (
             x.get("final_score", 0),
@@ -595,8 +638,20 @@ def rerank_candidates(query_image_path, candidates, top_n=3):
     return finalize_rerank_results(client, query_image_path, scored, top_n=top_n)
 
 
-def rerank_candidates_concurrent(query_image_path, candidates, top_n=3, max_workers=3):
-    """Experimental concurrent rerank; default search flow still uses rerank_candidates."""
+def rerank_candidates_concurrent(
+    query_image_path,
+    candidates,
+    top_n=3,
+    max_workers=3,
+    candidate_timeout_seconds=None,
+    on_candidate_scored=None,
+):
+    """Experimental concurrent rerank; default search flow still uses rerank_candidates.
+
+    A request timeout keeps the candidate at its coarse score and marks it as
+    ``rerank_status=timeout``. Callers must present that result as pending,
+    rather than treating it as a verified final rerank.
+    """
     if not query_image_path or not candidates:
         return []
 
@@ -607,12 +662,30 @@ def rerank_candidates_concurrent(query_image_path, candidates, top_n=3, max_work
     workers = max(1, min(int(max_workers or 1), len(usable)))
     scored = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(score_rerank_candidate, query_image_path, candidate) for candidate in usable]
+        futures = [
+            executor.submit(
+                score_rerank_candidate,
+                query_image_path,
+                candidate,
+                timeout_seconds=candidate_timeout_seconds,
+                collect_timing=on_candidate_scored is not None,
+            )
+            for candidate in usable
+        ]
         for future in as_completed(futures):
-            scored.append(future.result())
+            item = future.result()
+            scored.append(item)
+            if on_candidate_scored is not None:
+                on_candidate_scored(dict(item))
 
     client = ZhipuAI(api_key=ZHIPUAI_API_KEY)
-    return finalize_rerank_results(client, query_image_path, scored, top_n=top_n)
+    return finalize_rerank_results(
+        client,
+        query_image_path,
+        scored,
+        top_n=top_n,
+        timeout_seconds=candidate_timeout_seconds,
+    )
 
 
 def display_similarity_score(item):
