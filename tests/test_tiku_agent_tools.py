@@ -1,10 +1,12 @@
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from tiku_agent.tools import (
     AgentToolConfig,
     classify_structure_tool,
     parse_candidate_action_tool,
+    rerank_candidates_tool,
     route_bank_tool,
 )
 
@@ -39,6 +41,35 @@ class TikuAgentToolsTest(unittest.TestCase):
             {"action": "delete_candidate", "rank": 2},
         )
         self.assertEqual(parse_candidate_action_tool("0", candidate_count=3).data, {"action": "cancel"})
+
+    def test_agent_rerank_runs_even_when_candidate_count_does_not_exceed_top(self):
+        candidates = [
+            {"rank": 1, "path": "q1.jpg", "score": 0.75, "name": "q1.jpg"},
+            {"rank": 2, "path": "q2.jpg", "score": 0.55, "name": "q2.jpg"},
+        ]
+
+        def fake_rerank(query_image_path, rerank_input, top_n=3):
+            self.assertEqual(query_image_path, "query.jpg")
+            self.assertEqual([item["path"] for item in rerank_input], ["q1.jpg", "q2.jpg"])
+            self.assertEqual(top_n, 3)
+            return [
+                {
+                    "rank": 2,
+                    "path": "q2.jpg",
+                    "name": "q2.jpg",
+                    "score": 0.55,
+                    "rerank_score": 0.95,
+                    "final_score": 0.75,
+                }
+            ]
+
+        with patch("tiku_agent.tools.search.rerank_candidates", side_effect=fake_rerank) as rerank:
+            result = rerank_candidates_tool("query.jpg", candidates, route="main", rerank_top=3)
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.data["reranked"])
+        self.assertEqual(rerank.call_count, 1)
+        self.assertEqual(result.data["visible_candidates"][0]["final_score"], 0.75)
 
 
 if __name__ == "__main__":

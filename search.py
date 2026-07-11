@@ -953,10 +953,7 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
     print(result_text)
     print(f"\n结果已保存: {output_path}")
 
-    filtered_rerank_paths = [item for item in all_paths if item["score"] >= RERANK_MIN_LOAD_SCORE]
-    if rerank_image_path and 0 < len(filtered_rerank_paths) <= rerank_top:
-        print(f"\n复筛候选仅 {len(filtered_rerank_paths)} 个，跳过 LLM 复筛，直接输出粗筛结果。")
-        filtered_rerank_paths = []
+    filtered_rerank_paths = [item for item in all_paths if item["score"] > 0]
     if rerank_image_path and filtered_rerank_paths:
         reranked = rerank_candidates(rerank_image_path, filtered_rerank_paths, rerank_top)
         if reranked:

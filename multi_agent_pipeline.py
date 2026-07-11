@@ -296,9 +296,6 @@ class MultiAgentCoordinator:
         rerank_note = ""
         if rerank and query_image_path and results:
             rerank_input = select_rerank_candidates(results, route.route)
-            if len(rerank_input) <= rerank_top and not force_rerank:
-                rerank_note = f"复筛候选 {len(rerank_input)} 个，不超过 {rerank_top} 个，已跳过复筛。"
-                rerank_input = []
             if status_callback and rerank_input:
                 status_callback("Zhipu复筛中...")
             if rerank_input:
@@ -466,24 +463,13 @@ def rerank_threshold_for_route(route: str) -> float:
 
 
 def select_rerank_candidates(results: list[dict[str, Any]], route: str) -> list[dict[str, Any]]:
-    """Keep all perfect matches, then add non-perfect candidates above the route threshold."""
-    threshold = rerank_threshold_for_route(route)
-    selected = []
-    seen_paths = set()
-
-    for item in results:
-        if item["score"] >= 1.0:
-            selected.append({key: item[key] for key in ("rank", "path", "score", "name")})
-            seen_paths.add(item["path"])
-
-    for item in results:
-        if item["path"] in seen_paths:
-            continue
-        if item["score"] >= threshold:
-            selected.append({key: item[key] for key in ("rank", "path", "score", "name")})
-            seen_paths.add(item["path"])
-
-    return selected
+    """Send every coarse candidate to vision rerank so displayed scores are final scores."""
+    del route
+    return [
+        {key: item[key] for key in ("rank", "path", "score", "name")}
+        for item in results
+        if item.get("path") and item.get("score", 0) > 0
+    ]
 
 
 def normalize_rerank_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:

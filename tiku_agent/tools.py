@@ -22,7 +22,6 @@ from multi_agent_pipeline import (
     load_bank_excel,
     normalize_rerank_results,
     normalize_structure_type,
-    rerank_threshold_for_route,
     resolve_effective_chapter,
     select_rerank_candidates,
     symbolic_root,
@@ -306,17 +305,6 @@ def rerank_candidates_tool(
 
     try:
         rerank_input = select_rerank_candidates(candidates, route)
-        if len(rerank_input) <= rerank_top and not force_rerank:
-            return ToolResult(
-                ok=True,
-                data={
-                    "reranked": False,
-                    "visible_candidates": _renumber(candidates),
-                    "rerank_note": f"复筛候选 {len(rerank_input)} 个，不超过 {rerank_top} 个，已跳过复筛。",
-                },
-                next_state="WAIT_CANDIDATE_CHOICE",
-            )
-
         reranked = search.rerank_candidates(query_image_path, rerank_input, top_n=rerank_top)
         visible = normalize_rerank_results(reranked) if reranked else _renumber(candidates)
         return ToolResult(
@@ -418,4 +406,3 @@ def _renumber(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         copied["rank"] = rank
         renumbered.append(copied)
     return renumbered
-
