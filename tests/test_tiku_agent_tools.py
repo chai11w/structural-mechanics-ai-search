@@ -72,6 +72,20 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertEqual(rerank.call_count, 1)
         self.assertEqual(result.data["visible_candidates"][0]["final_score"], 0.75)
 
+    def test_agent_rerank_skips_model_when_no_candidate_reaches_threshold(self):
+        candidates = [
+            {"rank": 1, "path": "q1.jpg", "score": 0.50, "name": "q1.jpg"},
+            {"rank": 2, "path": "q2.jpg", "score": 0.40, "name": "q2.jpg"},
+        ]
+
+        with patch("tiku_agent.tools.search.rerank_candidates") as rerank:
+            result = rerank_candidates_tool("query.jpg", candidates, route="main", rerank_top=3)
+
+        self.assertTrue(result.ok)
+        self.assertFalse(result.data["reranked"])
+        self.assertEqual(rerank.call_count, 0)
+        self.assertIn("粗筛", result.data["rerank_note"])
+
 
 if __name__ == "__main__":
     unittest.main()

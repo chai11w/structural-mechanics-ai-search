@@ -51,6 +51,7 @@ class TikuAgentIntentTest(unittest.TestCase):
     def test_chapter_alias_maps_to_chapter(self):
         self.assertEqual(parse_chapter("按力法"), "4力法")
         self.assertEqual(parse_chapter("矩阵位移"), "7矩阵位移")
+        self.assertEqual(parse_chapter("不对，应该是第三章"), "3静定结构位移")
 
     def test_llm_wait_question_choice_selects_question(self):
         result = parse_user_intent(
@@ -137,6 +138,11 @@ class TikuAgentIntentTest(unittest.TestCase):
         )
         self.assertTrue(result.ok)
         self.assertEqual(result.intent, "cancel")
+
+    def test_rule_fallback_can_resend_answer_after_answered(self):
+        result = parse_user_intent("刚才答案再发我", state="ANSWERED", use_llm=False)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.intent, "resend_answer")
 
     def test_forbidden_store_delete_are_unsupported_by_llm_payload(self):
         delete_result = parse_user_intent(

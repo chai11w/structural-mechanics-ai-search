@@ -166,6 +166,40 @@
   - `tests/test_multi_agent_rerank_policy.py`
   - new Agent tool test confirming 2 candidates still call rerank.
 
+## 2026-07-11 Agent Single-Question Orchestration MVP
+
+- Added the first orchestration layer for the isolated Agent:
+  - `tiku_agent/agent.py`
+  - `tiku_agent/render.py`
+- Exported `TikuSearchAgent` and `AgentResponse` from `tiku_agent/__init__.py`.
+- The orchestration layer wires together:
+  - LLM/rule intent parsing from `tiku_agent/intent.py`;
+  - dialogue state from `tiku_agent/state.py`;
+  - isolated retrieval tools from `tiku_agent/tools.py`;
+  - user-facing text rendering from `tiku_agent/render.py`.
+- Current supported single-question flow:
+  - `handle_image(image_path)` starts a new search.
+  - `analyze_image_tool` extracts loads and optional auto chapter.
+  - Missing chapter enters `WAIT_CHAPTER` and asks the user to supply a chapter.
+  - User chapter input continues route -> structure type -> coarse search -> rerank -> candidate list.
+  - User candidate choice calls `answer_candidate_tool` and stores `last_answer_paths`.
+  - User can ask to resend the previous answer through the new `resend_answer` intent.
+  - User can correct the chapter after candidates/answer, such as "不对，应该是第三章"; the Agent clears stale candidates/answers, increments `revision_count`, and reruns search with existing loads/image context.
+  - User can choose another candidate after an answer, such as "第二个".
+  - `cancel` is supported.
+- Intent layer updates:
+  - Added `ANSWERED` state awareness.
+  - Added `resend_answer` intent.
+  - Allows `set_chapter` and `select_candidate` while `ANSWERED`.
+  - Parses natural chapter correction phrases such as `第三章`.
+- Added `tests/test_tiku_agent_agent.py` with fake tools so orchestration tests do not call Qwen, Zhipu, live Feishu, or mutate old Feishu runtime state.
+- Current scope:
+  - Single-question Agent MVP only.
+  - Multi-question state is present but multi-question orchestration is not connected yet.
+  - No LangGraph graph yet.
+  - No new Feishu bot yet.
+  - No existing Feishu runtime files, ports, tunnels, sessions, or `.tmp_feishu_tiku` state touched.
+
 ## Supported Chapters
 
 - `2静定结构`

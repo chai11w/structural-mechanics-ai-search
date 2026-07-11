@@ -26,12 +26,14 @@ STATE_IDLE = "IDLE"
 STATE_WAIT_CHAPTER = "WAIT_CHAPTER"
 STATE_WAIT_QUESTION_CHOICE = "WAIT_QUESTION_CHOICE"
 STATE_WAIT_CANDIDATE_CHOICE = "WAIT_CANDIDATE_CHOICE"
+STATE_ANSWERED = "ANSWERED"
 
 SUPPORTED_INTENTS = {
     "search_image",
     "set_chapter",
     "select_question",
     "select_candidate",
+    "resend_answer",
     "cancel",
     "unsupported",
 }
@@ -73,6 +75,7 @@ INTENT_SYSTEM_PROMPT = """你是结构力学题库检索 Agent 的意图识别�
 - set_chapter：用户指定章节。
 - select_question：用户在多题列表中选择题号，可同时指定章节。
 - select_candidate：用户在候选列表中选择答案候选。
+- resend_answer：用户要求再次发送刚才的答案。
 - cancel：用户取消/退出当前流程。
 - unsupported：其他、无法判断、当前版本不支持，或用户要求删除/入库/维护。
 
@@ -82,7 +85,7 @@ INTENT_SYSTEM_PROMPT = """你是结构力学题库检索 Agent 的意图识别�
 
 输出 JSON 格式：
 {
-  "intent": "search_image|set_chapter|select_question|select_candidate|cancel|unsupported",
+  "intent": "search_image|set_chapter|select_question|select_candidate|resend_answer|cancel|unsupported",
   "image_path": null,
   "chapter": null,
   "question_index": null,
@@ -96,6 +99,7 @@ INTENT_SYSTEM_PROMPT = """你是结构力学题库检索 Agent 的意图识别�
 - WAIT_CHAPTER：用户通常是在补章节。
 - WAIT_QUESTION_CHOICE：用户通常是在选多题里的题号。
 - WAIT_CANDIDATE_CHOICE：用户通常是在选候选答案。
+- ANSWERED：用户可能是在纠正章节/题号、选择另一个候选，或要求重发刚才答案。
 - IDLE：用户通常是在开始搜索或表达自然语言任务。"""
 
 
@@ -278,6 +282,9 @@ def validate_intent_payload(
     if intent == "cancel":
         return IntentResult("cancel", data=data, source=source)
 
+    if intent == "resend_answer":
+        return IntentResult("resend_answer", data=data, source=source)
+
     if intent == "search_image":
         image_path = str(payload.get("image_path") or "").strip()
         if image_path:
@@ -288,7 +295,7 @@ def validate_intent_payload(
         chapter = parse_chapter(str(payload.get("chapter") or ""))
         if not chapter:
             return IntentResult("unsupported", ok=False, data=data, error="章节无法识别或不在 2-8 章范围内。", source=source)
-        if state not in {STATE_IDLE, STATE_WAIT_CHAPTER, STATE_WAIT_QUESTION_CHOICE}:
+        if state not in {STATE_IDLE, STATE_WAIT_CHAPTER, STATE_WAIT_QUESTION_CHOICE, STATE_WAIT_CANDIDATE_CHOICE, STATE_ANSWERED}:
             return IntentResult("unsupported", ok=False, data=data, error="当前状态不允许重新设置章节。", source=source)
         data["chapter"] = chapter
         return IntentResult("set_chapter", data=data, source=source)
@@ -311,7 +318,7 @@ def validate_intent_payload(
             return IntentResult("unsupported", ok=False, data=data, error="候选编号无法识别。", source=source)
         if candidate_count is not None and not 1 <= rank <= candidate_count:
             return IntentResult("unsupported", ok=False, data=data, error=f"候选编号超出范围：{rank}", source=source)
-        if state != STATE_WAIT_CANDIDATE_CHOICE:
+        if state not in {STATE_WAIT_CANDIDATE_CHOICE, STATE_ANSWERED}:
             return IntentResult("unsupported", ok=False, data=data, error="当前状态不允许选择候选答案。", source=source)
         data["rank"] = rank
         return IntentResult("select_candidate", data=data, source=source)
@@ -333,16 +340,18 @@ def parse_user_intent_rule_fallback(
         return IntentResult("unsupported", ok=False, error="未收到可识别的文字或图片", source="rule_fallback")
     if _is_cancel(clean):
         return IntentResult("cancel", source="rule_fallback")
+    if _is_resend_answer(clean):
+        return IntentResult("resend_answer", source="rule_fallback")
     path = _extract_image_path(clean)
     if path:
         return IntentResult("search_image", data={"image_path": path}, source="rule_fallback")
-    if state == STATE_WAIT_CHAPTER:
+    if state in {STATE_WAIT_CHAPTER, STATE_WAIT_CANDIDATE_CHOICE, STATE_ANSWERED}:
         chapter = parse_chapter(clean)
         if chapter:
             return IntentResult("set_chapter", data={"chapter": chapter}, source="rule_fallback")
     if state == STATE_WAIT_QUESTION_CHOICE:
         return _parse_question_choice(clean, question_count)
-    if state == STATE_WAIT_CANDIDATE_CHOICE:
+    if state in {STATE_WAIT_CANDIDATE_CHOICE, STATE_ANSWERED}:
         return _parse_candidate_choice(clean, candidate_count)
     return IntentResult("unsupported", ok=False, error="LLM 不可用，规则 fallback 无法理解这条指令。", source="rule_fallback")
 
@@ -355,6 +364,13 @@ def parse_chapter(text: str) -> str | None:
         for chapter in CHAPTERS:
             if chapter.startswith(clean):
                 return chapter
+    chapter_number = re.search(r"第?\s*([2-8二三四五六七八])\s*章", clean)
+    if chapter_number:
+        parsed = chinese_number_to_int(chapter_number.group(1))
+        if parsed is not None:
+            for chapter in CHAPTERS:
+                if chapter.startswith(str(parsed)):
+                    return chapter
     for chapter in CHAPTERS:
         if clean == chapter or clean in chapter or chapter in clean:
             return chapter
@@ -475,6 +491,14 @@ def _extract_image_path(text: str) -> str | None:
 
 def _is_cancel(text: str) -> bool:
     return text.lower() in {"0", "取消", "cancel", "退出", "算了", "不用了"}
+
+
+def _is_resend_answer(text: str) -> bool:
+    clean = text.lower()
+    return ("答案" in clean and any(word in clean for word in ("刚才", "上次", "再发", "重发", "再给"))) or clean in {
+        "刚才答案",
+        "重发答案",
+    }
 
 
 def _normalize_text(text: object) -> str:

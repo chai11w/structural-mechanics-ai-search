@@ -305,6 +305,12 @@ def rerank_candidates_tool(
 
     try:
         rerank_input = select_rerank_candidates(candidates, route)
+        if not rerank_input:
+            return ToolResult(
+                ok=True,
+                data={"reranked": False, "visible_candidates": _renumber(candidates), "rerank_note": "候选未达到复筛阈值，已显示粗筛结果。"},
+                next_state="WAIT_CANDIDATE_CHOICE",
+            )
         reranked = search.rerank_candidates(query_image_path, rerank_input, top_n=rerank_top)
         visible = normalize_rerank_results(reranked) if reranked else _renumber(candidates)
         return ToolResult(
