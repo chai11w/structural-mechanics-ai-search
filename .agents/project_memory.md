@@ -107,6 +107,42 @@
   - No LangGraph graph yet.
   - No Feishu integration and no old Feishu runtime state touched.
 
+## 2026-07-11 Agent State Layer MVP
+
+- Added `tiku_agent/state.py` as the minimal state layer for the future retrieval Agent.
+- The state layer is intentionally small and does not call LLMs, search tools, Feishu APIs, or existing Feishu runtime state.
+- First version keeps exactly 11 core fields:
+  - `session_id`
+  - `state`
+  - `image_path`
+  - `chapter`
+  - `loads`
+  - `route`
+  - `structure_type`
+  - `candidates`
+  - `selected_rank`
+  - `questions`
+  - `selected_question`
+- Supported state gates include:
+  - `IDLE`
+  - `WAIT_CHAPTER`
+  - `WAIT_QUESTION_CHOICE`
+  - `WAIT_CANDIDATE_CHOICE`
+  - `READY_TO_ROUTE`
+  - `READY_FOR_SEARCH`
+  - `DONE`
+  - `CANCELLED`
+  - `ERROR`
+  - `NO_MATCH`
+- Multi-question support is preserved at the state layer through `questions` and `selected_question`, but no multi-question orchestration has been added yet.
+- `last_error`, answer output paths, event logs, layout details, chapter confidence/evidence, and full tool traces are intentionally not in the first state schema. Add them later only if orchestration, persistence, or debugging needs prove it.
+- Added `tests/test_tiku_agent_state.py` using standard-library `unittest`.
+- Current scope:
+  - State data model only.
+  - No orchestration layer yet.
+  - No LangGraph graph yet.
+  - No Feishu integration and no old Feishu runtime state touched.
+
 ## Supported Chapters
 
 - `2静定结构`

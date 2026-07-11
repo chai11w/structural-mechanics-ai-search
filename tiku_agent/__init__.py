@@ -5,3 +5,6 @@ Do not store Agent checkpoints, Feishu events, or temporary images in the old
 `.tmp_feishu_tiku` directory.
 """
 
+from tiku_agent.state import AgentState
+
+__all__ = ["AgentState"]
