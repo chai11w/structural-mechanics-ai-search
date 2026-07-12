@@ -6,6 +6,7 @@ from tiku_agent.agent import AgentToolbox, TikuSearchAgent
 from tiku_agent.session_artifacts import SessionArtifacts
 from tiku_agent.session_runtime import AgentSessionRuntime
 from tiku_agent.session_store import SQLiteSessionStore
+from tiku_agent.task_log import TaskLogEntry, TaskLogger
 from tiku_agent.tools import ToolResult
 
 
@@ -42,6 +43,14 @@ class FakeTools:
         raise AssertionError("single scope analysis should avoid duplicate image analysis")
 
 
+class RecordingTaskLogger(TaskLogger):
+    def __init__(self):
+        self.entries: list[TaskLogEntry] = []
+
+    def write(self, entry: TaskLogEntry) -> None:
+        self.entries.append(entry)
+
+
 class AgentSessionRuntimeTest(unittest.TestCase):
     def setUp(self):
         self.database_path = RUNTIME_DIR / f"session_runtime_test_{uuid4().hex}.db"
@@ -53,10 +62,12 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.addCleanup(lambda: self.artifacts.clear_session("resume-session"))
         self.addCleanup(lambda: self.artifacts.clear_session("cancel-session"))
         tools = FakeTools().toolbox()
+        self.logger = RecordingTaskLogger()
         self.store = SQLiteSessionStore(self.database_path)
         self.runtime = AgentSessionRuntime(
             self.store,
             artifacts=self.artifacts,
+            task_logger=self.logger,
             agent_factory=lambda state: TikuSearchAgent(state=state, tools=tools, use_llm_intent=False),
         )
 
@@ -68,6 +79,7 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         restarted_runtime = AgentSessionRuntime(
             self.store,
             artifacts=self.artifacts,
+            task_logger=self.logger,
             agent_factory=lambda state: TikuSearchAgent(state=state, tools=FakeTools().toolbox(), use_llm_intent=False),
         )
         answer = restarted_runtime.handle_text(session_id, "就这个")
@@ -75,6 +87,9 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.assertEqual(answer.state["phase"], "ANSWERED")
         self.assertEqual(answer.images, ["answers/q1.jpg"])
         self.assertEqual(self.store.load(session_id).last_answer_paths, ["answers/q1.jpg"])
+        self.assertEqual([entry.outcome for entry in self.logger.entries], ["candidates", "answered"])
+        self.assertEqual([entry.kind for entry in self.logger.entries], ["image", "text"])
+        self.assertTrue(all(entry.duration_ms >= 0 for entry in self.logger.entries))
 
     def test_cancel_clears_persisted_session(self):
         session_id = "cancel-session"
@@ -85,6 +100,7 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.assertEqual(response.intent, "cancel")
         self.assertIsNone(self.store.load(session_id))
         self.assertFalse(self.artifacts.session_dir(session_id).exists())
+        self.assertEqual(self.logger.entries[-1].outcome, "cancelled")
 
 
 if __name__ == "__main__":

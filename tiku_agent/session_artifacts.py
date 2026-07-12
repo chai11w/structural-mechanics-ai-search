@@ -18,7 +18,7 @@ class SessionArtifacts:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def session_dir(self, session_id: str) -> Path:
-        return self.root / _session_key(session_id)
+        return self.root / session_key(session_id)
 
     def persist_image(self, session_id: str, source: str | Path) -> Path:
         source_path = Path(source)
@@ -42,7 +42,7 @@ class SessionArtifacts:
             self.clear_session(session_id)
 
 
-def _session_key(session_id: str) -> str:
+def session_key(session_id: str) -> str:
     clean = str(session_id).strip()
     if not clean:
         raise ValueError("session_id is required")
