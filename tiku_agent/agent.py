@@ -21,12 +21,13 @@ from tiku_agent.tools import (
     AgentToolConfig,
     ToolResult,
     analyze_image_tool,
-    analyze_multi_question_tool,
+    analyze_multi_image_tool,
     answer_candidate_tool,
     classify_structure_tool,
     coarse_search_tool,
     rerank_candidates_tool,
     route_bank_tool,
+    prepare_question_units_tool,
 )
 
 
@@ -41,7 +42,8 @@ class AgentResponse:
 @dataclass
 class AgentToolbox:
     analyze_image: Callable[..., ToolResult] = analyze_image_tool
-    analyze_multi_question: Callable[..., ToolResult] = analyze_multi_question_tool
+    analyze_multi_image: Callable[..., ToolResult] = analyze_multi_image_tool
+    prepare_question_units: Callable[..., ToolResult] = prepare_question_units_tool
     route_bank: Callable[..., ToolResult] = route_bank_tool
     classify_structure: Callable[..., ToolResult] = classify_structure_tool
     coarse_search: Callable[..., ToolResult] = coarse_search_tool
@@ -114,9 +116,16 @@ class TikuSearchAgent:
         if not image_path:
             return self._fail("没有收到图片路径。")
         self.state.start_search(image_path)
-        multi = self.tools.analyze_multi_question(image_path, config=self.config)
+        multi = self.tools.analyze_multi_image(image_path, config=self.config)
         if multi.ok and multi.data.get("is_multi"):
-            self.state.set_questions(list(multi.data.get("questions") or []))
+            prepared = self.tools.prepare_question_units(
+                image_path,
+                list(multi.data.get("questions") or []),
+                config=self.config,
+            )
+            if not prepared.ok:
+                return self._fail(prepared.error)
+            self.state.set_questions(list(prepared.data.get("questions") or []))
             return self._response(render.render_multi_question_list(self.state), IntentResult("search_image"))
         analyzed = self.tools.analyze_image(image_path, chapter="auto", config=self.config)
         if not analyzed.ok:

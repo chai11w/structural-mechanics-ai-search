@@ -17,7 +17,8 @@ class FakeTools:
     def toolbox(self):
         return AgentToolbox(
             analyze_image=self.analyze_image,
-            analyze_multi_question=self.analyze_multi_question,
+            analyze_multi_image=self.analyze_multi_image,
+            prepare_question_units=self.prepare_question_units,
             route_bank=self.route_bank,
             classify_structure=self.classify_structure,
             coarse_search=self.coarse_search,
@@ -35,8 +36,11 @@ class FakeTools:
             },
         )
 
-    def analyze_multi_question(self, image_path, *, config=None):
+    def analyze_multi_image(self, image_path, *, config=None):
         return ToolResult(ok=True, data={"is_multi": False, "questions": []})
+
+    def prepare_question_units(self, image_path, questions, *, config=None):
+        return ToolResult(ok=True, data={"questions": questions, "diagram_crops": {}})
 
     def route_bank(self, loads):
         return ToolResult(ok=True, data={"route": "main", "category": "main_numeric", "reason": "fake"})
@@ -185,7 +189,7 @@ class TikuSearchAgentTest(unittest.TestCase):
 
     def test_multi_question_selection_runs_selected_crop_with_chapter_override(self):
         fake = FakeTools(chapter="")
-        fake.analyze_multi_question = lambda image_path, *, config=None: ToolResult(
+        fake.analyze_multi_image = lambda image_path, *, config=None: ToolResult(
             ok=True,
             data={
                 "is_multi": True,
@@ -193,6 +197,16 @@ class TikuSearchAgentTest(unittest.TestCase):
                     {"label": "4", "loads": [{"type": "集中", "raw": "P"}], "chapter": "4力法", "question_image_path": "crop4.jpg"},
                     {"label": "5", "loads": [{"type": "均布", "raw": "q"}], "chapter": "", "question_image_path": "crop5.jpg"},
                 ],
+            },
+        )
+        fake.prepare_question_units = lambda image_path, questions, *, config=None: ToolResult(
+            ok=True,
+            data={
+                "questions": [
+                    {**questions[0], "question_image_path": "crop4.jpg"},
+                    {**questions[1], "question_image_path": "crop5.jpg"},
+                ],
+                "diagram_crops": {"4": "crop4.jpg", "5": "crop5.jpg"},
             },
         )
         agent = self.make_agent(fake)
@@ -218,7 +232,7 @@ class TikuSearchAgentTest(unittest.TestCase):
             return original_rerank(query_image_path, candidates, **kwargs)
 
         fake.rerank_candidates = record_rerank
-        fake.analyze_multi_question = lambda image_path, *, config=None: ToolResult(
+        fake.analyze_multi_image = lambda image_path, *, config=None: ToolResult(
             ok=True,
             data={
                 "is_multi": True,
@@ -227,6 +241,10 @@ class TikuSearchAgentTest(unittest.TestCase):
                     {"label": "2", "loads": [{"type": "均布", "raw": "q"}], "chapter": "4力法", "question_image_path": ""},
                 ],
             },
+        )
+        fake.prepare_question_units = lambda image_path, questions, *, config=None: ToolResult(
+            ok=True,
+            data={"questions": questions, "diagram_crops": {}},
         )
         agent = self.make_agent(fake)
 

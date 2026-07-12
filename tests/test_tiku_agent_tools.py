@@ -4,10 +4,11 @@ from unittest.mock import patch
 
 from tiku_agent.tools import (
     AgentToolConfig,
-    analyze_multi_question_tool,
+    analyze_multi_image_tool,
     classify_structure_tool,
     parse_candidate_action_tool,
     rerank_candidates_tool,
+    prepare_question_units_tool,
     route_bank_tool,
 )
 
@@ -26,7 +27,7 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertEqual(result.data["route"], "symbolic")
         self.assertEqual(result.next_state, "READY_FOR_STRUCTURE")
 
-    def test_multi_question_tool_prepares_questions_and_isolated_crops(self):
+    def test_multi_image_tool_lists_questions_without_preparing_crops(self):
         class FakeQwen:
             def analyze_layout(self, _image_path):
                 return {
@@ -37,32 +38,42 @@ class TikuAgentToolsTest(unittest.TestCase):
                     ],
                 }
 
-        with (
-            patch("tiku_agent.tools._make_qwen", return_value=FakeQwen()),
-            patch(
-                "tiku_agent.tools.prepare_multi_diagram_crops",
-                return_value={"1": "runtime/multi_diagrams/q1.jpg", "2": "runtime/multi_diagrams/q2.jpg"},
-            ),
-        ):
-            result = analyze_multi_question_tool("multi.jpg", config=AgentToolConfig())
+        with patch("tiku_agent.tools._make_qwen", return_value=FakeQwen()):
+            result = analyze_multi_image_tool("multi.jpg", config=AgentToolConfig())
 
         self.assertTrue(result.ok)
         self.assertTrue(result.data["is_multi"])
         self.assertEqual(result.next_state, "WAIT_QUESTION_CHOICE")
         self.assertEqual(result.data["questions"][0]["chapter"], "2静定结构")
-        self.assertEqual(result.data["questions"][1]["question_image_path"], "runtime/multi_diagrams/q2.jpg")
+        self.assertNotIn("question_image_path", result.data["questions"][1])
 
-    def test_multi_question_tool_keeps_single_image_on_single_flow(self):
+    def test_multi_image_tool_keeps_single_image_on_single_flow(self):
         class FakeQwen:
             def analyze_layout(self, _image_path):
                 return {"question_layout": "single", "questions": []}
 
         with patch("tiku_agent.tools._make_qwen", return_value=FakeQwen()):
-            result = analyze_multi_question_tool("single.jpg", config=AgentToolConfig())
+            result = analyze_multi_image_tool("single.jpg", config=AgentToolConfig())
 
         self.assertTrue(result.ok)
         self.assertFalse(result.data["is_multi"])
         self.assertEqual(result.next_state, "READY_FOR_SINGLE_ANALYSIS")
+
+    def test_prepare_question_units_only_attaches_isolated_crops(self):
+        questions = [
+            {"label": "4", "loads": [{"type": "集中", "raw": "P"}], "chapter": "4力法"},
+            {"label": "5", "loads": [{"type": "均布", "raw": "q"}], "chapter": ""},
+        ]
+        with patch(
+            "tiku_agent.tools.prepare_multi_diagram_crops",
+            return_value={"4": "runtime/multi_diagrams/q4.jpg"},
+        ):
+            result = prepare_question_units_tool("multi.jpg", questions, config=AgentToolConfig())
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.data["questions"][0]["question_image_path"], "runtime/multi_diagrams/q4.jpg")
+        self.assertEqual(result.data["questions"][1]["question_image_path"], "")
+        self.assertTrue(result.data["has_reliable_crops"])
 
     def test_structure_tool_skips_non_symbolic_routes(self):
         result = classify_structure_tool(None, route="main")

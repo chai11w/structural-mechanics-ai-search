@@ -122,16 +122,12 @@ def analyze_image_tool(
         return ToolResult(ok=False, error=str(exc), next_state="ERROR")
 
 
-def analyze_multi_question_tool(
+def analyze_multi_image_tool(
     image_path: str | Path,
     *,
     config: AgentToolConfig | None = None,
 ) -> ToolResult:
-    """Detect a multi-question image and prepare isolated diagram crops.
-
-    A non-multi image is not an error: the Agent should continue through its
-    normal single-question analysis path.
-    """
+    """Only detect whether an image contains multiple questions and list them."""
     config = config or AgentToolConfig()
     path = Path(image_path)
     try:
@@ -151,21 +147,51 @@ def analyze_multi_question_tool(
                 next_state="READY_FOR_SINGLE_ANALYSIS",
             )
 
-        crops = prepare_multi_diagram_crops(path, questions, config.runtime_dir / "multi_diagrams")
-        prepared = []
+        analyzed_questions = []
         for index, question in enumerate(questions, 1):
             item = dict(question)
             item["question_index"] = index
-            item["question_image_path"] = crops.get(normalize_question_key(item.get("label")), "")
             item["chapter"] = effective_question_chapter(item) or ""
-            prepared.append(item)
+            analyzed_questions.append(item)
         return ToolResult(
             ok=True,
-            data={"is_multi": True, "layout": layout, "questions": prepared, "diagram_crops": crops},
+            data={"is_multi": True, "layout": layout, "questions": analyzed_questions},
             next_state="WAIT_QUESTION_CHOICE",
         )
     except Exception as exc:  # noqa: BLE001 - keep the single-question flow usable.
         return ToolResult(ok=True, data={"is_multi": False, "questions": []}, error=str(exc), next_state="READY_FOR_SINGLE_ANALYSIS")
+
+
+def prepare_question_units_tool(
+    image_path: str | Path,
+    questions: list[dict[str, Any]],
+    *,
+    config: AgentToolConfig | None = None,
+) -> ToolResult:
+    """Prepare isolated, rerank-safe question images only for a confirmed multi image."""
+    config = config or AgentToolConfig()
+    path = Path(image_path)
+    prepared = []
+    try:
+        crops = prepare_multi_diagram_crops(path, questions, config.runtime_dir / "multi_diagrams")
+    except Exception as exc:  # noqa: BLE001 - load-only retrieval stays available.
+        crops = {}
+        crop_error = str(exc)
+    else:
+        crop_error = ""
+
+    for index, question in enumerate(questions, 1):
+        item = dict(question)
+        item["question_index"] = index
+        item["question_image_path"] = crops.get(normalize_question_key(item.get("label")), "")
+        item["chapter"] = str(item.get("chapter") or effective_question_chapter(item) or "")
+        prepared.append(item)
+    return ToolResult(
+        ok=True,
+        data={"questions": prepared, "diagram_crops": crops, "has_reliable_crops": bool(crops)},
+        error=crop_error,
+        next_state="WAIT_QUESTION_CHOICE",
+    )
 
 
 def route_bank_tool(loads: list[dict[str, Any]]) -> ToolResult:
