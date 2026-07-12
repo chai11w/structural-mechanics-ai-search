@@ -3,6 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from tiku_agent.agent import AgentToolbox, TikuSearchAgent
+from tiku_agent.session_artifacts import SessionArtifacts
 from tiku_agent.session_runtime import AgentSessionRuntime
 from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.tools import ToolResult
@@ -44,21 +45,29 @@ class FakeTools:
 class AgentSessionRuntimeTest(unittest.TestCase):
     def setUp(self):
         self.database_path = RUNTIME_DIR / f"session_runtime_test_{uuid4().hex}.db"
+        self.source_image = RUNTIME_DIR / f"session_runtime_source_{uuid4().hex}.jpg"
+        self.source_image.write_bytes(b"fake image bytes")
         self.addCleanup(lambda: self.database_path.unlink(missing_ok=True))
+        self.addCleanup(lambda: self.source_image.unlink(missing_ok=True))
+        self.artifacts = SessionArtifacts(RUNTIME_DIR / f"session_artifacts_test_{uuid4().hex}")
+        self.addCleanup(lambda: self.artifacts.clear_session("resume-session"))
+        self.addCleanup(lambda: self.artifacts.clear_session("cancel-session"))
         tools = FakeTools().toolbox()
         self.store = SQLiteSessionStore(self.database_path)
         self.runtime = AgentSessionRuntime(
             self.store,
+            artifacts=self.artifacts,
             agent_factory=lambda state: TikuSearchAgent(state=state, tools=tools, use_llm_intent=False),
         )
 
     def test_restart_can_resume_unique_candidate_with_natural_confirmation(self):
         session_id = "resume-session"
-        first = self.runtime.handle_image(session_id, "question.jpg")
+        first = self.runtime.handle_image(session_id, self.source_image)
         self.assertEqual(first.state["phase"], "WAIT_CANDIDATE_CHOICE")
 
         restarted_runtime = AgentSessionRuntime(
             self.store,
+            artifacts=self.artifacts,
             agent_factory=lambda state: TikuSearchAgent(state=state, tools=FakeTools().toolbox(), use_llm_intent=False),
         )
         answer = restarted_runtime.handle_text(session_id, "就这个")
@@ -69,12 +78,13 @@ class AgentSessionRuntimeTest(unittest.TestCase):
 
     def test_cancel_clears_persisted_session(self):
         session_id = "cancel-session"
-        self.runtime.handle_image(session_id, "question.jpg")
+        self.runtime.handle_image(session_id, self.source_image)
 
         response = self.runtime.handle_text(session_id, "取消")
 
         self.assertEqual(response.intent, "cancel")
         self.assertIsNone(self.store.load(session_id))
+        self.assertFalse(self.artifacts.session_dir(session_id).exists())
 
 
 if __name__ == "__main__":

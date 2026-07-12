@@ -49,6 +49,7 @@ class AgentToolConfig:
     """
 
     runtime_dir: Path = DEFAULT_RUNTIME_DIR
+    session_dir: Path | None = None
     top_k: int = search.TOP_K
     rerank_top: int = 3
     use_qwen_cache: bool = True
@@ -59,7 +60,11 @@ class AgentToolConfig:
 
     @property
     def answer_output_dir(self) -> Path:
-        return self.runtime_dir / "answer_output"
+        return (self.session_dir or self.runtime_dir) / "answer_output"
+
+    @property
+    def multi_diagram_dir(self) -> Path:
+        return (self.session_dir or self.runtime_dir) / "multi_diagrams"
 
 
 @dataclass
@@ -173,7 +178,7 @@ def prepare_question_units_tool(
     questions = analyzed_questions
     prepared = []
     try:
-        crops = prepare_multi_diagram_crops(path, questions, config.runtime_dir / "multi_diagrams")
+        crops = prepare_multi_diagram_crops(path, questions, config.multi_diagram_dir)
     except Exception as exc:  # noqa: BLE001 - load-only retrieval stays available.
         crops = {}
         crop_error = str(exc)

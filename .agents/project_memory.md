@@ -24,7 +24,7 @@
 - `tiku_agent/state.py`：支持章节纠正、多题当前裁图、候选切换、答案回看和错误恢复。
 - `tiku_agent/agent.py` 与 `render.py`：单题/多题自然语言编排；多题可选题号、用对应裁图检索并复用候选和答案流程。
 - `tiku_agent/render.py`：新 Agent 的所有用户可见检索话术统一为简洁自然对话，隐藏路径、分数和内部状态；唯一候选支持“就这个 / 要这个 / 发答案”直接取答案。
-- `tiku_agent/session_store.py` 与 `session_runtime.py`：隔离 SQLite 会话存储和外层恢复/保存编排已实现；默认最后活跃后 2 小时过期，取消即清除。真实单题已验证“候选→模拟重启→就这个→答案”。
+- `tiku_agent/session_store.py`、`session_runtime.py` 与 `session_artifacts.py`：隔离 SQLite 会话存储、外层恢复/保存和 session 临时文件管理已实现；默认最后活跃后 2 小时过期，取消即清除状态与题图/裁图/答案临时文件。真实单题已验证“候选→模拟重启→就这个→答案”。
 - `tiku_agent/tools.py`：首轮 scope 只判单题/多题；单题同时返回荷载/章节并直接检索，多题才调用详细题号/bbox/逐题荷载识别和裁图准备。
 - 两套荷载提取 prompt 已统一：赋值符号输出无单位的 `符号=数值`；`P=40/q=20/M=20` 路由主库，纯符号仍路由字母库，并有回归测试。
 - 共享复筛不再因候选少于 `rerank_top` 而跳过；候选达到路由粗筛阈值就进入复筛。
@@ -38,7 +38,7 @@
 
 ## Not Implemented
 
-- 尚未引入 LangGraph 图、独立 FastAPI 入口或临时文件随会话过期清理；会话恢复已接入 Agent 外层并完成真实验证。
+- 尚未引入 LangGraph 图、独立 FastAPI 入口或结构化任务日志；会话恢复和 session 临时文件清理已接入 Agent 外层并完成真实验证。
 - 尚未创建或连接新的飞书机器人；现有飞书机器人不是 Agent 入口。
 - 复筛并发数、首轮超时和补评上限尚未配置化。
 - 缺少 pipeline 级超时回退、真实飞书事件和持久状态恢复集成测试。
