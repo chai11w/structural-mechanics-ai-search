@@ -23,6 +23,9 @@ class FakeRuntime:
         self.calls.append(("image", session_id, image_path.is_file()))
         return AgentResponse(text="我正在帮你找。", intent="search_image")
 
+    def clear(self, session_id: str) -> None:
+        self.calls.append(("clear", session_id))
+
 
 class FastApiDemoTest(unittest.TestCase):
     def test_health_text_cookie_image_upload_and_media_token(self):
@@ -49,6 +52,10 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(image_response.status_code, 200)
         self.assertEqual(runtime.calls[-1][0], "image")
         self.assertTrue(runtime.calls[-1][2])
+
+        reset_response = client.post("/api/reset")
+        self.assertEqual(reset_response.status_code, 200)
+        self.assertEqual(runtime.calls[-1][0], "clear")
 
 
 if __name__ == "__main__":

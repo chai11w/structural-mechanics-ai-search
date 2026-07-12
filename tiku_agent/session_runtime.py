@@ -44,6 +44,12 @@ class AgentSessionRuntime:
     def handle_text(self, session_id: str, text: str) -> AgentResponse:
         return self._run(session_id, "text", lambda agent: agent.handle_text(text))
 
+    def clear(self, session_id: str) -> None:
+        """Explicitly start a fresh conversation and remove its temporary files."""
+        clean_session_id = self._clean_session_id(session_id)
+        self.store.clear(clean_session_id)
+        self.artifacts.clear_session(clean_session_id)
+
     def _run(self, session_id: str, kind: str, handler: Callable[[TikuSearchAgent], AgentResponse]) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
         self._purge_expired()
