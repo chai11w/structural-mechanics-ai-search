@@ -51,7 +51,7 @@ class AgentToolConfig:
     runtime_dir: Path = DEFAULT_RUNTIME_DIR
     session_dir: Path | None = None
     top_k: int = search.TOP_K
-    rerank_top: int = 3
+    rerank_top: int = search.DISPLAY_MAX_RESULTS
     use_qwen_cache: bool = True
 
     @property
@@ -368,7 +368,7 @@ def rerank_candidates_tool(
     candidates: list[dict[str, Any]],
     *,
     route: str,
-    rerank_top: int = 3,
+    rerank_top: int = search.DISPLAY_MAX_RESULTS,
     force_rerank: bool = False,
 ) -> ToolResult:
     """Rerank coarse candidates and return visible candidates only.

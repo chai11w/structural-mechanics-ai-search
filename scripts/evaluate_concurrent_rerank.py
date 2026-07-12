@@ -35,7 +35,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Compare serial vs concurrent shape rerank on symbolic-bank samples.")
     parser.add_argument("--samples", type=int, default=3)
     parser.add_argument("--candidate-limit", type=int, default=8)
-    parser.add_argument("--rerank-top", type=int, default=3)
+    parser.add_argument("--rerank-top", type=int, default=search.DISPLAY_MAX_RESULTS)
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--candidate-timeout", type=float, default=None)
     parser.add_argument("--retry-timeout", type=float, default=None)

@@ -39,7 +39,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from multi_agent_pipeline import MultiAgentCoordinator, is_auto_chapter  # noqa: E402
-from search import ANSWER_OUTPUT, answer, cfg  # noqa: E402
+from search import ANSWER_OUTPUT, DISPLAY_MAX_RESULTS, answer, cfg  # noqa: E402
 from scripts.chapter_judgment_log import append_chapter_judgment_log  # noqa: E402
 from scripts.feishu_delete_flow import (  # noqa: E402
     DeletePlan,
@@ -103,7 +103,7 @@ class FeishuTikuOptions:
     session_ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS
     temp_dir: Path = BASE / ".tmp_feishu_tiku"
     top_k: int = 3
-    rerank_top: int = 3
+    rerank_top: int = DISPLAY_MAX_RESULTS
     max_message_age_seconds: int = 15 * 60
     working_reaction: str | None = "OK"
 
@@ -842,7 +842,7 @@ class MockCoordinator:
         chapter: str,
         *,
         rerank: bool = True,
-        rerank_top: int = 3,
+        rerank_top: int = DISPLAY_MAX_RESULTS,
         source: str = "mock_image_search",
         classified: dict[str, Any] | None = None,
     ) -> Any:
@@ -1924,7 +1924,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-ttl-minutes", type=int, default=10)
     parser.add_argument("--max-message-age-minutes", type=int, default=15)
     parser.add_argument("--top", type=int, default=3)
-    parser.add_argument("--rerank-top", type=int, default=3)
+    parser.add_argument("--rerank-top", type=int, default=DISPLAY_MAX_RESULTS)
     parser.add_argument(
         "--working-reaction",
         default="OK",

@@ -614,7 +614,7 @@ def score_rerank_candidate(
     return item
 
 
-def finalize_rerank_results(client, query_image_path, scored, top_n=3, timeout_seconds=None):
+def finalize_rerank_results(client, query_image_path, scored, top_n=DISPLAY_MAX_RESULTS, timeout_seconds=None):
     scored = apply_length_tie_break(client, query_image_path, scored, timeout_seconds=timeout_seconds)
     scored.sort(
         key=lambda x: (
@@ -628,7 +628,7 @@ def finalize_rerank_results(client, query_image_path, scored, top_n=3, timeout_s
     return select_display_results(scored, max_results=top_n)
 
 
-def rerank_candidates(query_image_path, candidates, top_n=3):
+def rerank_candidates(query_image_path, candidates, top_n=DISPLAY_MAX_RESULTS):
     """Rerank candidates with the shared bounded-concurrency policy."""
     return rerank_candidates_concurrent(
         query_image_path,
@@ -670,7 +670,7 @@ def mark_rerank_incomplete(candidates, note):
 def rerank_candidates_concurrent(
     query_image_path,
     candidates,
-    top_n=3,
+    top_n=DISPLAY_MAX_RESULTS,
     max_workers=3,
     candidate_timeout_seconds=None,
     retry_timeout_seconds=None,
@@ -1100,7 +1100,7 @@ def resolve_question_path(question_path, chapter_name=None, update_excel=False):
     return ROOT / old_rel, old_rel, False
 
 
-def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, rerank_top=3):
+def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, rerank_top=DISPLAY_MAX_RESULTS):
     df = load_chapter_excel(chapter_name)
     if df is None:
         print(f"ERROR: Chapter '{chapter_name}' not found")

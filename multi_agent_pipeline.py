@@ -225,7 +225,7 @@ class MultiAgentCoordinator:
         chapter: str | None,
         *,
         rerank: bool = True,
-        rerank_top: int = 3,
+        rerank_top: int = search.DISPLAY_MAX_RESULTS,
         classified: dict[str, Any] | None = None,
     ) -> PipelineResult:
         classified = classified or self.qwen.classify_image(image_path)
@@ -251,7 +251,7 @@ class MultiAgentCoordinator:
         *,
         query_image_path: str | None = None,
         rerank: bool = False,
-        rerank_top: int = 3,
+        rerank_top: int = search.DISPLAY_MAX_RESULTS,
         force_rerank: bool = False,
         status_callback=None,
         classified: dict[str, Any] | None = None,
