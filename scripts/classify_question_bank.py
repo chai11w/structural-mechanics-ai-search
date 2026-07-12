@@ -117,7 +117,29 @@ raw 不要输出单位:
 无荷载时 loads 输出 []，但仍要输出章节字段。不要输出解释、Markdown或代码块。"""
 
 
-LAYOUT_PROMPT = """你是结构力学题目图片分析助手。请判断图片中是一道题还是多道题，只输出JSON。
+IMAGE_SCOPE_PROMPT = """你是结构力学题目图片分流助手。请判断图片中是一道题还是多道题，只输出JSON。
+
+输出格式:
+{
+  "question_layout":"single|multi|uncertain",
+  "reason":"简短说明，引用你看到的题号、分隔线或版面线索",
+  "loads":[{"type":"集中|均布|弯矩","raw":"去掉单位后的荷载标注"}],
+  "chapter_hint":"2静定结构|3静定结构位移|4力法|5位移法|6力矩分配|7矩阵位移|8影响线|unknown",
+  "chapter_confidence":0到1之间的小数,
+  "chapter_evidence":"用于判断章节的题目文字或理由"
+}
+
+条件规则:
+- 如果 question_layout 是 single：必须识别这一题的 loads 和章节字段。
+- 如果 question_layout 是 multi 或 uncertain：loads 必须输出 []，章节字段必须为 unknown、0、""；此阶段绝不找题号、bbox、逐题荷载或逐题章节。
+- 单题是一个完整题目，即使其中有多个小问也仍为 single；看到多个独立题号、独立结构图或明显分隔线才为 multi。
+
+荷载类型只有三种：集中、均布、弯矩。荷载类型根据图形形态判断，不根据单位判断。raw 不要输出单位：5kN/m、5kN·m、5kN.m 都只输出 5；q=20kN/m 输出 q=20；M=20kN·m 输出 M=20；P=40kN 输出 P=40；纯符号保持原样。
+不要提取刚度 EI/EA、尺寸、节点编号、支座反力或公式结果。章节只能根据明确题干/方法文字判断；没有明确线索则 unknown。
+不要输出解释、Markdown或代码块。"""
+
+
+LAYOUT_PROMPT = """你是结构力学多题图片分析助手。图片已经确认包含多道独立题目。请定位每一道题，只输出JSON。
 
 输出格式:
 {
@@ -484,6 +506,29 @@ def qwen_analyze_layout(image_path: Path, *, model: str, endpoint: str, api_key:
     return result
 
 
+def qwen_analyze_image_scope(image_path: Path, *, model: str, endpoint: str, api_key: str, timeout: int) -> dict:
+    """Cheap first pass: classify page layout, and analyze loads only when it is single."""
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": IMAGE_SCOPE_PROMPT},
+            {"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_to_data_url(image_path)}}, {"type": "text", "text": "只输出JSON。"}]},
+        ],
+        "temperature": 0,
+        "max_tokens": 1024,
+        "enable_thinking": False,
+    }
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(endpoint, data=body, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    content = data["choices"][0]["message"]["content"]
+    result = normalize_image_scope_result(parse_model_json(content))
+    result["raw_content"] = content
+    result["usage"] = data.get("usage", {})
+    return result
+
+
 def qwen_locate_diagram(
     image_path: Path,
     *,
@@ -658,6 +703,30 @@ def normalize_layout_result(parsed: dict, image_size: tuple[int, int] | None = N
         "question_layout": layout,
         "reason": str(parsed.get("reason") or "").strip(),
         "questions": normalized_questions,
+    }
+
+
+def normalize_image_scope_result(parsed: dict) -> dict:
+    layout = str(parsed.get("question_layout") or "").strip().lower()
+    if layout not in {"single", "multi", "uncertain"}:
+        layout = "uncertain"
+    if layout != "single":
+        return {"question_layout": layout, "reason": str(parsed.get("reason") or "").strip(), "single_analysis": None}
+    chapter_hint = normalize_chapter_hint(parsed.get("chapter_hint"))
+    chapter_confidence = normalize_chapter_confidence(parsed.get("chapter_confidence"))
+    chapter_evidence = str(parsed.get("chapter_evidence") or "").strip()
+    if chapter_hint == CHAPTER_UNKNOWN and not chapter_evidence:
+        chapter_evidence = "未识别到明确章节线索"
+    chapter_hint, chapter_confidence, chapter_evidence = guard_chapter_prediction(chapter_hint, chapter_confidence, chapter_evidence)
+    return {
+        "question_layout": layout,
+        "reason": str(parsed.get("reason") or "").strip(),
+        "single_analysis": {
+            "loads": [normalize_load_item(item) for item in parsed.get("loads", []) if isinstance(item, dict)],
+            "chapter_hint": chapter_hint,
+            "chapter_confidence": chapter_confidence,
+            "chapter_evidence": chapter_evidence,
+        },
     }
 
 

@@ -131,32 +131,18 @@ def analyze_multi_image_tool(
     config = config or AgentToolConfig()
     path = Path(image_path)
     try:
-        layout = _make_qwen(config).analyze_layout(path)
+        layout = _make_qwen(config).analyze_image_scope(path)
         if layout.get("question_layout") != "multi":
             return ToolResult(
                 ok=True,
-                data={"is_multi": False, "layout": layout, "questions": []},
+                data={"is_multi": False, "layout": layout, "single_analysis": layout.get("single_analysis"), "questions": []},
                 next_state="READY_FOR_SINGLE_ANALYSIS",
             )
 
-        questions = normalize_multi_questions(layout.get("questions", []))
-        if len(questions) < 2:
-            return ToolResult(
-                ok=True,
-                data={"is_multi": False, "layout": layout, "questions": []},
-                next_state="READY_FOR_SINGLE_ANALYSIS",
-            )
-
-        analyzed_questions = []
-        for index, question in enumerate(questions, 1):
-            item = dict(question)
-            item["question_index"] = index
-            item["chapter"] = effective_question_chapter(item) or ""
-            analyzed_questions.append(item)
         return ToolResult(
             ok=True,
-            data={"is_multi": True, "layout": layout, "questions": analyzed_questions},
-            next_state="WAIT_QUESTION_CHOICE",
+            data={"is_multi": True, "layout": layout, "questions": []},
+            next_state="READY_FOR_MULTI_DETAILS",
         )
     except Exception as exc:  # noqa: BLE001 - keep the single-question flow usable.
         return ToolResult(ok=True, data={"is_multi": False, "questions": []}, error=str(exc), next_state="READY_FOR_SINGLE_ANALYSIS")
@@ -168,9 +154,23 @@ def prepare_question_units_tool(
     *,
     config: AgentToolConfig | None = None,
 ) -> ToolResult:
-    """Prepare isolated, rerank-safe question images only for a confirmed multi image."""
+    """After multi is confirmed, locate each question then prepare rerank-safe crops."""
     config = config or AgentToolConfig()
     path = Path(image_path)
+    try:
+        layout = _make_qwen(config).analyze_layout(path)
+        questions = normalize_multi_questions(layout.get("questions", []))
+        if layout.get("question_layout") != "multi" or len(questions) < 2:
+            return ToolResult(ok=False, error="多题详细识别未得到至少两道题。", next_state="ERROR")
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(ok=False, error=str(exc), next_state="ERROR")
+    analyzed_questions = []
+    for index, question in enumerate(questions, 1):
+        item = dict(question)
+        item["question_index"] = index
+        item["chapter"] = effective_question_chapter(item) or ""
+        analyzed_questions.append(item)
+    questions = analyzed_questions
     prepared = []
     try:
         crops = prepare_multi_diagram_crops(path, questions, config.runtime_dir / "multi_diagrams")

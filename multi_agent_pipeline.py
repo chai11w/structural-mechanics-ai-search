@@ -26,6 +26,7 @@ from scripts.classify_question_bank import (
     normalize_load_item,
     normalize_chapter_confidence,
     normalize_chapter_hint,
+    qwen_analyze_image_scope,
     qwen_analyze_layout,
     qwen_extract_loads,
 )
@@ -145,6 +146,13 @@ class QwenClassifier:
             timeout=self.timeout,
         )
 
+    def analyze_image_scope(self, image_path: str | Path) -> dict[str, Any]:
+        path = Path(image_path)
+        api_key = os.environ.get("DASHSCOPE_API_KEY", "") or search.cfg.get("dashscope_api_key", "")
+        if not api_key:
+            raise RuntimeError("DASHSCOPE_API_KEY is not set")
+        return qwen_analyze_image_scope(path, model=self.model, endpoint=self.endpoint, api_key=api_key, timeout=self.timeout)
+
     def classify_structure_type(self, image_path: str | Path) -> dict[str, Any]:
         path = Path(image_path)
         api_key = os.environ.get("DASHSCOPE_API_KEY", "") or search.cfg.get("dashscope_api_key", "")
@@ -218,8 +226,9 @@ class MultiAgentCoordinator:
         *,
         rerank: bool = True,
         rerank_top: int = 3,
+        classified: dict[str, Any] | None = None,
     ) -> PipelineResult:
-        classified = self.qwen.classify_image(image_path)
+        classified = classified or self.qwen.classify_image(image_path)
         return self.search_loads(
             classified.get("loads", []),
             chapter,
@@ -231,6 +240,9 @@ class MultiAgentCoordinator:
 
     def analyze_image_layout(self, image_path: str | Path) -> dict[str, Any]:
         return self.qwen.analyze_layout(image_path)
+
+    def analyze_image_scope(self, image_path: str | Path) -> dict[str, Any]:
+        return self.qwen.analyze_image_scope(image_path)
 
     def search_loads(
         self,

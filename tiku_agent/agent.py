@@ -127,9 +127,20 @@ class TikuSearchAgent:
                 return self._fail(prepared.error)
             self.state.set_questions(list(prepared.data.get("questions") or []))
             return self._response(render.render_multi_question_list(self.state), IntentResult("search_image"))
-        analyzed = self.tools.analyze_image(image_path, chapter="auto", config=self.config)
-        if not analyzed.ok:
-            return self._fail(analyzed.error)
+        scope_analysis = multi.data.get("single_analysis") if multi.ok else None
+        if isinstance(scope_analysis, dict):
+            analyzed = ToolResult(
+                ok=True,
+                data={
+                    "image_path": image_path,
+                    "loads": scope_analysis.get("loads", []),
+                    "chapter": scope_analysis.get("chapter_hint", ""),
+                },
+            )
+        else:
+            analyzed = self.tools.analyze_image(image_path, chapter="auto", config=self.config)
+            if not analyzed.ok:
+                return self._fail(analyzed.error)
         self.state.set_analysis(
             loads=analyzed.data.get("loads", []),
             chapter=analyzed.data.get("chapter") or "",

@@ -27,15 +27,11 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertEqual(result.data["route"], "symbolic")
         self.assertEqual(result.next_state, "READY_FOR_STRUCTURE")
 
-    def test_multi_image_tool_lists_questions_without_preparing_crops(self):
+    def test_multi_image_tool_only_confirms_multi_without_detail_work(self):
         class FakeQwen:
-            def analyze_layout(self, _image_path):
+            def analyze_image_scope(self, _image_path):
                 return {
                     "question_layout": "multi",
-                    "questions": [
-                        {"label": "1", "loads": [{"type": "集中", "raw": "P"}], "chapter_hint": "2静定结构", "chapter_confidence": 0.9},
-                        {"label": "2", "loads": [{"type": "均布", "raw": "q"}], "chapter_hint": "unknown", "chapter_confidence": 0.0},
-                    ],
                 }
 
         with patch("tiku_agent.tools._make_qwen", return_value=FakeQwen()):
@@ -43,20 +39,20 @@ class TikuAgentToolsTest(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertTrue(result.data["is_multi"])
-        self.assertEqual(result.next_state, "WAIT_QUESTION_CHOICE")
-        self.assertEqual(result.data["questions"][0]["chapter"], "2静定结构")
-        self.assertNotIn("question_image_path", result.data["questions"][1])
+        self.assertEqual(result.next_state, "READY_FOR_MULTI_DETAILS")
+        self.assertEqual(result.data["questions"], [])
 
     def test_multi_image_tool_keeps_single_image_on_single_flow(self):
         class FakeQwen:
-            def analyze_layout(self, _image_path):
-                return {"question_layout": "single", "questions": []}
+            def analyze_image_scope(self, _image_path):
+                return {"question_layout": "single", "single_analysis": {"loads": [{"type": "集中", "raw": "P"}], "chapter_hint": "4力法"}}
 
         with patch("tiku_agent.tools._make_qwen", return_value=FakeQwen()):
             result = analyze_multi_image_tool("single.jpg", config=AgentToolConfig())
 
         self.assertTrue(result.ok)
         self.assertFalse(result.data["is_multi"])
+        self.assertEqual(result.data["single_analysis"]["loads"][0]["raw"], "P")
         self.assertEqual(result.next_state, "READY_FOR_SINGLE_ANALYSIS")
 
     def test_prepare_question_units_only_attaches_isolated_crops(self):
@@ -64,7 +60,11 @@ class TikuAgentToolsTest(unittest.TestCase):
             {"label": "4", "loads": [{"type": "集中", "raw": "P"}], "chapter": "4力法"},
             {"label": "5", "loads": [{"type": "均布", "raw": "q"}], "chapter": ""},
         ]
-        with patch(
+        class FakeQwen:
+            def analyze_layout(self, _image_path):
+                return {"question_layout": "multi", "questions": questions}
+
+        with patch("tiku_agent.tools._make_qwen", return_value=FakeQwen()), patch(
             "tiku_agent.tools.prepare_multi_diagram_crops",
             return_value={"4": "runtime/multi_diagrams/q4.jpg"},
         ):

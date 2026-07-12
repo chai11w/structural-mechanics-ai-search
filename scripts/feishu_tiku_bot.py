@@ -300,11 +300,11 @@ class TikuBot:
             return self._handle_store_image(sender, session, image_path)
 
         if self.chapter_mode(sender) == CHAPTER_MODE_AUTO:
-            layout_response = self._try_start_multi_question_session(sender, image_path)
+            layout_response, single_analysis = self._try_start_multi_question_session(sender, image_path)
             if layout_response is not None:
                 return layout_response
             session = TikuSession(state="searching", image_path=image_path)
-            return self._search(sender, session, "auto")
+            return self._search(sender, session, "auto", classified=single_analysis)
         session = TikuSession(state="waiting_chapter", image_path=image_path)
         self.sessions.save(sender, session)
         return BotResponse(texts=[format_chapter_prompt(image_path)])
@@ -556,19 +556,24 @@ class TikuBot:
 
         return BotResponse(texts=["新增会话状态异常，请回复 0 取消后重新开始。"])
 
-    def _try_start_multi_question_session(self, sender: str, image_path: Path) -> BotResponse | None:
+    def _try_start_multi_question_session(self, sender: str, image_path: Path) -> tuple[BotResponse | None, dict[str, Any] | None]:
         started = time.perf_counter()
         try:
-            layout = self.coordinator.analyze_image_layout(image_path)
+            scope = self.coordinator.analyze_image_scope(image_path)
         except Exception as exc:  # noqa: BLE001 - keep the existing single-question flow available.
-            print(f"layout analysis failed, fallback to single flow: {exc}", file=sys.stderr, flush=True)
-            return None
+            print(f"image scope analysis failed, fallback to single flow: {exc}", file=sys.stderr, flush=True)
+            return None, None
         layout_seconds = time.perf_counter() - started
-        if layout.get("question_layout") != "multi":
-            return None
+        if scope.get("question_layout") != "multi":
+            return None, scope.get("single_analysis") if scope.get("question_layout") == "single" else None
+        try:
+            layout = self.coordinator.analyze_image_layout(image_path)
+        except Exception as exc:  # noqa: BLE001
+            print(f"multi-question detail analysis failed: {exc}", file=sys.stderr, flush=True)
+            return None, None
         questions = normalize_multi_questions(layout.get("questions", []))
         if len(questions) < 2:
-            return None
+            return None, None
         for question in questions:
             log_multi_chapter_decision(image_path=image_path, question=question)
         crop_started = time.perf_counter()
@@ -594,7 +599,7 @@ class TikuBot:
             diagram_crops=diagram_crops,
         )
         self.sessions.save(sender, session)
-        return BotResponse(texts=[format_multi_question_list(session)])
+        return BotResponse(texts=[format_multi_question_list(session)]), None
 
     def _handle_multi_text(self, sender: str, session: TikuSession, clean: str) -> BotResponse:
         if session.state == "waiting_multi_choice" and clean == "0":
@@ -644,13 +649,14 @@ class TikuBot:
             )
         return self._search_multi_question(sender, session, question, chapter)
 
-    def _search(self, sender: str, session: TikuSession, chapter: str) -> BotResponse:
+    def _search(self, sender: str, session: TikuSession, chapter: str, *, classified: dict[str, Any] | None = None) -> BotResponse:
         assert session.image_path is not None
         result = self.coordinator.search_image(
             session.image_path,
             chapter,
             rerank=True,
             rerank_top=self.options.rerank_top,
+            classified=classified,
         )
         log_search_chapter_decision(
             source="feishu_chapter_decision",
@@ -838,8 +844,9 @@ class MockCoordinator:
         rerank: bool = True,
         rerank_top: int = 3,
         source: str = "mock_image_search",
+        classified: dict[str, Any] | None = None,
     ) -> Any:
-        del image_path, rerank, rerank_top, source
+        del image_path, rerank, rerank_top, source, classified
         if self.auto_needs_chapter and str(chapter).strip().lower() == "auto":
             return type(
                 "MockPipelineResult",
@@ -888,6 +895,18 @@ class MockCoordinator:
     def analyze_image_layout(self, image_path: Path) -> dict[str, Any]:
         del image_path
         return {"question_layout": "single", "questions": []}
+
+    def analyze_image_scope(self, image_path: Path) -> dict[str, Any]:
+        del image_path
+        return {
+            "question_layout": "single",
+            "single_analysis": {
+                "loads": [{"type": "集中", "raw": "10"}],
+                "chapter_hint": "5位移法",
+                "chapter_confidence": 1.0,
+                "chapter_evidence": "mock",
+            },
+        }
 
     def search_loads(
         self,

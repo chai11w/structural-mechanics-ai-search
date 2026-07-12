@@ -13,6 +13,7 @@ class FakeTools:
             1: ["out/answer1.jpg"],
             2: ["out/answer2.jpg"],
         }
+        self.analyze_image_calls = 0
 
     def toolbox(self):
         return AgentToolbox(
@@ -27,6 +28,7 @@ class FakeTools:
         )
 
     def analyze_image(self, image_path, *, chapter="auto", config=None, include_layout=False):
+        self.analyze_image_calls += 1
         return ToolResult(
             ok=True,
             data={
@@ -37,7 +39,14 @@ class FakeTools:
         )
 
     def analyze_multi_image(self, image_path, *, config=None):
-        return ToolResult(ok=True, data={"is_multi": False, "questions": []})
+        return ToolResult(
+            ok=True,
+            data={
+                "is_multi": False,
+                "questions": [],
+                "single_analysis": {"loads": [{"type": "集中", "raw": "P"}], "chapter_hint": self.chapter},
+            },
+        )
 
     def prepare_question_units(self, image_path, questions, *, config=None):
         return ToolResult(ok=True, data={"questions": questions, "diagram_crops": {}})
@@ -99,6 +108,7 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.candidate_count, 2)
         self.assertIn("检索完成", response.text)
         self.assertEqual(fake.search_chapters, ["4力法"])
+        self.assertEqual(fake.analyze_image_calls, 0)
 
     def test_missing_chapter_then_user_supplies_chapter(self):
         fake = FakeTools(chapter="")
