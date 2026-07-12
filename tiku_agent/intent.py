@@ -160,6 +160,10 @@ def parse_user_intent(
     if explicit_chapter is not None:
         return explicit_chapter
 
+    implied_choice = _single_candidate_choice(clean, state=state, candidate_count=candidate_count)
+    if implied_choice is not None:
+        return implied_choice
+
     if use_llm:
         try:
             payload = (llm_client or call_qwen_intent)(
@@ -239,6 +243,21 @@ def _explicit_chapter_intent(text: str, *, state: str) -> IntentResult | None:
         },
         state=state,
         source="rule_chapter_priority",
+    )
+
+
+def _single_candidate_choice(text: str, *, state: str, candidate_count: int | None) -> IntentResult | None:
+    """Let a one-result conversation accept natural confirmations without an LLM round trip."""
+    if state != STATE_WAIT_CANDIDATE_CHOICE or candidate_count != 1:
+        return None
+    clean = re.sub(r"[，。！？!?.、\s]", "", text)
+    if clean not in {"这个", "就这个", "要这个", "要它", "就它", "发答案", "发这个答案", "这个答案"}:
+        return None
+    return validate_intent_payload(
+        {"intent": "select_candidate", "rank": 1, "confidence": 1.0, "reason": "用户确认唯一候选。"},
+        state=state,
+        candidate_count=candidate_count,
+        source="rule_single_candidate",
     )
 
 

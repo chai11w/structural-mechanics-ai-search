@@ -130,6 +130,18 @@ class TikuAgentIntentTest(unittest.TestCase):
         self.assertEqual(result.data, {"rank": 1})
         self.assertEqual(result.source, "rule_fallback")
 
+    def test_single_candidate_accepts_natural_confirmation_without_llm(self):
+        result = parse_user_intent(
+            "就这个",
+            state=STATE_WAIT_CANDIDATE_CHOICE,
+            candidate_count=1,
+            llm_client=lambda _prompt: self.fail("single-candidate confirmation should not call LLM"),
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.intent, "select_candidate")
+        self.assertEqual(result.data["rank"], 1)
+        self.assertEqual(result.source, "rule_single_candidate")
+
     def test_cancel(self):
         result = parse_user_intent(
             "取消",

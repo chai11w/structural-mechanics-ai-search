@@ -106,7 +106,7 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.phase, STATE_WAIT_CANDIDATE_CHOICE)
         self.assertEqual(agent.state.current_chapter, "4力法")
         self.assertEqual(agent.state.candidate_count, 2)
-        self.assertIn("检索完成", response.text)
+        self.assertIn("比较像", response.text)
         self.assertEqual(fake.search_chapters, ["4力法"])
         self.assertEqual(fake.analyze_image_calls, 0)
 
@@ -116,13 +116,13 @@ class TikuSearchAgentTest(unittest.TestCase):
 
         first = agent.handle_image("q.jpg")
         self.assertEqual(agent.state.phase, STATE_WAIT_CHAPTER)
-        self.assertIn("章节还不确定", first.text)
+        self.assertIn("不能确定", first.text)
 
         second = agent.handle_text("这题应该是第三章")
         self.assertEqual(agent.state.phase, STATE_WAIT_CANDIDATE_CHOICE)
         self.assertEqual(agent.state.current_chapter, "3静定结构位移")
         self.assertEqual(fake.search_chapters, ["3静定结构位移"])
-        self.assertIn("检索完成", second.text)
+        self.assertIn("比较像", second.text)
 
     def test_select_answer_and_resend_answer(self):
         fake = FakeTools(chapter="4力法")
@@ -132,10 +132,10 @@ class TikuSearchAgentTest(unittest.TestCase):
         answer = agent.handle_text("1")
         self.assertEqual(agent.state.phase, PHASE_ANSWERED)
         self.assertEqual(agent.state.last_answer_paths, ["out/answer1.jpg"])
-        self.assertIn("out/answer1.jpg", answer.text)
+        self.assertIn("答案发你了", answer.text)
 
         resend = agent.handle_text("刚才答案再发我")
-        self.assertIn("out/answer1.jpg", resend.text)
+        self.assertIn("再发你一次", resend.text)
         self.assertEqual(resend.images, ["out/answer1.jpg"])
 
     def test_correct_chapter_after_answer_reruns_search(self):
@@ -151,7 +151,7 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.revision_count, 1)
         self.assertEqual(agent.state.last_answer_paths, [])
         self.assertEqual(fake.search_chapters, ["4力法", "3静定结构位移"])
-        self.assertIn("3静定结构位移", corrected.text)
+        self.assertIn("比较像", corrected.text)
 
     def test_choose_another_candidate_after_answer(self):
         fake = FakeTools(chapter="4力法")
@@ -164,7 +164,7 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.phase, PHASE_ANSWERED)
         self.assertEqual(agent.state.selected_rank, 2)
         self.assertEqual(agent.state.last_answer_paths, ["out/answer2.jpg"])
-        self.assertIn("out/answer2.jpg", answer.text)
+        self.assertIn("答案发你了", answer.text)
 
     def test_correct_chapter_with_method_name_after_candidates(self):
         fake = FakeTools(chapter="3静定结构位移")
@@ -177,7 +177,7 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.current_chapter, "4力法")
         self.assertEqual(agent.state.revision_count, 1)
         self.assertEqual(fake.search_chapters, ["3静定结构位移", "4力法"])
-        self.assertIn("4力法", corrected.text)
+        self.assertIn("比较像", corrected.text)
 
     def test_cancel(self):
         fake = FakeTools(chapter="4力法")
@@ -187,7 +187,7 @@ class TikuSearchAgentTest(unittest.TestCase):
         response = agent.handle_text("取消")
 
         self.assertEqual(agent.state.phase, "CANCELLED")
-        self.assertIn("已取消", response.text)
+        self.assertIn("取消", response.text)
 
     def test_unsupported_text_returns_message(self):
         fake = FakeTools(chapter="4力法")
@@ -195,7 +195,7 @@ class TikuSearchAgentTest(unittest.TestCase):
 
         response = agent.handle_text("帮我入库这道题")
 
-        self.assertIn("不支持", response.text)
+        self.assertIn("没太明白", response.text)
 
     def test_multi_question_selection_runs_selected_crop_with_chapter_override(self):
         fake = FakeTools(chapter="")
@@ -229,8 +229,8 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.active_image_path, "crop5.jpg")
         self.assertEqual(agent.state.current_chapter, "2静定结构")
         self.assertEqual(fake.search_chapters, ["2静定结构"])
-        self.assertIn("识别到多道题", listed.text)
-        self.assertIn("检索完成", selected.text)
+        self.assertIn("看到了 2 道题", listed.text)
+        self.assertIn("比较像", selected.text)
 
     def test_multi_question_without_crop_skips_visual_rerank(self):
         fake = FakeTools(chapter="")

@@ -152,10 +152,10 @@ class TikuSearchAgent:
 
     def _set_or_correct_chapter(self, chapter: str, intent: IntentResult) -> AgentResponse:
         if not chapter:
-            return self._response(render.render_unsupported("章节无法识别，请说第几章或方法名。"), intent)
+            return self._response(render.render_unsupported(), intent)
         if not self.state.current_loads:
             self.state.set_chapter(chapter)
-            return self._response("已记录章节，请先发题图后再检索。", intent)
+            return self._response("好，等你把题图发来。", intent)
 
         should_correct = bool(self.state.candidates or self.state.last_answer_paths or self.state.current_chapter)
         if should_correct:
