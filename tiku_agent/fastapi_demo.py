@@ -102,10 +102,11 @@ def _agent_json(response: AgentResponse, media: dict[str, Path], session_id: str
 
 
 _PAGE = """<!doctype html>
-<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>结构力学搜题 Agent</title>
 <style>
 body{margin:0;background:#f5f6f8;color:#202124;font:16px system-ui,"Microsoft YaHei",sans-serif}main{max-width:720px;margin:auto;padding:28px 16px 110px}h1{font-size:20px;margin:0 0 22px}.bubble{background:white;border-radius:14px;padding:12px 15px;margin:10px 0;line-height:1.55;box-shadow:0 1px 3px #0000000b}.me{background:#dff3e4;margin-left:60px}.images{display:flex;gap:8px;flex-wrap:wrap}.images img{max-width:220px;max-height:240px;border-radius:10px;background:white}.bar{position:fixed;bottom:0;left:0;right:0;background:white;border-top:1px solid #e5e7eb;padding:12px}.inner{max-width:720px;margin:auto;display:flex;gap:8px}input{flex:1;padding:11px;border:1px solid #d1d5db;border-radius:9px;font:inherit}button{border:0;border-radius:9px;background:#267a44;color:white;padding:0 16px;font:inherit;cursor:pointer}label{display:inline-flex;align-items:center;padding:0 12px;border:1px solid #d1d5db;border-radius:9px;cursor:pointer}label input{display:none}</style>
+ </head><body>
 <main><h1>结构力学搜题 Agent</h1><div id="chat"><div class="bubble">发一张题图，或者直接告诉我你想做什么。</div></div></main>
 <div class="bar"><div class="inner"><label>图片<input id="file" type="file" accept="image/*"></label><input id="text" placeholder="说点什么…"><button id="send">发送</button></div></div>
 <script>
@@ -114,4 +115,4 @@ function add(message,me=false,images=[]){const box=document.createElement('div')
 async function sendText(){const value=text.value.trim();if(!value)return;add(value,true);text.value='';const r=await fetch('/api/message',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:value})});const d=await r.json();add(d.text,false,d.images||[])}
 async function sendImage(){const selected=file.files[0];if(!selected)return;add('我发了一张题图。',true);file.value='';const r=await fetch('/api/image',{method:'POST',headers:{'x-filename':selected.name,'content-type':selected.type},body:selected});const d=await r.json();add(d.text,false,d.images||[])}
 document.querySelector('#send').onclick=sendText;text.onkeydown=e=>{if(e.key==='Enter')sendText()};file.onchange=sendImage;
-</script></html>"""
+</script></body></html>"""
