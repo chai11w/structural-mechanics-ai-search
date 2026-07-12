@@ -3,3 +3,5 @@ openpyxl
 Pillow
 zhipuai
 opencv-python
+fastapi==0.139.0
+uvicorn==0.51.0
