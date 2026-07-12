@@ -20,6 +20,7 @@
 - `scripts/feishu_store_flow.py` 与 `scripts/feishu_delete_flow.py`：带计划、确认和备份的题库写操作。
 - `tiku_agent/tools.py`：隔离的分析、路由、结构分类、粗筛、复筛、候选选择和答案工具。
 - `tiku_agent/intent.py`：Qwen LLM-first intent，支持搜题、改章节、选择题目/候选、重发答案和取消。
+- 候选页、已答题页和待选章节页中，用户明确说出 2-8 章时，规则解析优先于 LLM，直接作为章节纠正处理。
 - `tiku_agent/state.py`：支持章节纠正、多题当前裁图、候选切换、答案回看和错误恢复。
 - `tiku_agent/agent.py` 与 `render.py`：单题自然语言编排，可在候选或回答后改章节重搜、改选答案。
 - 两套荷载提取 prompt 已统一：赋值符号输出无单位的 `符号=数值`；`P=40/q=20/M=20` 路由主库，纯符号仍路由字母库，并有回归测试。
@@ -58,7 +59,6 @@
 - 同粗筛分的超时候选补评顺序可能受线程完成顺序影响，尚未建立确定性次序。
 - `search.py` 和 `scripts/feishu_tiku_bot.py` 体量较大；章节和中文序号解析仍有多处实现，存在行为漂移风险。
 - 单元测试以 mock 和纯函数为主，外部模型、飞书事件和状态恢复覆盖不足。
-- 候选页中，LLM intent 可能把“这题属于第七章矩阵位移”一类明确章节表达误判为不支持的 `cross_chapter_search`；规则 fallback 能正确解析，尚未接入 LLM 结果的章节兜底。
 - `requirements.txt` 没有版本约束，换机器安装存在依赖行为变化风险。
 - 本地配置会覆盖代码默认值，调整默认参数时必须检查有效配置。
 - PowerShell 写 JSON 可能产生 UTF-8 BOM，导致 Python `json.load(..., encoding="utf-8")` 失败。
@@ -77,9 +77,9 @@
 
 ## Next Best Step
 
-1. 为 LLM intent 加入明确章节表达的规则兜底，防止候选页把合法章节纠正误判为跨章节盲搜。
-2. 为独立 Agent 接入多题识别结果、题目选择和逐题检索编排，并用 fake tools 覆盖状态转换测试。
-3. 将复筛并发/超时参数配置化，增加同分候选确定性排序和 pipeline 集成测试。
+1. 为独立 Agent 接入多题识别结果、题目选择和逐题检索编排，并用 fake tools 覆盖状态转换测试。
+2. 将复筛并发/超时参数配置化，增加同分候选确定性排序和 pipeline 集成测试。
+3. 抽取飞书与 Agent 共用的章节、中文序号和题号解析模块，先补兼容测试再逐步拆分飞书入口。
 
 ## Important Commands
 

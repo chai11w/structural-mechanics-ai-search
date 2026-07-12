@@ -32,7 +32,7 @@ class TikuAgentIntentTest(unittest.TestCase):
         self.assertIn("第二题按力法", prompt)
         self.assertIn("question_count", prompt)
 
-    def test_llm_wait_chapter_maps_to_chapter(self):
+    def test_explicit_chapter_has_priority_while_waiting_for_chapter(self):
         result = parse_user_intent(
             "按力法",
             state=STATE_WAIT_CHAPTER,
@@ -46,7 +46,7 @@ class TikuAgentIntentTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.intent, "set_chapter")
         self.assertEqual(result.data["chapter"], "4力法")
-        self.assertEqual(result.source, "llm")
+        self.assertEqual(result.source, "rule_chapter_priority")
 
     def test_chapter_alias_maps_to_chapter(self):
         self.assertEqual(parse_chapter("按力法"), "4力法")
@@ -171,7 +171,45 @@ class TikuAgentIntentTest(unittest.TestCase):
         self.assertFalse(store_result.ok)
         self.assertEqual(store_result.data["requested_action"], "store")
 
-    def test_llm_failure_uses_rule_fallback(self):
+    def test_explicit_chapter_has_priority_over_llm_candidate_page_intent(self):
+        for text in [
+            "我觉得应该按第七章矩阵位移重新搜",
+            "这道题属于第七章矩阵位移",
+            "保持第七章继续查",
+        ]:
+            with self.subTest(text=text):
+                result = parse_user_intent(
+                    text,
+                    state=STATE_WAIT_CANDIDATE_CHOICE,
+                    candidate_count=2,
+                    llm_client=lambda _prompt: {
+                        "intent": "unsupported",
+                        "requested_action": "cross_chapter_search",
+                        "confidence": 0.9,
+                        "reason": "误判为跨章节盲搜",
+                    },
+                )
+                self.assertTrue(result.ok)
+                self.assertEqual(result.intent, "set_chapter")
+                self.assertEqual(result.data["chapter"], "7矩阵位移")
+                self.assertEqual(result.source, "rule_chapter_priority")
+
+    def test_explicit_chapter_does_not_call_llm(self):
+        def should_not_run(_prompt):
+            self.fail("LLM should not run when a user explicitly states a chapter")
+
+        result = parse_user_intent(
+            "这题属于第七章矩阵位移",
+            state=STATE_WAIT_CANDIDATE_CHOICE,
+            candidate_count=2,
+            llm_client=should_not_run,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.intent, "set_chapter")
+        self.assertEqual(result.source, "rule_chapter_priority")
+
+    def test_explicit_chapter_does_not_depend_on_llm_availability(self):
         result = parse_user_intent(
             "4",
             state=STATE_WAIT_CHAPTER,
@@ -180,7 +218,7 @@ class TikuAgentIntentTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.intent, "set_chapter")
         self.assertEqual(result.data["chapter"], "4力法")
-        self.assertEqual(result.source, "rule_fallback")
+        self.assertEqual(result.source, "rule_chapter_priority")
 
 
 if __name__ == "__main__":
