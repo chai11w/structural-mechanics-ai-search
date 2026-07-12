@@ -21,6 +21,7 @@ from tiku_agent.tools import (
     AgentToolConfig,
     ToolResult,
     analyze_image_tool,
+    analyze_multi_question_tool,
     answer_candidate_tool,
     classify_structure_tool,
     coarse_search_tool,
@@ -40,6 +41,7 @@ class AgentResponse:
 @dataclass
 class AgentToolbox:
     analyze_image: Callable[..., ToolResult] = analyze_image_tool
+    analyze_multi_question: Callable[..., ToolResult] = analyze_multi_question_tool
     route_bank: Callable[..., ToolResult] = route_bank_tool
     classify_structure: Callable[..., ToolResult] = classify_structure_tool
     coarse_search: Callable[..., ToolResult] = coarse_search_tool
@@ -48,7 +50,7 @@ class AgentToolbox:
 
 
 class TikuSearchAgent:
-    """Orchestrate intent, state, and tools for the first single-question Agent."""
+    """Orchestrate isolated single- and multi-question retrieval flows."""
 
     def __init__(
         self,
@@ -105,13 +107,17 @@ class TikuSearchAgent:
         if intent.intent == "select_candidate":
             return self._answer_candidate(int(intent.data["rank"]), intent)
         if intent.intent == "select_question":
-            return self._response(render.render_unsupported("多题选择的编排还没接入；当前先支持单题检索。"), intent)
+            return self._select_question(intent)
         return self._response(render.render_unsupported(intent.error), intent)
 
     def _start_image_search(self, image_path: str) -> AgentResponse:
         if not image_path:
             return self._fail("没有收到图片路径。")
         self.state.start_search(image_path)
+        multi = self.tools.analyze_multi_question(image_path, config=self.config)
+        if multi.ok and multi.data.get("is_multi"):
+            self.state.set_questions(list(multi.data.get("questions") or []))
+            return self._response(render.render_multi_question_list(self.state), IntentResult("search_image"))
         analyzed = self.tools.analyze_image(image_path, chapter="auto", config=self.config)
         if not analyzed.ok:
             return self._fail(analyzed.error)
@@ -136,9 +142,21 @@ class TikuSearchAgent:
             self.state.correct_chapter(chapter)
         else:
             self.state.set_chapter(chapter)
-        return self._run_search(intent=intent)
+        return self._run_search(intent=intent, classified=self._selected_question())
 
-    def _run_search(self, *, intent: IntentResult | None = None) -> AgentResponse:
+    def _select_question(self, intent: IntentResult) -> AgentResponse:
+        try:
+            question = self.state.select_question(
+                int(intent.data["question_index"]),
+                chapter_override=intent.data.get("chapter_override"),
+            )
+        except ValueError as exc:
+            return self._response(render.render_unsupported(str(exc)), intent)
+        if self.state.phase == "WAIT_CHAPTER":
+            return self._response(render.render_chapter_prompt(self.state), intent)
+        return self._run_search(intent=intent, classified=question)
+
+    def _run_search(self, *, intent: IntentResult | None = None, classified: dict[str, Any] | None = None) -> AgentResponse:
         routed = self.tools.route_bank(self.state.current_loads)
         if not routed.ok:
             return self._fail(routed.error or routed.data.get("reason", "无法确定检索库"))
@@ -148,7 +166,7 @@ class TikuSearchAgent:
         structured = self.tools.classify_structure(
             self.state.active_image_path or None,
             route=route,
-            classified=None,
+            classified=classified,
             config=self.config,
         )
         if not structured.ok:
@@ -171,7 +189,7 @@ class TikuSearchAgent:
             return self._response(render.render_no_match(self.state), intent or IntentResult("search_image"))
 
         reranked = self.tools.rerank_candidates(
-            self.state.active_image_path or None,
+            self._rerank_query_image_path(),
             candidates,
             route=route,
             rerank_top=self.config.rerank_top,
@@ -186,6 +204,17 @@ class TikuSearchAgent:
             note=str(reranked.data.get("rerank_note") or ""),
         )
         return self._response(text, intent or IntentResult("search_image"), images=[str(item.get("path")) for item in visible if item.get("path")])
+
+    def _selected_question(self) -> dict[str, Any] | None:
+        index = self.state.selected_question
+        if index is None or not 1 <= index <= len(self.state.questions):
+            return None
+        return dict(self.state.questions[index - 1])
+
+    def _rerank_query_image_path(self) -> str | None:
+        if self.state.selected_question is not None:
+            return self.state.current_question_image_path or None
+        return self.state.active_image_path or None
 
     def _answer_candidate(self, rank: int, intent: IntentResult) -> AgentResponse:
         try:

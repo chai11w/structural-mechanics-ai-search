@@ -11,6 +11,18 @@ def render_chapter_prompt(state: AgentState) -> str:
     return "这题章节还不确定，请告诉我是第几章或用什么方法，例如：3静定结构位移、4力法、5位移法。" + suffix
 
 
+def render_multi_question_list(state: AgentState) -> str:
+    if not state.questions:
+        return "没有识别到可选择的题目。"
+    lines = ["识别到多道题，请告诉我要搜哪一题；可同时指定章节，例如“帮我搜第二题，章节静定结构”。"]
+    for index, question in enumerate(state.questions, 1):
+        label = question.get("label") or index
+        chapter = question.get("chapter") or "章节未知"
+        loads = _loads_summary(question.get("loads") or [])
+        lines.append(f"{index}. 第{label}题：{chapter}；荷载：{loads or '未识别'}")
+    return "\n".join(lines)
+
+
 def render_candidates(state: AgentState, *, reranked: bool = False, note: str = "") -> str:
     if not state.candidates:
         return "没有找到可用候选。"

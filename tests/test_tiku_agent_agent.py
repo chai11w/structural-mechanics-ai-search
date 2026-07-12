@@ -17,6 +17,7 @@ class FakeTools:
     def toolbox(self):
         return AgentToolbox(
             analyze_image=self.analyze_image,
+            analyze_multi_question=self.analyze_multi_question,
             route_bank=self.route_bank,
             classify_structure=self.classify_structure,
             coarse_search=self.coarse_search,
@@ -33,6 +34,9 @@ class FakeTools:
                 "loads": [{"type": "集中", "raw": "P"}],
             },
         )
+
+    def analyze_multi_question(self, image_path, *, config=None):
+        return ToolResult(ok=True, data={"is_multi": False, "questions": []})
 
     def route_bank(self, loads):
         return ToolResult(ok=True, data={"route": "main", "category": "main_numeric", "reason": "fake"})
@@ -178,6 +182,58 @@ class TikuSearchAgentTest(unittest.TestCase):
         response = agent.handle_text("帮我入库这道题")
 
         self.assertIn("不支持", response.text)
+
+    def test_multi_question_selection_runs_selected_crop_with_chapter_override(self):
+        fake = FakeTools(chapter="")
+        fake.analyze_multi_question = lambda image_path, *, config=None: ToolResult(
+            ok=True,
+            data={
+                "is_multi": True,
+                "questions": [
+                    {"label": "4", "loads": [{"type": "集中", "raw": "P"}], "chapter": "4力法", "question_image_path": "crop4.jpg"},
+                    {"label": "5", "loads": [{"type": "均布", "raw": "q"}], "chapter": "", "question_image_path": "crop5.jpg"},
+                ],
+            },
+        )
+        agent = self.make_agent(fake)
+
+        listed = agent.handle_image("multi.jpg")
+        selected = agent.handle_text("第二题-2静定结构")
+
+        self.assertEqual(agent.state.phase, STATE_WAIT_CANDIDATE_CHOICE)
+        self.assertEqual(agent.state.selected_question, 2)
+        self.assertEqual(agent.state.active_image_path, "crop5.jpg")
+        self.assertEqual(agent.state.current_chapter, "2静定结构")
+        self.assertEqual(fake.search_chapters, ["2静定结构"])
+        self.assertIn("识别到多道题", listed.text)
+        self.assertIn("检索完成", selected.text)
+
+    def test_multi_question_without_crop_skips_visual_rerank(self):
+        fake = FakeTools(chapter="")
+        rerank_inputs = []
+        original_rerank = fake.rerank_candidates
+
+        def record_rerank(query_image_path, candidates, **kwargs):
+            rerank_inputs.append(query_image_path)
+            return original_rerank(query_image_path, candidates, **kwargs)
+
+        fake.rerank_candidates = record_rerank
+        fake.analyze_multi_question = lambda image_path, *, config=None: ToolResult(
+            ok=True,
+            data={
+                "is_multi": True,
+                "questions": [
+                    {"label": "1", "loads": [{"type": "集中", "raw": "P"}], "chapter": "4力法", "question_image_path": ""},
+                    {"label": "2", "loads": [{"type": "均布", "raw": "q"}], "chapter": "4力法", "question_image_path": ""},
+                ],
+            },
+        )
+        agent = self.make_agent(fake)
+
+        agent.handle_image("multi.jpg")
+        agent.handle_text("第一题")
+
+        self.assertEqual(rerank_inputs, [None])
 
 
 if __name__ == "__main__":

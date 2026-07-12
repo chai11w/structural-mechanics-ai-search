@@ -236,8 +236,12 @@ class AgentState:
         question_image = str(question.get("question_image_path") or question.get("image_path") or "")
         if question_image:
             self.current_question_image_path = question_image
-        elif self.current_image_path:
+        elif not self.questions and self.current_image_path:
             self.current_question_image_path = self.current_image_path
+        else:
+            # A selected multi-question item without a reliable crop must not
+            # reuse the full page for visual reranking.
+            self.current_question_image_path = ""
         self.current_loads = list(question.get("loads") or self.current_loads)
         self.current_chapter = str(chapter_override or question.get("chapter") or self.current_chapter)
         self.candidates = []
