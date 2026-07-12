@@ -100,6 +100,8 @@ class TikuSearchAgent:
             return self._response(render.render_cancelled(), intent)
         if intent.intent == "resend_answer":
             return self._response(render.render_resend_answer(self.state), intent, images=self.state.last_answer_paths)
+        if intent.intent == "explain_failure":
+            return self._response(render.render_failure_explanation(self.state), intent)
         if not intent.ok:
             return self._response(render.render_unsupported(intent.error), intent)
         if intent.intent == "search_image":
@@ -129,12 +131,18 @@ class TikuSearchAgent:
             return self._response(render.render_multi_question_list(self.state), IntentResult("search_image"))
         scope_analysis = multi.data.get("single_analysis") if multi.ok else None
         if isinstance(scope_analysis, dict):
+            chapter_hint = str(scope_analysis.get("chapter_hint") or "").strip()
+            # `unknown` is a model sentinel, not a chapter name.  Keep the
+            # session in WAIT_CHAPTER so a pure diagram never searches a
+            # fictional `unknown.xlsx` file.
+            if chapter_hint.lower() == "unknown":
+                chapter_hint = ""
             analyzed = ToolResult(
                 ok=True,
                 data={
                     "image_path": image_path,
                     "loads": scope_analysis.get("loads", []),
-                    "chapter": scope_analysis.get("chapter_hint", ""),
+                    "chapter": chapter_hint,
                 },
             )
         else:

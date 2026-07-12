@@ -2,10 +2,14 @@ import unittest
 
 import search
 from multi_agent_pipeline import RuleRouter
-from scripts.classify_question_bank import SYSTEM_PROMPT as CLASSIFIER_SYSTEM_PROMPT
+from scripts.classify_question_bank import IMAGE_SCOPE_PROMPT, SYSTEM_PROMPT as CLASSIFIER_SYSTEM_PROMPT
 
 
 class AssignedSymbolicRoutingTest(unittest.TestCase):
+    def test_fast_scope_prompt_preserves_repeated_independent_loads(self):
+        self.assertIn("不要把相同标注的多个荷载合并", IMAGE_SCOPE_PROMPT)
+        self.assertIn("三个分别标为 Fp", IMAGE_SCOPE_PROMPT)
+
     def test_load_prompt_requires_unitless_assigned_symbols(self):
         self.assertIn("输出 P=40、q=20、F1=40、M=20", search.SYSTEM_PROMPT)
         self.assertIn("不要输出 P=40kN 或 q=20kN/m", search.SYSTEM_PROMPT)

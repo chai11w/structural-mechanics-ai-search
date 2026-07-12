@@ -156,6 +156,16 @@ class TikuAgentIntentTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.intent, "resend_answer")
 
+    def test_failure_explanation_is_understood_without_llm(self):
+        result = parse_user_intent(
+            "为啥失败",
+            state="ERROR",
+            llm_client=lambda _prompt: self.fail("failure explanation should not call LLM"),
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.intent, "explain_failure")
+        self.assertEqual(result.source, "rule_failure_explanation")
+
     def test_forbidden_store_delete_are_unsupported_by_llm_payload(self):
         delete_result = parse_user_intent(
             "删掉第一个",

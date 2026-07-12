@@ -124,6 +124,17 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(fake.search_chapters, ["3静定结构位移"])
         self.assertIn("比较像", second.text)
 
+    def test_unknown_scope_chapter_waits_for_user_instead_of_searching_unknown(self):
+        fake = FakeTools(chapter="unknown")
+        agent = self.make_agent(fake)
+
+        response = agent.handle_image("diagram-only.jpg")
+
+        self.assertEqual(agent.state.phase, STATE_WAIT_CHAPTER)
+        self.assertEqual(agent.state.current_chapter, "")
+        self.assertEqual(fake.search_chapters, [])
+        self.assertIn("不能确定", response.text)
+
     def test_select_answer_and_resend_answer(self):
         fake = FakeTools(chapter="4力法")
         agent = self.make_agent(fake)
@@ -196,6 +207,16 @@ class TikuSearchAgentTest(unittest.TestCase):
         response = agent.handle_text("帮我入库这道题")
 
         self.assertIn("没太明白", response.text)
+
+    def test_explains_sanitized_failure_reason_on_request(self):
+        agent = self.make_agent(FakeTools(chapter="4力法"))
+        agent.state.fail("Request timed out while reading C:\\private\\question.jpg")
+
+        response = agent.handle_text("为什么失败")
+
+        self.assertEqual(response.intent, "explain_failure")
+        self.assertIn("响应超时", response.text)
+        self.assertNotIn("private", response.text)
 
     def test_multi_question_selection_runs_selected_crop_with_chapter_override(self):
         fake = FakeTools(chapter="")

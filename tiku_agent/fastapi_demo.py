@@ -28,8 +28,8 @@ def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
     app = FastAPI(title="结构力学搜题 Agent", docs_url=None, redoc_url=None)
 
     @app.get("/", response_class=HTMLResponse)
-    def index() -> str:
-        return _PAGE
+    def index() -> HTMLResponse:
+        return HTMLResponse(_PAGE, headers={"Cache-Control": "no-store"})
 
     @app.get("/health")
     def health() -> dict[str, str]:

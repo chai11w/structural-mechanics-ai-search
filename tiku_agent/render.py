@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from tiku_agent.state import AgentState
 
 
@@ -50,6 +52,33 @@ def render_error(error: str) -> str:
     return "这次没查成功。重新发一下题图，我们再试一次。"
 
 
+def render_failure_explanation(state: AgentState) -> str:
+    if state.phase == "NO_MATCH":
+        chapter = state.current_chapter or "这一章"
+        return f"不是系统出错：我在{chapter}里没有找到足够相似的题。换个章节或发一张更清楚的图试试。"
+    if not state.last_error:
+        return "这次没有失败记录。你可以直接继续发题，或告诉我想换哪个章节。"
+    detail = _safe_failure_detail(state.last_error)
+    return f"刚才没查成功，是因为：{detail}。你重新发一下题图，我们再试一次。"
+
+
 def render_no_match(state: AgentState) -> str:
     chapter = state.current_chapter or "这一章"
     return f"我在{chapter}里没找到很像的题。换个章节试试？"
+
+
+def _safe_failure_detail(error: str) -> str:
+    raw = str(error or "").strip()
+    lower = raw.lower()
+    if "timeout" in lower or "timed out" in lower:
+        return "题图识别服务响应超时"
+    if "dashscope_api_key" in lower or "api key" in lower or "unauthorized" in lower:
+        return "题图识别服务暂时不可用"
+    if "file not found" in lower or "no such file" in lower:
+        return "题图文件没有读取成功"
+    if "invalid image" in lower or "cannot identify image" in lower:
+        return "这张图片无法正常读取"
+    cleaned = re.sub(r"(?i)(bearer\s+|api[_-]?key\s*[=:]\s*)\S+", r"\1[已隐藏]", raw)
+    cleaned = re.sub(r"[A-Za-z]:\\[^\s]+", "本地文件", cleaned)
+    cleaned = " ".join(cleaned.split())
+    return cleaned[:120] or "处理过程中断了"
