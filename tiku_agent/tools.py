@@ -26,6 +26,12 @@ from multi_agent_pipeline import (
     select_rerank_candidates,
     symbolic_root,
 )
+from scripts.feishu_tiku_bot import (
+    effective_question_chapter,
+    normalize_multi_questions,
+    normalize_question_key,
+    prepare_multi_diagram_crops,
+)
 
 
 BASE = Path(__file__).resolve().parent.parent
@@ -114,6 +120,52 @@ def analyze_image_tool(
         )
     except Exception as exc:  # noqa: BLE001 - tool boundary returns structured errors.
         return ToolResult(ok=False, error=str(exc), next_state="ERROR")
+
+
+def analyze_multi_question_tool(
+    image_path: str | Path,
+    *,
+    config: AgentToolConfig | None = None,
+) -> ToolResult:
+    """Detect a multi-question image and prepare isolated diagram crops.
+
+    A non-multi image is not an error: the Agent should continue through its
+    normal single-question analysis path.
+    """
+    config = config or AgentToolConfig()
+    path = Path(image_path)
+    try:
+        layout = _make_qwen(config).analyze_layout(path)
+        if layout.get("question_layout") != "multi":
+            return ToolResult(
+                ok=True,
+                data={"is_multi": False, "layout": layout, "questions": []},
+                next_state="READY_FOR_SINGLE_ANALYSIS",
+            )
+
+        questions = normalize_multi_questions(layout.get("questions", []))
+        if len(questions) < 2:
+            return ToolResult(
+                ok=True,
+                data={"is_multi": False, "layout": layout, "questions": []},
+                next_state="READY_FOR_SINGLE_ANALYSIS",
+            )
+
+        crops = prepare_multi_diagram_crops(path, questions, config.runtime_dir / "multi_diagrams")
+        prepared = []
+        for index, question in enumerate(questions, 1):
+            item = dict(question)
+            item["question_index"] = index
+            item["question_image_path"] = crops.get(normalize_question_key(item.get("label")), "")
+            item["chapter"] = effective_question_chapter(item) or ""
+            prepared.append(item)
+        return ToolResult(
+            ok=True,
+            data={"is_multi": True, "layout": layout, "questions": prepared, "diagram_crops": crops},
+            next_state="WAIT_QUESTION_CHOICE",
+        )
+    except Exception as exc:  # noqa: BLE001 - keep the single-question flow usable.
+        return ToolResult(ok=True, data={"is_multi": False, "questions": []}, error=str(exc), next_state="READY_FOR_SINGLE_ANALYSIS")
 
 
 def route_bank_tool(loads: list[dict[str, Any]]) -> ToolResult:

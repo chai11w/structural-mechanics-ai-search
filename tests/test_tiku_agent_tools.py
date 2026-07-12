@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from tiku_agent.tools import (
     AgentToolConfig,
+    analyze_multi_question_tool,
     classify_structure_tool,
     parse_candidate_action_tool,
     rerank_candidates_tool,
@@ -24,6 +25,44 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.data["route"], "symbolic")
         self.assertEqual(result.next_state, "READY_FOR_STRUCTURE")
+
+    def test_multi_question_tool_prepares_questions_and_isolated_crops(self):
+        class FakeQwen:
+            def analyze_layout(self, _image_path):
+                return {
+                    "question_layout": "multi",
+                    "questions": [
+                        {"label": "1", "loads": [{"type": "集中", "raw": "P"}], "chapter_hint": "2静定结构", "chapter_confidence": 0.9},
+                        {"label": "2", "loads": [{"type": "均布", "raw": "q"}], "chapter_hint": "unknown", "chapter_confidence": 0.0},
+                    ],
+                }
+
+        with (
+            patch("tiku_agent.tools._make_qwen", return_value=FakeQwen()),
+            patch(
+                "tiku_agent.tools.prepare_multi_diagram_crops",
+                return_value={"1": "runtime/multi_diagrams/q1.jpg", "2": "runtime/multi_diagrams/q2.jpg"},
+            ),
+        ):
+            result = analyze_multi_question_tool("multi.jpg", config=AgentToolConfig())
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.data["is_multi"])
+        self.assertEqual(result.next_state, "WAIT_QUESTION_CHOICE")
+        self.assertEqual(result.data["questions"][0]["chapter"], "2静定结构")
+        self.assertEqual(result.data["questions"][1]["question_image_path"], "runtime/multi_diagrams/q2.jpg")
+
+    def test_multi_question_tool_keeps_single_image_on_single_flow(self):
+        class FakeQwen:
+            def analyze_layout(self, _image_path):
+                return {"question_layout": "single", "questions": []}
+
+        with patch("tiku_agent.tools._make_qwen", return_value=FakeQwen()):
+            result = analyze_multi_question_tool("single.jpg", config=AgentToolConfig())
+
+        self.assertTrue(result.ok)
+        self.assertFalse(result.data["is_multi"])
+        self.assertEqual(result.next_state, "READY_FOR_SINGLE_ANALYSIS")
 
     def test_structure_tool_skips_non_symbolic_routes(self):
         result = classify_structure_tool(None, route="main")
