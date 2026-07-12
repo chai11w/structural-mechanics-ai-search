@@ -24,6 +24,7 @@
 - `tiku_agent/state.py`：支持章节纠正、多题当前裁图、候选切换、答案回看和错误恢复。
 - `tiku_agent/agent.py` 与 `render.py`：单题/多题自然语言编排；多题可选题号、用对应裁图检索并复用候选和答案流程。
 - `tiku_agent/render.py`：新 Agent 的所有用户可见检索话术统一为简洁自然对话，隐藏路径、分数和内部状态；唯一候选支持“就这个 / 要这个 / 发答案”直接取答案。
+- `tiku_agent/session_store.py`：已定义隔离会话持久化契约（load/save/clear/purge_expired），默认最后活跃后 2 小时过期；SQLite 后端尚未实现。
 - `tiku_agent/tools.py`：首轮 scope 只判单题/多题；单题同时返回荷载/章节并直接检索，多题才调用详细题号/bbox/逐题荷载识别和裁图准备。
 - 两套荷载提取 prompt 已统一：赋值符号输出无单位的 `符号=数值`；`P=40/q=20/M=20` 路由主库，纯符号仍路由字母库，并有回归测试。
 - 共享复筛不再因候选少于 `rerank_top` 而跳过；候选达到路由粗筛阈值就进入复筛。
@@ -37,7 +38,7 @@
 
 ## Not Implemented
 
-- 尚未引入 LangGraph 图、checkpoint 或持久会话恢复。
+- 尚未引入 LangGraph 图、SQLite 后端或持久会话恢复；会话存储接口已定义。
 - 尚未创建或连接新的飞书机器人；现有飞书机器人不是 Agent 入口。
 - 复筛并发数、首轮超时和补评上限尚未配置化。
 - 缺少 pipeline 级超时回退、真实飞书事件和持久状态恢复集成测试。
