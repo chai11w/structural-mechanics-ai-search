@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
+import json
+from pathlib import Path
+from threading import Lock
 from typing import Literal
 
 
 TASK_LOG_SCHEMA_VERSION = 1
+DEFAULT_TASK_LOG_PATH = Path(__file__).resolve().parent.parent / ".tmp_tiku_agent" / "task_logs.jsonl"
 TaskKind = Literal["image", "text"]
 TaskOutcome = Literal["waiting", "candidates", "answered", "no_match", "cancelled", "error"]
 
@@ -42,3 +46,18 @@ class TaskLogger(ABC):
     @abstractmethod
     def write(self, entry: TaskLogEntry) -> None:
         """Persist one structured task record."""
+
+
+class JsonlTaskLogger(TaskLogger):
+    """Append task records locally as UTF-8 JSON Lines without retaining raw input."""
+
+    def __init__(self, path: str | Path = DEFAULT_TASK_LOG_PATH) -> None:
+        self.path = Path(path)
+        self._lock = Lock()
+
+    def write(self, entry: TaskLogEntry) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(entry.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        with self._lock:
+            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(payload + "\n")
