@@ -50,18 +50,23 @@ def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
         return result
 
     @app.get("/", response_class=HTMLResponse)
-    def index() -> HTMLResponse:
-        return HTMLResponse(_PAGE, headers={"Cache-Control": "no-store"})
+    def index(request: Request) -> HTMLResponse:
+        session_id = _session_id(request)
+        result = HTMLResponse(_PAGE, headers={"Cache-Control": "no-store"})
+        _set_session_cookie(result, session_id, secure_cookie=_is_secure_request(request))
+        return result
 
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
     @app.get("/api/session")
-    def session(request: Request) -> dict[str, str]:
-        session_id = str(request.cookies.get(SESSION_COOKIE) or "").strip()
-        path = runtime.current_image_path(session_id) if session_id else None
-        return {"uploaded_image": f"/api/upload/{path.name}" if path is not None else ""}
+    def session(request: Request) -> JSONResponse:
+        session_id = _session_id(request)
+        path = runtime.current_image_path(session_id)
+        result = JSONResponse({"uploaded_image": f"/api/upload/{path.name}" if path is not None else ""})
+        _set_session_cookie(result, session_id, secure_cookie=_is_secure_request(request))
+        return result
 
     @app.post("/api/message")
     async def message(request: Request) -> Response:
@@ -140,6 +145,17 @@ def _is_secure_request(request: Request) -> bool:
     return forwarded == "https" or (not forwarded and request.url.scheme == "https")
 
 
+def _set_session_cookie(response: Response, session_id: str, *, secure_cookie: bool) -> None:
+    response.set_cookie(
+        SESSION_COOKIE,
+        session_id,
+        max_age=2 * 60 * 60,
+        httponly=True,
+        secure=secure_cookie,
+        samesite="lax",
+    )
+
+
 def _write_incoming_image(content: bytes, filename: str) -> Path:
     INCOMING_DIR.mkdir(parents=True, exist_ok=True)
     suffix = Path(filename).suffix.lower() or ".jpg"
@@ -174,12 +190,5 @@ def _agent_json(
     result = JSONResponse(
         {"text": response.text, "images": image_urls, "uploaded_image": uploaded_image_url, "intent": response.intent}
     )
-    result.set_cookie(
-        SESSION_COOKIE,
-        session_id,
-        max_age=2 * 60 * 60,
-        httponly=True,
-        secure=secure_cookie,
-        samesite="lax",
-    )
+    _set_session_cookie(result, session_id, secure_cookie=secure_cookie)
     return result

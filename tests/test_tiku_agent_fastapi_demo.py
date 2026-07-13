@@ -31,8 +31,8 @@ class FakeRuntime:
     def clear(self, session_id: str) -> None:
         self.calls.append(("clear", session_id))
 
-    def current_image_path(self, _session_id: str) -> Path:
-        return self.image_path
+    def current_image_path(self, session_id: str) -> Path | None:
+        return self.image_path if session_id == self.upload_session else None
 
     def resolve_upload(self, session_id: str, filename: str) -> Path | None:
         if session_id != self.upload_session:
@@ -118,6 +118,41 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("Secure", response.headers["set-cookie"])
         self.assertEqual(response.headers["strict-transport-security"], "max-age=31536000")
+
+    def test_first_page_assigns_session_before_upload_and_reopen_restores_image(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"demo_reopen_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        runtime = FakeRuntime(image_path)
+        app = create_app(runtime=runtime)
+        first_visit = TestClient(app)
+
+        page = first_visit.get("/")
+        self.assertEqual(page.status_code, 200)
+        session_id = first_visit.cookies.get(SESSION_COOKIE)
+        self.assertTrue(session_id)
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (4, 4), "white").save(buffer, format="JPEG")
+        uploaded = first_visit.post(
+            "/api/image",
+            content=buffer.getvalue(),
+            headers={"x-filename": "question.jpg"},
+        )
+        self.assertEqual(uploaded.status_code, 200)
+        self.assertEqual(runtime.upload_session, session_id)
+        uploaded_url = uploaded.json()["uploaded_image"]
+
+        reopened = TestClient(app)
+        reopened.cookies.set(SESSION_COOKIE, session_id)
+        self.assertEqual(reopened.get("/api/session").json()["uploaded_image"], uploaded_url)
+        self.assertEqual(reopened.get(uploaded_url).status_code, 200)
+
+        no_page_visit = TestClient(app)
+        session_response = no_page_visit.get("/api/session")
+        self.assertEqual(session_response.status_code, 200)
+        self.assertIn(SESSION_COOKIE, session_response.cookies)
 
     def test_health_text_cookie_image_upload_and_session_bound_media(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
