@@ -70,6 +70,11 @@ class FastApiDemoTest(unittest.TestCase):
 
         page = client.get("/")
         self.assertEqual(page.headers["cache-control"], "no-store")
+        self.assertEqual(page.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(page.headers["x-frame-options"], "DENY")
+        self.assertEqual(page.headers["referrer-policy"], "no-referrer")
+        self.assertIn("frame-ancestors 'none'", page.headers["content-security-policy"])
+        self.assertEqual(client.get("/openapi.json").status_code, 404)
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
@@ -77,6 +82,7 @@ class FastApiDemoTest(unittest.TestCase):
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
             'id="drop-overlay"', 'type="submit" aria-label="发送消息" disabled', '松开即可上传题图',
+            '题图会用于云端模型识别', '请勿上传个人敏感信息',
         ):
             self.assertIn(expected, page.text)
         for expected in (
@@ -92,6 +98,26 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertIn("overflow-y: auto", _STYLE)
         self.assertIn("prefers-reduced-motion: reduce", _STYLE)
         self.assertNotIn("window.scrollTo", _SCRIPT)
+
+    def test_public_http_redirects_and_https_cookie_is_secure(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"demo_secure_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        client = TestClient(create_app(runtime=FakeRuntime(image_path)))
+
+        redirect = client.get("/", headers={"x-forwarded-proto": "http"}, follow_redirects=False)
+        self.assertEqual(redirect.status_code, 308)
+        self.assertTrue(redirect.headers["location"].startswith("https://"))
+
+        response = client.post(
+            "/api/message",
+            json={"text": "就这个"},
+            headers={"x-forwarded-proto": "https"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Secure", response.headers["set-cookie"])
+        self.assertEqual(response.headers["strict-transport-security"], "max-age=31536000")
 
     def test_health_text_cookie_image_upload_and_session_bound_media(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"

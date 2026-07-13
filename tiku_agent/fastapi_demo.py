@@ -7,7 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
@@ -29,8 +29,25 @@ _SCRIPT = (WEB_DIR / "demo.js").read_text(encoding="utf-8")
 def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
     """Create a local-only demo app without any existing Feishu configuration."""
     runtime = runtime or AgentSessionRuntime(SQLiteSessionStore(DEFAULT_RUNTIME_DIR / "session.db"))
-    app = FastAPI(title="结构力学搜题 Agent", docs_url=None, redoc_url=None)
+    app = FastAPI(title="结构力学搜题 Agent", docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
+
+    @app.middleware("http")
+    async def secure_public_requests(request: Request, call_next):
+        if _forwarded_proto(request) == "http":
+            return RedirectResponse(str(request.url.replace(scheme="https")), status_code=308)
+        result = await call_next(request)
+        result.headers["Content-Security-Policy"] = (
+            "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; "
+            "script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'"
+        )
+        result.headers["X-Content-Type-Options"] = "nosniff"
+        result.headers["X-Frame-Options"] = "DENY"
+        result.headers["Referrer-Policy"] = "no-referrer"
+        result.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        if _is_secure_request(request):
+            result.headers["Strict-Transport-Security"] = "max-age=31536000"
+        return result
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
@@ -59,7 +76,7 @@ def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="text is required")
         session_id = _session_id(request)
         response = runtime.handle_text(session_id, text)
-        return _agent_json(response, runtime, session_id)
+        return _agent_json(response, runtime, session_id, secure_cookie=_is_secure_request(request))
 
     @app.post("/api/reset")
     def reset(request: Request) -> JSONResponse:
@@ -67,7 +84,7 @@ def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
         if session_id:
             runtime.clear(session_id)
         result = JSONResponse({"ok": True})
-        result.delete_cookie(SESSION_COOKIE)
+        result.delete_cookie(SESSION_COOKIE, secure=_is_secure_request(request), httponly=True, samesite="lax")
         return result
 
     @app.post("/api/image")
@@ -82,7 +99,13 @@ def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
             uploaded_image = runtime.current_image_path(session_id)
         finally:
             incoming.unlink(missing_ok=True)
-        return _agent_json(response, runtime, session_id, uploaded_image=uploaded_image)
+        return _agent_json(
+            response,
+            runtime,
+            session_id,
+            uploaded_image=uploaded_image,
+            secure_cookie=_is_secure_request(request),
+        )
 
     @app.get("/api/upload/{filename}")
     def get_upload(filename: str, request: Request) -> FileResponse:
@@ -108,6 +131,15 @@ def _session_id(request: Request) -> str:
     return value or secrets.token_urlsafe(24)
 
 
+def _forwarded_proto(request: Request) -> str:
+    return str(request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
+
+
+def _is_secure_request(request: Request) -> bool:
+    forwarded = _forwarded_proto(request)
+    return forwarded == "https" or (not forwarded and request.url.scheme == "https")
+
+
 def _write_incoming_image(content: bytes, filename: str) -> Path:
     INCOMING_DIR.mkdir(parents=True, exist_ok=True)
     suffix = Path(filename).suffix.lower() or ".jpg"
@@ -128,6 +160,7 @@ def _agent_json(
     session_id: str,
     *,
     uploaded_image: Path | None = None,
+    secure_cookie: bool = False,
 ) -> JSONResponse:
     image_urls = []
     for image in response.images:
@@ -141,5 +174,12 @@ def _agent_json(
     result = JSONResponse(
         {"text": response.text, "images": image_urls, "uploaded_image": uploaded_image_url, "intent": response.intent}
     )
-    result.set_cookie(SESSION_COOKIE, session_id, max_age=2 * 60 * 60, httponly=True, samesite="lax")
+    result.set_cookie(
+        SESSION_COOKIE,
+        session_id,
+        max_age=2 * 60 * 60,
+        httponly=True,
+        secure=secure_cookie,
+        samesite="lax",
+    )
     return result
