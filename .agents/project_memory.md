@@ -2,101 +2,91 @@
 
 ## Current State
 
-- 项目位于 `F:\cc\7-题库检索`，用于维护结构力学题库并按图片或荷载检索相似题、返回答案。
-- CLI、现有飞书检索/入库/删除、章节 2-8、主库/字母库分流和字母库结构类型筛选处于可用维护阶段。
-- 独立 `tiku_agent/` 已完成工具层、LLM intent、对话状态，以及单题/多题编排 MVP；LangGraph checkpoint 和新飞书机器人尚未接入。
-- Agent 使用 `.tmp_tiku_agent`，现有飞书使用 `.tmp_feishu_tiku`；两套运行状态必须持续隔离。
-- 视觉复筛采用 GLM shape-only 轮廓评分，与粗筛荷载分各占 50%；CLI、飞书 pipeline 和 Agent 工具共享并发、超时补评和整批回退策略。
-- 验证入口是 `python -B scripts/smoke_test.py`；完整单元测试使用 `python -B -m unittest discover -s tests -p "test_*.py"`。
-- 本地配置可能包含路径或密钥，只查看 `config.example.json` 的结构，不读取或提交完整本地配置。
-- 当前分支为 `codex/llm-rerank-support-filter`；`data/feishu_chapter_failure_log.jsonl` 是运行日志，不混入普通提交。
+- 项目位于 `F:\cc\7-题库检索`，用于维护结构力学题库并按题图或荷载检索相似题、返回答案。
+- CLI、现有飞书检索/入库/删除、章节 2-8、主库/字母库分流和字母库结构类型筛选可用。
+- 独立 `tiku_agent/` 已完成工具层、LLM intent、对话状态和单题/多题 MVP；LangGraph checkpoint 与新飞书机器人尚未接入。
+- Agent 使用 `.tmp_tiku_agent`，现有飞书使用 `.tmp_feishu_tiku`；两套入口和运行状态必须持续隔离。
+- FastAPI Demo 监听 `127.0.0.1:8790`，通过独立 Cloudflare Tunnel 和稳定公网域名开放；电脑、Demo 和 tunnel 在线时公网可用。
+- Demo 当前代码内容已恢复到首次访问即建立会话、刷新可恢复题图的稳定版本；后来增加的微信裁剪/HEIC 兼容已整体撤销。
+- 当前分支为 `codex/llm-rerank-support-filter`；`data/feishu_chapter_failure_log.jsonl` 有用户运行日志改动，禁止混入普通提交。
 
 ## Implemented
 
 - `search.py`：粗筛、并发视觉复筛、答案定位和基础 CLI；默认 `top_k=3`，本地配置可覆盖。
-- `multi_agent_pipeline.py`：图片识别、章节判断、主库/字母库路由、结构类型筛选和复筛协调。
-- `scripts/search_by_loads.py`：`loads-search`、`image-search`、`answer` 的轻量 CLI 包装。
+- `multi_agent_pipeline.py`：题图识别、章节判断、主库/字母库路由、结构类型筛选和复筛协调。
 - `scripts/feishu_tiku_bot.py`：现有飞书单题/多题检索、章节选择、答案返回、入库和候选删除。
-- `scripts/feishu_store_flow.py` 与 `scripts/feishu_delete_flow.py`：带计划、确认和备份的题库写操作。
-- `tiku_agent/tools.py`：隔离的分析、路由、结构分类、粗筛、复筛、候选选择和答案工具。
-- `tiku_agent/intent.py`：采用“少量规则前置 + Qwen intent + 状态校验 + 规则降级”；支持搜题、改章节、选择题目/候选、重发答案和取消，但模型目前只接收阶段、用户原话和题目/候选数量。
-- 候选页、已答题页和待选章节页中，用户明确说出 2-8 章时，规则解析优先于 LLM，直接作为章节纠正处理。
-- `tiku_agent/state.py`：支持章节纠正、多题当前裁图、候选切换、答案回看和错误恢复。
-- `tiku_agent/agent.py` 与 `render.py`：单题/多题自然语言编排；多题可选题号、用对应裁图检索并复用候选和答案流程。
-- 多题在任一小题答完后仍保留原题列表；“再帮我查第二个 / 查第二题”会切换到对应小题继续检索，单独的候选编号表达仍按候选处理。
-- `tiku_agent/render.py`：新 Agent 的所有用户可见检索话术统一为简洁自然对话，隐藏路径、分数和内部状态；唯一候选支持“就这个 / 要这个 / 发答案”直接取答案。
-- 隔离 SQLite 会话存储、恢复和 session 临时文件管理已实现；最后活跃 2 小时过期，取消会清除状态与临时文件，真实验证过重启后继续取答案。
-- 隐私受限任务日志只记录耗时、阶段、结果、候选数、章节、路由和错误类别，不保存原话、路径或模型原文。
-- 独立 FastAPI demo 监听 `127.0.0.1:8790`；页面已重构为无常驻假历史侧栏的单会话聊天画布，桌面/移动端统一通过菜单打开临时会话抽屉。上传、拖放、候选卡选择、答案图和大图预览归属于对应消息；顶部栏与组合输入区固定，仅消息区滚动。具备上传前类型/15MB 校验、可访问状态与错误播报、新对话取消进行中请求、中文安全错误提示。上传原图、候选图和答案图都复制到会话目录并使用稳定、会话绑定的 URL，刷新或 Demo 重启后两小时内仍可恢复；原始网络异常不会直接显示 `Failed to fetch`。
-- `tiku_agent/tools.py`：首轮 scope 只判单题/多题；单题同时返回荷载/章节并直接检索，多题才调用详细题号/bbox/逐题荷载识别和裁图准备。章节识别先提取独立的 `visible_problem_text`：无实际题干直接降级为 `unknown`，有题干才恢复按题干与题型判断章节，不依赖模型是否加引号；旧缓存缺少该字段时自动重识别。
-- 两套荷载提取 prompt 已统一：赋值符号输出无单位的 `符号=数值`；scope 对题干 `Fp=28kN` 与图中 `Fp/Fp/2` 会回填为 `Fp=28`，确保走主库；纯符号仍路由字母库，并有回归测试和真实原图验证。
-- 共享复筛不再因候选少于 `rerank_top` 而跳过；候选达到路由粗筛阈值就进入复筛。
-- 并发复筛最多 10 个候选；首轮单候选 8 秒，超时项最多补评 3 个、每项 10 秒，仍不完整则整批回退粗筛排序。
-- 视觉复筛只看主杆件骨架、整体轮廓、主要杆件数量和连接位置，忽略荷载、尺寸、文字、题号和支座细节。
-- 用户可见分数为 `0.5 * 粗筛荷载分 + 0.5 * 视觉轮廓分`，复筛输出遵守“90 分及以上全显，否则只显最高分”规则。
-- 复筛展示阈值只定义在 `search.py`：90 分及以上全部显示；没有 90 分候选时只显示最终分最高的一张；飞书、Agent 与 CLI 共享该默认策略。
+- `scripts/feishu_store_flow.py` 与 `scripts/feishu_delete_flow.py`：题库写操作采用计划、确认和备份。
+- `tiku_agent/tools.py`、`state.py`、`agent.py`、`render.py`：隔离工具、状态和自然语言编排；支持章节纠正、多题选题、候选切换和答案回看。
+- Intent 采用少量确定性规则、Qwen 动作判断、状态校验和规则降级；明确章节优先于模型结果。
+- SQLite 会话与 session 文件持久化已实现；最后活跃 2 小时过期，取消清理状态与临时文件。
+- 页面首次打开即创建会话 Cookie；首次上传后立即退出再进入、刷新或 Demo 重启时，两小时内可恢复会话绑定题图 URL。
+- Demo 已具备单会话聊天画布、移动端菜单、拖放上传、候选选择、大图预览、固定顶栏/输入区、中文安全错误和请求取消。
+- 公网入口已关闭 OpenAPI，启用 HTTPS 重定向、安全 Cookie、CSP 与基础安全响应头，并展示云端识别和敏感信息提示。
+- 章节识别先提取 `visible_problem_text`：没有实际题干则 `unknown`；有题干才结合题干和题型判断章节。
+- 赋值符号荷载统一为无单位 `符号=数值`，进入主库；纯符号进入字母库。
+- 视觉复筛使用 GLM shape-only；只比较主杆件骨架与轮廓，不看荷载、文字、尺寸和支座细节。
+- 最终分为粗筛荷载分与视觉轮廓分各 50%；90 分以上全显，否则只显示最高分，CLI、飞书与 Agent 共用策略。
+- 并发复筛最多 10 个候选；首轮单候选 8 秒，最多补评 3 个、每项 10 秒；批次不完整则整批回退粗筛排序。
 
 ## In Progress
 
-- Agent 处于多题 MVP 后的迭代阶段；下一轮专门优化 intent：让模型接收题目列表、当前题、已查/已答状态、候选列表和上次动作，负责自然语言与指代推理，代码继续负责动作校验与工具执行。
+- 当前没有未完成代码改动；下一阶段原计划是增强 intent 的隐私受限上下文和多轮指代推理。
 
 ## Not Implemented
 
-- 尚未引入 LangGraph 图、临时公网链接、新飞书机器人或日志查询/保留策略；独立 FastAPI 本地入口、会话恢复、session 临时文件清理和隐私受限任务日志均已完成真实验证。
-- 尚未创建或连接新的飞书机器人；现有飞书机器人不是 Agent 入口。
+- 尚未引入 LangGraph 图或 checkpoint，也未创建、连接新的飞书机器人。
 - 复筛并发数、首轮超时和补评上限尚未配置化。
-- 缺少 pipeline 级超时回退、真实飞书事件和持久状态恢复集成测试。
+- 缺少 pipeline 级超时回退、真实飞书事件和持久状态集成测试。
+- 微信内置浏览器裁剪后的临时图片兼容尚未实现；现有前端仍同时严格检查 MIME 与扩展名，空 MIME、`application/octet-stream`、HEIC/HEIF 可能被拒绝。
+- 公网访问次数限制、身份认证和滥用防护尚未启用。
 
 ## Architecture Rules
 
-- 新 Agent 必须使用独立入口、配置、机器人凭据、事件 URL、端口、隧道、session、日志、checkpoint、临时图片和测试输出。
-- 不停止、重启或改造正在使用的 `scripts/feishu_tiku_bot.py` 服务来测试 Agent；是否重启由用户另行决定。
-- 早期 Agent 可以只读使用 live 题库；入库、删除和修复必须走 `plan -> confirm -> execute` 并备份。
-- 章节必须由用户指定、确认，或由 `chapter=auto` 根据题干/题型文字证据确定；纯结构图不能跨章节猜测。
-- 荷载类型只使用 `集中`、`均布`、`弯矩`；`raw` 保留原始标注并做单位归一化。
-- 主库保存数值荷载和已赋值符号题，字母库保存未赋值字母题；字母库图片检索才使用结构类型筛选。
-- 复筛只处理粗筛候选，不反向改变候选池；未完成批次不能混合视觉分形成最终排序。
-- 默认视觉复筛继续使用 GLM shape-only；10 组对比中 GLM 为 9/10、Qwen 为 7/10，Qwen 对关键骨架不同的异形题压分不足。除非有新评测证据，不切换默认模型。
-- `_last_search.json` 按最终显示结果重写，保证答案序号和用户所见排名一致。
-- 修改检索、储存、索引或 Agent 共享逻辑时，同步检查 CLI、飞书、Agent 和项目 Skill 文档。
+- 新 Agent 必须使用独立入口、配置、机器人凭据、端口、隧道、session、日志、checkpoint 和临时文件。
+- 不停止、重启或改造现有 `scripts/feishu_tiku_bot.py` 来测试 Agent；Demo 仅使用独立 8790 入口。
+- 早期 Agent 可以只读 live 题库；入库、删除和修复必须走 `plan -> confirm -> execute` 并备份。
+- 章节只能由用户指定/确认，或由题干文字证据自动确定；纯结构图不能跨章节猜测。
+- 荷载类型只用 `集中`、`均布`、`弯矩`；`raw` 保留原始标注并做单位归一化。
+- 主库保存数值荷载和已赋值符号题，字母库保存未赋值字母题；只有字母库图片检索使用结构类型筛选。
+- 复筛只处理粗筛候选，不改变候选池；未完成批次不能混合视觉分排序。
+- 修改共享检索、储存、索引或 Agent 逻辑时，同步检查 CLI、飞书、Agent 和项目 Skill 文档。
 
 ## Known Risks
 
-- 当前 intent 虽名为 LLM-first，但明确章节、失败询问、唯一候选确认和多题追问会被规则前置拦截；其余模型调用只有阶段与数量，没有题号映射、当前选择和历史动作，因此“另一个/刚才那个/剩下那道”等指代仍容易误判。
-- 同粗筛分的超时候选补评顺序可能受线程完成顺序影响，尚未建立确定性次序。
-- `search.py` 和 `scripts/feishu_tiku_bot.py` 体量较大；章节和中文序号解析仍有多处实现，存在行为漂移风险。
-- 单元测试以 mock 和纯函数为主，外部模型、飞书事件和状态恢复覆盖不足。
-- 荷载线水平/竖直方向实验未接入：GLM 在 23 张人工明确样本中总体约 57%，均布荷载长基线约 33%，不足以安全压低复筛分数。
-- 自动图片入口首轮会判定单题/多题；真实第七章单题到候选实测 8.42 秒（此前自动路径约 12.4–14.1 秒）。多题才继续详细定位；图片附带“按单题搜”等显式分流入口尚未接入。
-- `requirements.txt` 没有版本约束，换机器安装存在依赖行为变化风险。
-- 本地配置会覆盖代码默认值，调整默认参数时必须检查有效配置。
-- PowerShell 写 JSON 可能产生 UTF-8 BOM，导致 Python `json.load(..., encoding="utf-8")` 失败。
-- Windows 环境运行普通 Python 导入可能生成并锁定 `__pycache__`；项目验证优先使用 `python -B`，避免留下无法清理的 pyc 文件。
-- 现有飞书运行进程可能尚未加载磁盘上的最新复筛代码，这是预期运行边界。
+- 微信/荣耀裁剪文件的实际 `File.name`、`File.type` 和原始字节尚未采样确认；不要仅凭错误提示假定一定是 HEIC。
+- Intent 获得的会话上下文有限，“另一个/刚才那个/剩下那道”等指代仍容易误判。
+- 同粗筛分的超时候选补评顺序可能受线程完成顺序影响，尚无确定性次序。
+- `search.py` 和现有飞书脚本体量较大，章节及中文序号解析存在行为漂移风险。
+- 单元测试以 mock/纯函数为主，外部模型、飞书事件与持久状态覆盖不足。
+- 公网 Demo 依赖本机和 Cloudflare Tunnel 持续在线；目前没有访问配额，可能产生模型费用。
+- `requirements.txt` 没有完整版本约束，换机器安装可能出现依赖行为变化。
+- 本地配置会覆盖代码默认值；调整默认参数时必须检查有效配置。
+- Windows 验证优先使用 `python -B`，避免生成并锁定 `__pycache__`。
 
 ## Do Not Do
 
 - 不提交、展示或写入 API key、token、密码和完整本地配置。
 - 不回退用户已有改动，不把全局记忆写入项目文件。
-- 不复用或覆盖现有飞书机器人的运行状态来开发 Agent。
-- 不直接修改 live 题库数据；写操作必须确认并备份。
-- 不让 LLM 直接用多题 bbox 做复筛；继续使用 OpenCV 图块流程并仅在不确定时调用模型。
+- 不复用现有飞书机器人的运行状态开发 Agent，也不随意重启现有飞书服务。
+- 不直接修改 live 题库；写操作必须确认并备份。
+- 不让 LLM 直接用多题 bbox 复筛；继续使用 OpenCV 图块流程。
 - 不让复筛展示规则改变粗筛候选池。
-- 不把 `data/feishu_chapter_failure_log.jsonl` 等运行日志混入普通代码提交。
+- 不提交 `data/feishu_chapter_failure_log.jsonl` 等运行日志。
+- 未拿到微信裁剪后的真实元数据或原始文件前，不重新套用已撤销的全格式规范化方案。
 
 ## Next Best Step
 
-1. 为 intent 构建隐私受限的会话上下文摘要，新增受约束动作推理与状态校验；保留纯数字、明确章节、取消等无歧义快速通道，不改检索、复筛和工具实现。
-2. 先用几十组单轮/多轮自然表达做新旧 intent 对照测试，重点覆盖题目与候选的指代歧义，再决定是否切换主判断器。
-3. 完成后继续真实多题图端到端回归，并补图片附带文字的显式单题分流。
+1. 若继续解决微信裁剪问题，先临时采集裁剪文件的 `name/type/size`，并取得一份裁剪后的原始文件；确认根因后再设计最小兼容修复。
+2. 若回到 Agent 主线，为 intent 增加隐私受限会话摘要与受约束动作推理，并用多轮指代样本做新旧对照测试。
+3. 面试演示前从电脑浏览器和微信各跑一遍上传、刷新恢复、候选选择和答案返回，不再临时扩大改动范围。
 
 ## Important Commands
 
 ```powershell
+python -B -m unittest discover -s tests -p "test_*.py"
 python -B scripts/smoke_test.py
-python -B -m unittest tests.test_tiku_agent_tools tests.test_tiku_agent_intent tests.test_tiku_agent_state tests.test_tiku_agent_agent
 python -B scripts/search_by_loads.py --help
 python -B search.py --help
-python -B scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter auto
-python -B scripts/feishu_tiku_bot.py dry-run-flow --image "D:\path\to\question.jpg" --chapter 5 --choice 1
+python -B -m uvicorn tiku_agent.fastapi_demo:create_app --factory --host 127.0.0.1 --port 8790
+Invoke-RestMethod http://127.0.0.1:8790/health
 ```
