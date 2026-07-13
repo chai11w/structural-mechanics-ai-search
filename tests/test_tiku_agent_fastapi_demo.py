@@ -84,6 +84,8 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertIn("let chatHistory=[]", page.text)
         self.assertNotIn("let history=[]", page.text)
         self.assertIn("restoreHistory()", page.text)
+        self.assertIn("repairUploadedImageHistory()", page.text)
+        self.assertIn("function renderHistory", page.text)
         self.assertIn("clearHistory()", page.text)
         self.assertIn("url.startsWith('/api/media/')||url.startsWith('/api/upload/')", page.text)
         self.assertIn("图片已失效，请重新上传", page.text)
@@ -141,6 +143,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertTrue(runtime.calls[-1][2])
         uploaded_image_url = image_response.json()["uploaded_image"]
         self.assertTrue(uploaded_image_url.startswith("/api/upload/"))
+        self.assertEqual(client.get("/api/session").json()["uploaded_image"], uploaded_image_url)
         self.assertEqual(client.get(uploaded_image_url).status_code, 200)
         other_upload_client = TestClient(app)
         other_upload_client.cookies.set(SESSION_COOKIE, "different-session")
