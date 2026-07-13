@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import secrets
+from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from PIL import Image
+from PIL import Image, ImageOps
+
+try:
+    from pillow_heif import register_heif_opener
+except ImportError:  # Keep the demo startable before optional mobile-format support is installed.
+    register_heif_opener = None
+
+if register_heif_opener is not None:
+    register_heif_opener(thumbnails=False)
 
 from tiku_agent.agent import AgentResponse
 from tiku_agent.session_runtime import AgentSessionRuntime
@@ -157,13 +166,22 @@ def _set_session_cookie(response: Response, session_id: str, *, secure_cookie: b
 
 
 def _write_incoming_image(content: bytes, filename: str) -> Path:
+    """Decode external bytes and normalize supported mobile images to a safe JPEG."""
     INCOMING_DIR.mkdir(parents=True, exist_ok=True)
-    suffix = Path(filename).suffix.lower() or ".jpg"
-    output = INCOMING_DIR / f"{uuid4().hex}{suffix}"
-    output.write_bytes(content)
+    output = INCOMING_DIR / f"{uuid4().hex}.jpg"
     try:
-        with Image.open(output) as image:
-            image.verify()
+        with Image.open(BytesIO(content)) as source:
+            source.seek(0)
+            image = ImageOps.exif_transpose(source)
+            image.load()
+            if image.mode in {"RGBA", "LA"} or (image.mode == "P" and "transparency" in image.info):
+                rgba = image.convert("RGBA")
+                background = Image.new("RGBA", rgba.size, "white")
+                background.alpha_composite(rgba)
+                image = background.convert("RGB")
+            elif image.mode != "RGB":
+                image = image.convert("RGB")
+            image.save(output, format="JPEG", quality=95, optimize=True)
     except Exception as exc:  # noqa: BLE001 - external input boundary.
         output.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="invalid image") from exc

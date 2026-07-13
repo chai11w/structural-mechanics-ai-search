@@ -1,6 +1,7 @@
 pandas
 openpyxl
 Pillow
+pillow-heif
 zhipuai
 opencv-python
 fastapi==0.139.0

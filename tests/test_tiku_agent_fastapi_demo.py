@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from tiku_agent.agent import AgentResponse
-from tiku_agent.fastapi_demo import SESSION_COOKIE, _SCRIPT, _STYLE, create_app
+from tiku_agent.fastapi_demo import SESSION_COOKIE, _SCRIPT, _STYLE, _write_incoming_image, create_app
 
 
 class FakeRuntime:
@@ -98,6 +98,32 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertIn("overflow-y: auto", _STYLE)
         self.assertIn("prefers-reduced-motion: reduce", _STYLE)
         self.assertNotIn("window.scrollTo", _SCRIPT)
+
+    def test_mobile_crop_metadata_is_tolerated_but_content_is_verified(self):
+        buffer = io.BytesIO()
+        Image.new("RGBA", (4, 4), (255, 0, 0, 128)).save(buffer, format="PNG")
+
+        normalized = _write_incoming_image(buffer.getvalue(), "微信裁剪临时文件.tmp")
+        self.addCleanup(lambda: normalized.unlink(missing_ok=True))
+        self.assertEqual(normalized.suffix, ".jpg")
+        with Image.open(normalized) as image:
+            self.assertEqual(image.format, "JPEG")
+            self.assertEqual(image.mode, "RGB")
+
+        heif_buffer = io.BytesIO()
+        Image.new("RGB", (4, 4), "white").save(heif_buffer, format="HEIF")
+        normalized_heif = _write_incoming_image(heif_buffer.getvalue(), "crop_without_extension")
+        self.addCleanup(lambda: normalized_heif.unlink(missing_ok=True))
+        with Image.open(normalized_heif) as image:
+            self.assertEqual(image.format, "JPEG")
+
+        with self.assertRaises(Exception) as invalid:
+            _write_incoming_image(b"not an image", "crop.jpg")
+        self.assertEqual(getattr(invalid.exception, "status_code", None), 400)
+
+        self.assertIn("normalizedType.startsWith('image/')", _SCRIPT)
+        self.assertIn("normalizedType === 'application/octet-stream'", _SCRIPT)
+        self.assertIn("'heic', 'heif', 'hif'", _SCRIPT)
 
     def test_public_http_redirects_and_https_cookie_is_secure(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
