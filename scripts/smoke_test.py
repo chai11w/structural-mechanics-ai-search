@@ -308,22 +308,22 @@ def check_multi_agent_routing() -> list[str]:
     if [item["path"] for item in display_very_high] != ["a.jpg", "b.jpg", "c.jpg"]:
         failures.append(f"rerank display should keep all >90% results only, got {display_very_high}")
 
-    display_many = search.select_display_results([
+    display_below_ninety = search.select_display_results([
         {"rank": 1, "path": "a.jpg", "score": 0.89},
         {"rank": 2, "path": "b.jpg", "score": 0.85},
         {"rank": 3, "path": "c.jpg", "score": 0.81},
         {"rank": 4, "path": "d.jpg", "score": 0.80},
     ])
-    if [item["path"] for item in display_many] != ["a.jpg", "b.jpg", "c.jpg"]:
-        failures.append(f"rerank display should cap >80% results at 3, got {display_many}")
+    if [item["path"] for item in display_below_ninety] != ["a.jpg"]:
+        failures.append(f"rerank display should keep only the best <90% result, got {display_below_ninety}")
 
     display_boundary = search.select_display_results([
         {"rank": 1, "path": "a.jpg", "score": 0.90},
         {"rank": 2, "path": "b.jpg", "score": 0.81},
         {"rank": 3, "path": "c.jpg", "score": 0.79},
     ])
-    if [item["path"] for item in display_boundary] != ["a.jpg", "b.jpg"]:
-        failures.append(f"rerank display should treat 90% as >80%, not >90%, got {display_boundary}")
+    if [item["path"] for item in display_boundary] != ["a.jpg"]:
+        failures.append(f"rerank display should include exactly 90% in the all-results threshold, got {display_boundary}")
 
     display_fallback = search.select_display_results([
         {"rank": 1, "path": "a.jpg", "score": 0.95},

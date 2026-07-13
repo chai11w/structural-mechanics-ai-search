@@ -12,23 +12,23 @@ class SharedDisplayPolicyTest(unittest.TestCase):
         results = [
             {"rank": 1, "final_score": 0.95},
             {"rank": 2, "final_score": 0.91},
-            {"rank": 3, "final_score": 0.89},
-            {"rank": 4, "final_score": 0.88},
+            {"rank": 3, "final_score": 0.90},
+            {"rank": 4, "final_score": 0.89},
             {"rank": 5, "final_score": 0.87},
         ]
 
         selected = search.select_display_results(results)
 
-        self.assertEqual([item["final_score"] for item in selected], [0.95, 0.91])
+        self.assertEqual([item["final_score"] for item in selected], [0.95, 0.91, 0.90])
 
-        eighty_to_ninety = [
+        below_ninety = [
             {"rank": 1, "final_score": 0.89},
             {"rank": 2, "final_score": 0.88},
             {"rank": 3, "final_score": 0.87},
             {"rank": 4, "final_score": 0.86},
         ]
-        selected = search.select_display_results(eighty_to_ninety)
-        self.assertEqual([item["final_score"] for item in selected], [0.89, 0.88, 0.87])
+        selected = search.select_display_results(below_ninety)
+        self.assertEqual([item["final_score"] for item in selected], [0.89])
 
     def test_agent_feishu_and_pipeline_share_default_display_limit(self):
         self.assertEqual(AgentToolConfig().rerank_top, search.DISPLAY_MAX_RESULTS)

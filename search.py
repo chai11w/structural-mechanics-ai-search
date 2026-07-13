@@ -55,7 +55,6 @@ LAST_SEARCH_FILE = ROOT / "_last_search.json"
 ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY") or cfg.get("zhipuai_api_key", "")
 TOP_K = cfg.get("top_k", 3)
 RERANK_MIN_LOAD_SCORE = 0.5
-DISPLAY_MIN_SCORE = 0.8
 DISPLAY_ALL_SCORE = 0.9
 DISPLAY_MAX_RESULTS = 3
 RERANK_LOAD_WEIGHT = 0.5
@@ -625,7 +624,7 @@ def finalize_rerank_results(client, query_image_path, scored, top_n=DISPLAY_MAX_
         ),
         reverse=True,
     )
-    return select_display_results(scored, max_results=top_n)
+    return select_display_results(scored)
 
 
 def rerank_candidates(query_image_path, candidates, top_n=DISPLAY_MAX_RESULTS):
@@ -765,20 +764,14 @@ def display_similarity_score(item):
 
 def select_display_results(
     results,
-    min_score=DISPLAY_MIN_SCORE,
-    max_results=DISPLAY_MAX_RESULTS,
     all_score=DISPLAY_ALL_SCORE,
 ):
-    """For reranked results: show all >90%, else top 3 >80%, else the best one."""
+    """Show all results at or above 90%; otherwise show only the best result."""
     if not results:
         return []
 
-    very_high = [item for item in results if display_similarity_score(item) > all_score]
-    if very_high:
-        selected = very_high
-    else:
-        high_quality = [item for item in results if display_similarity_score(item) > min_score]
-        selected = high_quality[:max_results] if high_quality else [max(results, key=display_similarity_score)]
+    very_high = [item for item in results if display_similarity_score(item) >= all_score]
+    selected = very_high or [max(results, key=display_similarity_score)]
 
     renumbered = []
     for rank, item in enumerate(selected, 1):
