@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
@@ -21,10 +22,16 @@ MAX_IMAGE_BYTES = 15 * 1024 * 1024
 INCOMING_DIR = DEFAULT_RUNTIME_DIR / "incoming"
 
 
+@dataclass(frozen=True)
+class MediaRecord:
+    session_id: str
+    path: Path
+
+
 def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
     """Create a local-only demo app without any existing Feishu configuration."""
     runtime = runtime or AgentSessionRuntime(SQLiteSessionStore(DEFAULT_RUNTIME_DIR / "session.db"))
-    media: dict[str, Path] = {}
+    media: dict[str, MediaRecord] = {}
     app = FastAPI(title="结构力学搜题 Agent", docs_url=None, redoc_url=None)
 
     @app.get("/", response_class=HTMLResponse)
@@ -50,6 +57,7 @@ def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
         session_id = str(request.cookies.get(SESSION_COOKIE) or "").strip()
         if session_id:
             runtime.clear(session_id)
+            _clear_session_media(media, session_id)
         result = JSONResponse({"ok": True})
         result.delete_cookie(SESSION_COOKIE)
         return result
@@ -68,11 +76,15 @@ def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
         return _agent_json(response, media, session_id)
 
     @app.get("/api/media/{media_id}")
-    def get_media(media_id: str) -> FileResponse:
-        path = media.get(media_id)
-        if path is None or not path.is_file():
+    def get_media(media_id: str, request: Request) -> FileResponse:
+        session_id = str(request.cookies.get(SESSION_COOKIE) or "").strip()
+        record = media.get(media_id)
+        if record is None or not session_id or not secrets.compare_digest(record.session_id, session_id):
             raise HTTPException(status_code=404, detail="media not found")
-        return FileResponse(path)
+        if not record.path.is_file():
+            media.pop(media_id, None)
+            raise HTTPException(status_code=404, detail="media not found")
+        return FileResponse(record.path)
 
     return app
 
@@ -96,18 +108,23 @@ def _write_incoming_image(content: bytes, filename: str) -> Path:
     return output
 
 
-def _agent_json(response: AgentResponse, media: dict[str, Path], session_id: str) -> JSONResponse:
+def _agent_json(response: AgentResponse, media: dict[str, MediaRecord], session_id: str) -> JSONResponse:
     image_urls = []
     for image in response.images:
         path = Path(image)
         if not path.is_file():
             continue
         media_id = uuid4().hex
-        media[media_id] = path
+        media[media_id] = MediaRecord(session_id=session_id, path=path)
         image_urls.append(f"/api/media/{media_id}")
     result = JSONResponse({"text": response.text, "images": image_urls, "intent": response.intent})
     result.set_cookie(SESSION_COOKIE, session_id, max_age=2 * 60 * 60, httponly=True, samesite="lax")
     return result
+
+
+def _clear_session_media(media: dict[str, MediaRecord], session_id: str) -> None:
+    for media_id in [key for key, record in media.items() if record.session_id == session_id]:
+        media.pop(media_id, None)
 
 
 _PAGE = """<!doctype html>

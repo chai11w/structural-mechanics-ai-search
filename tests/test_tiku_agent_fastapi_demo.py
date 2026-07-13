@@ -34,7 +34,8 @@ class FastApiDemoTest(unittest.TestCase):
         self.addCleanup(lambda: media_path.unlink(missing_ok=True))
         Image.new("RGB", (4, 4), "white").save(media_path)
         runtime = FakeRuntime(media_path)
-        client = TestClient(create_app(runtime=runtime))
+        app = create_app(runtime=runtime)
+        client = TestClient(app)
 
         self.assertEqual(client.get("/health").json(), {"status": "ok"})
         page = client.get("/")
@@ -59,6 +60,9 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertIn(SESSION_COOKIE, follow_up.cookies)
         media_response = client.get(text_response.json()["images"][0])
         self.assertEqual(media_response.status_code, 200)
+        other_client = TestClient(app)
+        other_client.cookies.set(SESSION_COOKIE, "different-session")
+        self.assertEqual(other_client.get(text_response.json()["images"][0]).status_code, 404)
 
         buffer = io.BytesIO()
         Image.new("RGB", (4, 4), "white").save(buffer, format="JPEG")
@@ -70,6 +74,7 @@ class FastApiDemoTest(unittest.TestCase):
         reset_response = client.post("/api/reset")
         self.assertEqual(reset_response.status_code, 200)
         self.assertEqual(runtime.calls[-1][0], "clear")
+        self.assertEqual(client.get(text_response.json()["images"][0]).status_code, 404)
 
 
 if __name__ == "__main__":

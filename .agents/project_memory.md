@@ -27,7 +27,7 @@
 - `tiku_agent/render.py`：新 Agent 的所有用户可见检索话术统一为简洁自然对话，隐藏路径、分数和内部状态；唯一候选支持“就这个 / 要这个 / 发答案”直接取答案。
 - `tiku_agent/session_store.py`、`session_runtime.py` 与 `session_artifacts.py`：隔离 SQLite 会话存储、外层恢复/保存和 session 临时文件管理已实现；默认最后活跃后 2 小时过期，取消即清除状态与题图/裁图/答案临时文件。真实单题已验证“候选→模拟重启→就这个→答案”。
 - `tiku_agent/task_log.py`：隐私受限的结构化任务日志已接入运行层，自动写入本地 JSONL；仅允许耗时、阶段、结果、候选数、章节、路由和错误类别。真实单题已验证日志无用户原话、图片路径或模型原文。
-- `tiku_agent/fastapi_demo.py` 与 `scripts/run_tiku_agent_demo.py`：独立 FastAPI demo 仅监听 `127.0.0.1:8790`，session cookie 持久会话，图片令牌隐藏本地路径；识别期间显示等待提示。Qwen 瞬时 HTTP 429/5xx/超时会重试，前端文字/图片请求在 60/90 秒后中断并恢复控件，HTTP/JSON 异常按类型转成安全中文提示；失败后可回复“重试”复用原图。
+- `tiku_agent/fastapi_demo.py` 与 `scripts/run_tiku_agent_demo.py`：独立 FastAPI demo 仅监听 `127.0.0.1:8790`，session cookie 持久会话，图片令牌绑定会话并隐藏本地路径，新对话后旧令牌失效；识别期间显示等待提示。Qwen 瞬时 HTTP 429/5xx/超时会重试，前端文字/图片请求在 60/90 秒后中断并恢复控件，HTTP/JSON 异常转成安全中文提示；失败后可回复“重试”复用原图。
 - FastAPI demo 使用桌面聊天布局：侧栏、新对话、居中消息流和底部输入框；上传题图会显示本地预览，`新对话` 会清除当前 session 和临时文件。
 - `tiku_agent/tools.py`：首轮 scope 只判单题/多题；单题同时返回荷载/章节并直接检索，多题才调用详细题号/bbox/逐题荷载识别和裁图准备。纯结构图猜第二章会因缺少题干引文而降级为 `unknown`；图中明确的“力法/位移法/影响线”等方法词按内容验证，不依赖模型是否加引号。
 - 两套荷载提取 prompt 已统一：赋值符号输出无单位的 `符号=数值`；`P=40/q=20/M=20` 路由主库，纯符号仍路由字母库，并有回归测试。
