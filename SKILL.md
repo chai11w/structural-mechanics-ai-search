@@ -40,7 +40,7 @@ python scripts/search_by_loads.py image-search --image "D:\path\to\question.jpg"
 python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter "2静定结构"
 ```
 
-图片检索可让 Qwen 根据题干文字自动建议章节。当前自动章节会采用非 `unknown` 且置信度不低于 `0.45` 的判断；2/3 章允许“桁架指定杆轴力”“静定结构位移/图乘法/单位荷载法/EA 为常数”等典型题型文字推断，纯结构图仍返回 `needs_chapter`，需要手动选择章节：
+图片检索可让 Qwen 根据题干文字自动建议章节。当前先独立提取 `visible_problem_text`：没有实际题干时直接返回 `needs_chapter`，有题干时才采用非 `unknown` 且置信度不低于 `0.45` 的判断；2/3 章允许“桁架指定杆轴力”“静定结构位移/图乘法/单位荷载法/EA 为常数”等典型题型文字并结合结构信息推断章节：
 
 ```powershell
 python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter auto
@@ -106,7 +106,7 @@ python scripts/feishu_tiku_bot.py dry-run-flow --image "D:\path\to\question.jpg"
 ## 注意事项
 
 - 不要跨章节自动搜索；章节必须由用户指定、确认，或由 `chapter=auto` 在题干/题型文字证据下自动确定。自动识别失败时必须让用户选择章节；飞书和 Agent 都不能自动遍历所有章节。
-- 自动章节判断里，“静定 + 内力图/弯矩图/剪力图/轴力图”应判为 `2静定结构`，不要限定后面是梁、钢架、多跨梁还是其他结构；桁架指定杆轴力也可判为 `2静定结构`。但仅靠模型从结构图推断“静定梁/静定结构”，没有题干或题型文字证据时，不能自动判 2 章。
+- 自动章节判断里先检查独立抄取的 `visible_problem_text`；为空时不看结构长相，直接返回 `unknown`。有实际题干后，“静定 + 内力图/弯矩图/剪力图/轴力图”应判为 `2静定结构`，不要限定后面是梁、钢架、多跨梁还是其他结构；桁架指定杆轴力也可判为 `2静定结构`，且不依赖模型是否给题干加引号。
 - 2026-07-05 起飞书章节日志改为全量记录章节判断到 `data/feishu_chapter_failure_log.jsonl`，包括自动采用、需要手动和手动补章节样本。这个文件名沿用旧失败日志名，但内容已不再只限失败样本。
 - 多题图不要让 LLM 直接给 bbox 来复筛；坐标容易漂。当前做法是 OpenCV 找结构图块、按题号顺序绑定并裁图；裁图缺失时退回荷载粗筛。章节未知或不在 2-8 章范围内的题不要自动检索，等用户指定章节或单独发图。
 - 不要直接读写 `config.json`、`config.local.json` 里的密钥；需要结构时看 `config.example.json`。

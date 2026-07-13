@@ -70,11 +70,42 @@ class AssignedSymbolicRoutingTest(unittest.TestCase):
                 "loads": [{"type": "集中", "raw": "Fp"}],
                 "chapter_hint": "2静定结构",
                 "chapter_confidence": 0.92,
+                "visible_problem_text": "",
                 "chapter_evidence": "该结构为桁架，荷载作用于节点",
             }
         )
 
         self.assertEqual(result["single_analysis"]["chapter_hint"], CHAPTER_UNKNOWN)
+
+    def test_unquoted_visible_static_beam_task_can_select_chapter_two(self):
+        result = normalize_image_scope_result(
+            {
+                "question_layout": "single",
+                "loads": [{"type": "均布", "raw": "q"}, {"type": "集中", "raw": "ql"}],
+                "chapter_hint": "2静定结构",
+                "chapter_confidence": 0.9,
+                "visible_problem_text": "求图示多跨静定梁的弯矩图和剪力图",
+                "chapter_evidence": "求图示多跨静定梁的弯矩图和剪力图",
+            }
+        )
+
+        self.assertEqual(result["single_analysis"]["chapter_hint"], "2静定结构")
+        self.assertEqual(result["single_analysis"]["visible_problem_text"], "求图示多跨静定梁的弯矩图和剪力图")
+
+    def test_visible_labels_without_problem_text_cannot_select_chapter(self):
+        result = normalize_image_scope_result(
+            {
+                "question_layout": "single",
+                "loads": [{"type": "均布", "raw": "q"}],
+                "chapter_hint": "2静定结构",
+                "chapter_confidence": 0.9,
+                "visible_problem_text": "",
+                "chapter_evidence": "图中是静定梁，可绘制弯矩图",
+            }
+        )
+
+        self.assertEqual(result["single_analysis"]["chapter_hint"], CHAPTER_UNKNOWN)
+        self.assertEqual(result["single_analysis"]["chapter_evidence"], "未识别到可见题干文字")
 
     def test_quoted_visible_static_truss_text_can_select_chapter_two(self):
         chapter, confidence, _ = guard_chapter_prediction(

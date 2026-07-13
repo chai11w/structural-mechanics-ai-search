@@ -98,11 +98,14 @@ class QwenClassifier:
         cache = self._load_cache() if self.use_cache else {}
         if self.use_cache and cache_key in cache:
             cached = dict(cache[cache_key])
-            cached["from_cache"] = True
-            cached.setdefault("chapter_hint", CHAPTER_UNKNOWN)
-            cached.setdefault("chapter_confidence", 0.0)
-            cached.setdefault("chapter_evidence", "")
-            return cached
+            # Results written before the visible-problem-text gate cannot
+            # prove that a chapter came from text rather than diagram shape.
+            if "visible_problem_text" in cached:
+                cached["from_cache"] = True
+                cached.setdefault("chapter_hint", CHAPTER_UNKNOWN)
+                cached.setdefault("chapter_confidence", 0.0)
+                cached.setdefault("chapter_evidence", "")
+                return cached
 
         api_key = os.environ.get("DASHSCOPE_API_KEY", "") or search.cfg.get("dashscope_api_key", "")
         if not api_key:
@@ -123,6 +126,7 @@ class QwenClassifier:
             "load_details": load_details,
             "chapter_hint": normalize_chapter_hint(extracted.get("chapter_hint")),
             "chapter_confidence": normalize_chapter_confidence(extracted.get("chapter_confidence")),
+            "visible_problem_text": str(extracted.get("visible_problem_text") or "").strip(),
             "chapter_evidence": str(extracted.get("chapter_evidence") or "").strip(),
             "model": self.model,
             "from_cache": False,
