@@ -2,13 +2,53 @@ import unittest
 
 import search
 from multi_agent_pipeline import RuleRouter
-from scripts.classify_question_bank import IMAGE_SCOPE_PROMPT, SYSTEM_PROMPT as CLASSIFIER_SYSTEM_PROMPT
+from scripts.classify_question_bank import (
+    CHAPTER_UNKNOWN,
+    IMAGE_SCOPE_PROMPT,
+    SYSTEM_PROMPT as CLASSIFIER_SYSTEM_PROMPT,
+    guard_chapter_prediction,
+    normalize_image_scope_result,
+)
 
 
 class AssignedSymbolicRoutingTest(unittest.TestCase):
     def test_fast_scope_prompt_preserves_repeated_independent_loads(self):
         self.assertIn("不要把相同标注的多个荷载合并", IMAGE_SCOPE_PROMPT)
         self.assertIn("三个分别标为 Fp", IMAGE_SCOPE_PROMPT)
+
+    def test_pure_truss_description_cannot_auto_select_chapter_two(self):
+        chapter, confidence, evidence = guard_chapter_prediction(
+            "2静定结构",
+            0.92,
+            "图中是桁架结构，可求杆件轴力",
+        )
+
+        self.assertEqual(chapter, CHAPTER_UNKNOWN)
+        self.assertLess(confidence, 0.5)
+        self.assertIn("自动降级为unknown", evidence)
+
+    def test_single_scope_with_only_diagram_reason_waits_for_chapter(self):
+        result = normalize_image_scope_result(
+            {
+                "question_layout": "single",
+                "loads": [{"type": "集中", "raw": "Fp"}],
+                "chapter_hint": "2静定结构",
+                "chapter_confidence": 0.92,
+                "chapter_evidence": "该结构为桁架，荷载作用于节点",
+            }
+        )
+
+        self.assertEqual(result["single_analysis"]["chapter_hint"], CHAPTER_UNKNOWN)
+
+    def test_quoted_visible_static_truss_text_can_select_chapter_two(self):
+        chapter, confidence, _ = guard_chapter_prediction(
+            "2静定结构",
+            0.9,
+            "题干原文：“求静定桁架指定杆的轴力”",
+        )
+
+        self.assertEqual(chapter, "2静定结构")
+        self.assertEqual(confidence, 0.9)
 
     def test_load_prompt_requires_unitless_assigned_symbols(self):
         self.assertIn("输出 P=40、q=20、F1=40、M=20", search.SYSTEM_PROMPT)
