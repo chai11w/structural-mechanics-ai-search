@@ -47,6 +47,11 @@ class AssignedSymbolicRoutingTest(unittest.TestCase):
         self.assertIn("不要把相同标注的多个荷载合并", IMAGE_SCOPE_PROMPT)
         self.assertIn("三个分别标为 Fp", IMAGE_SCOPE_PROMPT)
 
+    def test_fast_scope_prompt_requires_assignment_backfill_for_fractional_label(self):
+        self.assertIn("Fp=28kN", IMAGE_SCOPE_PROMPT)
+        self.assertIn("Fp 或 Fp/2", IMAGE_SCOPE_PROMPT)
+        self.assertIn("不得只输出 Fp 或 Fp/2", IMAGE_SCOPE_PROMPT)
+
     def test_pure_truss_description_cannot_auto_select_chapter_two(self):
         chapter, confidence, evidence = guard_chapter_prediction(
             "2静定结构",
