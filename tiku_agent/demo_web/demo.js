@@ -446,9 +446,9 @@ async function submitPreparedImage(prepared, uploadRow) {
   if (isBusy) return;
   setUploadRowStatus(uploadRow, '我发了一张题图。');
   const operation = ++operationVersion;
-  const pending = addMessage({ message: '正在上传并识别题干', variant: 'pending' }, false);
+  const pending = addMessage({ message: '正在识别题目', variant: 'pending' }, false);
   setBusy(true);
-  setStatus('working', '正在识别题图…');
+  setStatus('working', '正在识别题目…');
   try {
     const formData = new FormData();
     formData.append('file', prepared.blob, prepared.filename);
