@@ -1,5 +1,8 @@
 import io
 from pathlib import Path
+import re
+import shutil
+import subprocess
 import unittest
 from uuid import uuid4
 
@@ -7,7 +10,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from tiku_agent.agent import AgentResponse
-from tiku_agent.fastapi_demo import SESSION_COOKIE, create_app
+from tiku_agent.fastapi_demo import SESSION_COOKIE, _PAGE, create_app
 
 
 class FakeRuntime:
@@ -28,6 +31,19 @@ class FakeRuntime:
 
 
 class FastApiDemoTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for embedded JavaScript syntax validation")
+    def test_embedded_javascript_has_valid_syntax(self):
+        scripts = re.findall(r"<script>(.*?)</script>", _PAGE, re.DOTALL)
+        self.assertTrue(scripts)
+        result = subprocess.run(
+            [shutil.which("node"), "--check", "-"],
+            input=scripts[-1],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_health_text_cookie_image_upload_and_media_token(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
         media_path = runtime_dir / f"demo_test_result_{uuid4().hex}.jpg"
