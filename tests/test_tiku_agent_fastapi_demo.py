@@ -78,7 +78,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260713-preview"', 'src="/assets/demo.js?v=20260713-preview"',
+            'href="/assets/demo.css?v=20260713-sent"', 'src="/assets/demo.js?v=20260713-sent"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -100,11 +100,13 @@ class FastApiDemoTest(unittest.TestCase):
         ):
             self.assertIn(expected, _SCRIPT)
         self.assertNotIn("new File(", _SCRIPT)
+        self.assertNotIn("题图处理中", _SCRIPT)
+        self.assertNotIn("题图正在上传", _SCRIPT)
         self.assertLess(
             _SCRIPT.index("const uploadRow = addLocalUploadPreview(sourcePreview)"),
             _SCRIPT.index("await normalizeImage(selected, sourcePreview)"),
         )
-        self.assertLess(_SCRIPT.index("await request('/api/image'"), _SCRIPT.index("message: '我发了一张题图。'"))
+        self.assertLess(_SCRIPT.index("message: '我发了一张题图。'"), _SCRIPT.index("await request('/api/image'"))
         self.assertIn("overflow-y: auto", _STYLE)
         self.assertIn("prefers-reduced-motion: reduce", _STYLE)
         self.assertNotIn("window.scrollTo", _SCRIPT)

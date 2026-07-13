@@ -411,16 +411,15 @@ async function sendText() {
 
 function addLocalUploadPreview(preview) {
   return addMessage({
-    message: '题图处理中…',
+    message: '我发了一张题图。',
     me: true,
     images: [preview],
     imageAlt: '待上传的题图',
-    variant: 'upload-pending',
   }, false);
 }
 
 function setUploadRowStatus(row, message, variant = '') {
-  row.classList.remove('upload-pending', 'error');
+  row.classList.remove('error');
   if (variant) row.classList.add(variant);
   const paragraph = row.querySelector('.message-text');
   if (paragraph) paragraph.textContent = message;
@@ -445,7 +444,7 @@ function addUploadFailure(row, message, prepared) {
 
 async function submitPreparedImage(prepared, uploadRow) {
   if (isBusy) return;
-  setUploadRowStatus(uploadRow, '题图正在上传…', 'upload-pending');
+  setUploadRowStatus(uploadRow, '我发了一张题图。');
   const operation = ++operationVersion;
   const pending = addMessage({ message: '正在上传并识别题干', variant: 'pending' }, false);
   setBusy(true);
