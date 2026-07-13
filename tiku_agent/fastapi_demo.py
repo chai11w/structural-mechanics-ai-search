@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import secrets
-from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from tiku_agent.agent import AgentResponse
@@ -20,19 +20,17 @@ from tiku_agent.tools import DEFAULT_RUNTIME_DIR
 SESSION_COOKIE = "tiku_agent_session"
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 INCOMING_DIR = DEFAULT_RUNTIME_DIR / "incoming"
-
-
-@dataclass(frozen=True)
-class MediaRecord:
-    session_id: str
-    path: Path
+WEB_DIR = Path(__file__).with_name("demo_web")
+_PAGE = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+_STYLE = (WEB_DIR / "demo.css").read_text(encoding="utf-8")
+_SCRIPT = (WEB_DIR / "demo.js").read_text(encoding="utf-8")
 
 
 def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
     """Create a local-only demo app without any existing Feishu configuration."""
     runtime = runtime or AgentSessionRuntime(SQLiteSessionStore(DEFAULT_RUNTIME_DIR / "session.db"))
-    media: dict[str, MediaRecord] = {}
     app = FastAPI(title="结构力学搜题 Agent", docs_url=None, redoc_url=None)
+    app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
@@ -50,20 +48,24 @@ def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
 
     @app.post("/api/message")
     async def message(request: Request) -> Response:
-        payload = await request.json()
+        try:
+            payload = await request.json()
+        except Exception as exc:  # noqa: BLE001 - malformed external input.
+            raise HTTPException(status_code=400, detail="invalid json") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="json object is required")
         text = str(payload.get("text") or "").strip()
         if not text:
             raise HTTPException(status_code=400, detail="text is required")
         session_id = _session_id(request)
         response = runtime.handle_text(session_id, text)
-        return _agent_json(response, media, session_id)
+        return _agent_json(response, runtime, session_id)
 
     @app.post("/api/reset")
     def reset(request: Request) -> JSONResponse:
         session_id = str(request.cookies.get(SESSION_COOKIE) or "").strip()
         if session_id:
             runtime.clear(session_id)
-            _clear_session_media(media, session_id)
         result = JSONResponse({"ok": True})
         result.delete_cookie(SESSION_COOKIE)
         return result
@@ -80,7 +82,7 @@ def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
             uploaded_image = runtime.current_image_path(session_id)
         finally:
             incoming.unlink(missing_ok=True)
-        return _agent_json(response, media, session_id, uploaded_image=uploaded_image)
+        return _agent_json(response, runtime, session_id, uploaded_image=uploaded_image)
 
     @app.get("/api/upload/{filename}")
     def get_upload(filename: str, request: Request) -> FileResponse:
@@ -93,13 +95,10 @@ def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
     @app.get("/api/media/{media_id}")
     def get_media(media_id: str, request: Request) -> FileResponse:
         session_id = str(request.cookies.get(SESSION_COOKIE) or "").strip()
-        record = media.get(media_id)
-        if record is None or not session_id or not secrets.compare_digest(record.session_id, session_id):
+        path = runtime.resolve_media(session_id, media_id) if session_id else None
+        if path is None:
             raise HTTPException(status_code=404, detail="media not found")
-        if not record.path.is_file():
-            media.pop(media_id, None)
-            raise HTTPException(status_code=404, detail="media not found")
-        return FileResponse(record.path)
+        return FileResponse(path)
 
     return app
 
@@ -125,7 +124,7 @@ def _write_incoming_image(content: bytes, filename: str) -> Path:
 
 def _agent_json(
     response: AgentResponse,
-    media: dict[str, MediaRecord],
+    runtime: AgentSessionRuntime,
     session_id: str,
     *,
     uploaded_image: Path | None = None,
@@ -135,58 +134,12 @@ def _agent_json(
         path = Path(image)
         if not path.is_file():
             continue
-        media_id = uuid4().hex
-        media[media_id] = MediaRecord(session_id=session_id, path=path)
-        image_urls.append(f"/api/media/{media_id}")
+        persisted = runtime.persist_media(session_id, path)
+        if persisted is not None:
+            image_urls.append(f"/api/media/{persisted.name}")
     uploaded_image_url = f"/api/upload/{uploaded_image.name}" if uploaded_image is not None else ""
     result = JSONResponse(
         {"text": response.text, "images": image_urls, "uploaded_image": uploaded_image_url, "intent": response.intent}
     )
     result.set_cookie(SESSION_COOKIE, session_id, max_age=2 * 60 * 60, httponly=True, samesite="lax")
     return result
-
-
-def _clear_session_media(media: dict[str, MediaRecord], session_id: str) -> None:
-    for media_id in [key for key, record in media.items() if record.session_id == session_id]:
-        media.pop(media_id, None)
-
-
-_PAGE = """<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>结构力学搜题</title>
-<style>
-:root{font-family:Inter,"Microsoft YaHei",system-ui,sans-serif;color:#202123;background:#fff}*{box-sizing:border-box}[hidden]{display:none!important}html,body{height:100%;overflow:hidden}body{margin:0;min-width:320px;background:#fff}.app{height:100vh;display:flex;overflow:hidden}.side{width:252px;height:100vh;flex:0 0 252px;overflow-y:auto;background:#f7f7f8;border-right:1px solid #ececee;padding:15px 12px;display:flex;flex-direction:column;gap:20px}.brand{display:flex;align-items:center;gap:9px;padding:7px 9px;font-weight:600;font-size:15px;letter-spacing:-.2px}.brand-mark{width:25px;height:25px;display:grid;place-items:center;border-radius:7px;background:#202123;color:#fff;font-size:12px}.new-chat{height:40px;border:1px solid #dedee3;border-radius:9px;background:#fff;display:flex;align-items:center;gap:9px;padding:0 12px;color:#303035;font:inherit;font-size:14px;cursor:pointer}.new-chat:hover{background:#f2f2f3}.new-chat:disabled{color:#a1a1aa;cursor:default}.side-label{font-size:11px;color:#8a8a91;padding:0 10px;text-transform:uppercase;letter-spacing:.08em}.session-note{font-size:13px;line-height:1.55;color:#66666e;padding:0 10px}.side-footer{margin-top:auto;padding:10px;font-size:12px;color:#85858d;border-top:1px solid #e5e5e8}.main{height:100vh;flex:1;min-width:0;overflow:hidden;display:flex;flex-direction:column;background:#fff}.topbar{height:58px;flex:0 0 58px;z-index:2;display:flex;align-items:center;justify-content:space-between;padding:0 28px;border-bottom:1px solid #f1f1f2;background:#fff}.topbar-title{font-size:14px;font-weight:550;color:#303035}.status{display:flex;align-items:center;gap:7px;color:#777780;font-size:12px}.dot{width:7px;height:7px;border-radius:50%;background:#30a46c}.status[data-state="working"] .dot{background:#d97706;animation:status-pulse 1.2s ease-in-out infinite}.status[data-state="error"] .dot{background:#dc2626}.status[data-state="error"]{color:#a61b1b}@keyframes status-pulse{50%{opacity:.35}}.conversation{width:100%;margin:0;padding:28px 24px 150px;flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}.conversation>#empty,.conversation>#chat{width:min(100%,840px);margin:0 auto}.empty{min-height:100%;display:flex;align-items:center;justify-content:center;text-align:center}.empty-inner{max-width:470px}.empty-icon{width:44px;height:44px;margin:0 auto 18px;display:grid;place-items:center;border:1px solid #e5e5e8;border-radius:13px;color:#33343a}.empty h1{font-size:28px;letter-spacing:-.7px;line-height:1.2;margin:0 0 10px;font-weight:600}.empty p{margin:0;color:#777780;font-size:15px;line-height:1.65}.message{display:flex;gap:12px;margin:0 0 22px;align-items:flex-start}.avatar{width:28px;height:28px;border-radius:8px;flex:0 0 28px;display:grid;place-items:center;background:#202123;color:#fff;font-size:11px;font-weight:600}.message-body{min-width:0;max-width:76%;line-height:1.7;color:#29292e;white-space:pre-wrap}.message.user{justify-content:flex-end}.message.user .message-body{background:#f2f2f3;border-radius:16px;padding:10px 14px}.message.user .avatar{display:none}.images{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:3px 0 24px 40px}.images img{width:100%;max-height:310px;object-fit:contain;border:1px solid #e8e8eb;border-radius:11px;background:#fff}.composer-wrap{position:fixed;left:252px;right:0;bottom:0;padding:18px 24px 22px;background:linear-gradient(transparent,#fff 30%)}.composer{width:min(100%,800px);margin:auto;display:flex;align-items:flex-end;gap:8px;padding:8px 9px 8px 12px;border:1px solid #dbdbe0;border-radius:15px;background:#fff;box-shadow:0 7px 24px #0000000d}.attach{width:34px;height:34px;border:0;border-radius:9px;background:transparent;color:#66666e;display:grid;place-items:center;cursor:pointer}.attach:hover{background:#f0f0f2}.attach:focus-visible{outline:2px solid #6b7280;outline-offset:2px}.attach input{display:none}.composer textarea{flex:1;resize:none;border:0;outline:0;background:transparent;font:inherit;font-size:15px;line-height:1.45;min-height:34px;max-height:140px;padding:7px 2px;color:#242429}.composer textarea::placeholder{color:#9a9aa2}.send{width:34px;height:34px;border:0;border-radius:9px;background:#202123;color:#fff;display:grid;place-items:center;cursor:pointer}.send:disabled{background:#d8d8dc;cursor:default}.notice{font-size:12px;text-align:center;color:#9a9aa2;margin-top:8px}.drop-overlay{position:fixed;inset:14px;z-index:20;display:grid;place-items:center;border:2px dashed #6b7280;border-radius:18px;background:#ffffffed;color:#303035;opacity:0;pointer-events:none;transition:opacity 160ms ease-out,background-color 160ms ease-out}.drop-overlay-inner{text-align:center;font-size:17px;font-weight:600}.drop-overlay small{display:block;margin-top:7px;color:#777780;font-size:13px;font-weight:400}.drop-overlay.is-visible{opacity:1}@media(prefers-reduced-motion:reduce){.drop-overlay{transition-duration:.01ms}.status[data-state="working"] .dot{animation:none}}@media(max-width:720px){.side{display:none}.topbar{padding:0 18px}.conversation{padding-right:16px;padding-left:16px}.composer-wrap{left:0;padding:15px 12px 18px}.message-body{max-width:88%}.images{margin-left:0}.empty{min-height:100%}.empty h1{font-size:25px}}</style></head>
-<body><div class="app"><aside class="side"><div class="brand"><span class="brand-mark">力</span><span>结构力学搜题</span></div><button class="new-chat" id="new-chat"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 5v14M5 12h14"/></svg>新对话</button><div><div class="side-label">当前会话</div><p class="session-note">发题图后，我会帮你在题库里找最相似的题。</p></div><div class="side-footer">会话会在 2 小时后自动清理</div></aside>
-<main class="main"><header class="topbar"><div class="topbar-title">结构力学题库</div><div class="status" id="status" data-state="ready" role="status" aria-live="polite"><span class="dot"></span><span id="status-text">Agent 已就绪</span></div></header><section class="conversation"><div class="empty" id="empty"><div class="empty-inner"><div class="empty-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 19.5V4.75A1.75 1.75 0 0 1 5.75 3h12.5A1.75 1.75 0 0 1 20 4.75V20l-4-2.5-4 2.5-4-2.5-4 2.5Z"/></svg></div><h1>今天想查哪道题？</h1><p>上传结构力学题图，或直接告诉我你想继续查哪一题。</p></div></div><div id="chat"></div></section></main></div>
-<div class="drop-overlay" id="drop-overlay" aria-hidden="true"><div class="drop-overlay-inner">松开即可上传题图<small>支持 PNG、JPG、WEBP 等图片，最大 15MB</small></div></div>
-<div class="composer-wrap"><form class="composer" id="composer"><label class="attach" id="attach" title="上传题图" role="button" tabindex="0" aria-label="上传题图"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 16V4m0 0L8 8m4-4 4 4M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></svg><input id="file" type="file" accept="image/*"></label><textarea id="text" rows="1" placeholder="发题图，或说点什么…"></textarea><button class="send" id="send" title="发送" aria-label="发送消息" type="submit" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m5 12 14-7-4 14-3-5-5-2Z"/><path d="m12 14 3-3"/></svg></button></form><div class="notice">Enter 发送 · Shift + Enter 换行 · 题图与会话将在 2 小时后自动清理</div></div>
-<style>.images.user-images{margin:3px 0 24px auto;width:min(76%,360px)}.expired-image{padding:18px;border:1px dashed #d4d4d8;border-radius:11px;color:#777780;font-size:13px;text-align:center}@media(max-width:720px){.images.user-images{width:min(88%,360px)}}</style>
-<script>
-const chat=document.querySelector('#chat'),empty=document.querySelector('#empty'),conversation=document.querySelector('.conversation'),composerWrap=document.querySelector('.composer-wrap'),attach=document.querySelector('#attach'),text=document.querySelector('#text'),file=document.querySelector('#file'),form=document.querySelector('#composer'),send=document.querySelector('#send'),newChat=document.querySelector('#new-chat'),dropOverlay=document.querySelector('#drop-overlay'),status=document.querySelector('#status'),statusText=document.querySelector('#status-text');
-const TEXT_TIMEOUT_MS=60000,IMAGE_TIMEOUT_MS=90000,MAX_IMAGE_BYTES=15*1024*1024,HISTORY_TTL_MS=2*60*60*1000,HISTORY_LIMIT=50,HISTORY_KEY='tiku-agent-current-chat-v1';
-let chatHistory=[],isBusy=false,dragDepth=0;
-function saveHistory(){try{localStorage.setItem(HISTORY_KEY,JSON.stringify({savedAt:Date.now(),messages:chatHistory.slice(-HISTORY_LIMIT)}))}catch(_error){/* The demo still works when browser storage is unavailable. */}}
-function isPersistentImage(url){return typeof url==='string'&&(url.startsWith('/api/media/')||url.startsWith('/api/upload/'))}
-function remember(message,me,images,imageAlt){const persistentImages=images.filter(isPersistentImage);chatHistory.push({message:String(message),me:Boolean(me),images:persistentImages,imageAlt:String(imageAlt)});chatHistory=chatHistory.slice(-HISTORY_LIMIT);saveHistory()}
-function scrollToLatest(){requestAnimationFrame(()=>conversation.scrollTo({top:conversation.scrollHeight,behavior:'auto'}))}
-function add(message,me=false,images=[],imageAlt='题库候选题',persist=true){empty.hidden=true;const row=document.createElement('article');row.className='message'+(me?' user':'');if(!me){const avatar=document.createElement('div');avatar.className='avatar';avatar.textContent='力';row.append(avatar)}const body=document.createElement('div');body.className='message-body';body.textContent=message;row.append(body);chat.append(row);if(images.length){const grid=document.createElement('div');grid.className='images'+(me?' user-images':'');images.forEach(url=>{const img=document.createElement('img');img.src=url;img.alt=imageAlt;img.addEventListener('load',()=>{if(url.startsWith('blob:'))URL.revokeObjectURL(url);scrollToLatest()},{once:true});img.addEventListener('error',()=>{if(url.startsWith('blob:'))URL.revokeObjectURL(url);const note=document.createElement('span');note.className='expired-image';note.textContent='图片已失效，请重新上传';img.replaceWith(note);scrollToLatest()},{once:true});grid.append(img)});chat.append(grid)}if(persist)remember(message,me,images,imageAlt);scrollToLatest();return row}
-function renderHistory(){chat.replaceChildren();empty.hidden=chatHistory.length>0;chatHistory.forEach(item=>add(item.message,Boolean(item.me),Array.isArray(item.images)?item.images.filter(isPersistentImage):[],item.imageAlt||'题库候选题',false))}
-function restoreHistory(){try{const stored=JSON.parse(localStorage.getItem(HISTORY_KEY)||'null'),savedAt=Number(stored?.savedAt),now=Date.now();if(!stored||!Array.isArray(stored.messages)||!Number.isFinite(savedAt)||savedAt>now+60000||now-savedAt>HISTORY_TTL_MS){localStorage.removeItem(HISTORY_KEY);return}chatHistory=stored.messages.slice(-HISTORY_LIMIT);renderHistory()}catch(_error){chatHistory=[];localStorage.removeItem(HISTORY_KEY)}}
-async function repairUploadedImageHistory(){try{const data=await request('/api/session',{},5000,'会话恢复超时。');if(!isPersistentImage(data.uploaded_image))return;for(let index=chatHistory.length-1;index>=0;index-=1){const item=chatHistory[index];if(item.me&&item.message==='我发了一张题图。'&&(!Array.isArray(item.images)||!item.images.length)){item.images=[data.uploaded_image];saveHistory();renderHistory();return}}}catch(_error){/* History remains usable even when the session has expired. */}}
-function clearHistory(){chatHistory=[];localStorage.removeItem(HISTORY_KEY)}
-function finishPending(row,message,images=[]){if(row&&row.isConnected)row.remove();add(message,false,images)}
-function setStatus(state,message){status.dataset.state=state;statusText.textContent=message}
-function resizeComposer(){text.style.height='auto';text.style.height=Math.min(text.scrollHeight,140)+'px'}
-function syncComposerSpace(){conversation.style.paddingBottom=Math.ceil(composerWrap.getBoundingClientRect().height+28)+'px'}
-function updateComposer(){send.disabled=isBusy||!text.value.trim()}
-function busy(value){isBusy=value;text.disabled=value;file.disabled=value;newChat.disabled=value;updateComposer()}
-function validateImage(selected){if(!selected)return '没有读取到图片，请重新选择。';if(!selected.type.startsWith('image/'))return '请上传 PNG、JPG、WEBP 等图片文件。';if(selected.size>MAX_IMAGE_BYTES)return '图片太大，请上传不超过 15MB 的图片。';return ''}
-function safeHttpError(status,data){const detail=typeof data?.detail==='string'?data.detail.toLowerCase():'';if(status===413||detail.includes('too large'))return '图片太大，请上传不超过 15MB 的图片。';if(status===400&&detail.includes('invalid image'))return '这个文件不是可读取的图片。';if(status>=500)return '服务暂时异常，请稍后重试。';if(status===400)return '提交的内容无法处理，请检查后重试。';if(status===401||status===403)return '当前请求无权处理。';return `请求失败（HTTP ${status}），请稍后重试。`}
-async function request(url,options,timeoutMs,timeoutMessage){const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),timeoutMs);try{const response=await fetch(url,{...options,signal:controller.signal});const contentType=response.headers.get('content-type')||'';let data={};if(contentType.includes('application/json')){try{data=await response.json()}catch(_error){data={}}}else{await response.text()}if(!response.ok)throw new Error(safeHttpError(response.status,data));if(!contentType.includes('application/json'))throw new Error('服务返回格式异常，请稍后重试。');return data}catch(error){if(error.name==='AbortError')throw new Error(timeoutMessage);if(error instanceof TypeError)throw new Error('无法连接本地服务，请确认 Demo 正在运行后重试。');throw error}finally{clearTimeout(timer)}}
-async function sendText(){const value=text.value.trim();if(!value||isBusy)return;add(value,true);text.value='';resizeComposer();busy(true);setStatus('working','正在回答…');try{const data=await request('/api/message',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:value})},TEXT_TIMEOUT_MS,'请求等待时间过长，请稍后重试。');add(data.text,false,data.images||[]);setStatus('ready','Agent 已就绪')}catch(error){add(error.message||'暂时无法处理，请再试一次。');setStatus('error','处理失败，请重试')}finally{busy(false);text.focus()}}
-async function uploadImage(selected){if(isBusy)return;const validationError=validateImage(selected);if(validationError){add(validationError);file.value='';return}const preview=URL.createObjectURL(selected),historyIndex=chatHistory.length;add('我发了一张题图。',true,[preview],'已上传题图');const pending=add('正在识别题图，请稍等…',false,[],'题库候选题',false);file.value='';busy(true);setStatus('working','正在识别题图…');try{const data=await request('/api/image',{method:'POST',headers:{'x-filename':selected.name,'content-type':selected.type},body:selected},IMAGE_TIMEOUT_MS,'题图识别时间过长。原图已保留，你可以直接回复“重试”。');if(isPersistentImage(data.uploaded_image)&&chatHistory[historyIndex]){chatHistory[historyIndex].images=[data.uploaded_image];saveHistory()}finishPending(pending,data.text,data.images||[]);setStatus('ready','Agent 已就绪')}catch(error){finishPending(pending,error.message||'图片暂时无法处理，请再试一次。');setStatus('error','识别失败，请重试')}finally{busy(false);text.focus()}}
-function hideDropOverlay(){dragDepth=0;dropOverlay.classList.remove('is-visible');dropOverlay.setAttribute('aria-hidden','true')}
-function hasDraggedFiles(event){return Array.from(event.dataTransfer?.types||[]).includes('Files')}
-async function resetConversation(){if(isBusy)return;busy(true);setStatus('working','正在创建新对话…');try{await request('/api/reset',{method:'POST'},TEXT_TIMEOUT_MS,'新对话创建超时，请稍后重试。');clearHistory();chat.replaceChildren();empty.hidden=false;setStatus('ready','Agent 已就绪')}catch(error){add(error.message||'新对话创建失败，请稍后重试。');setStatus('error','新对话创建失败')}finally{busy(false);text.focus()}}
-async function checkHealth(){try{await request('/health',{},5000,'服务连接超时。');if(!isBusy)setStatus('ready','Agent 已就绪')}catch(_error){setStatus('error','服务未连接')}}
-form.addEventListener('submit',event=>{event.preventDefault();sendText()});text.addEventListener('input',()=>{resizeComposer();updateComposer()});text.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing&&event.keyCode!==229){event.preventDefault();sendText()}});attach.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();file.click()}});file.addEventListener('change',()=>uploadImage(file.files[0]));document.addEventListener('dragenter',event=>{if(!hasDraggedFiles(event))return;event.preventDefault();if(isBusy)return;dragDepth+=1;dropOverlay.classList.add('is-visible');dropOverlay.setAttribute('aria-hidden','false')});document.addEventListener('dragover',event=>{if(!hasDraggedFiles(event))return;event.preventDefault();if(event.dataTransfer)event.dataTransfer.dropEffect=isBusy?'none':'copy'});document.addEventListener('dragleave',event=>{if(!hasDraggedFiles(event))return;event.preventDefault();if(isBusy)return;dragDepth=Math.max(0,dragDepth-1);if(!dragDepth)hideDropOverlay()});document.addEventListener('drop',event=>{if(!hasDraggedFiles(event))return;event.preventDefault();const selected=event.dataTransfer?.files?.[0];hideDropOverlay();if(!isBusy)uploadImage(selected)});window.addEventListener('blur',hideDropOverlay);window.addEventListener('offline',()=>setStatus('error','网络已断开'));window.addEventListener('online',checkHealth);newChat.addEventListener('click',resetConversation);if('ResizeObserver'in window)new ResizeObserver(syncComposerSpace).observe(composerWrap);window.addEventListener('resize',syncComposerSpace);restoreHistory();repairUploadedImageHistory();resizeComposer();syncComposerSpace();updateComposer();checkHealth();
-</script></body></html>"""

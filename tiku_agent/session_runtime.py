@@ -61,15 +61,28 @@ class AgentSessionRuntime:
 
     def resolve_upload(self, session_id: str, filename: str) -> Path | None:
         """Resolve one session-owned upload without exposing arbitrary paths."""
+        return self._resolve_artifact(session_id, "uploads", filename)
+
+    def persist_media(self, session_id: str, source: str | Path) -> Path | None:
+        """Keep candidate/answer media available for the live conversation."""
+        clean_session_id = self._clean_session_id(session_id)
+        if self.store.load(clean_session_id) is None:
+            return None
+        return self.artifacts.persist_media(clean_session_id, source)
+
+    def resolve_media(self, session_id: str, filename: str) -> Path | None:
+        return self._resolve_artifact(session_id, "media", filename)
+
+    def _resolve_artifact(self, session_id: str, folder: str, filename: str) -> Path | None:
         clean_session_id = self._clean_session_id(session_id)
         if self.store.load(clean_session_id) is None:
             return None
         safe_name = Path(str(filename)).name
         if not safe_name or safe_name != str(filename):
             return None
-        upload_dir = (self.artifacts.session_dir(clean_session_id) / "uploads").resolve()
-        target = (upload_dir / safe_name).resolve()
-        if target.parent != upload_dir or not target.is_file():
+        artifact_dir = (self.artifacts.session_dir(clean_session_id) / folder).resolve()
+        target = (artifact_dir / safe_name).resolve()
+        if target.parent != artifact_dir or not target.is_file():
             return None
         return target
 

@@ -88,6 +88,11 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.assertEqual(restarted_runtime.resolve_upload(session_id, persisted_image.name), persisted_image.resolve())
         self.assertIsNone(restarted_runtime.resolve_upload(session_id, "../" + persisted_image.name))
         self.assertIsNone(restarted_runtime.resolve_upload("another-session", persisted_image.name))
+        persisted_media = restarted_runtime.persist_media(session_id, self.source_image)
+        self.assertIsNotNone(persisted_media)
+        self.assertTrue(persisted_media.is_file())
+        self.assertEqual(restarted_runtime.resolve_media(session_id, persisted_media.name), persisted_media.resolve())
+        self.assertIsNone(restarted_runtime.resolve_media("another-session", persisted_media.name))
         answer = restarted_runtime.handle_text(session_id, "就这个")
 
         self.assertEqual(answer.state["phase"], "ANSWERED")

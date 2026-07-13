@@ -31,6 +31,18 @@ class SessionArtifacts:
         shutil.copy2(source_path, target)
         return target
 
+    def persist_media(self, session_id: str, source: str | Path) -> Path:
+        """Copy one user-visible candidate or answer into session storage."""
+        source_path = Path(source)
+        if not source_path.is_file():
+            raise FileNotFoundError(f"media file not found: {source_path}")
+        target_dir = self.session_dir(session_id) / "media"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        suffix = source_path.suffix.lower() or ".bin"
+        target = target_dir / f"{uuid4().hex}{suffix}"
+        shutil.copy2(source_path, target)
+        return target
+
     def clear_session(self, session_id: str) -> None:
         target = self.session_dir(session_id)
         if target.parent != self.root:
