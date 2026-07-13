@@ -55,6 +55,8 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertIn("HISTORY_KEY='tiku-agent-current-chat-v1'", page.text)
         self.assertIn("HISTORY_TTL_MS=2*60*60*1000", page.text)
         self.assertIn("HISTORY_LIMIT=50", page.text)
+        self.assertIn("let chatHistory=[]", page.text)
+        self.assertNotIn("let history=[]", page.text)
         self.assertIn("restoreHistory()", page.text)
         self.assertIn("clearHistory()", page.text)
         self.assertIn("!url.startsWith('blob:')", page.text)
