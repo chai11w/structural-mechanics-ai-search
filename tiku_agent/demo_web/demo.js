@@ -28,7 +28,7 @@ const HISTORY_TTL_MS = 2 * 60 * 60 * 1000;
 const HISTORY_LIMIT = 50;
 const HISTORY_KEY = 'tiku-agent-current-chat-v2';
 const LEGACY_HISTORY_KEY = 'tiku-agent-current-chat-v1';
-const ALLOWED_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'jfif', 'pjpeg', 'pjp', 'webp', 'gif', 'bmp', 'heic', 'heif', 'hif']);
+const ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp']);
 
 let history = [];
 let isBusy = false;
@@ -271,11 +271,8 @@ function setBusy(value) {
 function validateImage(file) {
   if (!file) return '没有读取到图片，请重新选择。';
   const extension = file.name.split('.').pop()?.toLowerCase();
-  const normalizedType = String(file.type || '').toLowerCase();
-  const hasImageType = normalizedType.startsWith('image/');
-  const hasImageExtension = ALLOWED_EXTENSIONS.has(extension);
-  const hasAmbiguousMetadata = !normalizedType || normalizedType === 'application/octet-stream';
-  if (!hasImageType && !hasImageExtension && !hasAmbiguousMetadata) return '请选择常见格式的图片文件。';
+  const allowedExtension = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'].includes(extension);
+  if (!ALLOWED_TYPES.has(file.type) || !allowedExtension) return '请上传 PNG、JPG、WEBP、GIF 或 BMP 图片。';
   if (file.size > MAX_IMAGE_BYTES) return '图片太大，请上传不超过 15MB 的图片。';
   return '';
 }
@@ -379,10 +376,7 @@ async function uploadImage(selected) {
   setStatus('working', '正在识别题图…');
   try {
     const data = await request('/api/image', {
-      method: 'POST', headers: {
-        'x-filename': selected.name,
-        'content-type': selected.type || 'application/octet-stream',
-      }, body: selected,
+      method: 'POST', headers: { 'x-filename': selected.name, 'content-type': selected.type }, body: selected,
     }, IMAGE_TIMEOUT_MS, '题图识别时间过长。原图已保留，你可以直接回复“重试”。');
     if (operation !== operationVersion) return;
     if (isPersistentImage(data.uploaded_image) && history[historyIndex]) {
