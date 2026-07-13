@@ -169,6 +169,14 @@ def parse_user_intent(
     if implied_choice is not None:
         return implied_choice
 
+    followup_question = _multi_question_followup_choice(
+        clean,
+        state=state,
+        question_count=question_count,
+    )
+    if followup_question is not None:
+        return followup_question
+
     if use_llm:
         try:
             payload = (llm_client or call_qwen_intent)(
@@ -383,7 +391,7 @@ def validate_intent_payload(
             return IntentResult("unsupported", ok=False, data=data, error="题号无法识别。", source=source)
         if question_count is not None and not 1 <= question_index <= question_count:
             return IntentResult("unsupported", ok=False, data=data, error=f"题号超出范围：{question_index}", source=source)
-        if state not in {STATE_IDLE, STATE_WAIT_QUESTION_CHOICE}:
+        if state not in {STATE_IDLE, STATE_WAIT_QUESTION_CHOICE, STATE_ANSWERED}:
             return IntentResult("unsupported", ok=False, data=data, error="当前状态不允许选择多题题号。", source=source)
         chapter = parse_chapter(str(payload.get("chapter") or ""))
         data.update({"question_index": question_index, "chapter_override": chapter})
@@ -430,6 +438,9 @@ def parse_user_intent_rule_fallback(
             return IntentResult("set_chapter", data={"chapter": chapter}, source="rule_fallback")
     if state == STATE_WAIT_QUESTION_CHOICE:
         return _parse_question_choice(clean, question_count)
+    followup_question = _multi_question_followup_choice(clean, state=state, question_count=question_count)
+    if followup_question is not None:
+        return followup_question
     if state in {STATE_WAIT_CANDIDATE_CHOICE, STATE_ANSWERED}:
         return _parse_candidate_choice(clean, candidate_count)
     return IntentResult("unsupported", ok=False, error="LLM 不可用，规则 fallback 无法理解这条指令。", source="rule_fallback")
@@ -545,6 +556,39 @@ def _parse_question_choice(text: str, question_count: int | None) -> IntentResul
         "select_question",
         data={"question_index": question_index, "chapter_override": chapter_override},
         source="rule_fallback",
+    )
+
+
+def _multi_question_followup_choice(
+    text: str,
+    *,
+    state: str,
+    question_count: int | None,
+) -> IntentResult | None:
+    """Recognize a request to continue with another item after an answer.
+
+    A bare ``第二个`` remains a candidate choice on the answered page.  A
+    question label (``第二题``) or an explicit search verb (``查第二个``)
+    clearly refers back to the original multi-question image instead.
+    """
+    if state != STATE_ANSWERED or not question_count or question_count < 2:
+        return None
+    question_index = parse_question_index(text)
+    if question_index is None and re.search(r"(?:查|搜|检索)", text):
+        # Do not use the generic ordinal parser here: in “查一下第二个” it
+        # can mistakenly read “一下” as the first ordinal.  Require the
+        # number attached to “个” or “题”.
+        match = re.search(r"第?\s*([0-9一二两三四五六七八九十]+)\s*(?:个|题)", text)
+        if match:
+            question_index = chinese_number_to_int(match.group(1))
+    if question_index is None:
+        return None
+    if not 1 <= question_index <= question_count:
+        return IntentResult("unsupported", ok=False, error=f"题号超出范围：{question_index}", source="rule_followup_question")
+    return IntentResult(
+        "select_question",
+        data={"question_index": question_index, "chapter_override": None},
+        source="rule_followup_question",
     )
 
 

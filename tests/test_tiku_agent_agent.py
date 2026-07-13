@@ -284,6 +284,36 @@ class TikuSearchAgentTest(unittest.TestCase):
 
         self.assertEqual(rerank_inputs, [None])
 
+    def test_answered_multi_question_can_switch_to_next_question_naturally(self):
+        fake = FakeTools(chapter="")
+        fake.analyze_multi_image = lambda image_path, *, config=None: ToolResult(
+            ok=True,
+            data={
+                "is_multi": True,
+                "questions": [
+                    {"label": "1", "loads": [{"type": "集中", "raw": "P"}], "chapter": "4力法", "question_image_path": "crop1.jpg"},
+                    {"label": "2", "loads": [{"type": "均布", "raw": "q"}], "chapter": "4力法", "question_image_path": "crop2.jpg"},
+                ],
+            },
+        )
+        fake.prepare_question_units = lambda image_path, questions, *, config=None: ToolResult(
+            ok=True,
+            data={"questions": questions, "diagram_crops": {"1": "crop1.jpg", "2": "crop2.jpg"}},
+        )
+        agent = self.make_agent(fake)
+
+        agent.handle_image("multi.jpg")
+        agent.handle_text("第一题")
+        agent.handle_text("1")
+        response = agent.handle_text("那再帮我查一下第二个")
+
+        self.assertEqual(agent.state.phase, STATE_WAIT_CANDIDATE_CHOICE)
+        self.assertEqual(agent.state.selected_question, 2)
+        self.assertEqual(agent.state.active_image_path, "crop2.jpg")
+        self.assertEqual(agent.state.last_answer_paths, [])
+        self.assertEqual(fake.search_chapters, ["4力法", "4力法"])
+        self.assertIn("比较像", response.text)
+
 
 if __name__ == "__main__":
     unittest.main()

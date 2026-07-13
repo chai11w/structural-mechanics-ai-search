@@ -156,6 +156,30 @@ class TikuAgentIntentTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.intent, "resend_answer")
 
+    def test_answered_multi_question_can_continue_with_search_language(self):
+        result = parse_user_intent(
+            "那再帮我查一下第二个",
+            state="ANSWERED",
+            candidate_count=2,
+            question_count=2,
+            llm_client=lambda _prompt: self.fail("explicit follow-up should not call LLM"),
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.intent, "select_question")
+        self.assertEqual(result.data["question_index"], 2)
+        self.assertEqual(result.source, "rule_followup_question")
+
+    def test_answered_multi_question_keeps_bare_ordinal_for_candidate_choice(self):
+        result = parse_user_intent_rule_fallback(
+            "第二个",
+            state="ANSWERED",
+            candidate_count=2,
+            question_count=2,
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.intent, "select_candidate")
+        self.assertEqual(result.data["rank"], 2)
+
     def test_failure_explanation_is_understood_without_llm(self):
         result = parse_user_intent(
             "为啥失败",
