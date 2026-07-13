@@ -46,6 +46,8 @@ DEFAULT_MODEL = "qwen3.7-plus"
 DEFAULT_ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 CHAPTERS = ["2静定结构", "3静定结构位移", "4力法", "5位移法", "6力矩分配", "7矩阵位移", "8影响线"]
 CHAPTER_UNKNOWN = "unknown"
+TRANSIENT_HTTP_STATUS = {429, 500, 502, 503, 504}
+HTTP_RETRY_DELAYS = (0.5, 1.0)
 CHAPTER_TRIGGER_WORDS = {
     "2静定结构": ["静定结构", "静定梁", "静定刚架", "静定钢架", "静定桁架"],
     "3静定结构位移": ["静定结构位移", "图乘法", "单位荷载法"],
@@ -423,6 +425,28 @@ def image_to_data_url(path: Path, upscale_min_side: int = 900) -> str:
     return f"data:{mime};base64,{data}"
 
 
+def request_json_with_retry(
+    request: urllib.request.Request,
+    *,
+    timeout: int,
+    retry_delays: tuple[float, ...] = HTTP_RETRY_DELAYS,
+) -> dict:
+    """Read JSON from an HTTP request and retry only transient upstream failures."""
+
+    for attempt in range(len(retry_delays) + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code not in TRANSIENT_HTTP_STATUS or attempt >= len(retry_delays):
+                raise
+        except (TimeoutError, urllib.error.URLError):
+            if attempt >= len(retry_delays):
+                raise
+        time.sleep(retry_delays[attempt])
+    raise RuntimeError("HTTP retry loop exhausted")  # pragma: no cover
+
+
 def qwen_extract_loads(image_path: Path, *, model: str, endpoint: str, api_key: str, timeout: int) -> dict:
     payload = {
         "model": model,
@@ -450,8 +474,7 @@ def qwen_extract_loads(image_path: Path, *, model: str, endpoint: str, api_key: 
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    data = request_json_with_retry(req, timeout=timeout)
 
     content = data["choices"][0]["message"]["content"]
     parsed = parse_model_json(content)
@@ -503,8 +526,7 @@ def qwen_analyze_layout(image_path: Path, *, model: str, endpoint: str, api_key:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    data = request_json_with_retry(req, timeout=timeout)
 
     content = data["choices"][0]["message"]["content"]
     parsed = parse_model_json(content)
@@ -528,8 +550,7 @@ def qwen_analyze_image_scope(image_path: Path, *, model: str, endpoint: str, api
     }
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(endpoint, data=body, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    data = request_json_with_retry(req, timeout=timeout)
     content = data["choices"][0]["message"]["content"]
     result = normalize_image_scope_result(parse_model_json(content))
     result["raw_content"] = content
@@ -572,8 +593,7 @@ def qwen_locate_diagram(
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    data = request_json_with_retry(req, timeout=timeout)
 
     content = data["choices"][0]["message"]["content"]
     parsed = parse_model_json(content)
@@ -632,8 +652,7 @@ def qwen_verify_diagram(
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    data = request_json_with_retry(req, timeout=timeout)
     content = data["choices"][0]["message"]["content"]
     parsed = parse_model_json(content)
     confidence = normalize_chapter_confidence(parsed.get("confidence"))

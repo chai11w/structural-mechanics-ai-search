@@ -83,6 +83,8 @@ class TikuSearchAgent:
         return self._dispatch(intent)
 
     def handle_text(self, text: str) -> AgentResponse:
+        if self.state.phase == PHASE_ERROR and text.strip() in {"重试", "再试", "再试一次"} and self.state.current_image_path:
+            return self._start_image_search(self.state.current_image_path)
         intent = self.intent_parser(
             text,
             state=self.state.phase,

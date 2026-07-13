@@ -1,4 +1,6 @@
 import unittest
+import urllib.error
+from unittest.mock import patch
 
 import search
 from multi_agent_pipeline import RuleRouter
@@ -8,10 +10,39 @@ from scripts.classify_question_bank import (
     SYSTEM_PROMPT as CLASSIFIER_SYSTEM_PROMPT,
     guard_chapter_prediction,
     normalize_image_scope_result,
+    request_json_with_retry,
 )
 
 
 class AssignedSymbolicRoutingTest(unittest.TestCase):
+    def test_transient_http_500_is_retried(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"ok": true}'
+
+        failure = urllib.error.HTTPError("https://example.test", 500, "server error", {}, None)
+        with patch("scripts.classify_question_bank.urllib.request.urlopen", side_effect=[failure, Response()]) as opened, patch(
+            "scripts.classify_question_bank.time.sleep"
+        ):
+            result = request_json_with_retry(object(), timeout=3, retry_delays=(0.01,))
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(opened.call_count, 2)
+
+    def test_non_transient_http_400_is_not_retried(self):
+        failure = urllib.error.HTTPError("https://example.test", 400, "bad request", {}, None)
+        with patch("scripts.classify_question_bank.urllib.request.urlopen", side_effect=failure) as opened:
+            with self.assertRaises(urllib.error.HTTPError):
+                request_json_with_retry(object(), timeout=3, retry_delays=(0.01,))
+
+        self.assertEqual(opened.call_count, 1)
+
     def test_fast_scope_prompt_preserves_repeated_independent_loads(self):
         self.assertIn("不要把相同标注的多个荷载合并", IMAGE_SCOPE_PROMPT)
         self.assertIn("三个分别标为 Fp", IMAGE_SCOPE_PROMPT)

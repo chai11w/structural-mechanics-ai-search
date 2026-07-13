@@ -48,8 +48,10 @@ def render_unsupported(message: str = "") -> str:
 
 
 def render_error(error: str) -> str:
-    del error
-    return "这次没查成功。重新发一下题图，我们再试一次。"
+    detail = _safe_failure_detail(error)
+    if "HTTP Error 5" in str(error) or "timed out" in str(error).lower() or "timeout" in str(error).lower():
+        return f"题图识别服务暂时异常（{detail}）。题图已保留，你可以直接回复“重试”。"
+    return "这次没查成功。题图已保留，你可以直接回复“重试”。"
 
 
 def render_failure_explanation(state: AgentState) -> str:

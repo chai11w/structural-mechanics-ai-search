@@ -41,6 +41,8 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(page.headers["cache-control"], "no-store")
         self.assertIn("URL.createObjectURL(selected)", page.text)
         self.assertIn("已上传题图", page.text)
+        self.assertIn("正在识别题图，请稍等", page.text)
+        self.assertIn("finishPending", page.text)
         text_response = client.post("/api/message", json={"text": "就这个"})
         self.assertEqual(text_response.status_code, 200)
         self.assertEqual(text_response.json()["text"], "我明白了。")

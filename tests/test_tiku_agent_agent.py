@@ -1,7 +1,7 @@
 import unittest
 
 from tiku_agent.agent import AgentToolbox, TikuSearchAgent
-from tiku_agent.state import PHASE_ANSWERED, STATE_WAIT_CANDIDATE_CHOICE, STATE_WAIT_CHAPTER
+from tiku_agent.state import PHASE_ANSWERED, PHASE_ERROR, STATE_WAIT_CANDIDATE_CHOICE, STATE_WAIT_CHAPTER
 from tiku_agent.tools import AgentToolConfig, ToolResult
 
 
@@ -134,6 +134,33 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.current_chapter, "")
         self.assertEqual(fake.search_chapters, [])
         self.assertIn("不能确定", response.text)
+
+    def test_retry_text_reuses_saved_image_after_transient_failure(self):
+        class RetryTools(FakeTools):
+            def __init__(self):
+                super().__init__(chapter="4力法")
+                self.fail_once = True
+
+            def analyze_multi_image(self, image_path, *, config=None):
+                return ToolResult(ok=True, data={"is_multi": False, "questions": []})
+
+            def analyze_image(self, image_path, *, chapter="auto", config=None, include_layout=False):
+                if self.fail_once:
+                    self.fail_once = False
+                    return ToolResult(ok=False, error="HTTP Error 500: Internal Server Error")
+                return super().analyze_image(image_path, chapter=chapter, config=config, include_layout=include_layout)
+
+        fake = RetryTools()
+        agent = self.make_agent(fake)
+
+        failed = agent.handle_image("saved-question.jpg")
+        self.assertEqual(agent.state.phase, PHASE_ERROR)
+        self.assertIn("直接回复“重试”", failed.text)
+
+        retried = agent.handle_text("重试")
+        self.assertEqual(agent.state.phase, STATE_WAIT_CANDIDATE_CHOICE)
+        self.assertEqual(agent.state.current_image_path, "saved-question.jpg")
+        self.assertIn("比较像", retried.text)
 
     def test_select_answer_and_resend_answer(self):
         fake = FakeTools(chapter="4力法")
