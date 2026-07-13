@@ -306,15 +306,9 @@ function imageFromObjectUrl(url) {
   });
 }
 
-async function normalizeImage(selected) {
+async function normalizeImage(selected, sourceUrl) {
   debugUploadMetadata('selected', selected);
-  const sourceUrl = URL.createObjectURL(selected);
-  let image;
-  try {
-    image = await imageFromObjectUrl(sourceUrl);
-  } finally {
-    URL.revokeObjectURL(sourceUrl);
-  }
+  const image = await imageFromObjectUrl(sourceUrl);
   if (!image.naturalWidth || !image.naturalHeight) throw new Error('裁剪处理失败，请重新选择图片。');
   const canvas = document.createElement('canvas');
   canvas.width = image.naturalWidth;
@@ -415,14 +409,31 @@ async function sendText() {
   await sendTextValue(textInput.value);
 }
 
-function addUploadFailure(message, prepared) {
-  const row = addMessage({
-    message: `${message} 裁剪后的图片已保留，可直接重新上传。`,
+function addLocalUploadPreview(preview) {
+  return addMessage({
+    message: '题图处理中…',
     me: true,
-    images: [prepared.preview],
-    imageAlt: '待重新上传的题图',
-    variant: 'error',
+    images: [preview],
+    imageAlt: '待上传的题图',
+    variant: 'upload-pending',
   }, false);
+}
+
+function setUploadRowStatus(row, message, variant = '') {
+  row.classList.remove('upload-pending', 'error');
+  if (variant) row.classList.add(variant);
+  const paragraph = row.querySelector('.message-text');
+  if (paragraph) paragraph.textContent = message;
+  row.querySelector('.retry-upload')?.remove();
+}
+
+function setUploadRowPreview(row, url) {
+  const image = row.querySelector('img');
+  if (image) image.src = url;
+}
+
+function addUploadFailure(row, message, prepared) {
+  setUploadRowStatus(row, `${message} 裁剪后的图片已保留，可直接重新上传。`, 'error');
   const retry = document.createElement('button');
   retry.type = 'button';
   retry.className = 'retry-upload';
@@ -432,9 +443,9 @@ function addUploadFailure(message, prepared) {
   return row;
 }
 
-async function submitPreparedImage(prepared, retryRow = null) {
+async function submitPreparedImage(prepared, uploadRow) {
   if (isBusy) return;
-  retryRow?.remove();
+  setUploadRowStatus(uploadRow, '题图正在上传…', 'upload-pending');
   const operation = ++operationVersion;
   const pending = addMessage({ message: '正在上传并识别题干', variant: 'pending' }, false);
   setBusy(true);
@@ -449,7 +460,9 @@ async function submitPreparedImage(prepared, retryRow = null) {
     if (operation !== operationVersion) return;
     if (!isPersistentImage(data.uploaded_image)) throw new Error('服务端处理失败，未返回已上传的题图。');
     pending.remove();
-    addMessage({ message: '我发了一张题图。', me: true, images: [data.uploaded_image], imageAlt: '已上传题图' });
+    setUploadRowPreview(uploadRow, data.uploaded_image);
+    setUploadRowStatus(uploadRow, '我发了一张题图。');
+    remember({ message: '我发了一张题图。', me: true, images: [data.uploaded_image], imageAlt: '已上传题图' });
     releaseObjectUrl(prepared.preview);
     clearPendingUpload({ releasePreview: false });
     addMessage(responseItem(data));
@@ -457,7 +470,7 @@ async function submitPreparedImage(prepared, retryRow = null) {
   } catch (error) {
     if (operation !== operationVersion) return;
     pending.remove();
-    addUploadFailure(error.message || '服务端处理失败，请稍后重试。', prepared);
+    addUploadFailure(uploadRow, error.message || '服务端处理失败，请稍后重试。', prepared);
     setStatus('error', '上传失败，可直接重试');
   } finally {
     if (operation !== operationVersion) return;
@@ -479,27 +492,32 @@ async function uploadImage(selected) {
     addMessage({ message: validationError, variant: 'error' });
     return;
   }
+  const sourcePreview = URL.createObjectURL(selected);
+  objectUrls.add(sourcePreview);
+  const uploadRow = addLocalUploadPreview(sourcePreview);
   const operation = ++operationVersion;
   setBusy(true);
   setStatus('working', '正在处理题图…');
   try {
-    const prepared = await normalizeImage(selected);
+    const prepared = await normalizeImage(selected, sourcePreview);
     if (operation !== operationVersion) {
       releaseObjectUrl(prepared.preview);
       return;
     }
+    setUploadRowPreview(uploadRow, prepared.preview);
+    releaseObjectUrl(sourcePreview);
     clearPendingUpload();
     pendingUpload = prepared;
   } catch (error) {
     if (operation === operationVersion) {
-      addMessage({ message: error.message || '裁剪处理失败，请重新选择图片。', variant: 'error' });
+      setUploadRowStatus(uploadRow, error.message || '裁剪处理失败，请重新选择图片。', 'error');
       setStatus('error', '图片处理失败');
     }
     return;
   } finally {
     if (operation === operationVersion) setBusy(false);
   }
-  if (operation === operationVersion) await submitPreparedImage(pendingUpload);
+  if (operation === operationVersion) await submitPreparedImage(pendingUpload, uploadRow);
 }
 
 function openDrawer() {
