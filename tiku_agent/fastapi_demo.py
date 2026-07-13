@@ -166,12 +166,27 @@ def _set_session_cookie(response: Response, session_id: str, *, secure_cookie: b
 
 
 def _write_incoming_image(content: bytes, filename: str) -> Path:
-    """Decode external bytes and normalize supported mobile images to a safe JPEG."""
+    """Verify actual image bytes and convert only formats the existing flow cannot consume."""
     INCOMING_DIR.mkdir(parents=True, exist_ok=True)
-    output = INCOMING_DIR / f"{uuid4().hex}.jpg"
+    output: Path | None = None
     try:
         with Image.open(BytesIO(content)) as source:
-            source.seek(0)
+            image_format = str(source.format or "").upper()
+            source.verify()
+        standard_suffix = {
+            "JPEG": ".jpg",
+            "PNG": ".png",
+            "WEBP": ".webp",
+            "GIF": ".gif",
+            "BMP": ".bmp",
+        }.get(image_format)
+        if standard_suffix:
+            output = INCOMING_DIR / f"{uuid4().hex}{standard_suffix}"
+            output.write_bytes(content)
+            return output
+
+        output = INCOMING_DIR / f"{uuid4().hex}.jpg"
+        with Image.open(BytesIO(content)) as source:
             image = ImageOps.exif_transpose(source)
             image.load()
             if image.mode in {"RGBA", "LA"} or (image.mode == "P" and "transparency" in image.info):
@@ -183,7 +198,8 @@ def _write_incoming_image(content: bytes, filename: str) -> Path:
                 image = image.convert("RGB")
             image.save(output, format="JPEG", quality=95, optimize=True)
     except Exception as exc:  # noqa: BLE001 - external input boundary.
-        output.unlink(missing_ok=True)
+        if output is not None:
+            output.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="invalid image") from exc
     return output
 

@@ -105,10 +105,10 @@ class FastApiDemoTest(unittest.TestCase):
 
         normalized = _write_incoming_image(buffer.getvalue(), "微信裁剪临时文件.tmp")
         self.addCleanup(lambda: normalized.unlink(missing_ok=True))
-        self.assertEqual(normalized.suffix, ".jpg")
+        self.assertEqual(normalized.suffix, ".png")
+        self.assertEqual(normalized.read_bytes(), buffer.getvalue())
         with Image.open(normalized) as image:
-            self.assertEqual(image.format, "JPEG")
-            self.assertEqual(image.mode, "RGB")
+            self.assertEqual(image.format, "PNG")
 
         heif_buffer = io.BytesIO()
         Image.new("RGB", (4, 4), "white").save(heif_buffer, format="HEIF")
