@@ -235,6 +235,22 @@ class TikuSearchAgentTest(unittest.TestCase):
 
         self.assertIn("没太明白", response.text)
 
+    def test_greeting_introduces_agent_without_resetting_search_state(self):
+        fake = FakeTools(chapter="4力法")
+        agent = self.make_agent(fake)
+        agent.handle_image("q.jpg")
+        phase_before = agent.state.phase
+        candidates_before = list(agent.state.candidates)
+
+        response = agent.handle_text("你好啊")
+
+        self.assertEqual(response.intent, "greeting")
+        self.assertIn("我是力答", response.text)
+        self.assertIn("结构力学题库", response.text)
+        self.assertIn("发一张结构力学题图", response.text)
+        self.assertEqual(agent.state.phase, phase_before)
+        self.assertEqual(agent.state.candidates, candidates_before)
+
     def test_explains_sanitized_failure_reason_on_request(self):
         agent = self.make_agent(FakeTools(chapter="4力法"))
         agent.state.fail("Request timed out while reading C:\\private\\question.jpg")

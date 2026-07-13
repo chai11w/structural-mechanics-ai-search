@@ -7,6 +7,14 @@ import re
 from tiku_agent.state import AgentState
 
 
+def render_greeting() -> str:
+    return (
+        "你好，我是力答，一个结构力学题库搜题助手。"
+        "我可以识别你发来的题图、判断题目章节、从题库寻找相似题，并返回对应答案。"
+        "发一张结构力学题图给我看看吧。"
+    )
+
+
 def render_chapter_prompt(state: AgentState) -> str:
     return "我还不能确定这题属于哪一章。你知道的话告诉我就行。"
 

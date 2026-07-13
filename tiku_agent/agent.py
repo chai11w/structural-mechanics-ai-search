@@ -104,6 +104,8 @@ class TikuSearchAgent:
             return self._response(render.render_resend_answer(self.state), intent, images=self.state.last_answer_paths)
         if intent.intent == "explain_failure":
             return self._response(render.render_failure_explanation(self.state), intent)
+        if intent.intent == "greeting":
+            return self._response(render.render_greeting(), intent)
         if not intent.ok:
             return self._response(render.render_unsupported(intent.error), intent)
         if intent.intent == "search_image":

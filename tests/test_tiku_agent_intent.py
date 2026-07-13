@@ -14,6 +14,24 @@ from tiku_agent.intent import (
 
 
 class TikuAgentIntentTest(unittest.TestCase):
+    def test_standalone_greetings_are_recognized_without_llm(self):
+        for text in ("你好啊", "Hello啊", "在吗？", "晚上好！"):
+            with self.subTest(text=text):
+                result = parse_user_intent(
+                    text,
+                    state=STATE_IDLE,
+                    llm_client=lambda _prompt: self.fail("standalone greeting should not call LLM"),
+                )
+                self.assertTrue(result.ok)
+                self.assertEqual(result.intent, "greeting")
+                self.assertEqual(result.source, "rule_greeting")
+
+    def test_greeting_with_business_request_is_not_intercepted(self):
+        for text in ("你好，帮我搜这道题", "在吗？第三章怎么搜", "hello 请帮我找答案"):
+            with self.subTest(text=text):
+                result = parse_user_intent(text, state=STATE_IDLE, use_llm=False)
+                self.assertNotEqual(result.intent, "greeting")
+
     def test_image_path_event_becomes_search_image(self):
         result = parse_user_intent(state=STATE_IDLE, image_path=r"D:\tmp\q.jpg")
         self.assertTrue(result.ok)
