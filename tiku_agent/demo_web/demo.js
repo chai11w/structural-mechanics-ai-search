@@ -29,6 +29,7 @@ const HISTORY_LIMIT = 50;
 const HISTORY_KEY = 'tiku-agent-current-chat-v2';
 const LEGACY_HISTORY_KEY = 'tiku-agent-current-chat-v1';
 const ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp']);
+const ALLOWED_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp']);
 
 let history = [];
 let isBusy = false;
@@ -36,6 +37,7 @@ let dragDepth = 0;
 let activeController = null;
 let focusBeforeModal = null;
 let operationVersion = 0;
+let pendingUpload = null;
 const objectUrls = new Set();
 
 function isPersistentImage(url) {
@@ -59,6 +61,11 @@ function releaseObjectUrl(url) {
 function releaseAllObjectUrls() {
   objectUrls.forEach((url) => URL.revokeObjectURL(url));
   objectUrls.clear();
+}
+
+function clearPendingUpload({ releasePreview = true } = {}) {
+  if (releasePreview && pendingUpload?.preview) releaseObjectUrl(pendingUpload.preview);
+  pendingUpload = null;
 }
 
 function remember(item) {
@@ -236,6 +243,7 @@ async function repairUploadedImageHistory() {
 
 function clearHistory() {
   history = [];
+  clearPendingUpload();
   releaseAllObjectUrls();
   localStorage.removeItem(HISTORY_KEY);
   localStorage.removeItem(LEGACY_HISTORY_KEY);
@@ -270,24 +278,74 @@ function setBusy(value) {
 
 function validateImage(file) {
   if (!file) return '没有读取到图片，请重新选择。';
-  const extension = file.name.split('.').pop()?.toLowerCase();
-  const allowedExtension = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'].includes(extension);
-  if (!ALLOWED_TYPES.has(file.type) || !allowedExtension) return '请上传 PNG、JPG、WEBP、GIF 或 BMP 图片。';
+  const name = String(file.name || '');
+  const extension = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+  const normalizedType = String(file.type || '').toLowerCase();
+  const ambiguousType = !normalizedType || normalizedType === 'application/octet-stream';
+  if (!ALLOWED_TYPES.has(normalizedType) && (!ambiguousType || (extension && !ALLOWED_EXTENSIONS.has(extension)))) {
+    return '图片格式不支持，请上传 PNG、JPG、WEBP、GIF 或 BMP 图片。';
+  }
   if (file.size > MAX_IMAGE_BYTES) return '图片太大，请上传不超过 15MB 的图片。';
   return '';
+}
+
+function debugUploadMetadata(stage, value, filename = '') {
+  console.debug('[image-upload]', stage, {
+    name: value?.name || filename || '',
+    type: value?.type || '',
+    size: Number(value?.size || 0),
+  });
+}
+
+function imageFromObjectUrl(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('图片格式不支持，浏览器无法读取该图片。'));
+    image.src = url;
+  });
+}
+
+async function normalizeImage(selected) {
+  debugUploadMetadata('selected', selected);
+  const sourceUrl = URL.createObjectURL(selected);
+  let image;
+  try {
+    image = await imageFromObjectUrl(sourceUrl);
+  } finally {
+    URL.revokeObjectURL(sourceUrl);
+  }
+  if (!image.naturalWidth || !image.naturalHeight) throw new Error('裁剪处理失败，请重新选择图片。');
+  const canvas = document.createElement('canvas');
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('裁剪处理失败，请重新选择图片。');
+  context.fillStyle = '#fff';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92));
+  if (!blob) throw new Error('裁剪处理失败，请重新选择图片。');
+  if (blob.size > MAX_IMAGE_BYTES) throw new Error('图片太大，请上传不超过 15MB 的图片。');
+  const filename = `cropped_${Date.now()}.jpg`;
+  const preview = URL.createObjectURL(blob);
+  objectUrls.add(preview);
+  debugUploadMetadata('normalized', blob, filename);
+  return { blob, filename, preview };
 }
 
 function safeHttpError(status, data) {
   const detail = typeof data?.detail === 'string' ? data.detail.toLowerCase() : '';
   if (status === 413 || detail.includes('too large')) return '图片太大，请上传不超过 15MB 的图片。';
-  if (status === 400 && detail.includes('invalid image')) return '这个文件不是可读取的图片。';
-  if (status >= 500) return '服务暂时异常，请稍后重试。';
+  if (status === 415 || detail.includes('unsupported image')) return '图片格式不支持，请上传 PNG、JPG、WEBP、GIF 或 BMP 图片。';
+  if (status === 400 && detail.includes('invalid image')) return '服务端无法读取该图片，请检查图片后重试。';
+  if (status >= 500) return '服务端处理失败，请稍后重试。';
   if (status === 400) return '提交的内容无法处理，请检查后重试。';
   if (status === 401 || status === 403) return '当前请求无权处理。';
   return `请求失败（HTTP ${status}），请稍后重试。`;
 }
 
-async function request(url, options, timeoutMs, timeoutMessage, track = true) {
+async function request(url, options, timeoutMs, timeoutMessage, track = true, networkMessage = '') {
   const controller = new AbortController();
   if (track) activeController = controller;
   const timer = setTimeout(() => controller.abort('timeout'), timeoutMs);
@@ -308,7 +366,7 @@ async function request(url, options, timeoutMs, timeoutMessage, track = true) {
       if (controller.signal.reason === 'new-chat') throw new Error('当前识别已取消。');
       throw new Error(timeoutMessage);
     }
-    if (error instanceof TypeError) throw new Error('无法连接本地服务，请确认 Demo 正在运行后重试。');
+    if (error instanceof TypeError) throw new Error(networkMessage || '无法连接本地服务，请确认 Demo 正在运行后重试。');
     throw error;
   } finally {
     clearTimeout(timer);
@@ -357,46 +415,91 @@ async function sendText() {
   await sendTextValue(textInput.value);
 }
 
-async function uploadImage(selected) {
+function addUploadFailure(message, prepared) {
+  const row = addMessage({
+    message: `${message} 裁剪后的图片已保留，可直接重新上传。`,
+    me: true,
+    images: [prepared.preview],
+    imageAlt: '待重新上传的题图',
+    variant: 'error',
+  }, false);
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.className = 'retry-upload';
+  retry.textContent = '重新上传';
+  retry.addEventListener('click', () => retryUpload(row, prepared));
+  row.querySelector('.message-content')?.append(retry);
+  return row;
+}
+
+async function submitPreparedImage(prepared, retryRow = null) {
   if (isBusy) return;
-  const validationError = validateImage(selected);
-  if (validationError) {
-    addMessage({ message: validationError, variant: 'error' });
-    fileInput.value = '';
-    return;
-  }
-  const preview = URL.createObjectURL(selected);
-  objectUrls.add(preview);
-  const historyIndex = history.length;
-  const uploadRow = addMessage({ message: '我发了一张题图。', me: true, images: [preview], imageAlt: '已上传题图' });
-  const pending = addMessage({ message: '正在识别题干并检索相似题', variant: 'pending' }, false);
-  fileInput.value = '';
+  retryRow?.remove();
   const operation = ++operationVersion;
+  const pending = addMessage({ message: '正在上传并识别题干', variant: 'pending' }, false);
   setBusy(true);
   setStatus('working', '正在识别题图…');
   try {
+    const formData = new FormData();
+    formData.append('file', prepared.blob, prepared.filename);
+    debugUploadMetadata('form-data:file', prepared.blob, prepared.filename);
     const data = await request('/api/image', {
-      method: 'POST', headers: { 'x-filename': selected.name, 'content-type': selected.type }, body: selected,
-    }, IMAGE_TIMEOUT_MS, '题图识别时间过长。原图已保留，你可以直接回复“重试”。');
+      method: 'POST', body: formData,
+    }, IMAGE_TIMEOUT_MS, '网络上传或题图识别超时，请直接重新上传。', true, '网络上传失败，请检查网络后重试。');
     if (operation !== operationVersion) return;
-    if (isPersistentImage(data.uploaded_image) && history[historyIndex]) {
-      history[historyIndex].images = [data.uploaded_image];
-      const previewImage = uploadRow.querySelector('img');
-      if (previewImage) previewImage.src = data.uploaded_image;
-      releaseObjectUrl(preview);
-      saveHistory();
-    }
-    replacePending(pending, responseItem(data));
+    if (!isPersistentImage(data.uploaded_image)) throw new Error('服务端处理失败，未返回已上传的题图。');
+    pending.remove();
+    addMessage({ message: '我发了一张题图。', me: true, images: [data.uploaded_image], imageAlt: '已上传题图' });
+    releaseObjectUrl(prepared.preview);
+    clearPendingUpload({ releasePreview: false });
+    addMessage(responseItem(data));
     setStatus('ready', '准备就绪');
   } catch (error) {
     if (operation !== operationVersion) return;
-    replacePending(pending, { message: error.message || '图片暂时无法处理，请再试一次。', variant: 'error' });
-    setStatus('error', '识别失败，可重新上传');
+    pending.remove();
+    addUploadFailure(error.message || '服务端处理失败，请稍后重试。', prepared);
+    setStatus('error', '上传失败，可直接重试');
   } finally {
     if (operation !== operationVersion) return;
     setBusy(false);
     textInput.focus();
   }
+}
+
+async function retryUpload(row, prepared) {
+  if (pendingUpload !== prepared || isBusy) return;
+  await submitPreparedImage(prepared, row);
+}
+
+async function uploadImage(selected) {
+  if (isBusy) return;
+  const validationError = validateImage(selected);
+  fileInput.value = '';
+  if (validationError) {
+    addMessage({ message: validationError, variant: 'error' });
+    return;
+  }
+  const operation = ++operationVersion;
+  setBusy(true);
+  setStatus('working', '正在处理题图…');
+  try {
+    const prepared = await normalizeImage(selected);
+    if (operation !== operationVersion) {
+      releaseObjectUrl(prepared.preview);
+      return;
+    }
+    clearPendingUpload();
+    pendingUpload = prepared;
+  } catch (error) {
+    if (operation === operationVersion) {
+      addMessage({ message: error.message || '裁剪处理失败，请重新选择图片。', variant: 'error' });
+      setStatus('error', '图片处理失败');
+    }
+    return;
+  } finally {
+    if (operation === operationVersion) setBusy(false);
+  }
+  if (operation === operationVersion) await submitPreparedImage(pendingUpload);
 }
 
 function openDrawer() {

@@ -7,7 +7,7 @@
 - 独立 `tiku_agent/` 已完成工具层、LLM intent、对话状态和单题/多题 MVP；LangGraph checkpoint 与新飞书机器人尚未接入。
 - Agent 使用 `.tmp_tiku_agent`，现有飞书使用 `.tmp_feishu_tiku`；两套入口和运行状态必须持续隔离。
 - FastAPI Demo 监听 `127.0.0.1:8790`，通过独立 Cloudflare Tunnel 和稳定公网域名开放；电脑、Demo 和 tunnel 在线时公网可用。
-- Demo 当前代码内容已恢复到首次访问即建立会话、刷新可恢复题图的稳定版本；后来增加的微信裁剪/HEIC 兼容已整体撤销。
+- Demo 保留首次访问建会话和刷新恢复题图，并已修复微信裁剪产物缺少文件名/MIME 时的上传链路；HEIC/HEIF 仍不在支持范围。
 - 当前分支为 `codex/llm-rerank-support-filter`；`data/feishu_chapter_failure_log.jsonl` 有用户运行日志改动，禁止混入普通提交。
 
 ## Implemented
@@ -20,7 +20,7 @@
 - Intent 采用少量确定性规则、Qwen 动作判断、状态校验和规则降级；明确章节优先于模型结果。
 - SQLite 会话与 session 文件持久化已实现；最后活跃 2 小时过期，取消清理状态与临时文件。
 - 页面首次打开即创建会话 Cookie；首次上传后立即退出再进入、刷新或 Demo 重启时，两小时内可恢复会话绑定题图 URL。
-- Demo 已具备单会话聊天画布、移动端菜单、拖放上传、候选选择、大图预览、固定顶栏/输入区、中文安全错误和请求取消。
+- Demo 已具备单会话聊天画布、移动端菜单、拖放上传、候选选择、大图预览、固定顶栏/输入区、中文安全错误和请求取消；选图结果统一经 canvas 输出质量 0.92 的 JPEG Blob，以 `file` multipart 字段上传，失败保留预览和 Blob 可直接重试，成功响应后才显示用户题图。
 - 公网入口已关闭 OpenAPI，启用 HTTPS 重定向、安全 Cookie、CSP 与基础安全响应头，并展示云端识别和敏感信息提示。
 - 章节识别先提取 `visible_problem_text`：没有实际题干则 `unknown`；有题干才结合题干和题型判断章节。
 - 赋值符号荷载统一为无单位 `符号=数值`，进入主库；纯符号进入字母库。
@@ -37,7 +37,7 @@
 - 尚未引入 LangGraph 图或 checkpoint，也未创建、连接新的飞书机器人。
 - 复筛并发数、首轮超时和补评上限尚未配置化。
 - 缺少 pipeline 级超时回退、真实飞书事件和持久状态集成测试。
-- 微信内置浏览器裁剪后的临时图片兼容尚未实现；现有前端仍同时严格检查 MIME 与扩展名，空 MIME、`application/octet-stream`、HEIC/HEIF 可能被拒绝。
+- HEIC/HEIF 浏览器解码兼容尚未实现；当前支持 JPEG、PNG、WEBP、GIF、BMP，空 MIME 或 `application/octet-stream` 会先尝试按真实图片字节解码。
 - 公网访问次数限制、身份认证和滥用防护尚未启用。
 
 ## Architecture Rules
@@ -53,7 +53,7 @@
 
 ## Known Risks
 
-- 微信/荣耀裁剪文件的实际 `File.name`、`File.type` 和原始字节尚未采样确认；不要仅凭错误提示假定一定是 HEIC。
+- 微信/荣耀真机裁剪文件的实际 `File.name`、`File.type` 和原始字节仍未采样；当前以 Chromium 模拟无后缀、通用 MIME 的裁剪产物验证通过，但真机 canvas 内存、EXIF 方向和 HEIC 解码仍需实测。
 - Intent 获得的会话上下文有限，“另一个/刚才那个/剩下那道”等指代仍容易误判。
 - 同粗筛分的超时候选补评顺序可能受线程完成顺序影响，尚无确定性次序。
 - `search.py` 和现有飞书脚本体量较大，章节及中文序号解析存在行为漂移风险。
@@ -72,11 +72,11 @@
 - 不让 LLM 直接用多题 bbox 复筛；继续使用 OpenCV 图块流程。
 - 不让复筛展示规则改变粗筛候选池。
 - 不提交 `data/feishu_chapter_failure_log.jsonl` 等运行日志。
-- 未拿到微信裁剪后的真实元数据或原始文件前，不重新套用已撤销的全格式规范化方案。
+- 未拿到真实 HEIC/HEIF 样本前，不扩展全格式服务端转码或引入 HEIF 依赖；当前客户端只规范化浏览器能解码的支持格式。
 
 ## Next Best Step
 
-1. 若继续解决微信裁剪问题，先临时采集裁剪文件的 `name/type/size`，并取得一份裁剪后的原始文件；确认根因后再设计最小兼容修复。
+1. 在真实微信内置浏览器分别用 JPG、PNG 完成裁剪上传、失败重试和后续搜题，并采集失败样本的 `name/type/size`；若仍失败再按真实字节最小修复。
 2. 若回到 Agent 主线，为 intent 增加隐私受限会话摘要与受约束动作推理，并用多轮指代样本做新旧对照测试。
 3. 面试演示前从电脑浏览器和微信各跑一遍上传、刷新恢复、候选选择和答案返回，不再临时扩大改动范围。
 

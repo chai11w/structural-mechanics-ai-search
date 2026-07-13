@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from io import BytesIO
+import logging
 import secrets
 from pathlib import Path
 from uuid import uuid4
@@ -21,6 +23,15 @@ SESSION_COOKIE = "tiku_agent_session"
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 INCOMING_DIR = DEFAULT_RUNTIME_DIR / "incoming"
 WEB_DIR = Path(__file__).with_name("demo_web")
+SUPPORTED_IMAGE_FORMATS = {
+    "JPEG": ("image/jpeg", ".jpg"),
+    "PNG": ("image/png", ".png"),
+    "WEBP": ("image/webp", ".webp"),
+    "GIF": ("image/gif", ".gif"),
+    "BMP": ("image/bmp", ".bmp"),
+}
+GENERIC_CONTENT_TYPES = {"", "application/octet-stream"}
+logger = logging.getLogger(__name__)
 _PAGE = (WEB_DIR / "index.html").read_text(encoding="utf-8")
 _STYLE = (WEB_DIR / "demo.css").read_text(encoding="utf-8")
 _SCRIPT = (WEB_DIR / "demo.js").read_text(encoding="utf-8")
@@ -94,11 +105,9 @@ def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
 
     @app.post("/api/image")
     async def image(request: Request) -> Response:
-        content = await request.body()
-        if not content or len(content) > MAX_IMAGE_BYTES:
-            raise HTTPException(status_code=400, detail="image is missing or too large")
+        content, filename, content_type = await _read_image_upload(request)
         session_id = _session_id(request)
-        incoming = _write_incoming_image(content, request.headers.get("x-filename", "question.jpg"))
+        incoming = _write_incoming_image(content, filename, content_type)
         try:
             response = runtime.handle_image(session_id, incoming)
             uploaded_image = runtime.current_image_path(session_id)
@@ -156,17 +165,59 @@ def _set_session_cookie(response: Response, session_id: str, *, secure_cookie: b
     )
 
 
-def _write_incoming_image(content: bytes, filename: str) -> Path:
+async def _read_image_upload(request: Request) -> tuple[bytes, str, str]:
+    """Read the new multipart `file` field while retaining the legacy raw-body API."""
+    request_type = str(request.headers.get("content-type") or "")
+    if request_type.lower().startswith("multipart/form-data"):
+        try:
+            form = await request.form()
+        except Exception as exc:  # noqa: BLE001 - malformed external multipart input.
+            raise HTTPException(status_code=400, detail="invalid multipart upload") from exc
+        try:
+            upload = form.get("file")
+            if upload is None or not callable(getattr(upload, "read", None)):
+                raise HTTPException(status_code=400, detail="image file field is required")
+            content = await upload.read(MAX_IMAGE_BYTES + 1)
+            filename = str(getattr(upload, "filename", "") or "cropped.jpg")
+            content_type = str(getattr(upload, "content_type", "") or "")
+        finally:
+            close = getattr(form, "close", None)
+            if callable(close):
+                await close()
+    else:
+        content = await request.body()
+        filename = str(request.headers.get("x-filename") or "question.jpg")
+        content_type = request_type.split(";", 1)[0].strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="image is missing")
+    if len(content) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="image is too large")
+    return content, filename, content_type
+
+
+def _write_incoming_image(content: bytes, filename: str, content_type: str = "") -> Path:
+    """Verify image bytes and choose the temporary suffix from the detected format."""
     INCOMING_DIR.mkdir(parents=True, exist_ok=True)
-    suffix = Path(filename).suffix.lower() or ".jpg"
-    output = INCOMING_DIR / f"{uuid4().hex}{suffix}"
-    output.write_bytes(content)
     try:
-        with Image.open(output) as image:
+        with Image.open(BytesIO(content)) as image:
+            detected_format = str(image.format or "").upper()
             image.verify()
     except Exception as exc:  # noqa: BLE001 - external input boundary.
-        output.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="invalid image") from exc
+    detected = SUPPORTED_IMAGE_FORMATS.get(detected_format)
+    if detected is None:
+        raise HTTPException(status_code=415, detail="unsupported image format")
+    detected_type, suffix = detected
+    normalized_type = str(content_type or "").split(";", 1)[0].strip().lower()
+    if normalized_type not in GENERIC_CONTENT_TYPES and normalized_type != detected_type:
+        logger.debug(
+            "image upload metadata mismatch: filename=%r declared=%r detected=%r",
+            filename,
+            normalized_type,
+            detected_type,
+        )
+    output = INCOMING_DIR / f"{uuid4().hex}{suffix}"
+    output.write_bytes(content)
     return output
 
 

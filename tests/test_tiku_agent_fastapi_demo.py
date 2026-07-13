@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from tiku_agent.agent import AgentResponse
-from tiku_agent.fastapi_demo import SESSION_COOKIE, _SCRIPT, _STYLE, create_app
+from tiku_agent.fastapi_demo import MAX_IMAGE_BYTES, SESSION_COOKIE, _SCRIPT, _STYLE, _write_incoming_image, create_app
 
 
 class FakeRuntime:
@@ -93,8 +93,12 @@ class FastApiDemoTest(unittest.TestCase):
             "event.key === 'Enter'", "!event.shiftKey", "!event.isComposing", "event.keyCode !== 229",
             "HISTORY_TTL_MS = 2 * 60 * 60 * 1000", "HISTORY_LIMIT = 50", "repairUploadedImageHistory()",
             "data.uploaded_image", "Number.isFinite(savedAt)", "无法连接本地服务",
+            "canvas.toBlob(resolve, 'image/jpeg', 0.92)", "formData.append('file', prepared.blob, prepared.filename)",
+            "const filename = `cropped_${Date.now()}.jpg`", "function retryUpload", "pendingUpload = prepared",
         ):
             self.assertIn(expected, _SCRIPT)
+        self.assertNotIn("new File(", _SCRIPT)
+        self.assertLess(_SCRIPT.index("await request('/api/image'"), _SCRIPT.index("message: '我发了一张题图。'"))
         self.assertIn("overflow-y: auto", _STYLE)
         self.assertIn("prefers-reduced-motion: reduce", _STYLE)
         self.assertNotIn("window.scrollTo", _SCRIPT)
@@ -153,6 +157,49 @@ class FastApiDemoTest(unittest.TestCase):
         session_response = no_page_visit.get("/api/session")
         self.assertEqual(session_response.status_code, 200)
         self.assertIn(SESSION_COOKIE, session_response.cookies)
+
+    def test_multipart_cropped_jpeg_and_png_metadata_mismatch_are_accepted(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"demo_multipart_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        runtime = FakeRuntime(image_path)
+        client = TestClient(create_app(runtime=runtime))
+        client.get("/")
+
+        jpeg = io.BytesIO()
+        Image.new("RGB", (5, 5), "white").save(jpeg, format="JPEG")
+        cropped = client.post(
+            "/api/image",
+            files={"file": ("cropped_1700000000000.jpg", jpeg.getvalue(), "image/jpeg")},
+        )
+        self.assertEqual(cropped.status_code, 200)
+        self.assertEqual(runtime.calls[-1][0], "image")
+
+        png = io.BytesIO()
+        Image.new("RGB", (5, 5), "white").save(png, format="PNG")
+        mismatched = _write_incoming_image(png.getvalue(), "crop_without_name.jpg", "image/jpeg")
+        self.addCleanup(lambda: mismatched.unlink(missing_ok=True))
+        self.assertEqual(mismatched.suffix, ".png")
+        with Image.open(mismatched) as detected:
+            self.assertEqual(detected.format, "PNG")
+
+    def test_image_upload_rejects_missing_invalid_and_oversized_content(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"demo_reject_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        client = TestClient(create_app(runtime=FakeRuntime(image_path)))
+
+        missing = client.post("/api/image", files={"other": ("crop.jpg", b"data", "image/jpeg")})
+        self.assertEqual(missing.status_code, 400)
+        invalid = client.post("/api/image", files={"file": ("crop.jpg", b"not an image", "image/jpeg")})
+        self.assertEqual(invalid.status_code, 400)
+        oversized = client.post(
+            "/api/image",
+            files={"file": ("crop.jpg", b"x" * (MAX_IMAGE_BYTES + 1), "image/jpeg")},
+        )
+        self.assertEqual(oversized.status_code, 413)
 
     def test_health_text_cookie_image_upload_and_session_bound_media(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
