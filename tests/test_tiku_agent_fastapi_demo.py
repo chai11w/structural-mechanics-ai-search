@@ -70,8 +70,8 @@ class FastApiDemoTest(unittest.TestCase):
 
         page = client.get("/")
         self.assertEqual(page.headers["cache-control"], "no-store")
-        self.assertEqual(client.get("/assets/demo.css").text, _STYLE)
-        self.assertEqual(client.get("/assets/demo.js").text, _SCRIPT)
+        self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
+        self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
             'href="/assets/demo.css"', 'src="/assets/demo.js"', 'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
