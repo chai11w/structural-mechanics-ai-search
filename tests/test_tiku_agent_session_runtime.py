@@ -82,6 +82,12 @@ class AgentSessionRuntimeTest(unittest.TestCase):
             task_logger=self.logger,
             agent_factory=lambda state: TikuSearchAgent(state=state, tools=FakeTools().toolbox(), use_llm_intent=False),
         )
+        persisted_image = restarted_runtime.current_image_path(session_id)
+        self.assertIsNotNone(persisted_image)
+        self.assertTrue(persisted_image.is_file())
+        self.assertEqual(restarted_runtime.resolve_upload(session_id, persisted_image.name), persisted_image.resolve())
+        self.assertIsNone(restarted_runtime.resolve_upload(session_id, "../" + persisted_image.name))
+        self.assertIsNone(restarted_runtime.resolve_upload("another-session", persisted_image.name))
         answer = restarted_runtime.handle_text(session_id, "就这个")
 
         self.assertEqual(answer.state["phase"], "ANSWERED")

@@ -17,6 +17,7 @@ class FakeRuntime:
     def __init__(self, image_path: Path):
         self.image_path = image_path
         self.calls = []
+        self.upload_session = ""
 
     def handle_text(self, session_id: str, text: str) -> AgentResponse:
         self.calls.append(("text", session_id, text))
@@ -24,10 +25,19 @@ class FakeRuntime:
 
     def handle_image(self, session_id: str, image_path: Path) -> AgentResponse:
         self.calls.append(("image", session_id, image_path.is_file()))
+        self.upload_session = session_id
         return AgentResponse(text="我正在帮你找。", intent="search_image")
 
     def clear(self, session_id: str) -> None:
         self.calls.append(("clear", session_id))
+
+    def current_image_path(self, _session_id: str) -> Path:
+        return self.image_path
+
+    def resolve_upload(self, session_id: str, filename: str) -> Path | None:
+        if session_id != self.upload_session:
+            return None
+        return self.image_path if filename == self.image_path.name and self.image_path.is_file() else None
 
 
 class FastApiDemoTest(unittest.TestCase):
@@ -75,7 +85,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertNotIn("let history=[]", page.text)
         self.assertIn("restoreHistory()", page.text)
         self.assertIn("clearHistory()", page.text)
-        self.assertIn("url.startsWith('/api/media/')", page.text)
+        self.assertIn("url.startsWith('/api/media/')||url.startsWith('/api/upload/')", page.text)
         self.assertIn("图片已失效，请重新上传", page.text)
         self.assertIn("'题库候选题',false", page.text)
         self.assertIn('id="drop-overlay"', page.text)
@@ -108,6 +118,8 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertIn("function hasDraggedFiles", page.text)
         self.assertIn('role="button" tabindex="0" aria-label="上传题图"', page.text)
         self.assertIn("function isPersistentImage", page.text)
+        self.assertIn("data.uploaded_image", page.text)
+        self.assertIn("无法连接本地服务", page.text)
         self.assertIn("Number.isFinite(savedAt)", page.text)
         text_response = client.post("/api/message", json={"text": "就这个"})
         self.assertEqual(text_response.status_code, 200)
@@ -127,6 +139,12 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(image_response.status_code, 200)
         self.assertEqual(runtime.calls[-1][0], "image")
         self.assertTrue(runtime.calls[-1][2])
+        uploaded_image_url = image_response.json()["uploaded_image"]
+        self.assertTrue(uploaded_image_url.startswith("/api/upload/"))
+        self.assertEqual(client.get(uploaded_image_url).status_code, 200)
+        other_upload_client = TestClient(app)
+        other_upload_client.cookies.set(SESSION_COOKIE, "different-session")
+        self.assertEqual(other_upload_client.get(uploaded_image_url).status_code, 404)
 
         reset_response = client.post("/api/reset")
         self.assertEqual(reset_response.status_code, 200)

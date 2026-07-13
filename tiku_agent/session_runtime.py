@@ -50,6 +50,29 @@ class AgentSessionRuntime:
         self.store.clear(clean_session_id)
         self.artifacts.clear_session(clean_session_id)
 
+    def current_image_path(self, session_id: str) -> Path | None:
+        """Return the current persisted upload for a live session."""
+        clean_session_id = self._clean_session_id(session_id)
+        state = self.store.load(clean_session_id)
+        if state is None or not state.current_image_path:
+            return None
+        path = Path(state.current_image_path)
+        return path if self.resolve_upload(clean_session_id, path.name) == path.resolve() else None
+
+    def resolve_upload(self, session_id: str, filename: str) -> Path | None:
+        """Resolve one session-owned upload without exposing arbitrary paths."""
+        clean_session_id = self._clean_session_id(session_id)
+        if self.store.load(clean_session_id) is None:
+            return None
+        safe_name = Path(str(filename)).name
+        if not safe_name or safe_name != str(filename):
+            return None
+        upload_dir = (self.artifacts.session_dir(clean_session_id) / "uploads").resolve()
+        target = (upload_dir / safe_name).resolve()
+        if target.parent != upload_dir or not target.is_file():
+            return None
+        return target
+
     def _run(self, session_id: str, kind: str, handler: Callable[[TikuSearchAgent], AgentResponse]) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
         self._purge_expired()

@@ -71,9 +71,18 @@ def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
         incoming = _write_incoming_image(content, request.headers.get("x-filename", "question.jpg"))
         try:
             response = runtime.handle_image(session_id, incoming)
+            uploaded_image = runtime.current_image_path(session_id)
         finally:
             incoming.unlink(missing_ok=True)
-        return _agent_json(response, media, session_id)
+        return _agent_json(response, media, session_id, uploaded_image=uploaded_image)
+
+    @app.get("/api/upload/{filename}")
+    def get_upload(filename: str, request: Request) -> FileResponse:
+        session_id = str(request.cookies.get(SESSION_COOKIE) or "").strip()
+        path = runtime.resolve_upload(session_id, filename) if session_id else None
+        if path is None:
+            raise HTTPException(status_code=404, detail="upload not found")
+        return FileResponse(path)
 
     @app.get("/api/media/{media_id}")
     def get_media(media_id: str, request: Request) -> FileResponse:
@@ -108,7 +117,13 @@ def _write_incoming_image(content: bytes, filename: str) -> Path:
     return output
 
 
-def _agent_json(response: AgentResponse, media: dict[str, MediaRecord], session_id: str) -> JSONResponse:
+def _agent_json(
+    response: AgentResponse,
+    media: dict[str, MediaRecord],
+    session_id: str,
+    *,
+    uploaded_image: Path | None = None,
+) -> JSONResponse:
     image_urls = []
     for image in response.images:
         path = Path(image)
@@ -117,7 +132,10 @@ def _agent_json(response: AgentResponse, media: dict[str, MediaRecord], session_
         media_id = uuid4().hex
         media[media_id] = MediaRecord(session_id=session_id, path=path)
         image_urls.append(f"/api/media/{media_id}")
-    result = JSONResponse({"text": response.text, "images": image_urls, "intent": response.intent})
+    uploaded_image_url = f"/api/upload/{uploaded_image.name}" if uploaded_image is not None else ""
+    result = JSONResponse(
+        {"text": response.text, "images": image_urls, "uploaded_image": uploaded_image_url, "intent": response.intent}
+    )
     result.set_cookie(SESSION_COOKIE, session_id, max_age=2 * 60 * 60, httponly=True, samesite="lax")
     return result
 
@@ -141,7 +159,7 @@ const chat=document.querySelector('#chat'),empty=document.querySelector('#empty'
 const TEXT_TIMEOUT_MS=60000,IMAGE_TIMEOUT_MS=90000,MAX_IMAGE_BYTES=15*1024*1024,HISTORY_TTL_MS=2*60*60*1000,HISTORY_LIMIT=50,HISTORY_KEY='tiku-agent-current-chat-v1';
 let chatHistory=[],isBusy=false,dragDepth=0;
 function saveHistory(){try{localStorage.setItem(HISTORY_KEY,JSON.stringify({savedAt:Date.now(),messages:chatHistory.slice(-HISTORY_LIMIT)}))}catch(_error){/* The demo still works when browser storage is unavailable. */}}
-function isPersistentImage(url){return typeof url==='string'&&url.startsWith('/api/media/')}
+function isPersistentImage(url){return typeof url==='string'&&(url.startsWith('/api/media/')||url.startsWith('/api/upload/'))}
 function remember(message,me,images,imageAlt){const persistentImages=images.filter(isPersistentImage);chatHistory.push({message:String(message),me:Boolean(me),images:persistentImages,imageAlt:String(imageAlt)});chatHistory=chatHistory.slice(-HISTORY_LIMIT);saveHistory()}
 function scrollToLatest(){requestAnimationFrame(()=>window.scrollTo({top:document.body.scrollHeight,behavior:'auto'}))}
 function add(message,me=false,images=[],imageAlt='题库候选题',persist=true){empty.hidden=true;const row=document.createElement('article');row.className='message'+(me?' user':'');if(!me){const avatar=document.createElement('div');avatar.className='avatar';avatar.textContent='力';row.append(avatar)}const body=document.createElement('div');body.className='message-body';body.textContent=message;row.append(body);chat.append(row);if(images.length){const grid=document.createElement('div');grid.className='images'+(me?' user-images':'');images.forEach(url=>{const img=document.createElement('img');img.src=url;img.alt=imageAlt;img.addEventListener('load',()=>{if(url.startsWith('blob:'))URL.revokeObjectURL(url);scrollToLatest()},{once:true});img.addEventListener('error',()=>{if(url.startsWith('blob:'))URL.revokeObjectURL(url);const note=document.createElement('span');note.className='expired-image';note.textContent='图片已失效，请重新上传';img.replaceWith(note);scrollToLatest()},{once:true});grid.append(img)});chat.append(grid)}if(persist)remember(message,me,images,imageAlt);scrollToLatest();return row}
@@ -155,9 +173,9 @@ function updateComposer(){send.disabled=isBusy||!text.value.trim()}
 function busy(value){isBusy=value;text.disabled=value;file.disabled=value;newChat.disabled=value;updateComposer()}
 function validateImage(selected){if(!selected)return '没有读取到图片，请重新选择。';if(!selected.type.startsWith('image/'))return '请上传 PNG、JPG、WEBP 等图片文件。';if(selected.size>MAX_IMAGE_BYTES)return '图片太大，请上传不超过 15MB 的图片。';return ''}
 function safeHttpError(status,data){const detail=typeof data?.detail==='string'?data.detail.toLowerCase():'';if(status===413||detail.includes('too large'))return '图片太大，请上传不超过 15MB 的图片。';if(status===400&&detail.includes('invalid image'))return '这个文件不是可读取的图片。';if(status>=500)return '服务暂时异常，请稍后重试。';if(status===400)return '提交的内容无法处理，请检查后重试。';if(status===401||status===403)return '当前请求无权处理。';return `请求失败（HTTP ${status}），请稍后重试。`}
-async function request(url,options,timeoutMs,timeoutMessage){const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),timeoutMs);try{const response=await fetch(url,{...options,signal:controller.signal});const contentType=response.headers.get('content-type')||'';let data={};if(contentType.includes('application/json')){try{data=await response.json()}catch(_error){data={}}}else{await response.text()}if(!response.ok)throw new Error(safeHttpError(response.status,data));if(!contentType.includes('application/json'))throw new Error('服务返回格式异常，请稍后重试。');return data}catch(error){if(error.name==='AbortError')throw new Error(timeoutMessage);throw error}finally{clearTimeout(timer)}}
+async function request(url,options,timeoutMs,timeoutMessage){const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),timeoutMs);try{const response=await fetch(url,{...options,signal:controller.signal});const contentType=response.headers.get('content-type')||'';let data={};if(contentType.includes('application/json')){try{data=await response.json()}catch(_error){data={}}}else{await response.text()}if(!response.ok)throw new Error(safeHttpError(response.status,data));if(!contentType.includes('application/json'))throw new Error('服务返回格式异常，请稍后重试。');return data}catch(error){if(error.name==='AbortError')throw new Error(timeoutMessage);if(error instanceof TypeError)throw new Error('无法连接本地服务，请确认 Demo 正在运行后重试。');throw error}finally{clearTimeout(timer)}}
 async function sendText(){const value=text.value.trim();if(!value||isBusy)return;add(value,true);text.value='';resizeComposer();busy(true);setStatus('working','正在回答…');try{const data=await request('/api/message',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:value})},TEXT_TIMEOUT_MS,'请求等待时间过长，请稍后重试。');add(data.text,false,data.images||[]);setStatus('ready','Agent 已就绪')}catch(error){add(error.message||'暂时无法处理，请再试一次。');setStatus('error','处理失败，请重试')}finally{busy(false);text.focus()}}
-async function uploadImage(selected){if(isBusy)return;const validationError=validateImage(selected);if(validationError){add(validationError);file.value='';return}const preview=URL.createObjectURL(selected);add('我发了一张题图。',true,[preview],'已上传题图');const pending=add('正在识别题图，请稍等…',false,[],'题库候选题',false);file.value='';busy(true);setStatus('working','正在识别题图…');try{const data=await request('/api/image',{method:'POST',headers:{'x-filename':selected.name,'content-type':selected.type},body:selected},IMAGE_TIMEOUT_MS,'题图识别时间过长。原图已保留，你可以直接回复“重试”。');finishPending(pending,data.text,data.images||[]);setStatus('ready','Agent 已就绪')}catch(error){finishPending(pending,error.message||'图片暂时无法处理，请再试一次。');setStatus('error','识别失败，请重试')}finally{busy(false);text.focus()}}
+async function uploadImage(selected){if(isBusy)return;const validationError=validateImage(selected);if(validationError){add(validationError);file.value='';return}const preview=URL.createObjectURL(selected),historyIndex=chatHistory.length;add('我发了一张题图。',true,[preview],'已上传题图');const pending=add('正在识别题图，请稍等…',false,[],'题库候选题',false);file.value='';busy(true);setStatus('working','正在识别题图…');try{const data=await request('/api/image',{method:'POST',headers:{'x-filename':selected.name,'content-type':selected.type},body:selected},IMAGE_TIMEOUT_MS,'题图识别时间过长。原图已保留，你可以直接回复“重试”。');if(isPersistentImage(data.uploaded_image)&&chatHistory[historyIndex]){chatHistory[historyIndex].images=[data.uploaded_image];saveHistory()}finishPending(pending,data.text,data.images||[]);setStatus('ready','Agent 已就绪')}catch(error){finishPending(pending,error.message||'图片暂时无法处理，请再试一次。');setStatus('error','识别失败，请重试')}finally{busy(false);text.focus()}}
 function hideDropOverlay(){dragDepth=0;dropOverlay.classList.remove('is-visible');dropOverlay.setAttribute('aria-hidden','true')}
 function hasDraggedFiles(event){return Array.from(event.dataTransfer?.types||[]).includes('Files')}
 async function resetConversation(){if(isBusy)return;busy(true);setStatus('working','正在创建新对话…');try{await request('/api/reset',{method:'POST'},TEXT_TIMEOUT_MS,'新对话创建超时，请稍后重试。');clearHistory();chat.replaceChildren();empty.hidden=false;setStatus('ready','Agent 已就绪')}catch(error){add(error.message||'新对话创建失败，请稍后重试。');setStatus('error','新对话创建失败')}finally{busy(false);text.focus()}}
