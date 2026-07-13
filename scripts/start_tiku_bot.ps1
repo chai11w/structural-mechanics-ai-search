@@ -4,6 +4,7 @@ param(
     [string]$CloudflaredConfig = $env:TIKU_CLOUDFLARED_CONFIG,
     [string]$PublicHost = $env:TIKU_PUBLIC_HOST,
     [int]$MaxMessageAgeMinutes = 15,
+    [switch]$ExternalTunnel,
     [switch]$NoMonitorWindows
 )
 
@@ -22,6 +23,10 @@ $BotErrLog = Join-Path $LogDir "tiku_bot.err.log"
 $TunnelOutLog = Join-Path $LogDir "cloudflared.out.log"
 $TunnelErrLog = Join-Path $LogDir "cloudflared.err.log"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+if ($ExternalTunnel -and -not $PublicHost) {
+    throw "ExternalTunnel requires PublicHost."
+}
 
 function Stop-PidFile {
     param([string]$Path, [string]$Label)
@@ -91,6 +96,9 @@ if ($CloudflaredConfig) {
 if ($PublicHost) {
     $arguments += @("-PublicHost", $PublicHost)
 }
+if ($ExternalTunnel) {
+    $arguments += "-ExternalTunnel"
+}
 
 $watchdog = Start-Process powershell.exe `
     -ArgumentList $arguments `
@@ -128,7 +136,11 @@ Write-Host "Tiku bot watchdog started: PID $($watchdog.Id)"
 Write-Host "Status file: $StatusFile"
 Write-Host "Latest Feishu URL file: $UrlFile"
 Write-Host ""
-if ($PublicHost) {
+if ($ExternalTunnel) {
+    Write-Host "External fixed Cloudflare Tunnel mode is enabled; no temporary tunnel will be started."
+    Write-Host "Feishu event URL:"
+    Write-Host "https://$PublicHost/feishu/events"
+} elseif ($PublicHost) {
     Write-Host "Feishu event URL should stay fixed:"
     Write-Host "https://$PublicHost/feishu/events"
 } else {

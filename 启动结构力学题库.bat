@@ -12,5 +12,5 @@ if not defined PROJECT_DIR (
     exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_DIR%\scripts\start_tiku_bot.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_DIR%\scripts\start_tiku_bot.ps1" -PublicHost "feishu-tiku.cysbuting.cn" -ExternalTunnel
 endlocal

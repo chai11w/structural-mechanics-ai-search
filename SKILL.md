@@ -101,7 +101,7 @@ python scripts/feishu_tiku_bot.py dry-run-flow --image "D:\path\to\question.jpg"
 - 飞书自动章节模式下会先判断题图是单题、多题还是不确定。`single`/`uncertain` 继续走原单题流程；`multi` 进入多题会话，先只返回题号、荷载和章节摘要，不立刻批量检索。用户回复题号按识别章节检索，回复 `题号-章节名` 指定章节检索；候选出来后才用 `题号-序号` 取答案。多题会话会在收图阶段用 OpenCV 预裁结构图块并按题号顺序绑定；用户查某题时若有对应裁图，则用该裁图做 Zhipu 复筛，否则退回荷载粗筛。候选阶段 `0` 返回多题列表，列表阶段 `0` 结束本次多题会话。
 - 飞书候选页支持删除错题：单题候选页回复 `-1` 到当前候选数删除对应候选；多题需要先进入某一题候选页，再回复对应负数删除当前题候选。删除前必须二次确认，回复 `1` 执行、`0` 取消；执行时会先备份 Excel，再把题目/答案图片移动到 `backups/delete_question_时间戳/`，最后从主库或字母库 Excel 中删除精确匹配的题目行。
 - 飞书收到图片消息并拿到 `image_key` 后会立即给原消息添加 `OK` reaction 表情，避免长时间模型识别时用户误以为机器人没响应；可用 `--working-reaction` 调整或关闭。
-- `启动结构力学题库.bat` 会启动 `scripts/start_tiku_bot.ps1`，再由 `scripts/tiku_bot_watchdog.ps1` 保活本地 8788 服务和本项目专属 cloudflared 临时隧道。不要和第二大脑的 8787 小柴服务混用。
+- `启动结构力学题库.bat` 会启动 `scripts/start_tiku_bot.ps1`，再由 `scripts/tiku_bot_watchdog.ps1` 保活本地 8788 服务；生产回调复用系统中已安装的固定 Cloudflare Tunnel，地址为 `https://feishu-tiku.cysbuting.cn/feishu/events`，不会再启动 `trycloudflare.com` 临时隧道。不要和第二大脑的 8787 小柴服务混用，也不要影响 8790 网页 Agent。
 
 ## 注意事项
 

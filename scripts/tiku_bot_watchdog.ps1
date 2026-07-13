@@ -3,7 +3,8 @@ param(
     [string]$TunnelName = $env:TIKU_TUNNEL_NAME,
     [string]$CloudflaredConfig = $env:TIKU_CLOUDFLARED_CONFIG,
     [string]$PublicHost = $env:TIKU_PUBLIC_HOST,
-    [int]$MaxMessageAgeMinutes = 15
+    [int]$MaxMessageAgeMinutes = 15,
+    [switch]$ExternalTunnel
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,6 +20,10 @@ $BotPidFile = Join-Path $LogDir "tiku_bot.pid"
 $TunnelPidFile = Join-Path $LogDir "cloudflared.pid"
 $UrlFile = Join-Path $LogDir "feishu_tiku_latest_url.txt"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+if ($ExternalTunnel -and -not $PublicHost) {
+    throw "ExternalTunnel requires PublicHost."
+}
 
 function Write-Status {
     param([string]$Message)
@@ -110,7 +115,7 @@ function Get-TunnelUrl {
     return $null
 }
 
-Set-Content -LiteralPath $StatusFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Watchdog started. Project=$ProjectDir Port=$Port PublicHost=$PublicHost MaxMessageAgeMinutes=$MaxMessageAgeMinutes" -Encoding UTF8
+Set-Content -LiteralPath $StatusFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Watchdog started. Project=$ProjectDir Port=$Port PublicHost=$PublicHost ExternalTunnel=$ExternalTunnel MaxMessageAgeMinutes=$MaxMessageAgeMinutes" -Encoding UTF8
 foreach ($path in @($BotOutLog, $BotErrLog, $TunnelOutLog, $TunnelErrLog)) {
     if (-not (Test-Path -LiteralPath $path)) { New-Item -ItemType File -Path $path -Force | Out-Null }
 }
@@ -132,7 +137,7 @@ while ($true) {
         }
     }
 
-    if (-not $tunnelProcess -or $tunnelProcess.HasExited) {
+    if (-not $ExternalTunnel -and (-not $tunnelProcess -or $tunnelProcess.HasExited)) {
         Write-Status "Tunnel process is not running; restarting tunnel."
         $tunnelProcess = Start-Tunnel
     }
