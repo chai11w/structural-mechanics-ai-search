@@ -81,6 +81,17 @@ class AssignedSymbolicRoutingTest(unittest.TestCase):
         self.assertEqual(chapter, "2静定结构")
         self.assertEqual(confidence, 0.9)
 
+    def test_unquoted_force_method_text_is_explicit_chapter_evidence(self):
+        chapter, confidence, evidence = guard_chapter_prediction(
+            "4力法",
+            1.0,
+            "用力法计算下图所示桁架的轴力",
+        )
+
+        self.assertEqual(chapter, "4力法")
+        self.assertEqual(confidence, 1.0)
+        self.assertEqual(evidence, "用力法计算下图所示桁架的轴力")
+
     def test_load_prompt_requires_unitless_assigned_symbols(self):
         self.assertIn("输出 P=40、q=20、F1=40、M=20", search.SYSTEM_PROMPT)
         self.assertIn("不要输出 P=40kN 或 q=20kN/m", search.SYSTEM_PROMPT)

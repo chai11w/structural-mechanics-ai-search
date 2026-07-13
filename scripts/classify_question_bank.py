@@ -346,15 +346,18 @@ def has_explicit_chapter_evidence(chapter_hint: str, chapter_evidence: str) -> b
             clue in compact_text or clue in check_text for clue in static_displacement_clues
         )
     if chapter_hint == "6力矩分配":
-        return any(word in quoted_text for word in ("力矩分配", "弯矩分配", "矩分配法", "分配法", "配法"))
+        return any(word in evidence_text for word in ("力矩分配", "弯矩分配", "矩分配法", "分配法"))
     if chapter_hint == "7矩阵位移":
         if any(trigger in evidence_text for trigger in triggers):
             return True
         matrix_clues = ("单元刚度矩阵", "整体刚度矩阵", "荷载列阵", "刚度矩阵", "坐标系")
         return sum(1 for clue in matrix_clues if clue in evidence_text) >= 2
-    if not quoted_text:
-        return False
-    return any(trigger in quoted_text for trigger in triggers)
+    # Method names such as “力法” and “影响线” are themselves explicit
+    # chapter evidence.  Models do not reliably wrap exact OCR text in quotes,
+    # so validate the content rather than punctuation.  Chapter 2 remains on
+    # the stricter quoted-text path above because a bare diagram can visually
+    # resemble a static beam/frame/truss and invite a false inference.
+    return any(trigger in evidence_text for trigger in triggers)
 
 
 def guard_chapter_prediction(chapter_hint: str, confidence: float, evidence: str) -> tuple[str, float, str]:
