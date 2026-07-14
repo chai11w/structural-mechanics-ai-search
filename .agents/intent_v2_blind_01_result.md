@@ -53,3 +53,11 @@ The two unsafe cases were addressed without changing the frozen fixture:
 - Model-inferred question/candidate indexes now require code-verifiable reference evidence. “换一个” is executable only when exactly one alternative exists; multiple alternatives force clarification even when Qwen returns a rank.
 - A focused live Qwen rerun of the two original unsafe cases passed 2/2 with zero unsafe executions.
 - The two non-safety accuracy failures remain intentionally unfixed in this stage.
+
+## Post-Remediation Regression Run
+
+- The explicit-question grammar now supports `第 N 题` / `第 N 小题` / `第 N 道题` without treating an indefinite phrase such as “那一道” as question one.
+- Future chapter targeting recognizes “下一张/接下来要发” independently of whether the sentence contains the literal word “图”.
+- Full Blind 01 regression after the safety and explicit-expression fixes: V2 19/20 (95%), unsafe executions 0; compared with V1, improvements 9, regressions 1.
+- The only remaining V2 miss is “答案候选里我要排第三的”. V2 safely clarifies instead of executing an unverified rank.
+- This miss is intentionally retained. Do not add a phrase-specific rule merely to reach 20/20; use Blind 02 to determine whether generic numeric-evidence support is warranted.

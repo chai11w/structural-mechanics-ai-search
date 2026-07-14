@@ -194,11 +194,10 @@ def _rule_decision(
 
     chapter = _parse_chapter_v2(text)
     if chapter:
-        next_target = bool(re.search(r"(?:下(?:面|一)(?:个|道|张)?|下一张).*(?:题|图)", text))
         return ActionDecisionV2(
             action="set_chapter",
             chapter_override=chapter,
-            chapter_target="next_image" if next_target else "current_question",
+            chapter_target=_chapter_target(text),
             source="rule",
             confidence=1.0,
         )
@@ -282,7 +281,15 @@ def _forbidden_request(text: str) -> str | None:
 
 
 def _explicit_question_index(text: str) -> int | None:
-    match = re.search(r"(?<!下)第?\s*([0-9一二两三四五六七八九十]+)\s*[题問问]", text)
+    match = re.search(
+        r"(?<!下)第?\s*([0-9一二两三四五六七八九十]+)\s*(?:小\s*)?[题問问]",
+        text,
+    )
+    if not match:
+        match = re.search(
+            r"第\s*([0-9一二两三四五六七八九十]+)\s*道\s*[题問问]?",
+            text,
+        )
     if not match and re.search(r"(?:查|搜|检索)", text):
         match = re.search(r"第?\s*([0-9一二两三四五六七八九十]+)\s*个", text)
     return chinese_number_to_int(match.group(1)) if match else None
@@ -428,6 +435,17 @@ def _parse_chapter_v2(text: str) -> str | None:
         if alias in text:
             return chapter
     return parse_chapter(text)
+
+
+def _chapter_target(text: str) -> str:
+    next_image_patterns = (
+        r"(?:下一张|下张)",
+        r"(?:接下来|之后|等会儿).{0,4}(?:发|传|给)",
+        r"下(?:一|面)(?:个|道)?(?:题|这个题|那道题)",
+    )
+    if any(re.search(pattern, text) for pattern in next_image_patterns):
+        return "next_image"
+    return "current_question"
 
 
 def _normalize(text: str | None) -> str:

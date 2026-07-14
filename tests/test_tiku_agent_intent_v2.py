@@ -19,6 +19,20 @@ class IntentV2Test(unittest.TestCase):
         self.assertEqual(decision.chapter_override, "4力法")
         self.assertEqual(decision.source, "rule")
 
+    def test_question_grammar_supports_small_and_classifier_forms(self):
+        context = ConversationContextV2(
+            phase="WAIT_QUESTION_CHOICE",
+            active_namespace="question",
+            question_count=3,
+            has_active_image=True,
+        )
+        small = decide_intent_v2("给我找第2小题，按位移法来", context)
+        self.assertEqual(small.action, "select_question")
+        self.assertEqual(small.question_index, 2)
+        self.assertEqual(small.chapter_override, "5位移法")
+        classifier = decide_intent_v2("查第二道题", context)
+        self.assertEqual(classifier.question_index, 2)
+
     def test_bare_number_follows_active_namespace_and_out_of_range_clarifies(self):
         allowed = ConversationContextV2(
             phase="ANSWERED",
@@ -200,6 +214,22 @@ class IntentV2Test(unittest.TestCase):
         decision = decide_intent_v2("", context, event_type="image")
         self.assertEqual(decision.action, "search_image")
         self.assertEqual(decision.chapter_override, "4力法")
+
+    def test_chapter_target_understands_future_image_without_literal_image_word(self):
+        context = ConversationContextV2(
+            phase="ANSWERED",
+            active_namespace="candidate",
+            question_count=1,
+            candidate_count=2,
+            has_active_image=True,
+            has_answer=True,
+        )
+        future = decide_intent_v2("我下一张发的是影响线", context)
+        self.assertEqual(future.action, "set_chapter")
+        self.assertEqual(future.chapter_override, "8影响线")
+        self.assertEqual(future.chapter_target, "next_image")
+        current = decide_intent_v2("当前这个按力矩分配法重搜", context)
+        self.assertEqual(current.chapter_target, "current_question")
 
     def test_prompt_contains_only_json_safe_context_summary(self):
         context = ConversationContextV2(
