@@ -78,7 +78,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260713-recognizing"', 'src="/assets/demo.js?v=20260713-recognizing"',
+            'href="/assets/demo.css?v=20260713-recognizing"', 'src="/assets/demo.js?v=20260714-keyboard"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -104,6 +104,11 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertNotIn("题图处理中", _SCRIPT)
         self.assertNotIn("题图正在上传", _SCRIPT)
         self.assertNotIn("正在上传并识别题干", _SCRIPT)
+        self.assertEqual(_SCRIPT.count("textInput.blur();"), 2)
+        send_text_block = _SCRIPT[_SCRIPT.index("async function sendTextValue"): _SCRIPT.index("async function sendText()")]
+        upload_block = _SCRIPT[_SCRIPT.index("async function submitPreparedImage"): _SCRIPT.index("async function retryUpload")]
+        self.assertNotIn("textInput.focus();", send_text_block)
+        self.assertNotIn("textInput.focus();", upload_block)
         self.assertLess(
             _SCRIPT.index("const uploadRow = addLocalUploadPreview(sourcePreview)"),
             _SCRIPT.index("await normalizeImage(selected, sourcePreview)"),

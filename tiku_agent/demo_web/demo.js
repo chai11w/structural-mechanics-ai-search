@@ -381,6 +381,7 @@ function responseItem(data) {
 async function sendTextValue(value, displayValue = value) {
   const clean = String(value || '').trim();
   if (!clean || isBusy) return;
+  textInput.blur();
   addMessage({ message: displayValue, me: true });
   textInput.value = '';
   resizeComposer();
@@ -401,7 +402,6 @@ async function sendTextValue(value, displayValue = value) {
   } finally {
     if (operation !== operationVersion) return;
     setBusy(false);
-    textInput.focus();
   }
 }
 
@@ -444,6 +444,7 @@ function addUploadFailure(row, message, prepared) {
 
 async function submitPreparedImage(prepared, uploadRow) {
   if (isBusy) return;
+  textInput.blur();
   setUploadRowStatus(uploadRow, '我发了一张题图。');
   const operation = ++operationVersion;
   const pending = addMessage({ message: '正在识别题目', variant: 'pending' }, false);
@@ -474,7 +475,6 @@ async function submitPreparedImage(prepared, uploadRow) {
   } finally {
     if (operation !== operationVersion) return;
     setBusy(false);
-    textInput.focus();
   }
 }
 
