@@ -666,6 +666,27 @@ def mark_rerank_incomplete(candidates, note):
     return marked
 
 
+def select_incomplete_rerank_fallback(candidates):
+    """Show every exact coarse match, or only the best non-exact match.
+
+    An incomplete visual rerank cannot safely distinguish candidates with the
+    same coarse score. Keep all 100% coarse matches so the user can choose;
+    when there is no exact match, avoid exposing the rest of the coarse pool.
+    """
+    if not candidates:
+        return []
+
+    exact = [item for item in candidates if float(item.get("score") or 0) >= 1.0 - 1e-9]
+    selected = exact or [max(candidates, key=lambda item: float(item.get("score") or 0))]
+
+    renumbered = []
+    for rank, item in enumerate(selected, 1):
+        copied = dict(item)
+        copied["rank"] = rank
+        renumbered.append(copied)
+    return renumbered
+
+
 def rerank_candidates_concurrent(
     query_image_path,
     candidates,
@@ -1184,7 +1205,16 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
             print(f"\n复筛结果已保存: {output_path}")
         elif reranked:
             note = rerank_incomplete_note(reranked)
+            fallback = mark_rerank_incomplete(select_incomplete_rerank_fallback(all_paths), note)
+            fallback_lines = [
+                f"{item['rank']}. {item['path']}    相似度: {round(float(item.get('score') or 0) * 100)}%"
+                for item in fallback
+            ]
+            fallback_text = "\n".join(fallback_lines)
+            output_path.write_text(fallback_text, encoding="utf-8")
+            LAST_SEARCH_FILE.write_text(json.dumps(fallback, ensure_ascii=False), encoding="utf-8")
             print(f"\n{note}")
+            print(fallback_text)
 
     # （已禁用自动弹图片）
 

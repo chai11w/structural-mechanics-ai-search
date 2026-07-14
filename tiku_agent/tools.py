@@ -400,7 +400,8 @@ def rerank_candidates_tool(
             rerank_note = ""
         elif reranked:
             rerank_note = search.rerank_incomplete_note(reranked)
-            visible = _renumber(search.mark_rerank_incomplete(candidates, rerank_note))
+            fallback = search.select_incomplete_rerank_fallback(candidates)
+            visible = _renumber(search.mark_rerank_incomplete(fallback, rerank_note))
         else:
             visible = _renumber(candidates)
             rerank_note = ""

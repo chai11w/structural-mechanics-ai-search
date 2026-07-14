@@ -322,7 +322,8 @@ class MultiAgentCoordinator:
                     rerank_note = ""
                 elif zhipu_results:
                     rerank_note = search.rerank_incomplete_note(zhipu_results)
-                    results = search.mark_rerank_incomplete(results, rerank_note)
+                    fallback = search.select_incomplete_rerank_fallback(results)
+                    results = search.mark_rerank_incomplete(fallback, rerank_note)
 
         write_last_search(results)
         return make_pipeline_result(

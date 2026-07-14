@@ -39,6 +39,28 @@ class SharedDisplayPolicyTest(unittest.TestCase):
             search.DISPLAY_MAX_RESULTS,
         )
 
+    def test_incomplete_rerank_fallback_keeps_all_exact_coarse_matches(self):
+        results = [
+            {"rank": 1, "path": "a.jpg", "score": 1.0},
+            {"rank": 2, "path": "b.jpg", "score": 1.0},
+            {"rank": 3, "path": "c.jpg", "score": 0.5},
+        ]
+
+        selected = search.select_incomplete_rerank_fallback(results)
+
+        self.assertEqual([item["path"] for item in selected], ["a.jpg", "b.jpg"])
+        self.assertEqual([item["rank"] for item in selected], [1, 2])
+
+    def test_incomplete_rerank_fallback_keeps_only_best_without_exact_match(self):
+        results = [
+            {"rank": 1, "path": "a.jpg", "score": 0.9},
+            {"rank": 2, "path": "b.jpg", "score": 0.8},
+        ]
+
+        selected = search.select_incomplete_rerank_fallback(results)
+
+        self.assertEqual([item["path"] for item in selected], ["a.jpg"])
+
 
 if __name__ == "__main__":
     unittest.main()

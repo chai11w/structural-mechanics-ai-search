@@ -138,8 +138,9 @@ class TikuAgentToolsTest(unittest.TestCase):
 
     def test_agent_rerank_falls_back_to_coarse_candidates_when_incomplete(self):
         candidates = [
-            {"rank": 1, "path": "q1.jpg", "score": 0.9, "name": "q1.jpg"},
-            {"rank": 2, "path": "q2.jpg", "score": 0.8, "name": "q2.jpg"},
+            {"rank": 1, "path": "q1.jpg", "score": 1.0, "name": "q1.jpg"},
+            {"rank": 2, "path": "q2.jpg", "score": 1.0, "name": "q2.jpg"},
+            {"rank": 3, "path": "q3.jpg", "score": 0.5, "name": "q3.jpg"},
         ]
         incomplete = [
             {
@@ -159,6 +160,26 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertEqual([item["path"] for item in result.data["visible_candidates"]], ["q1.jpg", "q2.jpg"])
         self.assertTrue(all(item["rerank_status"] == "incomplete" for item in result.data["visible_candidates"]))
         self.assertIn("回退粗筛", result.data["rerank_note"])
+
+    def test_agent_rerank_incomplete_keeps_only_best_when_no_exact_match(self):
+        candidates = [
+            {"rank": 1, "path": "q1.jpg", "score": 0.9, "name": "q1.jpg"},
+            {"rank": 2, "path": "q2.jpg", "score": 0.8, "name": "q2.jpg"},
+        ]
+        incomplete = [
+            {
+                "rank": 1,
+                "path": "q1.jpg",
+                "score": 0.9,
+                "rerank_status": "incomplete",
+                "rerank_reason": "部分候选复筛未完成，已回退粗筛排序。",
+            }
+        ]
+
+        with patch("tiku_agent.tools.search.rerank_candidates", return_value=incomplete):
+            result = rerank_candidates_tool("query.jpg", candidates, route="main", rerank_top=3)
+
+        self.assertEqual([item["path"] for item in result.data["visible_candidates"]], ["q1.jpg"])
 
 
 if __name__ == "__main__":
