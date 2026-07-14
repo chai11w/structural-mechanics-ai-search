@@ -41,7 +41,10 @@ class SessionStoreContractTest(unittest.TestCase):
             current_chapter="4力法",
             questions=[{"label": "4", "loads": [{"type": "集中", "raw": "P"}]}],
             selected_question=1,
+            previous_question=1,
+            completed_questions=[1],
             candidates=[{"rank": 1, "path": "bank/q1.jpg", "score": 0.9}],
+            pending_chapter="8影响线",
         )
         store.save(original)
 

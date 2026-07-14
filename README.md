@@ -34,6 +34,14 @@ python -B scripts/run_tiku_agent_demo.py --port 8790
 
 会话、上传题图、候选图、裁图和答案输出均位于 `.tmp_tiku_agent/`，媒体地址与当前 Cookie 会话绑定。上传原图、候选图和答案图在刷新或 Demo 重启后仍可显示，最后一次检索或对话操作 2 小时后统一过期；“新对话”会取消当前请求并清理前后端临时状态。前端会在上传前检查图片类型和 15MB 大小限制，并把服务端异常转换为可理解的中文提示。该入口会记录不含用户原话、图片路径或模型原文的结构化任务日志。
 
+Demo 默认继续使用 Intent V1。Intent V2 只能通过显式开关在另一端口试运行：
+
+```powershell
+python -B scripts/run_tiku_agent_demo.py --port 8791 --intent-version v2
+```
+
+V2 默认使用独立的 `.tmp_tiku_agent_v2/`，其中的 SQLite、上传、会话文件、答案输出、模型缓存和结构化任务日志均不与 V1 共用。不要把试运行端口设为正在使用的 8790；需要回退时停止 8791 即可，原 V1 无需迁移或重启。
+
 ## 系统流程
 
 ```mermaid

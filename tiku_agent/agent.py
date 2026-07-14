@@ -7,10 +7,21 @@ from pathlib import Path
 from typing import Any, Callable
 
 from tiku_agent import render
+from tiku_agent.action_decision_v2 import ActionDecisionV2
+from tiku_agent.conversation_context_v2 import ConversationContextV2
 from tiku_agent.intent import (
     IntentResult,
     parse_user_intent,
 )
+from tiku_agent.intent_runtime_v2 import (
+    INTENT_VERSION_V1,
+    INTENT_VERSION_V2,
+    INTENT_VERSIONS,
+    adapt_decision_v2,
+    build_runtime_context_v2,
+)
+from tiku_agent.intent_v2 import call_qwen_decision_v2, decide_intent_v2
+from tiku_agent.reply_shell_v2 import is_reply_shell_action, render_reply_shell_v2
 from tiku_agent.state import (
     PHASE_ANSWERED,
     PHASE_ERROR,
@@ -63,15 +74,28 @@ class TikuSearchAgent:
         intent_parser: Callable[..., IntentResult] = parse_user_intent,
         use_llm_intent: bool = True,
         llm_client: Callable[[str], dict[str, Any]] | None = None,
+        intent_version: str = INTENT_VERSION_V1,
     ) -> None:
+        if intent_version not in INTENT_VERSIONS:
+            raise ValueError(f"Unsupported intent version: {intent_version}")
         self.state = state or AgentState()
         self.tools = tools or AgentToolbox()
         self.config = config or AgentToolConfig()
         self.intent_parser = intent_parser
         self.use_llm_intent = use_llm_intent
         self.llm_client = llm_client
+        self.intent_version = intent_version
 
     def handle_image(self, image_path: str | Path) -> AgentResponse:
+        if self.intent_version == INTENT_VERSION_V2:
+            context = build_runtime_context_v2(self.state, trusted_image_event=True)
+            decision = decide_intent_v2(
+                None,
+                context,
+                event_type="image",
+                llm_client=self._v2_llm_client(),
+            )
+            return self._dispatch_v2(decision, context, image_path=image_path)
         intent = self.intent_parser(
             state=self.state.phase,
             image_path=image_path,
@@ -83,6 +107,14 @@ class TikuSearchAgent:
         return self._dispatch(intent)
 
     def handle_text(self, text: str) -> AgentResponse:
+        if self.intent_version == INTENT_VERSION_V2:
+            context = build_runtime_context_v2(self.state)
+            decision = decide_intent_v2(
+                text,
+                context,
+                llm_client=self._v2_llm_client(),
+            )
+            return self._dispatch_v2(decision, context)
         if self.state.phase == PHASE_ERROR and text.strip() in {"重试", "再试", "再试一次"} and self.state.current_image_path:
             return self._start_image_search(self.state.current_image_path)
         intent = self.intent_parser(
@@ -95,8 +127,33 @@ class TikuSearchAgent:
         )
         return self._dispatch(intent)
 
-    def _dispatch(self, intent: IntentResult) -> AgentResponse:
-        self.state.remember_intent(intent.to_dict())
+    def _dispatch_v2(
+        self,
+        decision: ActionDecisionV2,
+        context: ConversationContextV2,
+        *,
+        image_path: str | Path | None = None,
+    ) -> AgentResponse:
+        self.state.remember_intent(decision.to_dict())
+        if is_reply_shell_action(decision.action):
+            return AgentResponse(
+                text=render_reply_shell_v2(decision, context),
+                state=self.state.to_dict(),
+                intent=decision.action,
+            )
+        return self._dispatch(
+            adapt_decision_v2(decision, image_path=image_path),
+            remember=False,
+        )
+
+    def _v2_llm_client(self) -> Callable[[str], dict[str, Any]] | None:
+        if not self.use_llm_intent:
+            return None
+        return self.llm_client or call_qwen_decision_v2
+
+    def _dispatch(self, intent: IntentResult, *, remember: bool = True) -> AgentResponse:
+        if remember:
+            self.state.remember_intent(intent.to_dict())
         if intent.intent == "cancel":
             self.state.cancel()
             return self._response(render.render_cancelled(), intent)
@@ -104,24 +161,41 @@ class TikuSearchAgent:
             return self._response(render.render_resend_answer(self.state), intent, images=self.state.last_answer_paths)
         if intent.intent == "explain_failure":
             return self._response(render.render_failure_explanation(self.state), intent)
+        if intent.intent == "retry_search":
+            return self._start_image_search(self.state.current_image_path)
         if intent.intent == "greeting":
             return self._response(render.render_greeting(), intent)
         if not intent.ok:
             return self._response(render.render_unsupported(intent.error), intent)
         if intent.intent == "search_image":
-            return self._start_image_search(str(intent.data.get("image_path") or ""))
+            return self._start_image_search(
+                str(intent.data.get("image_path") or ""),
+                chapter_override=str(intent.data.get("chapter_override") or ""),
+            )
         if intent.intent == "set_chapter":
-            return self._set_or_correct_chapter(str(intent.data.get("chapter") or ""), intent)
+            return self._set_or_correct_chapter(
+                str(intent.data.get("chapter") or ""),
+                intent,
+                chapter_target=str(intent.data.get("chapter_target") or "current_question"),
+            )
         if intent.intent == "select_candidate":
             return self._answer_candidate(int(intent.data["rank"]), intent)
         if intent.intent == "select_question":
             return self._select_question(intent)
         return self._response(render.render_unsupported(intent.error), intent)
 
-    def _start_image_search(self, image_path: str) -> AgentResponse:
+    def _start_image_search(
+        self,
+        image_path: str,
+        *,
+        chapter_override: str = "",
+    ) -> AgentResponse:
         if not image_path:
             return self._fail("没有收到图片路径。")
+        pending_chapter = chapter_override or self.state.pending_chapter
         self.state.start_search(image_path)
+        if pending_chapter:
+            self.state.set_pending_chapter(pending_chapter)
         multi = self.tools.analyze_multi_image(image_path, config=self.config)
         if multi.ok and multi.data.get("is_multi"):
             prepared = self.tools.prepare_question_units(
@@ -155,16 +229,27 @@ class TikuSearchAgent:
                 return self._fail(analyzed.error)
         self.state.set_analysis(
             loads=analyzed.data.get("loads", []),
-            chapter=analyzed.data.get("chapter") or "",
+            chapter=pending_chapter or analyzed.data.get("chapter") or "",
             question_image_path=analyzed.data.get("image_path") or image_path,
         )
+        if pending_chapter:
+            self.state.consume_pending_chapter()
         if self.state.phase == "WAIT_CHAPTER":
             return self._response(render.render_chapter_prompt(self.state), IntentResult("search_image"))
         return self._run_search()
 
-    def _set_or_correct_chapter(self, chapter: str, intent: IntentResult) -> AgentResponse:
+    def _set_or_correct_chapter(
+        self,
+        chapter: str,
+        intent: IntentResult,
+        *,
+        chapter_target: str = "current_question",
+    ) -> AgentResponse:
         if not chapter:
             return self._response(render.render_unsupported(), intent)
+        if chapter_target == "next_image":
+            self.state.set_pending_chapter(chapter)
+            return self._response(f"好，下一张题图按{chapter}检索。", intent)
         if not self.state.current_loads:
             self.state.set_chapter(chapter)
             return self._response("好，等你把题图发来。", intent)
@@ -177,13 +262,17 @@ class TikuSearchAgent:
         return self._run_search(intent=intent, classified=self._selected_question())
 
     def _select_question(self, intent: IntentResult) -> AgentResponse:
+        pending_chapter = self.state.pending_chapter
+        chapter_override = str(intent.data.get("chapter_override") or pending_chapter or "") or None
         try:
             question = self.state.select_question(
                 int(intent.data["question_index"]),
-                chapter_override=intent.data.get("chapter_override"),
+                chapter_override=chapter_override,
             )
         except ValueError as exc:
             return self._response(render.render_unsupported(str(exc)), intent)
+        if pending_chapter:
+            self.state.consume_pending_chapter()
         if self.state.phase == "WAIT_CHAPTER":
             return self._response(render.render_chapter_prompt(self.state), intent)
         return self._run_search(intent=intent, classified=question)

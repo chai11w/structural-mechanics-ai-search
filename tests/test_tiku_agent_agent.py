@@ -97,6 +97,165 @@ class TikuSearchAgentTest(unittest.TestCase):
             use_llm_intent=False,
         )
 
+    def make_v2_agent(self, fake_tools, *, llm_client=None):
+        return TikuSearchAgent(
+            tools=fake_tools.toolbox(),
+            config=AgentToolConfig(top_k=3, rerank_top=3),
+            use_llm_intent=llm_client is not None,
+            llm_client=llm_client,
+            intent_version="v2",
+        )
+
+    def test_v2_conversation_shell_preserves_search_state_and_calls_no_tools(self):
+        fake = FakeTools(chapter="4力法")
+        agent = self.make_v2_agent(fake)
+        agent.handle_image("q.jpg")
+        phase_before = agent.state.phase
+        candidates_before = list(agent.state.candidates)
+        searches_before = list(fake.search_chapters)
+
+        response = agent.handle_text("辛苦了")
+
+        self.assertEqual(response.intent, "small_talk")
+        self.assertIn("继续看题", response.text)
+        self.assertEqual(agent.state.phase, phase_before)
+        self.assertEqual(agent.state.candidates, candidates_before)
+        self.assertEqual(fake.search_chapters, searches_before)
+
+    def test_v2_model_action_without_positive_evidence_safely_clarifies(self):
+        fake = FakeTools(chapter="4力法")
+        agent = self.make_v2_agent(
+            fake,
+            llm_client=lambda _prompt: {"action": "resend_answer"},
+        )
+        agent.handle_image("q.jpg")
+        searches_before = list(fake.search_chapters)
+
+        response = agent.handle_text("忙吗，能接着看题不")
+
+        self.assertEqual(response.intent, "clarification")
+        self.assertIn("继续搜题", response.text)
+        self.assertEqual(fake.search_chapters, searches_before)
+
+    def test_v2_model_failure_safely_clarifies_without_running_tools(self):
+        fake = FakeTools(chapter="4力法")
+        agent = self.make_v2_agent(
+            fake,
+            llm_client=lambda _prompt: (_ for _ in ()).throw(RuntimeError("model unavailable")),
+        )
+        agent.handle_image("q.jpg")
+        searches_before = list(fake.search_chapters)
+
+        response = agent.handle_text("那个")
+
+        self.assertEqual(response.intent, "clarification")
+        self.assertNotIn("model unavailable", response.text)
+        self.assertEqual(fake.search_chapters, searches_before)
+
+    def test_v2_pending_chapter_is_consumed_by_next_single_image(self):
+        fake = FakeTools(chapter="3静定结构位移")
+        agent = self.make_v2_agent(fake)
+
+        pending = agent.handle_text("待会传的题按力法")
+        self.assertEqual(pending.intent, "set_chapter")
+        self.assertEqual(agent.state.pending_chapter, "4力法")
+        self.assertEqual(agent.state.phase, "IDLE")
+
+        agent.handle_image("next.jpg")
+
+        self.assertEqual(agent.state.current_chapter, "4力法")
+        self.assertEqual(agent.state.pending_chapter, "")
+        self.assertEqual(fake.search_chapters, ["4力法"])
+
+    def test_v2_pending_chapter_waits_for_question_choice_on_multi_image(self):
+        fake = FakeTools(chapter="")
+        fake.analyze_multi_image = lambda image_path, *, config=None: ToolResult(
+            ok=True,
+            data={
+                "is_multi": True,
+                "questions": [
+                    {"label": "1", "loads": [{"type": "集中", "raw": "P"}], "chapter": "", "question_image_path": "q1.jpg"},
+                    {"label": "2", "loads": [{"type": "均布", "raw": "q"}], "chapter": "", "question_image_path": "q2.jpg"},
+                ],
+            },
+        )
+        fake.prepare_question_units = lambda image_path, questions, *, config=None: ToolResult(
+            ok=True,
+            data={"questions": questions, "diagram_crops": {"1": "q1.jpg", "2": "q2.jpg"}},
+        )
+        agent = self.make_v2_agent(fake)
+        agent.handle_text("下一张按影响线")
+
+        listed = agent.handle_image("multi.jpg")
+
+        self.assertEqual(agent.state.phase, "WAIT_QUESTION_CHOICE")
+        self.assertEqual(agent.state.pending_chapter, "8影响线")
+        self.assertEqual(fake.search_chapters, [])
+        self.assertIn("2 道题", listed.text)
+
+        agent.handle_text("第二题")
+
+        self.assertEqual(agent.state.pending_chapter, "")
+        self.assertEqual(agent.state.current_chapter, "8影响线")
+        self.assertEqual(fake.search_chapters, ["8影响线"])
+
+    def test_v2_safe_clarification_recovers_on_the_next_explicit_turn(self):
+        fake = FakeTools(chapter="4力法")
+        agent = self.make_v2_agent(
+            fake,
+            llm_client=lambda _prompt: {
+                "action": "clarification",
+                "clarification_reason": "ambiguous_reference",
+            },
+        )
+        agent.handle_image("q.jpg")
+        candidates_before = list(agent.state.candidates)
+        searches_before = list(fake.search_chapters)
+
+        clarified = agent.handle_text("那个")
+
+        self.assertEqual(clarified.intent, "clarification")
+        self.assertEqual(agent.state.candidates, candidates_before)
+        self.assertEqual(fake.search_chapters, searches_before)
+
+        answered = agent.handle_text("第二个候选")
+
+        self.assertEqual(answered.intent, "select_candidate")
+        self.assertEqual(agent.state.phase, PHASE_ANSWERED)
+        self.assertEqual(agent.state.selected_rank, 2)
+        self.assertEqual(agent.state.last_answer_paths, ["out/answer2.jpg"])
+        self.assertEqual(fake.search_chapters, searches_before)
+
+    def test_v2_previous_question_reference_uses_recorded_state_not_model_guess(self):
+        fake = FakeTools(chapter="")
+        fake.analyze_multi_image = lambda image_path, *, config=None: ToolResult(
+            ok=True,
+            data={
+                "is_multi": True,
+                "questions": [
+                    {"label": "1", "loads": [{"type": "集中", "raw": "P"}], "chapter": "4力法", "question_image_path": "q1.jpg"},
+                    {"label": "2", "loads": [{"type": "均布", "raw": "q"}], "chapter": "4力法", "question_image_path": "q2.jpg"},
+                ],
+            },
+        )
+        fake.prepare_question_units = lambda image_path, questions, *, config=None: ToolResult(
+            ok=True,
+            data={"questions": questions, "diagram_crops": {"1": "q1.jpg", "2": "q2.jpg"}},
+        )
+        agent = self.make_v2_agent(
+            fake,
+            llm_client=lambda _prompt: {"action": "select_question", "question_index": 2},
+        )
+        agent.handle_image("multi.jpg")
+        agent.handle_text("第一题")
+        agent.handle_text("第二题")
+
+        returned = agent.handle_text("上一道")
+
+        self.assertEqual(returned.intent, "select_question")
+        self.assertEqual(agent.state.selected_question, 1)
+        self.assertEqual(agent.state.previous_question, 2)
+
     def test_image_search_reaches_candidate_choice(self):
         fake = FakeTools(chapter="4力法")
         agent = self.make_agent(fake)

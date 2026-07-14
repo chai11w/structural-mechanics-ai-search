@@ -37,7 +37,11 @@ _STYLE = (WEB_DIR / "demo.css").read_text(encoding="utf-8")
 _SCRIPT = (WEB_DIR / "demo.js").read_text(encoding="utf-8")
 
 
-def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
+def create_app(
+    *,
+    runtime: AgentSessionRuntime | None = None,
+    incoming_dir: str | Path = INCOMING_DIR,
+) -> FastAPI:
     """Create a local-only demo app without any existing Feishu configuration."""
     runtime = runtime or AgentSessionRuntime(SQLiteSessionStore(DEFAULT_RUNTIME_DIR / "session.db"))
     app = FastAPI(title="结构力学搜题 Agent", docs_url=None, redoc_url=None, openapi_url=None)
@@ -107,7 +111,12 @@ def create_app(*, runtime: AgentSessionRuntime | None = None) -> FastAPI:
     async def image(request: Request) -> Response:
         content, filename, content_type = await _read_image_upload(request)
         session_id = _session_id(request)
-        incoming = _write_incoming_image(content, filename, content_type)
+        incoming = _write_incoming_image(
+            content,
+            filename,
+            content_type,
+            incoming_dir=incoming_dir,
+        )
         try:
             response = runtime.handle_image(session_id, incoming)
             uploaded_image = runtime.current_image_path(session_id)
@@ -195,9 +204,16 @@ async def _read_image_upload(request: Request) -> tuple[bytes, str, str]:
     return content, filename, content_type
 
 
-def _write_incoming_image(content: bytes, filename: str, content_type: str = "") -> Path:
+def _write_incoming_image(
+    content: bytes,
+    filename: str,
+    content_type: str = "",
+    *,
+    incoming_dir: str | Path = INCOMING_DIR,
+) -> Path:
     """Verify image bytes and choose the temporary suffix from the detected format."""
-    INCOMING_DIR.mkdir(parents=True, exist_ok=True)
+    target_dir = Path(incoming_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
     try:
         with Image.open(BytesIO(content)) as image:
             detected_format = str(image.format or "").upper()
@@ -216,7 +232,7 @@ def _write_incoming_image(content: bytes, filename: str, content_type: str = "")
             normalized_type,
             detected_type,
         )
-    output = INCOMING_DIR / f"{uuid4().hex}{suffix}"
+    output = target_dir / f"{uuid4().hex}{suffix}"
     output.write_bytes(content)
     return output
 

@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from uuid import uuid4
 
 from tiku_agent.intent import (
+    CHAPTERS,
     STATE_IDLE,
     STATE_WAIT_CANDIDATE_CHOICE,
     STATE_WAIT_CHAPTER,
@@ -63,6 +64,8 @@ class AgentState:
 
     questions: list[dict] = field(default_factory=list)
     selected_question: int | None = None
+    previous_question: int | None = None
+    completed_questions: list[int] = field(default_factory=list)
 
     candidates: list[dict] = field(default_factory=list)
     selected_rank: int | None = None
@@ -71,6 +74,7 @@ class AgentState:
     last_intent: dict = field(default_factory=dict)
     last_error: str = ""
     revision_count: int = 0
+    pending_chapter: str = ""
 
     def __init__(
         self,
@@ -84,12 +88,15 @@ class AgentState:
         current_structure_type: str = "",
         questions: list[dict] | None = None,
         selected_question: int | None = None,
+        previous_question: int | None = None,
+        completed_questions: list[int] | None = None,
         candidates: list[dict] | None = None,
         selected_rank: int | None = None,
         last_answer_paths: list[str] | None = None,
         last_intent: dict | None = None,
         last_error: str = "",
         revision_count: int = 0,
+        pending_chapter: str = "",
         *,
         state: str | None = None,
         image_path: str = "",
@@ -108,12 +115,15 @@ class AgentState:
         self.current_structure_type = current_structure_type or structure_type
         self.questions = list(questions or [])
         self.selected_question = selected_question
+        self.previous_question = previous_question
+        self.completed_questions = sorted(set(int(index) for index in (completed_questions or [])))
         self.candidates = list(candidates or [])
         self.selected_rank = selected_rank
         self.last_answer_paths = [str(path) for path in (last_answer_paths or [])]
         self.last_intent = dict(last_intent or {})
         self.last_error = last_error
         self.revision_count = revision_count
+        self.pending_chapter = pending_chapter
         self.validate()
 
     @property
@@ -178,8 +188,14 @@ class AgentState:
             raise ValueError("selected_rank must be positive")
         if self.selected_question is not None and self.selected_question < 1:
             raise ValueError("selected_question must be positive")
+        if self.previous_question is not None and self.previous_question < 1:
+            raise ValueError("previous_question must be positive")
+        if any(index < 1 for index in self.completed_questions):
+            raise ValueError("completed_questions must contain positive indexes")
         if self.revision_count < 0:
             raise ValueError("revision_count must not be negative")
+        if self.pending_chapter and self.pending_chapter not in CHAPTERS:
+            raise ValueError("pending_chapter must be a supported chapter")
 
     def remember_intent(self, intent: dict) -> None:
         self.last_intent = dict(intent)
@@ -193,10 +209,13 @@ class AgentState:
         self.current_structure_type = ""
         self.questions = []
         self.selected_question = None
+        self.previous_question = None
+        self.completed_questions = []
         self.candidates = []
         self.selected_rank = None
         self.last_answer_paths = []
         self.last_error = ""
+        self.pending_chapter = ""
         self.phase = PHASE_PROCESSING
 
     def set_analysis(self, *, loads: list[dict], chapter: str = "", question_image_path: str = "") -> None:
@@ -226,11 +245,15 @@ class AgentState:
     def set_questions(self, questions: list[dict]) -> None:
         self.questions = list(questions)
         self.selected_question = None
+        self.previous_question = None
+        self.completed_questions = []
         self.phase = STATE_WAIT_QUESTION_CHOICE if questions else PHASE_NO_MATCH
 
     def select_question(self, index: int, *, chapter_override: str | None = None) -> dict:
         if not 1 <= index <= len(self.questions):
             raise ValueError(f"Question index out of range: {index}")
+        if self.selected_question is not None and self.selected_question != index:
+            self.previous_question = self.selected_question
         self.selected_question = index
         question = dict(self.questions[index - 1])
         question_image = str(question.get("question_image_path") or question.get("image_path") or "")
@@ -263,12 +286,27 @@ class AgentState:
 
     def set_answer_paths(self, paths: list[str]) -> None:
         self.last_answer_paths = [str(path) for path in paths]
+        if self.selected_question is not None:
+            self.completed_questions = sorted(
+                set((*self.completed_questions, self.selected_question))
+            )
         self.phase = PHASE_ANSWERED
+
+    def set_pending_chapter(self, chapter: str) -> None:
+        if chapter not in CHAPTERS:
+            raise ValueError("pending chapter must be supported")
+        self.pending_chapter = chapter
+
+    def consume_pending_chapter(self) -> str:
+        chapter = self.pending_chapter
+        self.pending_chapter = ""
+        return chapter
 
     def mark_done(self) -> None:
         self.phase = PHASE_ANSWERED
 
     def cancel(self) -> None:
+        self.pending_chapter = ""
         self.phase = PHASE_CANCELLED
 
     def fail(self, error: str = "") -> None:

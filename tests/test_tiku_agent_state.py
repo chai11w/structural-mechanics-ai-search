@@ -28,12 +28,15 @@ class TikuAgentStateTest(unittest.TestCase):
                 "current_structure_type",
                 "questions",
                 "selected_question",
+                "previous_question",
+                "completed_questions",
                 "candidates",
                 "selected_rank",
                 "last_answer_paths",
                 "last_intent",
                 "last_error",
                 "revision_count",
+                "pending_chapter",
             },
         )
         self.assertEqual(state.phase, STATE_IDLE)
@@ -64,6 +67,18 @@ class TikuAgentStateTest(unittest.TestCase):
         self.assertEqual(restored.current_chapter, "4力法")
         self.assertEqual(restored.current_loads[0]["raw"], "P")
         self.assertEqual(restored.last_answer_paths, ["a.jpg"])
+
+    def test_legacy_state_without_v2_context_fields_still_loads(self):
+        legacy = AgentState(current_image_path="q.jpg", current_chapter="4力法").to_dict()
+        legacy.pop("previous_question")
+        legacy.pop("completed_questions")
+        legacy.pop("pending_chapter")
+
+        restored = AgentState.from_dict(legacy)
+
+        self.assertIsNone(restored.previous_question)
+        self.assertEqual(restored.completed_questions, [])
+        self.assertEqual(restored.pending_chapter, "")
 
     def test_start_search_resets_current_dialogue_context(self):
         state = AgentState(
@@ -151,6 +166,27 @@ class TikuAgentStateTest(unittest.TestCase):
         self.assertEqual(state.active_image_path, "q2.jpg")
         self.assertEqual(state.current_chapter, "4力法")
         self.assertEqual(state.phase, PHASE_READY_TO_ROUTE)
+
+    def test_multi_question_progress_and_pending_chapter_round_trip(self):
+        state = AgentState(current_image_path="full.jpg")
+        state.set_questions(
+            [
+                {"question_image_path": "q1.jpg", "chapter": "4力法"},
+                {"question_image_path": "q2.jpg", "chapter": "5位移法"},
+            ]
+        )
+        state.select_question(1)
+        state.set_answer_paths(["a1.jpg"])
+        state.select_question(2)
+        state.set_pending_chapter("8影响线")
+
+        restored = AgentState.from_dict(state.to_dict())
+
+        self.assertEqual(restored.previous_question, 1)
+        self.assertEqual(restored.completed_questions, [1])
+        self.assertEqual(restored.pending_chapter, "8影响线")
+        self.assertEqual(restored.consume_pending_chapter(), "8影响线")
+        self.assertEqual(restored.pending_chapter, "")
 
     def test_answered_keeps_answer_paths_for_recall(self):
         state = AgentState()

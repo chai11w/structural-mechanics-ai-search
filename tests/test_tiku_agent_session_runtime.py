@@ -6,6 +6,7 @@ from tiku_agent.agent import AgentToolbox, TikuSearchAgent
 from tiku_agent.session_artifacts import SessionArtifacts
 from tiku_agent.session_runtime import AgentSessionRuntime
 from tiku_agent.session_store import SQLiteSessionStore
+from tiku_agent.state import AgentState
 from tiku_agent.task_log import TaskLogEntry, TaskLogger
 from tiku_agent.tools import ToolResult
 
@@ -102,6 +103,24 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.assertEqual([entry.kind for entry in self.logger.entries], ["image", "text"])
         self.assertTrue(all(entry.duration_ms >= 0 for entry in self.logger.entries))
 
+    def test_runtime_intent_version_defaults_to_v1_and_requires_explicit_v2(self):
+        self.assertEqual(self.runtime.intent_version, "v1")
+        explicit = AgentSessionRuntime(
+            self.store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            intent_version="v2",
+        )
+        self.assertEqual(explicit.intent_version, "v2")
+        isolated_agent = explicit._make_agent(AgentState(session_id="isolated"))
+        self.assertEqual(isolated_agent.config.runtime_dir, self.artifacts.root.parent)
+        self.assertEqual(
+            isolated_agent.config.session_dir,
+            self.artifacts.session_dir("isolated"),
+        )
+        with self.assertRaises(ValueError):
+            AgentSessionRuntime(self.store, intent_version="v3")
+
     def test_cancel_clears_persisted_session(self):
         session_id = "cancel-session"
         self.runtime.handle_image(session_id, self.source_image)
@@ -112,6 +131,41 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.assertIsNone(self.store.load(session_id))
         self.assertFalse(self.artifacts.session_dir(session_id).exists())
         self.assertEqual(self.logger.entries[-1].outcome, "cancelled")
+
+    def test_v2_pending_chapter_survives_restart_and_is_consumed_once(self):
+        session_id = "v2-pending-session"
+        self.addCleanup(lambda: self.artifacts.clear_session(session_id))
+        runtime = AgentSessionRuntime(
+            self.store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            agent_factory=lambda state: TikuSearchAgent(
+                state=state,
+                tools=FakeTools().toolbox(),
+                use_llm_intent=False,
+                intent_version="v2",
+            ),
+        )
+
+        pending = runtime.handle_text(session_id, "待会传的题按影响线")
+        self.assertEqual(pending.state["pending_chapter"], "8影响线")
+
+        restarted = AgentSessionRuntime(
+            self.store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            agent_factory=lambda state: TikuSearchAgent(
+                state=state,
+                tools=FakeTools().toolbox(),
+                use_llm_intent=False,
+                intent_version="v2",
+            ),
+        )
+        searched = restarted.handle_image(session_id, self.source_image)
+
+        self.assertEqual(searched.state["current_chapter"], "8影响线")
+        self.assertEqual(searched.state["pending_chapter"], "")
+        self.assertEqual(self.store.load(session_id).pending_chapter, "")
 
 
 if __name__ == "__main__":
