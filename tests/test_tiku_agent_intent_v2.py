@@ -74,6 +74,57 @@ class IntentV2Test(unittest.TestCase):
         self.assertEqual(decide_intent_v2("你还能帮我做什么", context, llm_client=model).action, "capability_help")
         self.assertEqual(calls, [])
 
+    def test_global_search_consent_is_bound_to_offer_and_wait_chapter(self):
+        offered = ConversationContextV2(
+            phase="WAIT_CHAPTER",
+            has_active_image=True,
+            global_search_offered=True,
+        )
+        for text in ("可以", "搜吧", "那就全局搜一下", "慢点没关系，帮我找"):
+            with self.subTest(text=text):
+                decision = decide_intent_v2(text, offered)
+                self.assertEqual(decision.action, "global_search")
+
+        not_offered = ConversationContextV2(phase="WAIT_CHAPTER", has_active_image=True)
+        self.assertEqual(
+            decide_intent_v2("所有章节都搜一遍", not_offered).action,
+            "reject",
+        )
+        self.assertEqual(
+            decide_intent_v2("可以", not_offered).clarification_reason,
+            "missing_chapter",
+        )
+
+    def test_global_search_decline_ambiguity_and_explicit_chapter_are_safe(self):
+        context = ConversationContextV2(
+            phase="WAIT_CHAPTER",
+            has_active_image=True,
+            global_search_offered=True,
+        )
+        declined = decide_intent_v2("先不用", context)
+        self.assertEqual(declined.action, "clarification")
+        self.assertEqual(declined.clarification_reason, "missing_chapter")
+        vague = decide_intent_v2("可能吧", context)
+        self.assertEqual(vague.action, "clarification")
+        self.assertEqual(vague.clarification_reason, "ambiguous_action")
+        chapter = decide_intent_v2("不用，按力法搜", context)
+        self.assertEqual(chapter.action, "set_chapter")
+        self.assertEqual(chapter.chapter_override, "4力法")
+
+    def test_model_cannot_invent_global_search_without_explicit_consent(self):
+        context = ConversationContextV2(
+            phase="WAIT_CHAPTER",
+            has_active_image=True,
+            global_search_offered=True,
+        )
+        decision = decide_intent_v2(
+            "你看着办",
+            context,
+            llm_client=lambda _prompt: {"action": "global_search"},
+        )
+        self.assertEqual(decision.action, "clarification")
+        self.assertEqual(decision.clarification_reason, "ambiguous_action")
+
     def test_context_expression_calls_model_once_then_code_authorizes(self):
         calls = []
 
@@ -326,6 +377,7 @@ class IntentV2Test(unittest.TestCase):
         prompt = build_context_prompt_v2("那个", context)
         self.assertIn('"question_index": null', prompt)
         self.assertIn("ambiguous_reference", prompt)
+        self.assertIn("global_search", prompt)
         self.assertNotIn("search_image|", prompt)
 
 
