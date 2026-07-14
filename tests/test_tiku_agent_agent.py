@@ -334,6 +334,35 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.current_chapter, "8影响线")
         self.assertEqual(fake.search_chapters, ["8影响线"])
 
+    def test_v2_explicit_candidate_selection_does_not_reselect_multi_question(self):
+        fake = FakeTools(chapter="")
+        fake.analyze_multi_image = lambda image_path, *, config=None: ToolResult(
+            ok=True,
+            data={
+                "is_multi": True,
+                "questions": [
+                    {"label": "1", "loads": [{"type": "集中", "raw": "P"}], "chapter": "4力法", "question_image_path": "q1.jpg"},
+                    {"label": "2", "loads": [{"type": "均布", "raw": "q"}], "chapter": "4力法", "question_image_path": "q2.jpg"},
+                ],
+            },
+        )
+        fake.prepare_question_units = lambda image_path, questions, *, config=None: ToolResult(
+            ok=True,
+            data={"questions": questions, "diagram_crops": {"1": "q1.jpg", "2": "q2.jpg"}},
+        )
+        agent = self.make_v2_agent(fake)
+        agent.handle_image("multi.jpg")
+        agent.handle_text("第二题")
+        searches_before = list(fake.search_chapters)
+
+        answered = agent.handle_text("选择候选 2")
+
+        self.assertEqual(answered.intent, "select_candidate")
+        self.assertEqual(agent.state.selected_question, 2)
+        self.assertEqual(agent.state.selected_rank, 2)
+        self.assertEqual(agent.state.last_answer_paths, ["out/answer2.jpg"])
+        self.assertEqual(fake.search_chapters, searches_before)
+
     def test_v2_safe_clarification_recovers_on_the_next_explicit_turn(self):
         fake = FakeTools(chapter="4力法")
         agent = self.make_v2_agent(
