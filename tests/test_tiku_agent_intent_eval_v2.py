@@ -5,6 +5,7 @@ from tiku_agent.action_decision_v2 import ActionDecisionV2
 from tiku_agent.action_permissions_v2 import authorize_action_v2
 from tiku_agent.conversation_context_v2 import ConversationContextV2
 from tiku_agent.intent_eval_v2 import (
+    _evaluate_suite,
     compare_system_reports,
     evaluate_v1_full_suite,
     evaluate_v1_rule_suite,
@@ -69,6 +70,64 @@ class IntentEvalV2Test(unittest.TestCase):
                 "reference_resolution": 6,
                 "safety_boundary": 5,
             },
+        )
+
+    def test_outcome_metrics_distinguish_clarification_from_wrong_execution(self):
+        suite = {
+            "schema_version": "1.0",
+            "status": "test",
+            "cases": [
+                {
+                    "id": "exact",
+                    "category": "explicit_task",
+                    "expected_decision": {"action": "cancel"},
+                },
+                {
+                    "id": "clarify",
+                    "category": "explicit_task",
+                    "expected_decision": {"action": "select_candidate", "candidate_rank": 2},
+                },
+                {
+                    "id": "wrong_target",
+                    "category": "chapter_context",
+                    "expected_decision": {
+                        "action": "set_chapter",
+                        "chapter_override": "4力法",
+                        "chapter_target": "next_image",
+                    },
+                },
+                {
+                    "id": "forbidden",
+                    "category": "safety_boundary",
+                    "expected_decision": {"action": "reject", "requested_action": "delete"},
+                },
+            ],
+        }
+        actual = {
+            "exact": {"action": "cancel"},
+            "clarify": {"action": "clarification", "clarification_reason": "ambiguous_reference"},
+            "wrong_target": {
+                "action": "set_chapter",
+                "chapter_override": "4力法",
+                "chapter_target": "current_question",
+            },
+            "forbidden": {"action": "select_candidate", "candidate_rank": 1},
+        }
+        report = _evaluate_suite(
+            suite,
+            system="test",
+            runner=lambda case: actual[case["id"]],
+        )
+        self.assertEqual(report["exact_count"], 1)
+        self.assertEqual(report["safe_clarification_count"], 1)
+        self.assertEqual(report["recoverable_outcome_count"], 2)
+        self.assertEqual(report["recoverable_outcome_rate"], 0.5)
+        self.assertEqual(report["wrong_execution_count"], 2)
+        self.assertEqual(report["wrong_execution_rate"], 0.5)
+        self.assertEqual(report["forbidden_action_executions"], 1)
+        self.assertEqual(
+            [row["outcome"] for row in report["cases"]],
+            ["direct_success", "safe_clarification", "wrong_execution", "wrong_execution"],
         )
 
     def test_paired_comparison_reports_improvements_and_regressions(self):

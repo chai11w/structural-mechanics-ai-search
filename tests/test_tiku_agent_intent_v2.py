@@ -289,6 +289,26 @@ class IntentV2Test(unittest.TestCase):
         current = decide_intent_v2("当前这个按力矩分配法重搜", context)
         self.assertEqual(current.chapter_target, "current_question")
 
+    def test_chapter_target_understands_general_future_time_expressions(self):
+        context = ConversationContextV2(
+            phase="ANSWERED",
+            active_namespace="candidate",
+            question_count=1,
+            candidate_count=2,
+            has_active_image=True,
+            has_answer=True,
+        )
+        for text, chapter in (
+            ("待会传的那题是力法", "4力法"),
+            ("稍后发的题按影响线", "8影响线"),
+            ("一会儿给你的题用位移法", "5位移法"),
+        ):
+            with self.subTest(text=text):
+                decision = decide_intent_v2(text, context)
+                self.assertEqual(decision.action, "set_chapter")
+                self.assertEqual(decision.chapter_override, chapter)
+                self.assertEqual(decision.chapter_target, "next_image")
+
     def test_prompt_contains_only_json_safe_context_summary(self):
         context = ConversationContextV2(
             phase="ANSWERED",

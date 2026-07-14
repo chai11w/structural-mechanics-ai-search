@@ -473,6 +473,7 @@ def _chapter_target(text: str) -> str:
     next_image_patterns = (
         r"(?:下一张|下张)",
         r"(?:接下来|之后|等会儿).{0,4}(?:发|传|给)",
+        r"(?:待会儿?|稍后|一会儿?|过会儿?).{0,6}(?:发|传|给)",
         r"下(?:一|面)(?:个|道)?(?:题|这个题|那道题)",
     )
     if any(re.search(pattern, text) for pattern in next_image_patterns):
