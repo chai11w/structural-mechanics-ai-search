@@ -9,6 +9,7 @@ from tiku_agent.tools import (
     AgentToolConfig,
     analyze_multi_image_tool,
     classify_structure_tool,
+    coarse_search_tool,
     global_search_tool,
     parse_candidate_action_tool,
     rerank_candidates_tool,
@@ -17,6 +18,57 @@ from tiku_agent.tools import (
 )
 
 class TikuAgentToolsTest(unittest.TestCase):
+    def test_coarse_search_continuation_excludes_every_attempted_candidate(self):
+        loads = [{"type": "集中", "raw": "P"}]
+        frame = pd.DataFrame(
+            [
+                {"题目名称": f"q{index}.jpg", "荷载": json.dumps({"loads": loads}, ensure_ascii=False)}
+                for index in range(1, 5)
+            ]
+        )
+        scores = [0.9, 0.8, 0.7, 0.6]
+        with patch("tiku_agent.tools.load_bank_excel", return_value=frame), patch(
+            "tiku_agent.tools.search.compute_similarity", side_effect=scores * 4
+        ), patch(
+            "tiku_agent.tools.search.resolve_question_path",
+            side_effect=lambda name, **_kwargs: (Path(name), name, False),
+        ):
+            first = coarse_search_tool(loads, chapter="4力法", route="main", top_k=2)
+            first_keys = [item["candidate_key"] for item in first.data["candidates"]]
+            second = coarse_search_tool(
+                loads,
+                chapter="4力法",
+                route="main",
+                top_k=2,
+                exclude_candidate_keys=first_keys,
+            )
+            second_keys = [item["candidate_key"] for item in second.data["candidates"]]
+            third = coarse_search_tool(
+                loads,
+                chapter="4力法",
+                route="main",
+                top_k=2,
+                exclude_candidate_keys=first_keys + second_keys,
+            )
+            third_keys = [item["candidate_key"] for item in third.data["candidates"]]
+            fourth = coarse_search_tool(
+                loads,
+                chapter="4力法",
+                route="main",
+                top_k=2,
+                exclude_candidate_keys=first_keys + second_keys + third_keys,
+            )
+
+        self.assertEqual([item["name"] for item in first.data["candidates"]], ["q1.jpg"])
+        self.assertTrue(first.data["has_more"])
+        self.assertEqual([item["name"] for item in second.data["candidates"]], ["q2.jpg"])
+        self.assertTrue(second.data["has_more"])
+        self.assertEqual([item["name"] for item in third.data["candidates"]], ["q3.jpg"])
+        self.assertTrue(third.data["has_more"])
+        self.assertEqual([item["name"] for item in fourth.data["candidates"]], ["q4.jpg"])
+        self.assertFalse(fourth.data["has_more"])
+        self.assertTrue(set(first_keys).isdisjoint(item["candidate_key"] for item in second.data["candidates"]))
+
     def test_global_search_reranks_every_deduplicated_perfect_candidate(self):
         loads = [{"type": "集中", "raw": "P"}]
         query = Path("query.jpg")
@@ -232,14 +284,14 @@ class TikuAgentToolsTest(unittest.TestCase):
 
         def fake_rerank(query_image_path, rerank_input, top_n=3):
             self.assertEqual(query_image_path, "query.jpg")
-            self.assertEqual([item["path"] for item in rerank_input], ["q1.jpg", "q2.jpg"])
+            self.assertEqual([item["path"] for item in rerank_input], ["q1.jpg"])
             self.assertEqual(top_n, 3)
             return [
                 {
-                    "rank": 2,
-                    "path": "q2.jpg",
-                    "name": "q2.jpg",
-                    "score": 0.70,
+                    "rank": 1,
+                    "path": "q1.jpg",
+                    "name": "q1.jpg",
+                    "score": 0.75,
                     "rerank_score": 0.95,
                     "final_score": 0.75,
                 }
@@ -265,6 +317,7 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertFalse(result.data["reranked"])
         self.assertEqual(rerank.call_count, 0)
+        self.assertEqual([item["path"] for item in result.data["visible_candidates"]], ["q1.jpg"])
         self.assertIn("粗筛", result.data["rerank_note"])
 
     def test_agent_rerank_falls_back_to_coarse_candidates_when_incomplete(self):
@@ -287,9 +340,21 @@ class TikuAgentToolsTest(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertFalse(result.data["reranked"])
-        self.assertEqual([item["path"] for item in result.data["visible_candidates"]], ["q1.jpg", "q2.jpg"])
+        self.assertEqual([item["path"] for item in result.data["visible_candidates"]], ["q1.jpg"])
         self.assertTrue(all(item["rerank_status"] == "incomplete" for item in result.data["visible_candidates"]))
         self.assertIn("回退粗筛", result.data["rerank_note"])
+
+    def test_agent_without_query_image_uses_coarse_display_policy(self):
+        candidates = [
+            {"rank": 1, "path": "q1.jpg", "score": 0.9, "name": "q1.jpg"},
+            {"rank": 2, "path": "q2.jpg", "score": 0.8, "name": "q2.jpg"},
+        ]
+
+        result = rerank_candidates_tool(None, candidates, route="main")
+
+        self.assertTrue(result.ok)
+        self.assertFalse(result.data["reranked"])
+        self.assertEqual([item["path"] for item in result.data["visible_candidates"]], ["q1.jpg"])
 
 
 if __name__ == "__main__":

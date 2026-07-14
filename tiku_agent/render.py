@@ -36,6 +36,29 @@ def render_candidates(state: AgentState, *, reranked: bool = False, note: str = 
     return f"我从题库里找到了 {len(state.candidates)} 道比较像的题，你看看有没有想要的。"
 
 
+def render_candidates_rejected(state: AgentState) -> str:
+    if state.continuation_available:
+        return "收到，这批候选都先排除。你可以回复“继续搜”看下一批，或告诉我换哪个章节。"
+    return "收到，这批候选都不匹配。当前范围已经没有更多候选，可以换章节或发一张更清楚的题图。"
+
+
+def render_existing_candidates(state: AgentState) -> str:
+    if not state.candidates:
+        return "当前没有可以返回的候选。"
+    return f"好，回到当前这 {len(state.candidates)} 个候选。直接回复候选编号即可。"
+
+
+def render_answer_mismatch(state: AgentState) -> str:
+    if state.continuation_available:
+        return "收到，这个答案先标记为不匹配。你可以选其他候选，或回复“继续搜”看下一批。"
+    return "收到，这个答案先标记为不匹配。你可以返回候选改选；当前范围没有更多候选。"
+
+
+def render_no_more_candidates(state: AgentState) -> str:
+    chapter = state.current_chapter or "当前范围"
+    return f"{chapter}里已经没有更多未看过的候选了。可以换章节或发一张更清楚的题图。"
+
+
 def render_global_candidates(state: AgentState) -> str:
     if not state.candidates:
         return render_global_no_match()

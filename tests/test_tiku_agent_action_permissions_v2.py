@@ -217,6 +217,50 @@ class ActionPermissionsV2Test(unittest.TestCase):
         self.assertEqual(denied.outcome, OUTCOME_CLARIFY)
         self.assertTrue(allowed.allowed)
 
+    def test_candidate_feedback_and_continuation_have_distinct_permissions(self):
+        context = DecisionContextV2(
+            phase="WAIT_CANDIDATE_CHOICE",
+            active_namespace=NAMESPACE_CANDIDATE,
+            candidate_count=2,
+            has_active_image=True,
+            continuation_available=True,
+        )
+        rejected = authorize_action_v2(ActionDecisionV2(action="reject_candidates"), context)
+        continued = authorize_action_v2(ActionDecisionV2(action="continue_search"), context)
+        shown = authorize_action_v2(ActionDecisionV2(action="show_candidates"), context)
+        self.assertTrue(rejected.allowed)
+        self.assertEqual(rejected.tool_effect, TOOLS_NONE)
+        self.assertTrue(continued.allowed)
+        self.assertEqual(continued.tool_effect, TOOLS_FIXED_SEARCH_PIPELINE)
+        self.assertTrue(shown.allowed)
+        self.assertEqual(shown.state_effect, STATE_PRESERVE)
+
+    def test_continue_search_clarifies_when_next_batch_is_exhausted(self):
+        result = authorize_action_v2(
+            ActionDecisionV2(action="continue_search"),
+            DecisionContextV2(
+                phase="WAIT_CANDIDATE_CHOICE",
+                active_namespace=NAMESPACE_CANDIDATE,
+                candidate_count=2,
+                has_active_image=True,
+                continuation_available=False,
+            ),
+        )
+        self.assertEqual(result.outcome, OUTCOME_CLARIFY)
+        self.assertEqual(result.code, "continuation_exhausted")
+
+    def test_answer_mismatch_requires_a_delivered_answer(self):
+        denied = authorize_action_v2(
+            ActionDecisionV2(action="report_answer_mismatch"),
+            DecisionContextV2(phase="ANSWERED", candidate_count=2),
+        )
+        allowed = authorize_action_v2(
+            ActionDecisionV2(action="report_answer_mismatch"),
+            DecisionContextV2(phase="ANSWERED", candidate_count=2, has_answer=True),
+        )
+        self.assertEqual(denied.outcome, OUTCOME_CLARIFY)
+        self.assertTrue(allowed.allowed)
+
     def test_task_action_is_rejected_while_internal_pipeline_is_busy(self):
         result = authorize_action_v2(
             ActionDecisionV2(action="select_candidate", candidate_rank=1),

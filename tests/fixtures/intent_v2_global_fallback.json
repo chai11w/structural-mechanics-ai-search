@@ -52,6 +52,14 @@
       "expected_decision": {"action": "clarification", "clarification_reason": "missing_chapter"}
     },
     {
+      "id": "global_decline_explicit_scope",
+      "category": "global_search_safety",
+      "history": [{"role": "assistant", "content": "也可以让我全局搜索。"}],
+      "context": {"phase": "WAIT_CHAPTER", "has_active_image": true, "global_search_offered": true},
+      "input": {"event_type": "text", "text": "先不要全局搜"},
+      "expected_decision": {"action": "clarification", "clarification_reason": "missing_chapter"}
+    },
+    {
       "id": "global_ambiguous_maybe",
       "category": "global_search_fallback",
       "history": [{"role": "assistant", "content": "需要我全局搜索吗？"}],

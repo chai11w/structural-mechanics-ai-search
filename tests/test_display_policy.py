@@ -8,6 +8,13 @@ from tiku_agent.tools import AgentToolConfig
 
 
 class SharedDisplayPolicyTest(unittest.TestCase):
+    def test_coarse_policy_keeps_all_perfect_or_only_best_fallback(self):
+        with_perfect = [(1.0, "a"), (1.0, "b"), (0.9, "c")]
+        self.assertEqual(search.select_coarse_results(with_perfect), with_perfect[:2])
+
+        without_perfect = [(0.9, "a"), (0.8, "b"), (0.7, "c")]
+        self.assertEqual(search.select_coarse_results(without_perfect), without_perfect[:1])
+
     def test_threshold_policy_is_centralized_in_search(self):
         results = [
             {"rank": 1, "final_score": 0.95},

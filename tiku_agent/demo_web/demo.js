@@ -145,7 +145,7 @@ function createMediaCard(url, index, item) {
     choose.type = 'button';
     choose.className = 'select-candidate';
     choose.textContent = '选择这道题';
-    choose.addEventListener('click', () => sendTextValue(String(index + 1), `选择候选 ${index + 1}`));
+    choose.addEventListener('click', () => sendTextValue(`选择候选 ${index + 1}`));
     footer.append(label, choose);
     card.append(footer);
   }

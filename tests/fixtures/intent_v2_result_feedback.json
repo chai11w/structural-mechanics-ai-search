@@ -1,0 +1,167 @@
+{
+  "schema_version": "1.0",
+  "status": "review_draft",
+  "description": "Candidate rejection, bounded continuation, candidate return, and answer mismatch recovery cases.",
+  "cases": [
+    {
+      "id": "feedback_reject_plain_none",
+      "category": "result_feedback",
+      "history": [{"role": "assistant", "content": "我找到了三个候选。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "continuation_available": true},
+      "input": {"event_type": "text", "text": "没有"},
+      "expected_decision": {"action": "reject_candidates"}
+    },
+    {
+      "id": "feedback_reject_all_wrong",
+      "category": "result_feedback",
+      "history": [{"role": "assistant", "content": "你看有没有想要的。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "continuation_available": true},
+      "input": {"event_type": "text", "text": "这几个都不是"},
+      "expected_decision": {"action": "reject_candidates"}
+    },
+    {
+      "id": "feedback_reject_no_wanted",
+      "category": "result_feedback",
+      "history": [{"role": "assistant", "content": "返回了两个候选。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 2, "has_active_image": true, "continuation_available": true},
+      "input": {"event_type": "text", "text": "没有想要的"},
+      "expected_decision": {"action": "reject_candidates"}
+    },
+    {
+      "id": "feedback_continue_search",
+      "category": "result_continuation",
+      "history": [{"role": "assistant", "content": "这批候选已排除，可以继续搜。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "continuation_available": true, "current_candidates_rejected": true},
+      "input": {"event_type": "text", "text": "继续搜"},
+      "expected_decision": {"action": "continue_search"}
+    },
+    {
+      "id": "feedback_continue_short_search",
+      "category": "result_continuation",
+      "history": [{"role": "assistant", "content": "你还可以继续找下一批。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "continuation_available": true, "current_candidates_rejected": true},
+      "input": {"event_type": "text", "text": "搜题"},
+      "expected_decision": {"action": "continue_search"}
+    },
+    {
+      "id": "feedback_continue_change_batch",
+      "category": "result_continuation",
+      "history": [{"role": "assistant", "content": "当前候选里有想要的吗？"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "continuation_available": true},
+      "input": {"event_type": "text", "text": "换一批"},
+      "expected_decision": {"action": "continue_search"}
+    },
+    {
+      "id": "feedback_continue_find_more",
+      "category": "result_continuation",
+      "history": [{"role": "assistant", "content": "当前候选里有想要的吗？"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "continuation_available": true},
+      "input": {"event_type": "text", "text": "再找几个"},
+      "expected_decision": {"action": "continue_search"}
+    },
+    {
+      "id": "feedback_reject_and_continue",
+      "category": "result_continuation",
+      "history": [{"role": "assistant", "content": "当前候选里有想要的吗？"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "continuation_available": true},
+      "input": {"event_type": "text", "text": "这些都不对，继续找"},
+      "expected_decision": {"action": "continue_search"}
+    },
+    {
+      "id": "feedback_continuation_exhausted",
+      "category": "result_continuation_safety",
+      "history": [{"role": "assistant", "content": "这已经是最后一批候选。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 2, "has_active_image": true, "continuation_available": false},
+      "input": {"event_type": "text", "text": "继续搜"},
+      "expected_decision": {"action": "clarification", "clarification_reason": "no_more_candidates"}
+    },
+    {
+      "id": "feedback_show_candidates",
+      "category": "result_navigation",
+      "history": [{"role": "assistant", "content": "答案已经发出。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "has_answer": true},
+      "input": {"event_type": "text", "text": "回到候选"},
+      "expected_decision": {"action": "show_candidates"}
+    },
+    {
+      "id": "feedback_show_candidates_again",
+      "category": "result_navigation",
+      "history": [{"role": "assistant", "content": "答案已经发出。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "candidate_count": 2, "has_active_image": true, "has_answer": true},
+      "input": {"event_type": "text", "text": "候选列表再发一下"},
+      "expected_decision": {"action": "show_candidates"}
+    },
+    {
+      "id": "feedback_answer_wrong",
+      "category": "answer_feedback",
+      "history": [{"role": "assistant", "content": "答案发你了。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "has_answer": true, "continuation_available": true},
+      "input": {"event_type": "text", "text": "这个答案不对"},
+      "expected_decision": {"action": "report_answer_mismatch"}
+    },
+    {
+      "id": "feedback_answer_not_matching",
+      "category": "answer_feedback",
+      "history": [{"role": "assistant", "content": "答案发你了。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "candidate_count": 2, "has_active_image": true, "has_answer": true, "continuation_available": false},
+      "input": {"event_type": "text", "text": "答案对不上"},
+      "expected_decision": {"action": "report_answer_mismatch"}
+    },
+    {
+      "id": "feedback_model_batch_looks_unlike",
+      "category": "result_feedback_natural",
+      "history": [{"role": "assistant", "content": "我找到了三个候选。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "continuation_available": true},
+      "input": {"event_type": "text", "text": "刚才那些看着没一个像的"},
+      "expected_decision": {"action": "reject_candidates"}
+    },
+    {
+      "id": "feedback_model_anything_else",
+      "category": "result_continuation_natural",
+      "history": [{"role": "assistant", "content": "这批候选都先排除了。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "continuation_available": true, "current_candidates_rejected": true},
+      "input": {"event_type": "text", "text": "后面还有别的吗"},
+      "expected_decision": {"action": "continue_search"}
+    },
+    {
+      "id": "feedback_model_page_forward",
+      "category": "result_continuation_natural",
+      "history": [{"role": "assistant", "content": "当前还有未展示候选。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 2, "has_active_image": true, "continuation_available": true},
+      "input": {"event_type": "text", "text": "往后翻翻看"},
+      "expected_decision": {"action": "continue_search"}
+    },
+    {
+      "id": "feedback_model_restore_list",
+      "category": "result_navigation_natural",
+      "history": [{"role": "assistant", "content": "答案已经发出。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "has_answer": true},
+      "input": {"event_type": "text", "text": "把刚才那一页调回来"},
+      "expected_decision": {"action": "show_candidates"}
+    },
+    {
+      "id": "feedback_model_answer_unrelated",
+      "category": "answer_feedback_natural",
+      "history": [{"role": "assistant", "content": "答案发你了。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "candidate_count": 2, "has_active_image": true, "has_answer": true, "continuation_available": true},
+      "input": {"event_type": "text", "text": "发来的解答跟这道题不是一回事"},
+      "expected_decision": {"action": "report_answer_mismatch"}
+    },
+    {
+      "id": "feedback_model_exhausted_cannot_execute",
+      "category": "result_continuation_safety_natural",
+      "history": [{"role": "assistant", "content": "当前候选已经全部看完。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 2, "has_active_image": true, "continuation_available": false},
+      "input": {"event_type": "text", "text": "后面还有别的吗"},
+      "expected_decision": {"action": "clarification", "clarification_reason": "no_more_candidates"}
+    },
+    {
+      "id": "feedback_error_retry_stays_retry",
+      "category": "failure_recovery_boundary",
+      "history": [{"role": "assistant", "content": "刚才服务失败，可以重试。"}],
+      "context": {"phase": "ERROR", "has_active_image": true, "retryable_error": true},
+      "input": {"event_type": "text", "text": "再搜一次"},
+      "expected_decision": {"action": "retry_search"}
+    }
+  ]
+}

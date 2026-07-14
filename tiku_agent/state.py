@@ -76,6 +76,10 @@ class AgentState:
     revision_count: int = 0
     pending_chapter: str = ""
     global_search_offered: bool = False
+    attempted_candidate_keys: list[str] = field(default_factory=list)
+    continuation_available: bool = False
+    current_candidates_rejected: bool = False
+    answer_mismatch_reported: bool = False
 
     def __init__(
         self,
@@ -99,6 +103,10 @@ class AgentState:
         revision_count: int = 0,
         pending_chapter: str = "",
         global_search_offered: bool = False,
+        attempted_candidate_keys: list[str] | None = None,
+        continuation_available: bool = False,
+        current_candidates_rejected: bool = False,
+        answer_mismatch_reported: bool = False,
         *,
         state: str | None = None,
         image_path: str = "",
@@ -127,6 +135,10 @@ class AgentState:
         self.revision_count = revision_count
         self.pending_chapter = pending_chapter
         self.global_search_offered = global_search_offered
+        self.attempted_candidate_keys = list(attempted_candidate_keys or [])
+        self.continuation_available = continuation_available
+        self.current_candidates_rejected = current_candidates_rejected
+        self.answer_mismatch_reported = answer_mismatch_reported
         self.validate()
 
     @property
@@ -201,6 +213,14 @@ class AgentState:
             raise ValueError("pending_chapter must be a supported chapter")
         if not isinstance(self.global_search_offered, bool):
             raise ValueError("global_search_offered must be boolean")
+        if len(self.attempted_candidate_keys) != len(set(self.attempted_candidate_keys)):
+            raise ValueError("attempted_candidate_keys must not contain duplicates")
+        if not all(isinstance(value, bool) for value in (
+            self.continuation_available,
+            self.current_candidates_rejected,
+            self.answer_mismatch_reported,
+        )):
+            raise ValueError("search recovery flags must be boolean")
 
     def remember_intent(self, intent: dict) -> None:
         self.last_intent = dict(intent)
@@ -222,6 +242,7 @@ class AgentState:
         self.last_error = ""
         self.pending_chapter = ""
         self.global_search_offered = False
+        self._reset_search_recovery()
         self.phase = PHASE_PROCESSING
 
     def set_analysis(self, *, loads: list[dict], chapter: str = "", question_image_path: str = "") -> None:
@@ -238,6 +259,7 @@ class AgentState:
             self.candidates = []
             self.selected_rank = None
             self.last_answer_paths = []
+            self._reset_search_recovery()
         self.current_chapter = chapter
         self.phase = PHASE_READY_TO_ROUTE
 
@@ -254,6 +276,7 @@ class AgentState:
         self.selected_question = None
         self.previous_question = None
         self.completed_questions = []
+        self._reset_search_recovery()
         self.phase = STATE_WAIT_QUESTION_CHOICE if questions else PHASE_NO_MATCH
 
     def select_question(self, index: int, *, chapter_override: str | None = None) -> dict:
@@ -278,6 +301,7 @@ class AgentState:
         self.selected_rank = None
         self.last_answer_paths = []
         self.global_search_offered = False
+        self._reset_search_recovery()
         self.phase = PHASE_READY_TO_ROUTE if self.current_chapter else STATE_WAIT_CHAPTER
         return question
 
@@ -285,12 +309,39 @@ class AgentState:
         self.global_search_offered = False
         self.candidates = _renumber(candidates)
         self.selected_rank = None
+        self.last_answer_paths = []
         self.phase = STATE_WAIT_CANDIDATE_CHOICE if self.candidates else PHASE_NO_MATCH
+
+    def record_search_batch(self, candidates: list[dict], *, has_more: bool) -> None:
+        for candidate in candidates:
+            key = str(candidate.get("candidate_key") or "").strip()
+            if key and key not in self.attempted_candidate_keys:
+                self.attempted_candidate_keys.append(key)
+        self.continuation_available = bool(has_more)
+        self.current_candidates_rejected = False
+        self.answer_mismatch_reported = False
+
+    def reject_current_candidates(self) -> None:
+        if not self.candidates:
+            raise ValueError("no candidates to reject")
+        self.current_candidates_rejected = True
+
+    def report_answer_mismatch(self) -> None:
+        if not self.last_answer_paths:
+            raise ValueError("no answer to report")
+        self.answer_mismatch_reported = True
+
+    def _reset_search_recovery(self) -> None:
+        self.attempted_candidate_keys = []
+        self.continuation_available = False
+        self.current_candidates_rejected = False
+        self.answer_mismatch_reported = False
 
     def select_candidate(self, rank: int) -> dict:
         if not 1 <= rank <= len(self.candidates):
             raise ValueError(f"Candidate rank out of range: {rank}")
         self.selected_rank = rank
+        self.answer_mismatch_reported = False
         return dict(self.candidates[rank - 1])
 
     def set_answer_paths(self, paths: list[str]) -> None:
@@ -332,6 +383,7 @@ class AgentState:
     def cancel(self) -> None:
         self.pending_chapter = ""
         self.global_search_offered = False
+        self._reset_search_recovery()
         self.phase = PHASE_CANCELLED
 
     def fail(self, error: str = "") -> None:

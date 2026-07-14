@@ -42,7 +42,11 @@ class IntentV2Test(unittest.TestCase):
             has_active_image=True,
             has_answer=True,
         )
-        self.assertEqual(decide_intent_v2("二", allowed).candidate_rank, 2)
+        for text in ("2", "二"):
+            with self.subTest(text=text):
+                decision = decide_intent_v2(text, allowed)
+                self.assertEqual(decision.action, "select_candidate")
+                self.assertEqual(decision.candidate_rank, 2)
         denied = ConversationContextV2(
             phase="ANSWERED",
             active_namespace="candidate",
@@ -54,6 +58,59 @@ class IntentV2Test(unittest.TestCase):
         decision = decide_intent_v2("二", denied)
         self.assertEqual(decision.action, "clarification")
         self.assertEqual(decision.clarification_reason, "out_of_range")
+
+    def test_bare_digit_selects_current_list_and_never_implicitly_changes_chapter(self):
+        question = ConversationContextV2(
+            phase="WAIT_QUESTION_CHOICE",
+            active_namespace="question",
+            question_count=3,
+            has_active_image=True,
+        )
+        candidate = ConversationContextV2(
+            phase="WAIT_CANDIDATE_CHOICE",
+            active_namespace="candidate",
+            question_count=2,
+            candidate_count=3,
+            has_active_image=True,
+        )
+        answered = ConversationContextV2(
+            phase="ANSWERED",
+            active_namespace="candidate",
+            question_count=2,
+            candidate_count=3,
+            has_active_image=True,
+            has_answer=True,
+        )
+        for context, action in (
+            (question, "select_question"),
+            (candidate, "select_candidate"),
+            (answered, "select_candidate"),
+        ):
+            with self.subTest(phase=context.phase):
+                self.assertEqual(decide_intent_v2("2", context).action, action)
+
+        for phase in ("IDLE", "WAIT_CHAPTER"):
+            with self.subTest(phase=phase):
+                context = ConversationContextV2(
+                    phase=phase,
+                    has_active_image=phase == "WAIT_CHAPTER",
+                )
+                decision = decide_intent_v2("2", context)
+                self.assertEqual(decision.action, "clarification")
+                self.assertIsNone(decision.chapter_override)
+
+        chapter_context = ConversationContextV2(
+            phase="ANSWERED",
+            active_namespace="candidate",
+            candidate_count=3,
+            has_active_image=True,
+            has_answer=True,
+        )
+        for text in ("2静定结构", "按第二章重新搜"):
+            with self.subTest(text=text):
+                decision = decide_intent_v2(text, chapter_context)
+                self.assertEqual(decision.action, "set_chapter")
+                self.assertEqual(decision.chapter_override, "2静定结构")
 
     def test_unique_candidate_accepts_natural_confirmation_without_model(self):
         context = ConversationContextV2(
@@ -113,9 +170,13 @@ class IntentV2Test(unittest.TestCase):
             has_active_image=True,
             global_search_offered=True,
         )
-        declined = decide_intent_v2("先不用", context)
-        self.assertEqual(declined.action, "clarification")
-        self.assertEqual(declined.clarification_reason, "missing_chapter")
+        for text in ("先不用", "先不要全局搜", "别全题库查", "全局搜索先不用", "暂时不做这个兜底"):
+            with self.subTest(text=text):
+                declined = decide_intent_v2(text, context)
+                self.assertEqual(declined.action, "clarification")
+                self.assertEqual(declined.clarification_reason, "missing_chapter")
+        positive = decide_intent_v2("不要紧，帮我全局搜", context)
+        self.assertEqual(positive.action, "global_search")
         vague = decide_intent_v2("可能吧", context)
         self.assertEqual(vague.action, "clarification")
         self.assertEqual(vague.clarification_reason, "ambiguous_action")
@@ -136,6 +197,14 @@ class IntentV2Test(unittest.TestCase):
         )
         self.assertEqual(decision.action, "clarification")
         self.assertEqual(decision.clarification_reason, "ambiguous_action")
+
+        refused = decide_intent_v2(
+            "先不要用这个兜底",
+            context,
+            llm_client=lambda _prompt: {"action": "global_search"},
+        )
+        self.assertEqual(refused.action, "clarification")
+        self.assertEqual(refused.clarification_reason, "missing_chapter")
 
     def test_context_expression_calls_model_once_then_code_authorizes(self):
         calls = []
@@ -391,6 +460,95 @@ class IntentV2Test(unittest.TestCase):
         self.assertIn("ambiguous_reference", prompt)
         self.assertIn("global_search", prompt)
         self.assertNotIn("search_image|", prompt)
+
+    def test_candidate_rejection_and_continuation_are_contextual_actions(self):
+        context = ConversationContextV2(
+            phase="WAIT_CANDIDATE_CHOICE",
+            active_namespace="candidate",
+            candidate_count=3,
+            has_active_image=True,
+            continuation_available=True,
+        )
+        self.assertEqual(decide_intent_v2("没有", context).action, "reject_candidates")
+        self.assertEqual(decide_intent_v2("继续搜", context).action, "continue_search")
+        self.assertEqual(
+            decide_intent_v2("这几个都不是，换一批", context).action,
+            "continue_search",
+        )
+
+    def test_continue_search_does_not_reuse_error_retry_semantics(self):
+        exhausted = ConversationContextV2(
+            phase="WAIT_CANDIDATE_CHOICE",
+            active_namespace="candidate",
+            candidate_count=2,
+            has_active_image=True,
+            continuation_available=False,
+        )
+        decision = decide_intent_v2("搜题", exhausted)
+        self.assertEqual(decision.action, "clarification")
+        self.assertEqual(decision.clarification_reason, "no_more_candidates")
+
+    def test_answer_mismatch_and_return_to_candidates_are_explicit(self):
+        answered = ConversationContextV2(
+            phase="ANSWERED",
+            active_namespace="candidate",
+            candidate_count=2,
+            has_active_image=True,
+            has_answer=True,
+            continuation_available=True,
+        )
+        self.assertEqual(
+            decide_intent_v2("这个答案对不上", answered).action,
+            "report_answer_mismatch",
+        )
+        self.assertEqual(decide_intent_v2("回到候选", answered).action, "show_candidates")
+
+    def test_model_can_map_natural_result_feedback_into_bounded_actions(self):
+        candidate_context = ConversationContextV2(
+            phase="WAIT_CANDIDATE_CHOICE",
+            active_namespace="candidate",
+            candidate_count=3,
+            has_active_image=True,
+            continuation_available=True,
+        )
+        answered_context = ConversationContextV2(
+            phase="ANSWERED",
+            active_namespace="candidate",
+            candidate_count=3,
+            has_active_image=True,
+            has_answer=True,
+            continuation_available=True,
+        )
+        cases = (
+            ("刚才那些看着没一个像的", candidate_context, "reject_candidates"),
+            ("后面还有别的吗", candidate_context, "continue_search"),
+            ("把刚才那一页调回来", answered_context, "show_candidates"),
+            ("发来的解答跟这道题不是一回事", answered_context, "report_answer_mismatch"),
+        )
+        for text, context, expected in cases:
+            with self.subTest(text=text):
+                decision = decide_intent_v2(
+                    text,
+                    context,
+                    llm_client=lambda _prompt, action=expected: {"action": action},
+                )
+                self.assertEqual(decision.action, expected)
+
+    def test_model_continuation_is_blocked_after_candidates_are_exhausted(self):
+        exhausted = ConversationContextV2(
+            phase="WAIT_CANDIDATE_CHOICE",
+            active_namespace="candidate",
+            candidate_count=2,
+            has_active_image=True,
+            continuation_available=False,
+        )
+        decision = decide_intent_v2(
+            "后面还有别的吗",
+            exhausted,
+            llm_client=lambda _prompt: {"action": "continue_search"},
+        )
+        self.assertEqual(decision.action, "clarification")
+        self.assertEqual(decision.clarification_reason, "no_more_candidates")
 
 
 if __name__ == "__main__":

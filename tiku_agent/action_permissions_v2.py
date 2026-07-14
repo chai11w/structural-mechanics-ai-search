@@ -69,6 +69,8 @@ class DecisionContextV2:
     retryable_error: bool = False
     trusted_image_event: bool = False
     global_search_offered: bool = False
+    continuation_available: bool = False
+    current_candidates_rejected: bool = False
 
     def __post_init__(self) -> None:
         if self.phase not in KNOWN_PHASES:
@@ -159,6 +161,36 @@ def authorize_action_v2(
         if not 1 <= int(decision.candidate_rank or 0) <= context.candidate_count:
             return _clarify("candidate_rank_out_of_range")
         return _allow("select_candidate", STATE_UPDATE_TASK, TOOLS_ANSWER_LOOKUP)
+
+    if decision.action == "reject_candidates":
+        if context.phase not in {"WAIT_CANDIDATE_CHOICE", "ANSWERED"}:
+            return _clarify("candidate_list_required")
+        if context.candidate_count == 0:
+            return _clarify("candidate_list_required")
+        return _allow("reject_candidates", STATE_UPDATE_TASK, TOOLS_NONE)
+
+    if decision.action == "continue_search":
+        if context.phase not in {"WAIT_CANDIDATE_CHOICE", "ANSWERED"}:
+            return _clarify("candidate_list_required")
+        if context.candidate_count == 0 or not context.has_active_image:
+            return _clarify("candidate_list_required")
+        if not context.continuation_available:
+            return _clarify("continuation_exhausted")
+        return _allow("continue_search", STATE_UPDATE_TASK, TOOLS_FIXED_SEARCH_PIPELINE)
+
+    if decision.action == "show_candidates":
+        if context.phase not in {"WAIT_CANDIDATE_CHOICE", "ANSWERED"}:
+            return _clarify("candidate_list_required")
+        if context.candidate_count == 0:
+            return _clarify("candidate_list_required")
+        return _allow("show_candidates", STATE_PRESERVE, TOOLS_NONE)
+
+    if decision.action == "report_answer_mismatch":
+        if context.phase != "ANSWERED" or not context.has_answer:
+            return _clarify("saved_answer_required")
+        if context.candidate_count == 0:
+            return _clarify("candidate_list_required")
+        return _allow("report_answer_mismatch", STATE_UPDATE_TASK, TOOLS_NONE)
 
     if decision.action == "resend_answer":
         if context.phase != "ANSWERED" or not context.has_answer:

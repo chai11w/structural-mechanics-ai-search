@@ -31,7 +31,10 @@ def render_reply_shell_v2(
     elif decision.action == "out_of_scope":
         reply = "这个我不处理。我主要帮你检索结构力学题库、选题和找答案。"
     elif decision.action == "clarification":
-        reply = _render_clarification(decision.clarification_reason or "ambiguous_action")
+        reply = _render_clarification(
+            decision.clarification_reason or "ambiguous_action",
+            context,
+        )
     elif decision.action == "reject":
         reply = _render_rejection(decision.requested_action or "")
     else:
@@ -42,7 +45,11 @@ def render_reply_shell_v2(
     return reply
 
 
-def _render_clarification(reason: str) -> str:
+def _render_clarification(reason: str, context: ConversationContextV2) -> str:
+    if reason == "ambiguous_action" and context.candidate_count:
+        if context.continuation_available:
+            return "你想继续搜题看下一批、选择候选编号，还是换章节？"
+        return "你想选择候选编号、换章节，还是发下一张题图？"
     replies = {
         "ambiguous_reference": "你指的是哪一道题，还是哪个候选？",
         "ambiguous_number_namespace": "这个编号是题号，还是候选编号？",
@@ -52,6 +59,7 @@ def _render_clarification(reason: str) -> str:
         "missing_chapter": "请告诉我这题按哪一章检索。",
         "missing_image": "请先发题图，我再继续处理。",
         "out_of_range": "这个编号超出当前范围了，请换一个。",
+        "no_more_candidates": "当前范围已经没有更多候选了。可以换章节或发一张更清楚的题图。",
     }
     return replies.get(reason, replies["ambiguous_action"])
 

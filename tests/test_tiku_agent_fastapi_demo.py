@@ -83,7 +83,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260713-recognizing"', 'src="/assets/demo.js?v=20260714-search-progress"',
+            'href="/assets/demo.css?v=20260713-recognizing"', 'src="/assets/demo.js?v=20260714-explicit-candidate"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -96,6 +96,7 @@ class FastApiDemoTest(unittest.TestCase):
             "function uploadImage", "document.addEventListener('dragenter'", "document.addEventListener('drop'",
             "new AbortController()", "activeController.abort('new-chat')", "function resetConversation",
             "function openDrawer", "function openLightbox", "className = 'select-candidate'",
+            "sendTextValue(`选择候选 ${index + 1}`)",
             "event.key === 'Enter'", "!event.shiftKey", "!event.isComposing", "event.keyCode !== 229",
             "HISTORY_TTL_MS = 2 * 60 * 60 * 1000", "HISTORY_LIMIT = 50", "repairUploadedImageHistory()",
             "data.uploaded_image", "Number.isFinite(savedAt)", "无法连接本地服务",
@@ -110,6 +111,7 @@ class FastApiDemoTest(unittest.TestCase):
         ):
             self.assertIn(expected, _SCRIPT)
         self.assertNotIn("new File(", _SCRIPT)
+        self.assertNotIn("sendTextValue(String(index + 1)", _SCRIPT)
         self.assertNotIn("题图处理中", _SCRIPT)
         self.assertNotIn("题图正在上传", _SCRIPT)
         self.assertNotIn("正在上传并识别题干", _SCRIPT)

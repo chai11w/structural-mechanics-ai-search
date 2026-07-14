@@ -32,6 +32,10 @@ EXECUTING_ACTIONS = {
     "set_chapter",
     "select_question",
     "select_candidate",
+    "reject_candidates",
+    "continue_search",
+    "show_candidates",
+    "report_answer_mismatch",
     "resend_answer",
     "retry_search",
 }

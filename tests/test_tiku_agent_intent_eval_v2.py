@@ -16,6 +16,7 @@ from tiku_agent.intent_eval_v2 import (
 SUITE_PATH = Path(__file__).parent / "fixtures" / "intent_v2_gold_review_01.json"
 EXPANSION_PATH = Path(__file__).parent / "fixtures" / "intent_v2_gold_review_02.json"
 GLOBAL_FALLBACK_PATH = Path(__file__).parent / "fixtures" / "intent_v2_global_fallback.json"
+RESULT_FEEDBACK_PATH = Path(__file__).parent / "fixtures" / "intent_v2_result_feedback.json"
 
 
 class IntentEvalV2Test(unittest.TestCase):
@@ -55,13 +56,22 @@ class IntentEvalV2Test(unittest.TestCase):
     def test_global_fallback_suite_has_reviewable_guarded_decisions(self):
         suite = load_gold_suite(GLOBAL_FALLBACK_PATH)
         self.assertEqual(suite["status"], "review_draft")
-        self.assertEqual(len(suite["cases"]), 12)
+        self.assertEqual(len(suite["cases"]), 13)
         for case in suite["cases"]:
             with self.subTest(case=case["id"]):
                 decision = ActionDecisionV2.from_dict(case["expected_decision"])
                 context = ConversationContextV2.from_mapping(case["context"])
                 authorization = authorize_action_v2(decision, context.to_decision_context())
                 self.assertTrue(authorization.allowed, authorization.code)
+
+    def test_result_feedback_suite_is_directly_recoverable(self):
+        suite = load_gold_suite(RESULT_FEEDBACK_PATH)
+        self.assertEqual(suite["status"], "review_draft")
+        self.assertEqual(len(suite["cases"]), 20)
+        report = evaluate_v2_suite(suite)
+        self.assertGreaterEqual(report["exact_count"], 14)
+        self.assertEqual(report["recoverable_outcome_count"], 20)
+        self.assertEqual(report["wrong_execution_count"], 0)
 
     def test_outcome_metrics_distinguish_clarification_from_wrong_execution(self):
         suite = {

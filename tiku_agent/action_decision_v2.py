@@ -31,6 +31,10 @@ TASK_ACTIONS = frozenset(
         "set_chapter",
         "select_question",
         "select_candidate",
+        "reject_candidates",
+        "continue_search",
+        "show_candidates",
+        "report_answer_mismatch",
         "resend_answer",
         "explain_failure",
         "retry_search",
@@ -58,6 +62,7 @@ CLARIFICATION_REASONS = frozenset(
         "missing_chapter",
         "missing_image",
         "out_of_range",
+        "no_more_candidates",
     }
 )
 

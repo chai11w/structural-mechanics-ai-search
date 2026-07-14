@@ -762,6 +762,15 @@ def display_similarity_score(item):
     return float(item[0] or 0)
 
 
+def select_coarse_results(results):
+    """Keep every perfect coarse match, or only the single best fallback."""
+    if not results:
+        return []
+
+    perfect = [item for item in results if display_similarity_score(item) >= 1.0]
+    return perfect or [max(results, key=display_similarity_score)]
+
+
 def select_display_results(
     results,
     all_score=DISPLAY_ALL_SCORE,
@@ -1114,13 +1123,8 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
 
     results.sort(key=lambda x: x[0], reverse=True)
 
-    # 100% 相似的不管几个都输出，不足 top_k 再补次高分
-    perfect = [r for r in results if r[0] >= 1.0]
-    if len(perfect) >= top_k:
-        top = perfect
-    else:
-        rest = [r for r in results if r[0] < 1.0][:top_k - len(perfect)]
-        top = perfect + rest
+    # 粗筛只保留全部 100% 匹配；没有 100% 时只保留最相似的 1 个。
+    top = select_coarse_results(results)
 
     if not top or top[0][0] == 0:
         print("(未找到高相似度匹配，以下是章节内最近题目)")

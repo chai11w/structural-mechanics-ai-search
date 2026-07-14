@@ -22,6 +22,7 @@ from tiku_agent.intent_eval_v2 import (  # noqa: E402
 DEFAULT_SUITES = (
     ROOT / "tests" / "fixtures" / "intent_v2_gold_review_01.json",
     ROOT / "tests" / "fixtures" / "intent_v2_gold_review_02.json",
+    ROOT / "tests" / "fixtures" / "intent_v2_result_feedback.json",
 )
 
 
@@ -31,7 +32,7 @@ def main() -> int:
         "--suite",
         type=Path,
         action="append",
-        help="Gold suite fragment; repeat to combine. Defaults to the 40-case review set.",
+        help="Gold suite fragment; repeat to combine. Defaults to the core review and result-feedback sets.",
     )
     parser.add_argument(
         "--system",

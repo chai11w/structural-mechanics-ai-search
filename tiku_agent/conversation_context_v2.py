@@ -41,6 +41,8 @@ class ConversationContextV2:
     retryable_error: bool = False
     trusted_image_event: bool = False
     global_search_offered: bool = False
+    continuation_available: bool = False
+    current_candidates_rejected: bool = False
     recent_actions: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -107,6 +109,8 @@ class ConversationContextV2:
             retryable_error=bool(payload.get("retryable_error")),
             trusted_image_event=bool(payload.get("trusted_image_event")),
             global_search_offered=bool(payload.get("global_search_offered")),
+            continuation_available=bool(payload.get("continuation_available")),
+            current_candidates_rejected=bool(payload.get("current_candidates_rejected")),
             recent_actions=tuple(str(item) for item in payload.get("recent_actions") or ()),
         )
 
@@ -151,6 +155,8 @@ class ConversationContextV2:
                 if global_search_offered is None
                 else global_search_offered
             ),
+            continuation_available=state.continuation_available,
+            current_candidates_rejected=state.current_candidates_rejected,
             recent_actions=recent_actions,
         )
 
@@ -166,6 +172,8 @@ class ConversationContextV2:
             retryable_error=self.retryable_error,
             trusted_image_event=self.trusted_image_event,
             global_search_offered=self.global_search_offered,
+            continuation_available=self.continuation_available,
+            current_candidates_rejected=self.current_candidates_rejected,
         )
 
     def to_prompt_payload(self) -> dict[str, Any]:
@@ -190,6 +198,8 @@ class ConversationContextV2:
             "retryable_error": self.retryable_error,
             "trusted_image_event": self.trusted_image_event,
             "global_search_offered": self.global_search_offered,
+            "continuation_available": self.continuation_available,
+            "current_candidates_rejected": self.current_candidates_rejected,
             "recent_actions": list(self.recent_actions),
         }
 

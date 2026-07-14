@@ -455,8 +455,7 @@ def rank_bank_candidates(
         scored.append((score, str(row["题目名称"])))
 
     scored.sort(key=lambda item: item[0], reverse=True)
-    perfect = [item for item in scored if item[0] >= 1.0]
-    top = perfect if len(perfect) >= top_k else perfect + [item for item in scored if item[0] < 1.0][:top_k - len(perfect)]
+    top = search.select_coarse_results(scored)
     top = [item for item in top if item[0] > 0]
 
     results = []

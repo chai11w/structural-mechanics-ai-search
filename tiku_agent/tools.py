@@ -300,6 +300,7 @@ def coarse_search_tool(
     route: Literal["main", "symbolic"],
     structure_type: str = "",
     top_k: int | None = None,
+    exclude_candidate_keys: list[str] | None = None,
 ) -> ToolResult:
     """Run read-only coarse search without writing `_last_search.json`.
 
@@ -323,20 +324,24 @@ def coarse_search_tool(
                 structure_filter_applied = True
 
         normalized_loads = search.normalize_query_loads(loads)
-        scored: list[tuple[float, str]] = []
+        excluded = {str(key).strip() for key in (exclude_candidate_keys or []) if str(key).strip()}
+        scored: list[tuple[float, str, str]] = []
         for _, row in df.iterrows():
             db_loads = search._safe_parse_loads(row["荷载"])
             db_loads = search.fix_load_types(db_loads)
             score = search.compute_similarity(normalized_loads, db_loads)
-            scored.append((score, str(row["题目名称"])))
+            name = str(row["题目名称"])
+            candidate_key = _candidate_key(chapter, route, name)
+            if candidate_key not in excluded:
+                scored.append((score, name, candidate_key))
 
         scored.sort(key=lambda item: item[0], reverse=True)
-        limit = top_k or search.TOP_K
-        perfect = [item for item in scored if item[0] >= 1.0]
-        top = perfect if len(perfect) >= limit else perfect + [item for item in scored if item[0] < 1.0][: limit - len(perfect)]
+        scored = [item for item in scored if item[0] > 0]
+        top = search.select_coarse_results(scored)
+        has_more = len(scored) > len(top)
 
         candidates = []
-        for rank, (score, name) in enumerate([item for item in top if item[0] > 0], 1):
+        for rank, (score, name, candidate_key) in enumerate(top, 1):
             path, resolved_name, repaired = search.resolve_question_path(
                 name,
                 chapter_name=chapter,
@@ -353,6 +358,7 @@ def coarse_search_tool(
                     "structure_type": filter_type if structure_filter_applied else "",
                     "structure_filter": structure_filter_applied,
                     "path_repaired_in_memory": repaired,
+                    "candidate_key": candidate_key,
                 }
             )
 
@@ -364,11 +370,18 @@ def coarse_search_tool(
                 "structure_type": filter_type,
                 "structure_filter_applied": structure_filter_applied,
                 "candidates": candidates,
+                "has_more": has_more,
+                "remaining_candidate_count": max(0, len(scored) - len(top)),
             },
             next_state="READY_FOR_RERANK" if candidates else "NO_MATCH",
         )
     except Exception as exc:  # noqa: BLE001
         return ToolResult(ok=False, error=str(exc), next_state="ERROR")
+
+
+def _candidate_key(chapter: str, route: str, name: str) -> str:
+    normalized_name = str(name).replace("\\", "/").strip().casefold()
+    return f"{chapter}|{route}|{normalized_name}"
 
 
 def global_search_tool(
@@ -597,19 +610,20 @@ def rerank_candidates_tool(
 
     if not candidates:
         return ToolResult(ok=True, data={"reranked": False, "visible_candidates": []}, next_state="NO_MATCH")
+    coarse_candidates = search.select_coarse_results(candidates)
     if not query_image_path:
         return ToolResult(
             ok=True,
-            data={"reranked": False, "visible_candidates": _renumber(candidates), "rerank_note": "无查询图，跳过复筛"},
+            data={"reranked": False, "visible_candidates": _renumber(coarse_candidates), "rerank_note": "无查询图，跳过复筛"},
             next_state="WAIT_CANDIDATE_CHOICE",
         )
 
     try:
-        rerank_input = select_rerank_candidates(candidates, route)
+        rerank_input = select_rerank_candidates(coarse_candidates, route)
         if not rerank_input:
             return ToolResult(
                 ok=True,
-                data={"reranked": False, "visible_candidates": _renumber(candidates), "rerank_note": "候选未达到复筛阈值，已显示粗筛结果。"},
+                data={"reranked": False, "visible_candidates": _renumber(coarse_candidates), "rerank_note": "候选未达到复筛阈值，已显示粗筛结果。"},
                 next_state="WAIT_CANDIDATE_CHOICE",
             )
         reranked = search.rerank_candidates(query_image_path, rerank_input, top_n=rerank_top)
@@ -618,9 +632,9 @@ def rerank_candidates_tool(
             rerank_note = ""
         elif reranked:
             rerank_note = search.rerank_incomplete_note(reranked)
-            visible = _renumber(search.mark_rerank_incomplete(candidates, rerank_note))
+            visible = _renumber(search.mark_rerank_incomplete(coarse_candidates, rerank_note))
         else:
-            visible = _renumber(candidates)
+            visible = _renumber(coarse_candidates)
             rerank_note = ""
         return ToolResult(
             ok=True,

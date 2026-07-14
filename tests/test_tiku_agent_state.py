@@ -38,6 +38,10 @@ class TikuAgentStateTest(unittest.TestCase):
                 "revision_count",
                 "pending_chapter",
                 "global_search_offered",
+                "attempted_candidate_keys",
+                "continuation_available",
+                "current_candidates_rejected",
+                "answer_mismatch_reported",
             },
         )
         self.assertEqual(state.phase, STATE_IDLE)

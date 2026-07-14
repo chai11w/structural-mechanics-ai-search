@@ -14,6 +14,8 @@ class FakeTools:
             2: ["out/answer2.jpg"],
         }
         self.global_search_calls = 0
+        self.route_calls = 0
+        self.structure_calls = 0
         self.global_candidates = [
             {
                 "rank": 1,
@@ -35,6 +37,7 @@ class FakeTools:
             },
         ]
         self.analyze_image_calls = 0
+        self.search_exclusions = []
 
     def toolbox(self):
         return AgentToolbox(
@@ -74,20 +77,42 @@ class FakeTools:
         return ToolResult(ok=True, data={"questions": questions, "diagram_crops": {}})
 
     def route_bank(self, loads):
+        self.route_calls += 1
         return ToolResult(ok=True, data={"route": "main", "category": "main_numeric", "reason": "fake"})
 
     def classify_structure(self, image_path, *, route, classified=None, config=None):
+        self.structure_calls += 1
         return ToolResult(ok=True, data={"structure_type": "", "source": "not_applicable"})
 
-    def coarse_search(self, loads, *, chapter, route, structure_type="", top_k=None):
+    def coarse_search(
+        self,
+        loads,
+        *,
+        chapter,
+        route,
+        structure_type="",
+        top_k=None,
+        exclude_candidate_keys=None,
+    ):
         self.search_chapters.append(chapter)
+        excluded = set(exclude_candidate_keys or [])
+        self.search_exclusions.append(list(excluded))
+        all_candidates = [
+            {
+                "path": f"{chapter}/q{index}.jpg",
+                "name": f"q{index}.jpg",
+                "score": 0.9 - index / 100,
+                "candidate_key": f"{chapter}|main|q{index}.jpg",
+            }
+            for index in range(1, 5)
+        ]
+        available = [item for item in all_candidates if item["candidate_key"] not in excluded]
+        selected = available[:2]
         return ToolResult(
             ok=True,
             data={
-                "candidates": [
-                    {"rank": 1, "path": f"{chapter}/q1.jpg", "name": "q1.jpg", "score": 0.8},
-                    {"rank": 2, "path": f"{chapter}/q2.jpg", "name": "q2.jpg", "score": 0.7},
-                ]
+                "candidates": [dict(item, rank=rank) for rank, item in enumerate(selected, 1)],
+                "has_more": len(available) > len(selected),
             },
         )
 
@@ -219,6 +244,18 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(answered.intent, "select_candidate")
         self.assertEqual(agent.state.selected_rank, 2)
         self.assertEqual(agent.state.last_answer_paths, ["out/answer2.jpg"])
+
+    def test_v2_global_search_explicit_negation_never_calls_tool(self):
+        fake = FakeTools(chapter="")
+        agent = self.make_v2_agent(fake)
+        agent.handle_image("q.jpg")
+
+        declined = agent.handle_text("先不要全局搜")
+
+        self.assertEqual(declined.intent, "clarification")
+        self.assertEqual(fake.global_search_calls, 0)
+        self.assertEqual(agent.state.phase, STATE_WAIT_CHAPTER)
+        self.assertTrue(agent.state.global_search_offered)
 
     def test_search_progress_uses_actual_agent_stage_for_all_three_entry_paths(self):
         automatic_events = []
@@ -358,6 +395,45 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(answered.intent, "select_candidate")
         self.assertEqual(agent.state.phase, PHASE_ANSWERED)
         self.assertEqual(agent.state.selected_rank, 2)
+        self.assertEqual(agent.state.last_answer_paths, ["out/answer2.jpg"])
+        self.assertEqual(fake.search_chapters, searches_before)
+
+    def test_v2_explicit_candidate_selection_does_not_reselect_multi_question(self):
+        fake = FakeTools(chapter="")
+        fake.analyze_multi_image = lambda image_path, *, config=None: ToolResult(
+            ok=True,
+            data={
+                "is_multi": True,
+                "questions": [
+                    {"label": "1", "loads": [{"type": "集中", "raw": "P"}], "chapter": "4力法", "question_image_path": "q1.jpg"},
+                    {"label": "2", "loads": [{"type": "均布", "raw": "q"}], "chapter": "4力法", "question_image_path": "q2.jpg"},
+                ],
+            },
+        )
+        fake.prepare_question_units = lambda image_path, questions, *, config=None: ToolResult(
+            ok=True,
+            data={"questions": questions, "diagram_crops": {"1": "q1.jpg", "2": "q2.jpg"}},
+        )
+        agent = self.make_v2_agent(fake)
+        agent.handle_image("multi.jpg")
+        agent.handle_text("第二题")
+        searches_before = list(fake.search_chapters)
+
+        answered = agent.handle_text("选择候选 2")
+
+        self.assertEqual(answered.intent, "select_candidate")
+        self.assertEqual(agent.state.selected_question, 2)
+        self.assertEqual(agent.state.selected_rank, 2)
+        self.assertEqual(agent.state.last_answer_paths, ["out/answer2.jpg"])
+        self.assertEqual(fake.search_chapters, searches_before)
+
+        agent.handle_text("选择候选 1")
+        bare_digit = agent.handle_text("2")
+
+        self.assertEqual(bare_digit.intent, "select_candidate")
+        self.assertEqual(agent.state.selected_question, 2)
+        self.assertEqual(agent.state.selected_rank, 2)
+        self.assertEqual(agent.state.current_chapter, "4力法")
         self.assertEqual(agent.state.last_answer_paths, ["out/answer2.jpg"])
         self.assertEqual(fake.search_chapters, searches_before)
 
@@ -651,6 +727,67 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.last_answer_paths, [])
         self.assertEqual(fake.search_chapters, ["4力法", "4力法"])
         self.assertIn("比较像", response.text)
+
+    def test_candidate_rejection_continues_with_a_non_repeating_batch(self):
+        fake = FakeTools(chapter="4力法")
+        agent = self.make_v2_agent(fake)
+        first = agent.handle_image("q.jpg")
+        first_paths = [item["path"] for item in agent.state.candidates]
+        self.assertEqual(first.intent, "search_image")
+        self.assertTrue(agent.state.continuation_available)
+
+        rejected = agent.handle_text("没有")
+        self.assertEqual(rejected.intent, "reject_candidates")
+        self.assertTrue(agent.state.current_candidates_rejected)
+        self.assertEqual(len(fake.search_chapters), 1)
+
+        continued = agent.handle_text("搜题")
+        second_paths = [item["path"] for item in agent.state.candidates]
+        self.assertEqual(continued.intent, "continue_search")
+        self.assertTrue(set(first_paths).isdisjoint(second_paths))
+        self.assertEqual(
+            set(fake.search_exclusions[-1]),
+            {"4力法|main|q1.jpg", "4力法|main|q2.jpg"},
+        )
+        self.assertFalse(agent.state.continuation_available)
+        self.assertEqual(fake.route_calls, 1)
+        self.assertEqual(fake.structure_calls, 1)
+
+        calls_before = len(fake.search_chapters)
+        exhausted = agent.handle_text("换一批")
+        self.assertEqual(exhausted.intent, "clarification")
+        self.assertIn("没有更多候选", exhausted.text)
+        self.assertEqual(len(fake.search_chapters), calls_before)
+
+    def test_answer_mismatch_can_return_to_the_existing_candidates(self):
+        fake = FakeTools(chapter="4力法")
+        agent = self.make_v2_agent(fake)
+        agent.handle_image("q.jpg")
+        agent.handle_text("候选1")
+
+        mismatch = agent.handle_text("这个答案不对")
+        self.assertEqual(mismatch.intent, "report_answer_mismatch")
+        self.assertTrue(agent.state.answer_mismatch_reported)
+
+        shown = agent.handle_text("回到候选")
+        self.assertEqual(shown.intent, "show_candidates")
+        self.assertEqual(shown.images, ["4力法/q1.jpg", "4力法/q2.jpg"])
+
+    def test_answer_mismatch_with_explicit_next_batch_continues_immediately(self):
+        fake = FakeTools(chapter="4力法")
+        agent = self.make_v2_agent(fake)
+        agent.handle_image("q.jpg")
+        agent.handle_text("候选1")
+
+        continued = agent.handle_text("这个答案不对，换一批")
+
+        self.assertEqual(continued.intent, "continue_search")
+        self.assertEqual(
+            [item["path"] for item in agent.state.candidates],
+            ["4力法/q3.jpg", "4力法/q4.jpg"],
+        )
+        self.assertEqual(agent.state.last_answer_paths, [])
+        self.assertEqual(agent.state.phase, STATE_WAIT_CANDIDATE_CHOICE)
 
 
 if __name__ == "__main__":

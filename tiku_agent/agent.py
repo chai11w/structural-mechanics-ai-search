@@ -133,6 +133,21 @@ class TikuSearchAgent:
             return self._response(render.render_failure_explanation(self.state), intent)
         if intent.intent == "retry_search":
             return self._start_image_search(self.state.current_image_path)
+        if intent.intent == "reject_candidates":
+            self.state.reject_current_candidates()
+            return self._response(render.render_candidates_rejected(self.state), intent)
+        if intent.intent == "continue_search":
+            self.state.reject_current_candidates()
+            return self._run_search(intent=intent, classified=self._selected_question(), continuing=True)
+        if intent.intent == "show_candidates":
+            return self._response(
+                render.render_existing_candidates(self.state),
+                intent,
+                images=[str(item.get("path")) for item in self.state.candidates if item.get("path")],
+            )
+        if intent.intent == "report_answer_mismatch":
+            self.state.report_answer_mismatch()
+            return self._response(render.render_answer_mismatch(self.state), intent)
         if intent.intent == "greeting":
             return self._response(render.render_greeting(), intent)
         if not intent.ok:
@@ -251,40 +266,54 @@ class TikuSearchAgent:
             return self._response(render.render_chapter_prompt(self.state), intent)
         return self._run_search(intent=intent, classified=question)
 
-    def _run_search(self, *, intent: IntentResult | None = None, classified: dict[str, Any] | None = None) -> AgentResponse:
+    def _run_search(
+        self,
+        *,
+        intent: IntentResult | None = None,
+        classified: dict[str, Any] | None = None,
+        continuing: bool = False,
+    ) -> AgentResponse:
         chapter = self.state.current_chapter
         message = f"正在按「{chapter}」搜索题目…" if chapter else "正在搜索题目…"
         self._report_progress("searching", message)
-        routed = self.tools.route_bank(self.state.current_loads)
-        if not routed.ok:
-            return self._fail(routed.error or routed.data.get("reason", "无法确定检索库"))
-        route = str(routed.data.get("route") or "")
-        self.state.set_route(route)
+        if continuing and self.state.current_route:
+            route = self.state.current_route
+            structure_type = self.state.current_structure_type
+        else:
+            routed = self.tools.route_bank(self.state.current_loads)
+            if not routed.ok:
+                return self._fail(routed.error or routed.data.get("reason", "无法确定检索库"))
+            route = str(routed.data.get("route") or "")
+            self.state.set_route(route)
 
-        structured = self.tools.classify_structure(
-            self.state.active_image_path or None,
-            route=route,
-            classified=classified,
-            config=self.config,
-        )
-        if not structured.ok:
-            return self._fail(structured.error)
-        structure_type = str(structured.data.get("structure_type") or "")
-        self.state.set_route(route, structure_type=structure_type)
+            structured = self.tools.classify_structure(
+                self.state.active_image_path or None,
+                route=route,
+                classified=classified,
+                config=self.config,
+            )
+            if not structured.ok:
+                return self._fail(structured.error)
+            structure_type = str(structured.data.get("structure_type") or "")
+            self.state.set_route(route, structure_type=structure_type)
 
-        coarse = self.tools.coarse_search(
-            self.state.current_loads,
-            chapter=self.state.current_chapter,
-            route=route,
-            structure_type=structure_type,
-            top_k=self.config.top_k,
-        )
+        coarse_kwargs: dict[str, Any] = {
+            "chapter": self.state.current_chapter,
+            "route": route,
+            "structure_type": structure_type,
+            "top_k": self.config.top_k,
+        }
+        if continuing:
+            coarse_kwargs["exclude_candidate_keys"] = list(self.state.attempted_candidate_keys)
+        coarse = self.tools.coarse_search(self.state.current_loads, **coarse_kwargs)
         if not coarse.ok:
             return self._fail(coarse.error)
         candidates = list(coarse.data.get("candidates") or [])
+        self.state.record_search_batch(candidates, has_more=bool(coarse.data.get("has_more")))
         if not candidates:
             self.state.set_candidates([])
-            return self._response(render.render_no_match(self.state), intent or IntentResult("search_image"))
+            text = render.render_no_more_candidates(self.state) if continuing else render.render_no_match(self.state)
+            return self._response(text, intent or IntentResult("search_image"))
 
         reranked = self.tools.rerank_candidates(
             self._rerank_query_image_path(),
