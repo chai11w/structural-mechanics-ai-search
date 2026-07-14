@@ -6,7 +6,9 @@ from tiku_agent.action_permissions_v2 import authorize_action_v2
 from tiku_agent.conversation_context_v2 import ConversationContextV2
 from tiku_agent.intent_eval_v2 import (
     compare_system_reports,
+    evaluate_v1_full_suite,
     evaluate_v1_rule_suite,
+    evaluate_v2_suite,
     load_gold_suite,
     load_gold_suites,
 )
@@ -78,8 +80,11 @@ class IntentEvalV2Test(unittest.TestCase):
         baseline = {
             "system": "baseline",
             "total": 2,
+            "exact_count": 0,
             "exact_accuracy": 0.0,
+            "action_count": 0,
             "action_accuracy": 0.0,
+            "safe_success_count": 0,
             "safe_success_rate": 0.0,
             "unsafe_executions": 1,
             "cases": [
@@ -90,8 +95,11 @@ class IntentEvalV2Test(unittest.TestCase):
         contender = {
             "system": "contender",
             "total": 2,
+            "exact_count": 1,
             "exact_accuracy": 0.5,
+            "action_count": 1,
             "action_accuracy": 0.5,
+            "safe_success_count": 1,
             "safe_success_rate": 0.5,
             "unsafe_executions": 0,
             "cases": [
@@ -105,6 +113,46 @@ class IntentEvalV2Test(unittest.TestCase):
         self.assertEqual(comparison["unchanged"], 1)
         self.assertEqual(comparison["metric_delta"]["exact_accuracy"], 0.5)
         self.assertEqual(comparison["metric_delta"]["unsafe_executions"], -1)
+        self.assertEqual(comparison["baseline_metrics"]["exact_count"], 0)
+        self.assertEqual(comparison["contender_metrics"]["exact_count"], 1)
+
+    def test_v1_and_v2_rule_layers_run_on_the_same_forty_cases(self):
+        suite = load_gold_suites([SUITE_PATH, EXPANSION_PATH])
+        v1 = evaluate_v1_rule_suite(suite)
+        v2 = evaluate_v2_suite(suite)
+        comparison = compare_system_reports(v1, v2)
+        self.assertEqual(v1["total"], 40)
+        self.assertEqual(v2["total"], 40)
+        self.assertEqual(comparison["total"], 40)
+        self.assertEqual(
+            [row["id"] for row in v1["cases"]],
+            [row["id"] for row in v2["cases"]],
+        )
+
+    def test_v1_full_runner_accepts_an_injected_model_without_network(self):
+        suite = {
+            "schema_version": "1.0",
+            "status": "test",
+            "cases": [
+                {
+                    "id": "model_case",
+                    "category": "conversation_shell",
+                    "context": {"phase": "IDLE"},
+                    "input": {"event_type": "text", "text": "你会做什么"},
+                    "expected_decision": {"action": "clarification", "clarification_reason": "ambiguous_action"},
+                }
+            ],
+        }
+        report = evaluate_v1_full_suite(
+            suite,
+            llm_client=lambda _prompt: {
+                "intent": "unsupported",
+                "confidence": 1.0,
+                "reason": "无法判断",
+            },
+        )
+        self.assertEqual(report["system"], "v1_full")
+        self.assertEqual(report["exact_count"], 1)
 
 
 if __name__ == "__main__":

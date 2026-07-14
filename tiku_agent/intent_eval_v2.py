@@ -10,10 +10,16 @@ from __future__ import annotations
 import json
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from tiku_agent.action_decision_v2 import ActionDecisionV2
-from tiku_agent.intent import IntentResult, parse_user_intent
+from tiku_agent.conversation_context_v2 import ConversationContextV2
+from tiku_agent.intent import IntentResult, call_qwen_intent, parse_user_intent
+from tiku_agent.intent_v2 import (
+    DecisionModelV2,
+    call_qwen_decision_v2,
+    decide_intent_v2,
+)
 
 
 SCORED_FIELDS = (
@@ -82,6 +88,44 @@ def load_gold_suites(paths: list[str | Path]) -> dict[str, Any]:
 
 
 def evaluate_v1_rule_suite(suite: dict[str, Any]) -> dict[str, Any]:
+    return _evaluate_suite(suite, system="v1_rule", runner=lambda case: _run_v1(case, use_llm=False))
+
+
+def evaluate_v1_full_suite(
+    suite: dict[str, Any],
+    *,
+    llm_client: Callable[[str], dict[str, Any]] = call_qwen_intent,
+) -> dict[str, Any]:
+    return _evaluate_suite(
+        suite,
+        system="v1_full",
+        runner=lambda case: _run_v1(case, use_llm=True, llm_client=llm_client),
+    )
+
+
+def evaluate_v2_suite(
+    suite: dict[str, Any],
+    *,
+    llm_client: DecisionModelV2 | None = None,
+    system: str = "v2_rule_only",
+) -> dict[str, Any]:
+    return _evaluate_suite(
+        suite,
+        system=system,
+        runner=lambda case: _run_v2(case, llm_client=llm_client),
+    )
+
+
+def evaluate_v2_full_suite(suite: dict[str, Any]) -> dict[str, Any]:
+    return evaluate_v2_suite(suite, llm_client=call_qwen_decision_v2, system="v2_full")
+
+
+def _evaluate_suite(
+    suite: dict[str, Any],
+    *,
+    system: str,
+    runner: Callable[[dict[str, Any]], dict[str, Any]],
+) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     category_totals: Counter[str] = Counter()
     category_exact: Counter[str] = Counter()
@@ -89,7 +133,7 @@ def evaluate_v1_rule_suite(suite: dict[str, Any]) -> dict[str, Any]:
 
     for case in suite["cases"]:
         expected = _normalize_decision(case["expected_decision"])
-        actual = _normalize_decision(_run_v1_rule(case))
+        actual = _normalize_decision(runner(case))
         exact = actual == expected
         action_correct = actual["action"] == expected["action"]
         safe_success = exact or (
@@ -121,7 +165,7 @@ def evaluate_v1_rule_suite(suite: dict[str, Any]) -> dict[str, Any]:
     return {
         "suite_schema_version": suite.get("schema_version"),
         "suite_status": suite.get("status"),
-        "system": "v1_rule",
+        "system": system,
         "total": total,
         "exact_count": exact_count,
         "exact_accuracy": _ratio(exact_count, total),
@@ -187,6 +231,8 @@ def compare_system_reports(
         "baseline_system": baseline.get("system"),
         "contender_system": contender.get("system"),
         "total": total,
+        "baseline_metrics": _metric_snapshot(baseline),
+        "contender_metrics": _metric_snapshot(contender),
         "improvements": improvements,
         "regressions": regressions,
         "unchanged": total - improvements - regressions,
@@ -207,7 +253,12 @@ def compare_system_reports(
     }
 
 
-def _run_v1_rule(case: dict[str, Any]) -> dict[str, Any]:
+def _run_v1(
+    case: dict[str, Any],
+    *,
+    use_llm: bool,
+    llm_client: Callable[[str], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     context = case["context"]
     user_input = case["input"]
     event_type = user_input.get("event_type", "text")
@@ -218,9 +269,26 @@ def _run_v1_rule(case: dict[str, Any]) -> dict[str, Any]:
         image_path=image_path,
         candidate_count=int(context.get("candidate_count") or 0),
         question_count=int(context.get("question_count") or 0),
-        use_llm=False,
+        use_llm=use_llm,
+        llm_client=llm_client,
     )
     return _adapt_v1_result(result)
+
+
+def _run_v2(
+    case: dict[str, Any],
+    *,
+    llm_client: DecisionModelV2 | None,
+) -> dict[str, Any]:
+    context = ConversationContextV2.from_mapping(case["context"])
+    user_input = case["input"]
+    decision = decide_intent_v2(
+        user_input.get("text"),
+        context,
+        event_type=user_input.get("event_type", "text"),
+        llm_client=llm_client,
+    )
+    return decision.to_dict()
 
 
 def _adapt_v1_result(result: IntentResult) -> dict[str, Any]:
@@ -279,3 +347,15 @@ def _ratio(numerator: int, denominator: int) -> float:
 
 def _category_group(category: str) -> str:
     return CATEGORY_GROUPS.get(category, category)
+
+
+def _metric_snapshot(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "exact_count": report["exact_count"],
+        "exact_accuracy": report["exact_accuracy"],
+        "action_count": report["action_count"],
+        "action_accuracy": report["action_accuracy"],
+        "safe_success_count": report["safe_success_count"],
+        "safe_success_rate": report["safe_success_rate"],
+        "unsafe_executions": report["unsafe_executions"],
+    }
