@@ -78,7 +78,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260713-recognizing"', 'src="/assets/demo.js?v=20260713-recognizing"',
+            'href="/assets/demo.css?v=20260713-recognizing"', 'src="/assets/demo.js?v=20260714-mobile-keyboard"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -98,6 +98,8 @@ class FastApiDemoTest(unittest.TestCase):
             "const filename = `cropped_${Date.now()}.jpg`", "function retryUpload", "pendingUpload = prepared",
             "const uploadRow = addLocalUploadPreview(sourcePreview)", "setUploadRowStatus(uploadRow, '我发了一张题图。')",
             "message: '正在识别题目'", "setStatus('working', '正在识别题目…')",
+            "function refocusComposerOnDesktop()", "window.matchMedia('(hover: hover) and (pointer: fine)')",
+            "textInput.focus({ preventScroll: true })",
         ):
             self.assertIn(expected, _SCRIPT)
         self.assertNotIn("new File(", _SCRIPT)

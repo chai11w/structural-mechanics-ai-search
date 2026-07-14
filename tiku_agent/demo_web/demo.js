@@ -268,6 +268,12 @@ function updateComposer() {
   sendButton.disabled = isBusy || !textInput.value.trim();
 }
 
+function refocusComposerOnDesktop() {
+  if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+    textInput.focus({ preventScroll: true });
+  }
+}
+
 function setBusy(value) {
   isBusy = value;
   textInput.disabled = value;
@@ -401,7 +407,7 @@ async function sendTextValue(value, displayValue = value) {
   } finally {
     if (operation !== operationVersion) return;
     setBusy(false);
-    textInput.focus();
+    refocusComposerOnDesktop();
   }
 }
 
@@ -474,7 +480,7 @@ async function submitPreparedImage(prepared, uploadRow) {
   } finally {
     if (operation !== operationVersion) return;
     setBusy(false);
-    textInput.focus();
+    refocusComposerOnDesktop();
   }
 }
 
@@ -569,7 +575,7 @@ async function resetConversation() {
   } finally {
     if (operation !== operationVersion) return;
     setBusy(false);
-    textInput.focus();
+    refocusComposerOnDesktop();
   }
 }
 
