@@ -40,6 +40,15 @@ let operationVersion = 0;
 let pendingUpload = null;
 const objectUrls = new Set();
 
+function syncVisualViewport() {
+  const viewport = window.visualViewport;
+  const height = viewport?.height || window.innerHeight;
+  const offsetTop = viewport?.offsetTop || 0;
+  if (!Number.isFinite(height) || height <= 0) return;
+  document.documentElement.style.setProperty('--app-height', `${Math.round(height)}px`);
+  document.documentElement.style.setProperty('--app-top', `${Math.round(offsetTop)}px`);
+}
+
 function isPersistentImage(url) {
   return typeof url === 'string' && (url.startsWith('/api/media/') || url.startsWith('/api/upload/'));
 }
@@ -641,7 +650,12 @@ window.addEventListener('blur', hideDropOverlay);
 window.addEventListener('pagehide', releaseAllObjectUrls);
 window.addEventListener('offline', () => setStatus('error', '当前网络已断开'));
 window.addEventListener('online', checkHealth);
+window.addEventListener('resize', syncVisualViewport, { passive: true });
+window.addEventListener('orientationchange', syncVisualViewport, { passive: true });
+window.visualViewport?.addEventListener('resize', syncVisualViewport, { passive: true });
+window.visualViewport?.addEventListener('scroll', syncVisualViewport, { passive: true });
 
+syncVisualViewport();
 restoreHistory();
 repairUploadedImageHistory();
 resizeComposer();

@@ -78,7 +78,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260713-recognizing"', 'src="/assets/demo.js?v=20260714-keyboard"',
+            'href="/assets/demo.css?v=20260714-viewport"', 'src="/assets/demo.js?v=20260714-viewport"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -98,6 +98,8 @@ class FastApiDemoTest(unittest.TestCase):
             "const filename = `cropped_${Date.now()}.jpg`", "function retryUpload", "pendingUpload = prepared",
             "const uploadRow = addLocalUploadPreview(sourcePreview)", "setUploadRowStatus(uploadRow, '我发了一张题图。')",
             "message: '正在识别题目'", "setStatus('working', '正在识别题目…')",
+            "function syncVisualViewport()", "window.visualViewport?.addEventListener('resize', syncVisualViewport",
+            "window.visualViewport?.addEventListener('scroll', syncVisualViewport", "syncVisualViewport();",
         ):
             self.assertIn(expected, _SCRIPT)
         self.assertNotIn("new File(", _SCRIPT)
@@ -115,6 +117,8 @@ class FastApiDemoTest(unittest.TestCase):
         )
         self.assertLess(_SCRIPT.index("message: '我发了一张题图。'"), _SCRIPT.index("await request('/api/image'"))
         self.assertIn("overflow-y: auto", _STYLE)
+        self.assertIn("position: fixed; top: var(--app-top, 0px)", _STYLE)
+        self.assertIn("height: var(--app-height, 100dvh)", _STYLE)
         self.assertIn("prefers-reduced-motion: reduce", _STYLE)
         self.assertNotIn("window.scrollTo", _SCRIPT)
 
