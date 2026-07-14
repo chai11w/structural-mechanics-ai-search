@@ -69,12 +69,14 @@ class TikuSearchAgent:
         config: AgentToolConfig | None = None,
         use_llm_intent: bool = True,
         llm_client: Callable[[str], dict[str, Any]] | None = None,
+        progress_reporter: Callable[[str, str], None] | None = None,
     ) -> None:
         self.state = state or AgentState()
         self.tools = tools or AgentToolbox()
         self.config = config or AgentToolConfig()
         self.use_llm_intent = use_llm_intent
         self.llm_client = llm_client
+        self.progress_reporter = progress_reporter
 
     def handle_image(self, image_path: str | Path) -> AgentResponse:
         context = build_runtime_context_v2(self.state, trusted_image_event=True)
@@ -250,6 +252,9 @@ class TikuSearchAgent:
         return self._run_search(intent=intent, classified=question)
 
     def _run_search(self, *, intent: IntentResult | None = None, classified: dict[str, Any] | None = None) -> AgentResponse:
+        chapter = self.state.current_chapter
+        message = f"正在按「{chapter}」搜索题目…" if chapter else "正在搜索题目…"
+        self._report_progress("searching", message)
         routed = self.tools.route_bank(self.state.current_loads)
         if not routed.ok:
             return self._fail(routed.error or routed.data.get("reason", "无法确定检索库"))
@@ -301,6 +306,8 @@ class TikuSearchAgent:
     def _run_global_search(self, intent: IntentResult) -> AgentResponse:
         if not self.state.consume_global_search_offer():
             return self._response(render.render_unsupported(), intent)
+
+        self._report_progress("global_searching", "正在全局搜索题目，可能需要一点时间…")
 
         routed = self.tools.route_bank(self.state.current_loads)
         if not routed.ok:
@@ -368,3 +375,7 @@ class TikuSearchAgent:
 
     def _response(self, text: str, intent: IntentResult, *, images: list[str] | None = None) -> AgentResponse:
         return AgentResponse(text=text, images=list(images or []), state=self.state.to_dict(), intent=intent.intent)
+
+    def _report_progress(self, stage: str, message: str) -> None:
+        if self.progress_reporter is not None:
+            self.progress_reporter(stage, message)

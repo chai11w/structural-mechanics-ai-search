@@ -220,6 +220,43 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.selected_rank, 2)
         self.assertEqual(agent.state.last_answer_paths, ["out/answer2.jpg"])
 
+    def test_search_progress_uses_actual_agent_stage_for_all_three_entry_paths(self):
+        automatic_events = []
+        automatic = TikuSearchAgent(
+            tools=FakeTools(chapter="4力法").toolbox(),
+            config=AgentToolConfig(top_k=3, rerank_top=3),
+            use_llm_intent=False,
+            progress_reporter=lambda stage, message: automatic_events.append((stage, message)),
+        )
+        automatic.handle_image("automatic.jpg")
+        self.assertEqual(automatic_events, [("searching", "正在按「4力法」搜索题目…")])
+
+        chapter_events = []
+        chapter_agent = TikuSearchAgent(
+            tools=FakeTools(chapter="").toolbox(),
+            config=AgentToolConfig(top_k=3, rerank_top=3),
+            use_llm_intent=False,
+            progress_reporter=lambda stage, message: chapter_events.append((stage, message)),
+        )
+        chapter_agent.handle_image("chapter.jpg")
+        self.assertEqual(chapter_events, [])
+        chapter_agent.handle_text("按力法搜")
+        self.assertEqual(chapter_events, [("searching", "正在按「4力法」搜索题目…")])
+
+        global_events = []
+        global_agent = TikuSearchAgent(
+            tools=FakeTools(chapter="").toolbox(),
+            config=AgentToolConfig(top_k=3, rerank_top=3),
+            use_llm_intent=False,
+            progress_reporter=lambda stage, message: global_events.append((stage, message)),
+        )
+        global_agent.handle_image("global.jpg")
+        global_agent.handle_text("全局搜索")
+        self.assertEqual(
+            global_events,
+            [("global_searching", "正在全局搜索题目，可能需要一点时间…")],
+        )
+
     def test_v2_global_search_no_match_keeps_normal_chapter_fallback(self):
         fake = FakeTools(chapter="")
         fake.global_candidates = []

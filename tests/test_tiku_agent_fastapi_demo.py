@@ -1,4 +1,5 @@
 import io
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -19,13 +20,17 @@ class FakeRuntime:
         self.upload_session = ""
         self.media_session = ""
 
-    def handle_text(self, session_id: str, text: str) -> AgentResponse:
+    def handle_text(self, session_id: str, text: str, *, progress=None) -> AgentResponse:
         self.calls.append(("text", session_id, text))
+        if progress is not None:
+            progress("searching", "正在按「4力法」搜索题目…")
         return AgentResponse(text="我明白了。", images=[str(self.image_path)], intent="select_candidate")
 
-    def handle_image(self, session_id: str, image_path: Path) -> AgentResponse:
+    def handle_image(self, session_id: str, image_path: Path, *, progress=None) -> AgentResponse:
         self.calls.append(("image", session_id, image_path.is_file()))
         self.upload_session = session_id
+        if progress is not None:
+            progress("searching", "正在按「4力法」搜索题目…")
         return AgentResponse(text="我正在帮你找。", intent="search_image")
 
     def clear(self, session_id: str) -> None:
@@ -78,7 +83,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260713-recognizing"', 'src="/assets/demo.js?v=20260714-mobile-keyboard"',
+            'href="/assets/demo.css?v=20260713-recognizing"', 'src="/assets/demo.js?v=20260714-search-progress"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -98,6 +103,8 @@ class FastApiDemoTest(unittest.TestCase):
             "const filename = `cropped_${Date.now()}.jpg`", "function retryUpload", "pendingUpload = prepared",
             "const uploadRow = addLocalUploadPreview(sourcePreview)", "setUploadRowStatus(uploadRow, '我发了一张题图。')",
             "message: '正在识别题目'", "setStatus('working', '正在识别题目…')",
+            "requestStream('/api/message/stream'", "requestStream('/api/image/stream'",
+            "function updatePendingMessage", "setStatus('working', event.message)",
             "function refocusComposerOnDesktop()", "window.matchMedia('(hover: hover) and (pointer: fine)')",
             "textInput.focus({ preventScroll: true })",
         ):
@@ -110,7 +117,10 @@ class FastApiDemoTest(unittest.TestCase):
             _SCRIPT.index("const uploadRow = addLocalUploadPreview(sourcePreview)"),
             _SCRIPT.index("await normalizeImage(selected, sourcePreview)"),
         )
-        self.assertLess(_SCRIPT.index("message: '我发了一张题图。'"), _SCRIPT.index("await request('/api/image'"))
+        self.assertLess(
+            _SCRIPT.index("message: '我发了一张题图。'"),
+            _SCRIPT.index("await requestStream('/api/image/stream'"),
+        )
         self.assertIn("overflow-y: auto", _STYLE)
         self.assertIn("prefers-reduced-motion: reduce", _STYLE)
         self.assertNotIn("window.scrollTo", _SCRIPT)
@@ -254,6 +264,29 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(reset_response.status_code, 200)
         self.assertEqual(runtime.calls[-1][0], "clear")
         self.assertEqual(client.get(media_url).status_code, 404)
+
+    def test_streaming_endpoints_emit_real_progress_before_result(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"demo_stream_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        client = TestClient(create_app(runtime=FakeRuntime(image_path)))
+
+        text_response = client.post("/api/message/stream", json={"text": "按力法搜"})
+        text_events = [json.loads(line) for line in text_response.text.splitlines() if line]
+        self.assertEqual([event["type"] for event in text_events], ["progress", "result"])
+        self.assertEqual(text_events[0]["stage"], "searching")
+        self.assertIn("力法", text_events[0]["message"])
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (4, 4), "white").save(buffer, format="JPEG")
+        image_response = client.post(
+            "/api/image/stream",
+            files={"file": ("crop.jpg", buffer.getvalue(), "image/jpeg")},
+        )
+        image_events = [json.loads(line) for line in image_response.text.splitlines() if line]
+        self.assertEqual([event["type"] for event in image_events], ["progress", "result"])
+        self.assertTrue(image_events[-1]["data"]["uploaded_image"].startswith("/api/upload/"))
 
 
 if __name__ == "__main__":

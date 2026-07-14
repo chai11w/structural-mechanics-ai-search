@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from io import BytesIO
+import json
 import logging
 import secrets
 from pathlib import Path
+from typing import Callable
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
@@ -98,6 +101,27 @@ def create_app(
         response = runtime.handle_text(session_id, text)
         return _agent_json(response, runtime, session_id, secure_cookie=_is_secure_request(request))
 
+    @app.post("/api/message/stream")
+    async def message_stream(request: Request) -> StreamingResponse:
+        try:
+            payload = await request.json()
+        except Exception as exc:  # noqa: BLE001 - malformed external input.
+            raise HTTPException(status_code=400, detail="invalid json") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="json object is required")
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="text is required")
+        session_id = _session_id(request)
+
+        def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
+            response = runtime.handle_text(session_id, text, progress=progress)
+            return _agent_payload(response, runtime, session_id)
+
+        result = StreamingResponse(_stream_agent_events(execute), media_type="application/x-ndjson")
+        _set_session_cookie(result, session_id, secure_cookie=_is_secure_request(request))
+        return result
+
     @app.post("/api/reset")
     def reset(request: Request) -> JSONResponse:
         session_id = str(request.cookies.get(SESSION_COOKIE) or "").strip()
@@ -129,6 +153,34 @@ def create_app(
             uploaded_image=uploaded_image,
             secure_cookie=_is_secure_request(request),
         )
+
+    @app.post("/api/image/stream")
+    async def image_stream(request: Request) -> StreamingResponse:
+        content, filename, content_type = await _read_image_upload(request)
+        session_id = _session_id(request)
+        incoming = _write_incoming_image(
+            content,
+            filename,
+            content_type,
+            incoming_dir=incoming_dir,
+        )
+
+        def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
+            try:
+                response = runtime.handle_image(session_id, incoming, progress=progress)
+                uploaded_image = runtime.current_image_path(session_id)
+                return _agent_payload(
+                    response,
+                    runtime,
+                    session_id,
+                    uploaded_image=uploaded_image,
+                )
+            finally:
+                incoming.unlink(missing_ok=True)
+
+        result = StreamingResponse(_stream_agent_events(execute), media_type="application/x-ndjson")
+        _set_session_cookie(result, session_id, secure_cookie=_is_secure_request(request))
+        return result
 
     @app.get("/api/upload/{filename}")
     def get_upload(filename: str, request: Request) -> FileResponse:
@@ -245,6 +297,25 @@ def _agent_json(
     uploaded_image: Path | None = None,
     secure_cookie: bool = False,
 ) -> JSONResponse:
+    result = JSONResponse(
+        _agent_payload(
+            response,
+            runtime,
+            session_id,
+            uploaded_image=uploaded_image,
+        )
+    )
+    _set_session_cookie(result, session_id, secure_cookie=secure_cookie)
+    return result
+
+
+def _agent_payload(
+    response: AgentResponse,
+    runtime: AgentSessionRuntime,
+    session_id: str,
+    *,
+    uploaded_image: Path | None = None,
+) -> dict[str, object]:
     image_urls = []
     for image in response.images:
         path = Path(image)
@@ -254,8 +325,40 @@ def _agent_json(
         if persisted is not None:
             image_urls.append(f"/api/media/{persisted.name}")
     uploaded_image_url = f"/api/upload/{uploaded_image.name}" if uploaded_image is not None else ""
-    result = JSONResponse(
-        {"text": response.text, "images": image_urls, "uploaded_image": uploaded_image_url, "intent": response.intent}
-    )
-    _set_session_cookie(result, session_id, secure_cookie=secure_cookie)
-    return result
+    return {
+        "text": response.text,
+        "images": image_urls,
+        "uploaded_image": uploaded_image_url,
+        "intent": response.intent,
+    }
+
+
+async def _stream_agent_events(
+    execute: Callable[[Callable[[str, str], None]], dict[str, object]],
+):
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
+
+    def progress(stage: str, message: str) -> None:
+        loop.call_soon_threadsafe(
+            queue.put_nowait,
+            {"type": "progress", "stage": stage, "message": message},
+        )
+
+    async def run() -> None:
+        try:
+            payload = await asyncio.to_thread(execute, progress)
+            await queue.put({"type": "result", "data": payload})
+        except Exception:  # noqa: BLE001 - keep internal failures out of the public stream.
+            logger.exception("streamed Agent request failed")
+            await queue.put({"type": "error", "message": "服务端处理失败，请稍后重试。"})
+        finally:
+            await queue.put(None)
+
+    task = asyncio.create_task(run())
+    while True:
+        event = await queue.get()
+        if event is None:
+            break
+        yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+    await task

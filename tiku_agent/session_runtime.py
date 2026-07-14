@@ -17,6 +17,7 @@ from tiku_agent.tools import AgentToolConfig
 
 
 AgentFactory = Callable[[AgentState], TikuSearchAgent]
+ProgressReporter = Callable[[str, str], None]
 
 
 class AgentSessionRuntime:
@@ -35,14 +36,31 @@ class AgentSessionRuntime:
         self.task_logger = task_logger or JsonlTaskLogger()
         self.agent_factory = agent_factory
 
-    def handle_image(self, session_id: str, image_path: str | Path) -> AgentResponse:
+    def handle_image(
+        self,
+        session_id: str,
+        image_path: str | Path,
+        *,
+        progress: ProgressReporter | None = None,
+    ) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
         self._purge_expired()
         persisted_image = self.artifacts.persist_image(clean_session_id, image_path)
-        return self._run(clean_session_id, "image", lambda agent: agent.handle_image(persisted_image))
+        return self._run(
+            clean_session_id,
+            "image",
+            lambda agent: agent.handle_image(persisted_image),
+            progress=progress,
+        )
 
-    def handle_text(self, session_id: str, text: str) -> AgentResponse:
-        return self._run(session_id, "text", lambda agent: agent.handle_text(text))
+    def handle_text(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        progress: ProgressReporter | None = None,
+    ) -> AgentResponse:
+        return self._run(session_id, "text", lambda agent: agent.handle_text(text), progress=progress)
 
     def clear(self, session_id: str) -> None:
         """Explicitly start a fresh conversation and remove its temporary files."""
@@ -86,14 +104,21 @@ class AgentSessionRuntime:
             return None
         return target
 
-    def _run(self, session_id: str, kind: str, handler: Callable[[TikuSearchAgent], AgentResponse]) -> AgentResponse:
+    def _run(
+        self,
+        session_id: str,
+        kind: str,
+        handler: Callable[[TikuSearchAgent], AgentResponse],
+        *,
+        progress: ProgressReporter | None = None,
+    ) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
         self._purge_expired()
         state = self.store.load(clean_session_id) or AgentState(session_id=clean_session_id)
         phase_before = state.phase
         started_at = datetime.now(UTC)
         started = time.perf_counter()
-        agent = self._make_agent(state)
+        agent = self._make_agent(state, progress=progress)
         response: AgentResponse | None = None
         error_kind = ""
         try:
@@ -120,11 +145,19 @@ class AgentSessionRuntime:
                 error_kind=error_kind,
             )
 
-    def _make_agent(self, state: AgentState) -> TikuSearchAgent:
+    def _make_agent(
+        self,
+        state: AgentState,
+        *,
+        progress: ProgressReporter | None = None,
+    ) -> TikuSearchAgent:
         if self.agent_factory is not None:
-            return self.agent_factory(state)
+            agent = self.agent_factory(state)
+            agent.progress_reporter = progress
+            return agent
         return TikuSearchAgent(
             state=state,
+            progress_reporter=progress,
             config=AgentToolConfig(
                 runtime_dir=self.artifacts.root.parent,
                 session_dir=self.artifacts.session_dir(state.session_id),

@@ -254,6 +254,15 @@ function replacePending(row, item) {
   addMessage(item);
 }
 
+function updatePendingMessage(row, message) {
+  const paragraph = row?.querySelector('.message-text');
+  if (!paragraph) return;
+  const textNode = Array.from(paragraph.childNodes).find((node) => node.nodeType === Node.TEXT_NODE);
+  if (textNode) textNode.nodeValue = message;
+  else paragraph.prepend(document.createTextNode(message));
+  scrollToLatest();
+}
+
 function setStatus(state, message) {
   runtimeStatus.dataset.state = state;
   statusText.textContent = message;
@@ -374,6 +383,51 @@ async function request(url, options, timeoutMs, timeoutMessage, track = true, ne
   }
 }
 
+async function requestStream(url, options, timeoutMs, timeoutMessage, onProgress, networkMessage = '') {
+  const controller = new AbortController();
+  activeController = controller;
+  const timer = setTimeout(() => controller.abort('timeout'), timeoutMs);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    if (!response.ok) {
+      let data = {};
+      try { data = await response.json(); } catch (_error) { data = {}; }
+      throw new Error(safeHttpError(response.status, data));
+    }
+    if (!response.body) throw new Error('服务返回格式异常，请稍后重试。');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let result = null;
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const event = JSON.parse(line);
+        if (event.type === 'progress') onProgress?.(event);
+        if (event.type === 'result') result = event.data;
+        if (event.type === 'error') throw new Error(event.message || '服务端处理失败，请稍后重试。');
+      }
+      if (done) break;
+    }
+    if (!result) throw new Error('服务返回格式异常，请稍后重试。');
+    return result;
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      if (controller.signal.reason === 'new-chat') throw new Error('当前识别已取消。');
+      throw new Error(timeoutMessage);
+    }
+    if (error instanceof TypeError) throw new Error(networkMessage || '无法连接本地服务，请确认 Demo 正在运行后重试。');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    if (activeController === controller) activeController = null;
+  }
+}
+
 function responseItem(data) {
   return {
     message: data.text || '处理完成。',
@@ -391,17 +445,25 @@ async function sendTextValue(value, displayValue = value) {
   textInput.value = '';
   resizeComposer();
   const operation = ++operationVersion;
+  let pending = null;
   setBusy(true);
-  setStatus('working', '正在回答…');
+  setStatus('working', '正在处理…');
   try {
-    const data = await request('/api/message', {
+    const data = await requestStream('/api/message/stream', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: clean }),
-    }, TEXT_TIMEOUT_MS, '请求等待时间过长，请稍后重试。');
+    }, TEXT_TIMEOUT_MS, '请求等待时间过长，请稍后重试。', (event) => {
+      if (operation !== operationVersion) return;
+      if (!pending) pending = addMessage({ message: event.message, variant: 'pending' }, false);
+      else updatePendingMessage(pending, event.message);
+      setStatus('working', event.message);
+    });
     if (operation !== operationVersion) return;
+    pending?.remove();
     addMessage(responseItem(data));
     setStatus('ready', '准备就绪');
   } catch (error) {
     if (operation !== operationVersion) return;
+    pending?.remove();
     if (error.message !== '当前识别已取消。') addMessage({ message: error.message || '暂时无法处理，请再试一次。', variant: 'error' });
     setStatus('error', '处理失败，可重新尝试');
   } finally {
@@ -459,9 +521,13 @@ async function submitPreparedImage(prepared, uploadRow) {
     const formData = new FormData();
     formData.append('file', prepared.blob, prepared.filename);
     debugUploadMetadata('form-data:file', prepared.blob, prepared.filename);
-    const data = await request('/api/image', {
+    const data = await requestStream('/api/image/stream', {
       method: 'POST', body: formData,
-    }, IMAGE_TIMEOUT_MS, '网络上传或题图识别超时，请直接重新上传。', true, '网络上传失败，请检查网络后重试。');
+    }, IMAGE_TIMEOUT_MS, '网络上传或题图识别超时，请直接重新上传。', (event) => {
+      if (operation !== operationVersion) return;
+      updatePendingMessage(pending, event.message);
+      setStatus('working', event.message);
+    }, '网络上传失败，请检查网络后重试。');
     if (operation !== operationVersion) return;
     if (!isPersistentImage(data.uploaded_image)) throw new Error('服务端处理失败，未返回已上传的题图。');
     pending.remove();
