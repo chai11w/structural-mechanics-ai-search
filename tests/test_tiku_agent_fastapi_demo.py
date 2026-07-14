@@ -83,7 +83,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260713-recognizing"', 'src="/assets/demo.js?v=20260714-explicit-candidate"',
+            'href="/assets/demo.css?v=20260714-candidate-viewport"', 'src="/assets/demo.js?v=20260714-candidate-viewport"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -108,6 +108,8 @@ class FastApiDemoTest(unittest.TestCase):
             "function updatePendingMessage", "setStatus('working', event.message)",
             "function refocusComposerOnDesktop()", "window.matchMedia('(hover: hover) and (pointer: fine)')",
             "textInput.focus({ preventScroll: true })",
+            "function syncVisualViewport()", "window.visualViewport?.addEventListener('resize', syncVisualViewport",
+            "window.visualViewport?.addEventListener('scroll', syncVisualViewport", "syncVisualViewport();",
         ):
             self.assertIn(expected, _SCRIPT)
         self.assertNotIn("new File(", _SCRIPT)
@@ -124,6 +126,8 @@ class FastApiDemoTest(unittest.TestCase):
             _SCRIPT.index("await requestStream('/api/image/stream'"),
         )
         self.assertIn("overflow-y: auto", _STYLE)
+        self.assertIn("top: var(--app-top, 0px)", _STYLE)
+        self.assertIn("height: var(--app-height, 100dvh)", _STYLE)
         self.assertIn("prefers-reduced-motion: reduce", _STYLE)
         self.assertNotIn("window.scrollTo", _SCRIPT)
 
