@@ -1,10 +1,18 @@
 import unittest
 from pathlib import Path
 
-from tiku_agent.intent_eval_v2 import evaluate_v1_rule_suite, load_gold_suite
+from tiku_agent.action_decision_v2 import ActionDecisionV2
+from tiku_agent.action_permissions_v2 import DecisionContextV2, authorize_action_v2
+from tiku_agent.intent_eval_v2 import (
+    compare_system_reports,
+    evaluate_v1_rule_suite,
+    load_gold_suite,
+    load_gold_suites,
+)
 
 
 SUITE_PATH = Path(__file__).parent / "fixtures" / "intent_v2_gold_review_01.json"
+EXPANSION_PATH = Path(__file__).parent / "fixtures" / "intent_v2_gold_review_02.json"
 
 
 class IntentEvalV2Test(unittest.TestCase):
@@ -31,6 +39,75 @@ class IntentEvalV2Test(unittest.TestCase):
         self.assertEqual(first["safe_success_count"], 0)
         self.assertEqual(first["safe_success_rate"], 0.0)
         self.assertEqual(first["unsafe_executions"], 4)
+
+    def test_combined_review_set_has_forty_valid_unique_decisions(self):
+        suite = load_gold_suites([SUITE_PATH, EXPANSION_PATH])
+        self.assertEqual(suite["status"], "combined_review_set")
+        self.assertEqual(suite["source_statuses"], ["approved_seed_set", "review_draft"])
+        self.assertEqual(len(suite["cases"]), 40)
+        self.assertEqual(len({case["id"] for case in suite["cases"]}), 40)
+        for case in suite["cases"]:
+            with self.subTest(case=case["id"]):
+                decision = ActionDecisionV2.from_dict(case["expected_decision"])
+                context_payload = {
+                    key: value
+                    for key, value in case["context"].items()
+                    if key in DecisionContextV2.__dataclass_fields__
+                }
+                authorization = authorize_action_v2(decision, DecisionContextV2(**context_payload))
+                self.assertTrue(authorization.allowed, authorization.code)
+
+    def test_combined_review_set_matches_approved_category_distribution(self):
+        report = evaluate_v1_rule_suite(load_gold_suites([SUITE_PATH, EXPANSION_PATH]))
+        self.assertEqual(
+            {name: values["total"] for name, values in report["categories"].items()},
+            {
+                "active_namespace": 7,
+                "chapter_context": 5,
+                "conversation_shell": 5,
+                "explicit_task": 8,
+                "failure_recovery": 4,
+                "reference_resolution": 6,
+                "safety_boundary": 5,
+            },
+        )
+
+    def test_paired_comparison_reports_improvements_and_regressions(self):
+        row = {
+            "category": "explicit_task",
+            "expected": {"action": "cancel"},
+            "actual": {"action": "clarification"},
+        }
+        baseline = {
+            "system": "baseline",
+            "total": 2,
+            "exact_accuracy": 0.0,
+            "action_accuracy": 0.0,
+            "safe_success_rate": 0.0,
+            "unsafe_executions": 1,
+            "cases": [
+                {"id": "a", "exact": False, **row},
+                {"id": "b", "exact": False, **row},
+            ],
+        }
+        contender = {
+            "system": "contender",
+            "total": 2,
+            "exact_accuracy": 0.5,
+            "action_accuracy": 0.5,
+            "safe_success_rate": 0.5,
+            "unsafe_executions": 0,
+            "cases": [
+                {"id": "a", "exact": True, **row},
+                {"id": "b", "exact": False, **row},
+            ],
+        }
+        comparison = compare_system_reports(baseline, contender)
+        self.assertEqual(comparison["improvements"], 1)
+        self.assertEqual(comparison["regressions"], 0)
+        self.assertEqual(comparison["unchanged"], 1)
+        self.assertEqual(comparison["metric_delta"]["exact_accuracy"], 0.5)
+        self.assertEqual(comparison["metric_delta"]["unsafe_executions"], -1)
 
 
 if __name__ == "__main__":

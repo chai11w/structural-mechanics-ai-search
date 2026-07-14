@@ -44,6 +44,13 @@ SAFE_EXPECTED_ACTIONS = {
     "reject",
 }
 
+CATEGORY_GROUPS = {
+    "pending_chapter": "chapter_context",
+    "chapter_context": "chapter_context",
+    "safety": "safety_boundary",
+    "safety_boundary": "safety_boundary",
+}
+
 
 def load_gold_suite(path: str | Path) -> dict[str, Any]:
     suite = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -54,6 +61,24 @@ def load_gold_suite(path: str | Path) -> dict[str, Any]:
     if any(not case_id for case_id in ids) or len(ids) != len(set(ids)):
         raise ValueError("gold case ids must be non-empty and unique")
     return suite
+
+
+def load_gold_suites(paths: list[str | Path]) -> dict[str, Any]:
+    """Combine reviewed suite fragments while preserving case order."""
+
+    if not paths:
+        raise ValueError("at least one gold suite path is required")
+    suites = [load_gold_suite(path) for path in paths]
+    cases = [case for suite in suites for case in suite["cases"]]
+    ids = [case["id"] for case in cases]
+    if len(ids) != len(set(ids)):
+        raise ValueError("gold case ids must be unique across suites")
+    return {
+        "schema_version": suites[0].get("schema_version"),
+        "status": "combined_review_set",
+        "source_statuses": [suite.get("status") for suite in suites],
+        "cases": cases,
+    }
 
 
 def evaluate_v1_rule_suite(suite: dict[str, Any]) -> dict[str, Any]:
@@ -73,7 +98,7 @@ def evaluate_v1_rule_suite(suite: dict[str, Any]) -> dict[str, Any]:
         unsafe = expected["action"] in SAFE_EXPECTED_ACTIONS and actual["action"] in EXECUTING_ACTIONS
         unsafe_executions += int(unsafe)
 
-        category = str(case["category"])
+        category = _category_group(str(case["category"]))
         category_totals[category] += 1
         category_exact[category] += int(exact)
         rows.append(
@@ -113,7 +138,72 @@ def evaluate_v1_rule_suite(suite: dict[str, Any]) -> dict[str, Any]:
             }
             for category in sorted(category_totals)
         },
+        "cases": rows,
         "failures": [row for row in rows if not row["exact"]],
+    }
+
+
+def compare_system_reports(
+    baseline: dict[str, Any],
+    contender: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a paired per-case comparison after both systems have run."""
+
+    if baseline.get("total") != contender.get("total"):
+        raise ValueError("comparison reports must contain the same number of cases")
+    baseline_cases = {row["id"]: row for row in baseline.get("cases", [])}
+    contender_cases = {row["id"]: row for row in contender.get("cases", [])}
+    if not baseline_cases or baseline_cases.keys() != contender_cases.keys():
+        raise ValueError("comparison reports must contain the same case ids")
+
+    paired: list[dict[str, Any]] = []
+    improvements = 0
+    regressions = 0
+    for case_id, baseline_row in baseline_cases.items():
+        contender_row = contender_cases[case_id]
+        if not baseline_row["exact"] and contender_row["exact"]:
+            change = "improved"
+            improvements += 1
+        elif baseline_row["exact"] and not contender_row["exact"]:
+            change = "regressed"
+            regressions += 1
+        else:
+            change = "unchanged"
+        paired.append(
+            {
+                "id": case_id,
+                "category": baseline_row["category"],
+                "expected": baseline_row["expected"],
+                "baseline_actual": baseline_row["actual"],
+                "contender_actual": contender_row["actual"],
+                "baseline_exact": baseline_row["exact"],
+                "contender_exact": contender_row["exact"],
+                "change": change,
+            }
+        )
+
+    total = int(baseline["total"])
+    return {
+        "baseline_system": baseline.get("system"),
+        "contender_system": contender.get("system"),
+        "total": total,
+        "improvements": improvements,
+        "regressions": regressions,
+        "unchanged": total - improvements - regressions,
+        "metric_delta": {
+            "exact_accuracy": round(
+                float(contender["exact_accuracy"]) - float(baseline["exact_accuracy"]), 4
+            ),
+            "action_accuracy": round(
+                float(contender["action_accuracy"]) - float(baseline["action_accuracy"]), 4
+            ),
+            "safe_success_rate": round(
+                float(contender["safe_success_rate"]) - float(baseline["safe_success_rate"]), 4
+            ),
+            "unsafe_executions": int(contender["unsafe_executions"])
+            - int(baseline["unsafe_executions"]),
+        },
+        "cases": paired,
     }
 
 
@@ -185,3 +275,7 @@ def _normalize_decision(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _ratio(numerator: int, denominator: int) -> float:
     return round(numerator / denominator, 4) if denominator else 0.0
+
+
+def _category_group(category: str) -> str:
+    return CATEGORY_GROUPS.get(category, category)
