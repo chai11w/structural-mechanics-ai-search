@@ -44,6 +44,7 @@ def build_runtime_context_v2(
         pending_chapter=state.pending_chapter or None,
         recent_actions=(recent_action,) if recent_action else (),
         trusted_image_event=trusted_image_event,
+        global_search_offered=state.global_search_offered,
         retryable_error=state.phase == PHASE_ERROR and bool(state.active_image_path),
     )
 
@@ -61,6 +62,8 @@ def adapt_decision_v2(
             "image_path": str(image_path or ""),
             "chapter_override": decision.chapter_override,
         }
+    elif decision.action == "global_search":
+        data = {}
     elif decision.action == "set_chapter":
         data = {
             "chapter": decision.chapter_override,

@@ -37,6 +37,7 @@ class TikuAgentStateTest(unittest.TestCase):
                 "last_error",
                 "revision_count",
                 "pending_chapter",
+                "global_search_offered",
             },
         )
         self.assertEqual(state.phase, STATE_IDLE)
@@ -73,12 +74,26 @@ class TikuAgentStateTest(unittest.TestCase):
         legacy.pop("previous_question")
         legacy.pop("completed_questions")
         legacy.pop("pending_chapter")
+        legacy.pop("global_search_offered")
 
         restored = AgentState.from_dict(legacy)
 
         self.assertIsNone(restored.previous_question)
         self.assertEqual(restored.completed_questions, [])
         self.assertEqual(restored.pending_chapter, "")
+        self.assertFalse(restored.global_search_offered)
+
+    def test_global_search_offer_round_trips_and_is_consumed(self):
+        state = AgentState(
+            phase=STATE_WAIT_CHAPTER,
+            current_image_path="q.jpg",
+            current_loads=[{"type": "集中", "raw": "P"}],
+        )
+        state.offer_global_search()
+        restored = AgentState.from_dict(state.to_dict())
+        self.assertTrue(restored.global_search_offered)
+        self.assertTrue(restored.consume_global_search_offer())
+        self.assertFalse(restored.global_search_offered)
 
     def test_start_search_resets_current_dialogue_context(self):
         state = AgentState(

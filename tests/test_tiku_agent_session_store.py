@@ -45,6 +45,7 @@ class SessionStoreContractTest(unittest.TestCase):
             completed_questions=[1],
             candidates=[{"rank": 1, "path": "bank/q1.jpg", "score": 0.9}],
             pending_chapter="8影响线",
+            global_search_offered=True,
         )
         store.save(original)
 

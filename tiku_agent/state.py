@@ -75,6 +75,7 @@ class AgentState:
     last_error: str = ""
     revision_count: int = 0
     pending_chapter: str = ""
+    global_search_offered: bool = False
 
     def __init__(
         self,
@@ -97,6 +98,7 @@ class AgentState:
         last_error: str = "",
         revision_count: int = 0,
         pending_chapter: str = "",
+        global_search_offered: bool = False,
         *,
         state: str | None = None,
         image_path: str = "",
@@ -124,6 +126,7 @@ class AgentState:
         self.last_error = last_error
         self.revision_count = revision_count
         self.pending_chapter = pending_chapter
+        self.global_search_offered = global_search_offered
         self.validate()
 
     @property
@@ -196,6 +199,8 @@ class AgentState:
             raise ValueError("revision_count must not be negative")
         if self.pending_chapter and self.pending_chapter not in CHAPTERS:
             raise ValueError("pending_chapter must be a supported chapter")
+        if not isinstance(self.global_search_offered, bool):
+            raise ValueError("global_search_offered must be boolean")
 
     def remember_intent(self, intent: dict) -> None:
         self.last_intent = dict(intent)
@@ -216,6 +221,7 @@ class AgentState:
         self.last_answer_paths = []
         self.last_error = ""
         self.pending_chapter = ""
+        self.global_search_offered = False
         self.phase = PHASE_PROCESSING
 
     def set_analysis(self, *, loads: list[dict], chapter: str = "", question_image_path: str = "") -> None:
@@ -226,6 +232,7 @@ class AgentState:
         self.phase = PHASE_READY_TO_ROUTE if chapter else STATE_WAIT_CHAPTER
 
     def set_chapter(self, chapter: str, *, corrected: bool = False) -> None:
+        self.global_search_offered = False
         if corrected and self.current_chapter and self.current_chapter != chapter:
             self.revision_count += 1
             self.candidates = []
@@ -270,10 +277,12 @@ class AgentState:
         self.candidates = []
         self.selected_rank = None
         self.last_answer_paths = []
+        self.global_search_offered = False
         self.phase = PHASE_READY_TO_ROUTE if self.current_chapter else STATE_WAIT_CHAPTER
         return question
 
     def set_candidates(self, candidates: list[dict]) -> None:
+        self.global_search_offered = False
         self.candidates = _renumber(candidates)
         self.selected_rank = None
         self.phase = STATE_WAIT_CANDIDATE_CHOICE if self.candidates else PHASE_NO_MATCH
@@ -302,14 +311,31 @@ class AgentState:
         self.pending_chapter = ""
         return chapter
 
+    def offer_global_search(self) -> None:
+        query_image = (
+            self.current_question_image_path
+            if self.selected_question is not None
+            else self.active_image_path
+        )
+        if self.phase != STATE_WAIT_CHAPTER or not query_image:
+            raise ValueError("global search can only be offered for an active chapter-unknown question")
+        self.global_search_offered = True
+
+    def consume_global_search_offer(self) -> bool:
+        offered = self.global_search_offered
+        self.global_search_offered = False
+        return offered
+
     def mark_done(self) -> None:
         self.phase = PHASE_ANSWERED
 
     def cancel(self) -> None:
         self.pending_chapter = ""
+        self.global_search_offered = False
         self.phase = PHASE_CANCELLED
 
     def fail(self, error: str = "") -> None:
+        self.global_search_offered = False
         self.last_error = error
         self.phase = PHASE_ERROR
 

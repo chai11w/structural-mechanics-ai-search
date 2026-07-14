@@ -121,7 +121,7 @@ class ConversationContextV2:
         pending_chapter: str | None = None,
         recent_actions: tuple[str, ...] = (),
         trusted_image_event: bool = False,
-        global_search_offered: bool = False,
+        global_search_offered: bool | None = None,
         retryable_error: bool = False,
     ) -> "ConversationContextV2":
         completed = tuple(sorted(set(completed_question_indexes)))
@@ -146,7 +146,11 @@ class ConversationContextV2:
             has_explainable_failure=bool(state.last_error),
             retryable_error=retryable_error,
             trusted_image_event=trusted_image_event,
-            global_search_offered=global_search_offered,
+            global_search_offered=(
+                state.global_search_offered
+                if global_search_offered is None
+                else global_search_offered
+            ),
             recent_actions=recent_actions,
         )
 

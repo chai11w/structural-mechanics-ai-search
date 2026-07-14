@@ -5,6 +5,17 @@ from tiku_agent.state import AgentState
 
 
 class ConversationContextV2Test(unittest.TestCase):
+    def test_runtime_state_exposes_only_global_offer_boolean(self):
+        state = AgentState(
+            phase="WAIT_CHAPTER",
+            current_image_path="q.jpg",
+            global_search_offered=True,
+        )
+        context = ConversationContextV2.from_agent_state(state)
+        self.assertTrue(context.global_search_offered)
+        self.assertTrue(context.to_decision_context().global_search_offered)
+        self.assertTrue(context.to_prompt_payload()["global_search_offered"])
+
     def test_agent_state_is_reduced_to_sanitized_semantic_summary(self):
         state = AgentState(
             phase="ANSWERED",

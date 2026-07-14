@@ -1,19 +1,103 @@
 from pathlib import Path
+import json
 import unittest
 from unittest.mock import patch
+
+import pandas as pd
 
 from tiku_agent.tools import (
     AgentToolConfig,
     analyze_multi_image_tool,
     classify_structure_tool,
+    global_search_tool,
     parse_candidate_action_tool,
     rerank_candidates_tool,
     prepare_question_units_tool,
     route_bank_tool,
 )
 
-
 class TikuAgentToolsTest(unittest.TestCase):
+    def test_global_search_reranks_every_deduplicated_perfect_candidate(self):
+        loads = [{"type": "集中", "raw": "P"}]
+        query = Path("query.jpg")
+        frames = {
+            "2静定结构": pd.DataFrame(
+                [
+                    {"题目名称": "query.jpg", "荷载": json.dumps({"loads": loads}, ensure_ascii=False)},
+                    {"题目名称": "other.jpg", "荷载": json.dumps({"loads": loads}, ensure_ascii=False)},
+                ]
+            ),
+            "4力法": pd.DataFrame(
+                [{"题目名称": "same.jpg", "荷载": json.dumps({"loads": loads}, ensure_ascii=False)}]
+            ),
+        }
+
+        def fake_score(_query, candidate, **_kwargs):
+            item = dict(candidate)
+            item["rerank_status"] = "completed"
+            item["rerank_score"] = 1.0 if candidate["content_hash"] == "same" else 0.95
+            return item
+
+        with patch("tiku_agent.tools.CHAPTERS", ["2静定结构", "4力法"]), patch(
+            "tiku_agent.tools.load_bank_excel",
+            side_effect=lambda _root, chapter: frames.get(chapter),
+        ), patch(
+            "tiku_agent.tools.search.resolve_question_path",
+            side_effect=lambda name, **_kwargs: (Path(name), name, False),
+        ), patch("tiku_agent.tools.Path.is_file", return_value=True), patch(
+            "tiku_agent.tools._file_sha256",
+            side_effect=lambda path: "same" if Path(path).name in {"query.jpg", "same.jpg"} else "other",
+        ), patch(
+            "tiku_agent.tools.search.score_rerank_candidate",
+            side_effect=fake_score,
+        ) as scorer:
+            result = global_search_tool(
+                loads,
+                query,
+                route="main",
+                config=AgentToolConfig(global_rerank_threshold=0.95),
+            )
+
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(result.data["coarse_candidate_count"], 2)
+        self.assertEqual(result.data["model_calls"], 2)
+        self.assertEqual(scorer.call_count, 2)
+        self.assertEqual(len(result.data["candidates"]), 1)
+        self.assertEqual(
+            result.data["candidates"][0]["source_chapters"],
+            ["2静定结构", "4力法"],
+        )
+        self.assertEqual(result.data["candidates"][0]["rerank_score"], 1.0)
+
+    def test_global_search_rejects_partial_visual_batch(self):
+        loads = [{"type": "集中", "raw": "P"}]
+        query = Path("query.jpg")
+        frame = pd.DataFrame(
+            [{"题目名称": "query.jpg", "荷载": json.dumps({"loads": loads}, ensure_ascii=False)}]
+        )
+
+        def timed_out(_query, candidate, **_kwargs):
+            item = dict(candidate)
+            item.update({"rerank_status": "timeout", "rerank_score": None})
+            return item
+
+        with patch("tiku_agent.tools.CHAPTERS", ["4力法"]), patch(
+            "tiku_agent.tools.load_bank_excel", return_value=frame
+        ), patch(
+            "tiku_agent.tools.search.resolve_question_path",
+            return_value=(query, "query.jpg", False),
+        ), patch("tiku_agent.tools.Path.is_file", return_value=True), patch(
+            "tiku_agent.tools._file_sha256", return_value="question"
+        ), patch(
+            "tiku_agent.tools.search.score_rerank_candidate",
+            side_effect=timed_out,
+        ):
+            result = global_search_tool(loads, query, route="main")
+
+        self.assertFalse(result.ok, result.to_dict())
+        self.assertEqual(result.data["unfinished_candidates"], 1)
+        self.assertIn("未完成", result.error)
+
     def test_agent_runtime_is_isolated_from_old_feishu_state(self):
         config = AgentToolConfig()
         self.assertEqual(config.runtime_dir, Path(__file__).resolve().parents[1] / ".tmp_tiku_agent")

@@ -32,6 +32,22 @@ class FakeTools:
                 ok=True,
                 data={"candidates": [{"rank": 1, "path": "bank/q1.jpg", "name": "q1.jpg", "score": 0.9}]},
             ),
+            global_search=lambda *_args, **_kwargs: ToolResult(
+                ok=True,
+                data={
+                    "candidates": [
+                        {
+                            "rank": 1,
+                            "path": "bank/global-q1.jpg",
+                            "name": "global-q1.jpg",
+                            "score": 1.0,
+                            "rerank_score": 1.0,
+                            "chapter": "4力法",
+                            "source_chapters": ["4力法"],
+                        }
+                    ]
+                },
+            ),
             rerank_candidates=lambda *_args, **_kwargs: ToolResult(
                 ok=True,
                 data={"reranked": False, "visible_candidates": [{"rank": 1, "path": "bank/q1.jpg", "name": "q1.jpg", "score": 0.9}]},
@@ -166,6 +182,50 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.assertEqual(searched.state["current_chapter"], "8影响线")
         self.assertEqual(searched.state["pending_chapter"], "")
         self.assertEqual(self.store.load(session_id).pending_chapter, "")
+
+    def test_v2_global_search_offer_survives_restart_and_is_consumed(self):
+        session_id = "v2-global-offer-session"
+        self.addCleanup(lambda: self.artifacts.clear_session(session_id))
+        tools = FakeTools().toolbox()
+        tools.analyze_multi_image = lambda *_args, **_kwargs: ToolResult(
+            ok=True,
+            data={
+                "is_multi": False,
+                "single_analysis": {
+                    "loads": [{"type": "集中", "raw": "P"}],
+                    "chapter_hint": "unknown",
+                },
+            },
+        )
+        make_agent = lambda state: TikuSearchAgent(
+            state=state,
+            tools=tools,
+            use_llm_intent=False,
+            intent_version="v2",
+        )
+        runtime = AgentSessionRuntime(
+            self.store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            agent_factory=make_agent,
+        )
+
+        offered = runtime.handle_image(session_id, self.source_image)
+        self.assertTrue(offered.state["global_search_offered"])
+        self.assertTrue(self.store.load(session_id).global_search_offered)
+
+        restarted = AgentSessionRuntime(
+            self.store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            agent_factory=make_agent,
+        )
+        searched = restarted.handle_text(session_id, "可以")
+
+        self.assertEqual(searched.intent, "global_search")
+        self.assertEqual(searched.state["phase"], "WAIT_CANDIDATE_CHOICE")
+        self.assertFalse(searched.state["global_search_offered"])
+        self.assertFalse(self.store.load(session_id).global_search_offered)
 
 
 if __name__ == "__main__":

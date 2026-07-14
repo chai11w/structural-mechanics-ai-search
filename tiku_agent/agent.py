@@ -36,6 +36,7 @@ from tiku_agent.tools import (
     answer_candidate_tool,
     classify_structure_tool,
     coarse_search_tool,
+    global_search_tool,
     rerank_candidates_tool,
     route_bank_tool,
     prepare_question_units_tool,
@@ -58,6 +59,7 @@ class AgentToolbox:
     route_bank: Callable[..., ToolResult] = route_bank_tool
     classify_structure: Callable[..., ToolResult] = classify_structure_tool
     coarse_search: Callable[..., ToolResult] = coarse_search_tool
+    global_search: Callable[..., ToolResult] = global_search_tool
     rerank_candidates: Callable[..., ToolResult] = rerank_candidates_tool
     answer_candidate: Callable[..., ToolResult] = answer_candidate_tool
 
@@ -172,6 +174,8 @@ class TikuSearchAgent:
                 str(intent.data.get("image_path") or ""),
                 chapter_override=str(intent.data.get("chapter_override") or ""),
             )
+        if intent.intent == "global_search":
+            return self._run_global_search(intent)
         if intent.intent == "set_chapter":
             return self._set_or_correct_chapter(
                 str(intent.data.get("chapter") or ""),
@@ -235,6 +239,8 @@ class TikuSearchAgent:
         if pending_chapter:
             self.state.consume_pending_chapter()
         if self.state.phase == "WAIT_CHAPTER":
+            if self.intent_version == INTENT_VERSION_V2:
+                self.state.offer_global_search()
             return self._response(render.render_chapter_prompt(self.state), IntentResult("search_image"))
         return self._run_search()
 
@@ -274,6 +280,8 @@ class TikuSearchAgent:
         if pending_chapter:
             self.state.consume_pending_chapter()
         if self.state.phase == "WAIT_CHAPTER":
+            if self.intent_version == INTENT_VERSION_V2:
+                self.state.offer_global_search()
             return self._response(render.render_chapter_prompt(self.state), intent)
         return self._run_search(intent=intent, classified=question)
 
@@ -325,6 +333,46 @@ class TikuSearchAgent:
             note=str(reranked.data.get("rerank_note") or ""),
         )
         return self._response(text, intent or IntentResult("search_image"), images=[str(item.get("path")) for item in visible if item.get("path")])
+
+    def _run_global_search(self, intent: IntentResult) -> AgentResponse:
+        if not self.state.consume_global_search_offer():
+            return self._response(render.render_unsupported(), intent)
+
+        routed = self.tools.route_bank(self.state.current_loads)
+        if not routed.ok:
+            return self._fail(routed.error or routed.data.get("reason", "无法确定检索库"))
+        route = str(routed.data.get("route") or "")
+        self.state.set_route(route)
+
+        structured = self.tools.classify_structure(
+            self.state.active_image_path or None,
+            route=route,
+            classified=self._selected_question(),
+            config=self.config,
+        )
+        if not structured.ok:
+            return self._fail(structured.error)
+        structure_type = str(structured.data.get("structure_type") or "")
+        self.state.set_route(route, structure_type=structure_type)
+
+        searched = self.tools.global_search(
+            self.state.current_loads,
+            self._rerank_query_image_path(),
+            route=route,
+            structure_type=structure_type,
+            config=self.config,
+        )
+        if not searched.ok:
+            return self._fail(searched.error)
+        candidates = list(searched.data.get("candidates") or [])
+        self.state.set_candidates(candidates)
+        if not candidates:
+            return self._response(render.render_global_no_match(), intent)
+        return self._response(
+            render.render_global_candidates(self.state),
+            intent,
+            images=[str(item.get("path")) for item in candidates if item.get("path")],
+        )
 
     def _selected_question(self) -> dict[str, Any] | None:
         index = self.state.selected_question

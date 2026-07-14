@@ -7,7 +7,9 @@ bot runtime, and search tools avoid writing `_last_search.json`.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -32,6 +34,7 @@ from scripts.feishu_tiku_bot import (
     normalize_question_key,
     prepare_multi_diagram_crops,
 )
+from tiku_agent.intent import CHAPTERS
 
 
 BASE = Path(__file__).resolve().parent.parent
@@ -52,6 +55,10 @@ class AgentToolConfig:
     session_dir: Path | None = None
     top_k: int = search.TOP_K
     rerank_top: int = search.DISPLAY_MAX_RESULTS
+    global_coarse_threshold: float = 0.999
+    global_rerank_threshold: float = 0.95
+    global_rerank_workers: int = 10
+    global_candidate_timeout_seconds: float = 15.0
     use_qwen_cache: bool = True
 
     @property
@@ -361,6 +368,173 @@ def coarse_search_tool(
         )
     except Exception as exc:  # noqa: BLE001
         return ToolResult(ok=False, error=str(exc), next_state="ERROR")
+
+
+def global_search_tool(
+    loads: list[dict[str, Any]],
+    query_image_path: str | Path | None,
+    *,
+    route: Literal["main", "symbolic"],
+    structure_type: str = "",
+    config: AgentToolConfig | None = None,
+) -> ToolResult:
+    """Strict read-only search across every supported chapter.
+
+    All content-deduplicated candidates with a coarse score at or above the
+    configured perfect-match threshold are visually scored. Concurrency is
+    bounded, but the total candidate pool and returned result count are not.
+    """
+
+    config = config or AgentToolConfig()
+    if not query_image_path or not Path(query_image_path).is_file():
+        return ToolResult(ok=False, error="全局搜索缺少可用题图。", next_state="ERROR")
+    if route not in {"main", "symbolic"}:
+        return ToolResult(ok=False, error=f"全局搜索不支持当前题库路由：{route}", next_state="ERROR")
+
+    try:
+        candidates = _collect_global_perfect_candidates(
+            loads,
+            route=route,
+            structure_type=structure_type,
+            threshold=config.global_coarse_threshold,
+        )
+        if not candidates:
+            return ToolResult(
+                ok=True,
+                data={
+                    "candidates": [],
+                    "coarse_candidate_count": 0,
+                    "model_calls": 0,
+                },
+                next_state="NO_MATCH",
+            )
+
+        workers = max(1, min(config.global_rerank_workers, len(candidates)))
+        scored = []
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(
+                    search.score_rerank_candidate,
+                    str(query_image_path),
+                    candidate,
+                    timeout_seconds=config.global_candidate_timeout_seconds,
+                    collect_timing=True,
+                )
+                for candidate in candidates
+            ]
+            for future in as_completed(futures):
+                scored.append(future.result())
+
+        unfinished = [
+            item for item in scored if item.get("rerank_status") != "completed"
+        ]
+        if unfinished:
+            return ToolResult(
+                ok=False,
+                data={
+                    "coarse_candidate_count": len(candidates),
+                    "model_calls": len(candidates),
+                    "unfinished_candidates": len(unfinished),
+                },
+                error="部分全局候选复筛未完成，请稍后重试。",
+                next_state="ERROR",
+            )
+
+        visible = [
+            item
+            for item in scored
+            if float(item.get("rerank_score") or 0)
+            > config.global_rerank_threshold
+        ]
+        visible.sort(
+            key=lambda item: (
+                float(item.get("rerank_score") or 0),
+                float(item.get("score") or 0),
+                -int(item.get("rank") or 0),
+            ),
+            reverse=True,
+        )
+        visible = _renumber(visible)
+        return ToolResult(
+            ok=True,
+            data={
+                "candidates": visible,
+                "coarse_candidate_count": len(candidates),
+                "model_calls": len(candidates),
+                "unfinished_candidates": 0,
+            },
+            next_state="WAIT_CANDIDATE_CHOICE" if visible else "NO_MATCH",
+        )
+    except Exception as exc:  # noqa: BLE001 - tool boundary returns a safe error.
+        return ToolResult(ok=False, error=str(exc), next_state="ERROR")
+
+
+def _collect_global_perfect_candidates(
+    loads: list[dict[str, Any]],
+    *,
+    route: Literal["main", "symbolic"],
+    structure_type: str,
+    threshold: float,
+) -> list[dict[str, Any]]:
+    excel_root = search.ROOT if route == "main" else symbolic_root(search.ROOT)
+    normalized_loads = search.normalize_query_loads(loads)
+    filter_type = normalize_structure_type(structure_type)
+    by_content: dict[str, dict[str, Any]] = {}
+
+    for chapter in CHAPTERS:
+        df = load_bank_excel(excel_root, chapter)
+        if df is None:
+            continue
+        if route == "symbolic" and filter_type and "结构类型" in df.columns:
+            filtered = df[df["结构类型"].astype(str) == filter_type]
+            if not filtered.empty:
+                df = filtered
+
+        for _, row in df.iterrows():
+            db_loads = search.fix_load_types(search._safe_parse_loads(row["荷载"]))
+            score = search.compute_similarity(normalized_loads, db_loads)
+            if score < threshold:
+                continue
+            path, resolved_name, _ = search.resolve_question_path(
+                str(row["题目名称"]),
+                chapter_name=chapter,
+                update_excel=False,
+            )
+            if not path.is_file():
+                continue
+            content_hash = _file_sha256(path)
+            existing = by_content.get(content_hash)
+            if existing is not None:
+                existing["source_chapters"].add(chapter)
+                continue
+            by_content[content_hash] = {
+                "path": str(path),
+                "name": resolved_name,
+                "score": float(score),
+                "route": route,
+                "chapter": chapter,
+                "source_chapters": {chapter},
+                "content_hash": content_hash,
+            }
+
+    candidates = sorted(
+        by_content.values(),
+        key=lambda item: (sorted(item["source_chapters"]), item["content_hash"]),
+    )
+    for rank, candidate in enumerate(candidates, 1):
+        chapters = sorted(candidate["source_chapters"])
+        candidate["rank"] = rank
+        candidate["chapter"] = chapters[0]
+        candidate["source_chapters"] = chapters
+    return candidates
+
+
+def _file_sha256(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def rerank_candidates_tool(

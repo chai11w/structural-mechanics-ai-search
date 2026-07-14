@@ -1,7 +1,7 @@
 import unittest
 
 from tiku_agent.agent import AgentToolbox, TikuSearchAgent
-from tiku_agent.state import PHASE_ANSWERED, PHASE_ERROR, STATE_WAIT_CANDIDATE_CHOICE, STATE_WAIT_CHAPTER
+from tiku_agent.state import AgentState, PHASE_ANSWERED, PHASE_ERROR, STATE_WAIT_CANDIDATE_CHOICE, STATE_WAIT_CHAPTER
 from tiku_agent.tools import AgentToolConfig, ToolResult
 
 
@@ -13,6 +13,27 @@ class FakeTools:
             1: ["out/answer1.jpg"],
             2: ["out/answer2.jpg"],
         }
+        self.global_search_calls = 0
+        self.global_candidates = [
+            {
+                "rank": 1,
+                "path": "3静定结构位移/global1.jpg",
+                "name": "global1.jpg",
+                "score": 1.0,
+                "rerank_score": 1.0,
+                "chapter": "3静定结构位移",
+                "source_chapters": ["3静定结构位移"],
+            },
+            {
+                "rank": 2,
+                "path": "4力法/global2.jpg",
+                "name": "global2.jpg",
+                "score": 1.0,
+                "rerank_score": 0.98,
+                "chapter": "4力法",
+                "source_chapters": ["4力法"],
+            },
+        ]
         self.analyze_image_calls = 0
 
     def toolbox(self):
@@ -23,6 +44,7 @@ class FakeTools:
             route_bank=self.route_bank,
             classify_structure=self.classify_structure,
             coarse_search=self.coarse_search,
+            global_search=self.global_search,
             rerank_candidates=self.rerank_candidates,
             answer_candidate=self.answer_candidate,
         )
@@ -76,6 +98,14 @@ class FakeTools:
             copied["final_score"] = copied["score"]
             visible.append(copied)
         return ToolResult(ok=True, data={"reranked": True, "visible_candidates": visible, "rerank_note": ""})
+
+    def global_search(self, loads, query_image_path, *, route, structure_type="", config=None):
+        self.global_search_calls += 1
+        return ToolResult(
+            ok=True,
+            data={"candidates": list(self.global_candidates)},
+            next_state="WAIT_CANDIDATE_CHOICE" if self.global_candidates else "NO_MATCH",
+        )
 
     def answer_candidate(self, candidates, *, rank, copy_to_output=True, config=None):
         return ToolResult(
@@ -166,6 +196,75 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.current_chapter, "4力法")
         self.assertEqual(agent.state.pending_chapter, "")
         self.assertEqual(fake.search_chapters, ["4力法"])
+
+    def test_v2_offers_and_executes_global_search_once(self):
+        fake = FakeTools(chapter="")
+        agent = self.make_v2_agent(fake)
+
+        offered = agent.handle_image("q.jpg")
+
+        self.assertTrue(agent.state.global_search_offered)
+        self.assertIn("全局搜索", offered.text)
+        searched = agent.handle_text("可以")
+
+        self.assertEqual(searched.intent, "global_search")
+        self.assertEqual(fake.global_search_calls, 1)
+        self.assertFalse(agent.state.global_search_offered)
+        self.assertEqual(agent.state.phase, STATE_WAIT_CANDIDATE_CHOICE)
+        self.assertEqual(agent.state.candidate_count, 2)
+        self.assertIn("3静定结构位移", searched.text)
+        self.assertIn("4力法", searched.text)
+        self.assertEqual(searched.images, ["3静定结构位移/global1.jpg", "4力法/global2.jpg"])
+
+        answered = agent.handle_text("第二个候选")
+        self.assertEqual(answered.intent, "select_candidate")
+        self.assertEqual(agent.state.selected_rank, 2)
+        self.assertEqual(agent.state.last_answer_paths, ["out/answer2.jpg"])
+
+    def test_v2_global_search_no_match_keeps_normal_chapter_fallback(self):
+        fake = FakeTools(chapter="")
+        fake.global_candidates = []
+        agent = self.make_v2_agent(fake)
+        agent.handle_image("q.jpg")
+
+        missing = agent.handle_text("全局搜吧")
+
+        self.assertEqual(missing.intent, "global_search")
+        self.assertEqual(agent.state.phase, "NO_MATCH")
+        self.assertIn("没有足够可靠", missing.text)
+
+        chapter = agent.handle_text("按力法搜")
+        self.assertEqual(chapter.intent, "set_chapter")
+        self.assertEqual(agent.state.current_chapter, "4力法")
+        self.assertEqual(fake.search_chapters, ["4力法"])
+
+    def test_v2_global_search_single_result_names_source_chapter(self):
+        fake = FakeTools(chapter="")
+        fake.global_candidates = [fake.global_candidates[0]]
+        agent = self.make_v2_agent(fake)
+        agent.handle_image("q.jpg")
+
+        response = agent.handle_text("搜吧")
+
+        self.assertEqual(response.intent, "global_search")
+        self.assertEqual(agent.state.candidate_count, 1)
+        self.assertIn("一道高相似题", response.text)
+        self.assertIn("3静定结构位移", response.text)
+
+    def test_v2_does_not_run_global_search_without_offer(self):
+        fake = FakeTools(chapter="")
+        agent = self.make_v2_agent(fake)
+        agent.state = AgentState(
+            phase=STATE_WAIT_CHAPTER,
+            current_image_path="q.jpg",
+            current_question_image_path="q.jpg",
+            current_loads=[{"type": "集中", "raw": "P"}],
+        )
+
+        response = agent.handle_text("全局搜吧")
+
+        self.assertEqual(response.intent, "reject")
+        self.assertEqual(fake.global_search_calls, 0)
 
     def test_v2_pending_chapter_waits_for_question_choice_on_multi_image(self):
         fake = FakeTools(chapter="")
@@ -276,6 +375,7 @@ class TikuSearchAgentTest(unittest.TestCase):
         first = agent.handle_image("q.jpg")
         self.assertEqual(agent.state.phase, STATE_WAIT_CHAPTER)
         self.assertIn("不能确定", first.text)
+        self.assertNotIn("全局搜索", first.text)
 
         second = agent.handle_text("这题应该是第三章")
         self.assertEqual(agent.state.phase, STATE_WAIT_CANDIDATE_CHOICE)

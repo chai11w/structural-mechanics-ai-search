@@ -16,6 +16,8 @@ def render_greeting() -> str:
 
 
 def render_chapter_prompt(state: AgentState) -> str:
+    if state.global_search_offered:
+        return "我还不能确定这题属于哪一章。你知道的话直接告诉我；也可以让我全局搜索，不过会慢一点。"
     return "我还不能确定这题属于哪一章。你知道的话告诉我就行。"
 
 
@@ -32,6 +34,24 @@ def render_candidates(state: AgentState, *, reranked: bool = False, note: str = 
     if len(state.candidates) == 1:
         return "我从题库里找到了最相似的一道题。你看看是不是这道。"
     return f"我从题库里找到了 {len(state.candidates)} 道比较像的题，你看看有没有想要的。"
+
+
+def render_global_candidates(state: AgentState) -> str:
+    if not state.candidates:
+        return render_global_no_match()
+    chapters = []
+    for item in state.candidates:
+        for chapter in item.get("source_chapters") or [item.get("chapter")]:
+            if chapter and chapter not in chapters:
+                chapters.append(str(chapter))
+    sources = "、".join(f"「{chapter}」" for chapter in chapters)
+    if len(state.candidates) == 1:
+        return f"我从全题库找到了一道高相似题，来自{sources}。你看是不是这道。"
+    return f"我从全题库找到 {len(state.candidates)} 道高相似题，分别来自{sources}。你看有没有想要的。"
+
+
+def render_global_no_match() -> str:
+    return "我已经全局搜过了，但暂时没有足够可靠的结果。你如果知道章节，可以告诉我再搜一次。"
 
 
 def render_answer(state: AgentState) -> str:
