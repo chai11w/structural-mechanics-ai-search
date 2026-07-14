@@ -50,3 +50,13 @@ The first summary retained the metrics and failing case ids but selected the wro
 - Do not alter the frozen first-run result or tune against Blind 02 case wording.
 - Discuss a generic semantic-conflict evidence gate before changing implementation: an executing action must be supported by positive action evidence and must not conflict with prohibition, removal or conversation-only evidence.
 - Keep safe clarifications unless a broader unseen set proves a systematic usability gap; 100% accuracy is not the goal.
+
+## Safety Remediation and Overall-Effect Check
+
+- A bank-scoped negative-retention construction is now treated as a forbidden delete request before candidate-number parsing. This covers requests such as not retaining a candidate in the question bank without adding candidate-ranking aliases.
+- A model-proposed `resend_answer` now requires positive answer/result delivery evidence. State permission alone can no longer turn a conversational continuation into answer delivery.
+- An initially broader evidence gate also constrained cancel, retry, failure explanation and chapter actions. It reduced Blind 01 from 19/20 to 16/20 and was rejected rather than accepted as a safety tradeoff. The retained gate is deliberately narrow.
+- Final Blind 01 regression: V2 19/20 (95%), unsafe executions 0. The only miss remains the intentionally unfixed candidate-rank paraphrase.
+- Final Blind 02 regression: V2 10/16 (62.5%), unsafe executions 0. The remaining six misses are clarifications or a wrong chapter target, not unsafe execution.
+- V2 produced 10/16 with zero unsafe executions in both post-remediation Blind 02 runs. V1 moved from 10/16 to 9/16 across those runs despite `temperature=0`, so small live-model variation remains a measurement risk.
+- Under the user-proposed scenario that common expressions are 90% of traffic and long-tail expressions are 10%, the illustrative weighted V2 accuracy is `95% × 0.9 + 62.5% × 0.1 = 91.75%`. The 90/10 mix is an assumption, not yet an observed traffic distribution; safety remains a separate zero-tolerance metric.

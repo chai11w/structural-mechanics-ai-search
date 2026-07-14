@@ -74,6 +74,9 @@ def decide_intent_v2(
     evidence_checked = _validate_contextual_selection_evidence(clean, decision, context)
     if evidence_checked is not None:
         decision = evidence_checked
+    action_evidence_checked = _validate_contextual_action_evidence(clean, decision)
+    if action_evidence_checked is not None:
+        decision = action_evidence_checked
     return _authorize_or_clarify(decision, context)
 
 
@@ -271,7 +274,14 @@ def _forbidden_request(text: str) -> str | None:
         return "cross_chapter_search"
     destructive_verb = re.search(r"(?:删除|删掉|删了|移除|清掉|清除|抹掉|剔除)", text)
     managed_object = re.search(r"(?:题库|库里|候选|答案|题目|第\s*[0-9一二两三四五六七八九十]+)", text)
-    if destructive_verb and managed_object:
+    negative_retention = re.search(
+        r"(?:别|不要|不必|无需|不准|不许).{0,8}(?:保留|留(?:着|下)?|存(?:着|下)?)",
+        text,
+    )
+    bank_scope = re.search(r"(?:题库|库里|库中)", text)
+    if (destructive_verb and managed_object) or (
+        negative_retention and bank_scope and managed_object
+    ):
         return "delete"
     if re.search(r"(?:入库|录入题库|加入题库|收录)", text):
         return "store"
@@ -406,6 +416,28 @@ def _validate_contextual_selection_evidence(
             )
         return _clarification("ambiguous_reference", source="validator")
     return None
+
+
+def _validate_contextual_action_evidence(
+    text: str,
+    decision: ActionDecisionV2,
+) -> ActionDecisionV2 | None:
+    """Require positive text evidence when state alone cannot justify a model action."""
+
+    if decision.source != "context_llm":
+        return None
+    if decision.action == "resend_answer" and not _has_resend_evidence(text):
+        return _clarification("ambiguous_action", source="validator")
+    return None
+
+
+def _has_resend_evidence(text: str) -> bool:
+    answer_object = re.search(r"(?:答案|结果|答题图片|答案图片)", text)
+    repeat_or_delivery = re.search(
+        r"(?:(?:再|重|重新).{0,6}(?:发|给|看|展示|显示)|(?:刚才|上次).{0,12}(?:发|给|看|展示|显示))",
+        text,
+    )
+    return bool(answer_object and repeat_or_delivery)
 
 
 def _is_alternative_reference(text: str) -> bool:

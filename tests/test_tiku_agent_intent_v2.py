@@ -141,6 +141,64 @@ class IntentV2Test(unittest.TestCase):
         self.assertEqual(decision.requested_action, "delete")
         self.assertEqual(calls, [])
 
+    def test_negative_retention_in_question_bank_is_rejected_before_number_rule(self):
+        calls = []
+        context = ConversationContextV2(
+            phase="ANSWERED",
+            active_namespace="candidate",
+            question_count=1,
+            candidate_count=2,
+            has_active_image=True,
+            has_answer=True,
+        )
+        decision = decide_intent_v2(
+            "候选二别留在题库里了",
+            context,
+            llm_client=lambda _prompt: calls.append(True) or {"action": "select_candidate", "candidate_rank": 2},
+        )
+        self.assertEqual(decision.action, "reject")
+        self.assertEqual(decision.requested_action, "delete")
+        self.assertEqual(calls, [])
+
+    def test_model_resend_requires_answer_delivery_evidence(self):
+        answered = ConversationContextV2(
+            phase="ANSWERED",
+            active_namespace="candidate",
+            question_count=1,
+            candidate_count=2,
+            has_active_image=True,
+            has_answer=True,
+        )
+        unsupported = decide_intent_v2(
+            "忙吗，能接着看题不",
+            answered,
+            llm_client=lambda _prompt: {"action": "resend_answer"},
+        )
+        self.assertEqual(unsupported.action, "clarification")
+        self.assertEqual(unsupported.clarification_reason, "ambiguous_action")
+
+        supported = decide_intent_v2(
+            "上个答案再给我看一遍",
+            answered,
+            llm_client=lambda _prompt: {"action": "resend_answer"},
+        )
+        self.assertEqual(supported.action, "resend_answer")
+
+    def test_model_can_use_error_state_to_understand_retry_paraphrase(self):
+        context = ConversationContextV2(
+            phase="ERROR",
+            question_count=1,
+            has_active_image=True,
+            has_explainable_failure=True,
+            retryable_error=True,
+        )
+        decision = decide_intent_v2(
+            "服务刚才没反应，再跑一遍",
+            context,
+            llm_client=lambda _prompt: {"action": "retry_search"},
+        )
+        self.assertEqual(decision.action, "retry_search")
+
     def test_model_candidate_choice_requires_unique_reference_evidence(self):
         multiple = ConversationContextV2(
             phase="ANSWERED",
