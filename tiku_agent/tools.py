@@ -59,6 +59,7 @@ class AgentToolConfig:
     global_rerank_threshold: float = 0.95
     global_rerank_workers: int = 10
     global_candidate_timeout_seconds: float = 15.0
+    global_retry_incomplete_once: bool = True
     use_qwen_cache: bool = True
 
     @property
@@ -405,25 +406,34 @@ def global_search_tool(
                     "candidates": [],
                     "coarse_candidate_count": 0,
                     "model_calls": 0,
+                    "retry_model_calls": 0,
                 },
                 next_state="NO_MATCH",
             )
 
-        workers = max(1, min(config.global_rerank_workers, len(candidates)))
-        scored = []
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [
-                executor.submit(
-                    search.score_rerank_candidate,
-                    str(query_image_path),
-                    candidate,
-                    timeout_seconds=config.global_candidate_timeout_seconds,
-                    collect_timing=True,
-                )
-                for candidate in candidates
+        scored = _score_global_candidates(query_image_path, candidates, config=config)
+        retry_model_calls = 0
+        unfinished = [
+            item for item in scored if item.get("rerank_status") != "completed"
+        ]
+        if unfinished and config.global_retry_incomplete_once:
+            originals_by_hash = {item["content_hash"]: item for item in candidates}
+            retry_candidates = [
+                originals_by_hash[item["content_hash"]]
+                for item in unfinished
+                if item.get("content_hash") in originals_by_hash
             ]
-            for future in as_completed(futures):
-                scored.append(future.result())
+            retried = _score_global_candidates(
+                query_image_path,
+                retry_candidates,
+                config=config,
+            )
+            retry_model_calls = len(retry_candidates)
+            retried_by_hash = {item["content_hash"]: item for item in retried}
+            scored = [
+                retried_by_hash.get(item.get("content_hash"), item)
+                for item in scored
+            ]
 
         unfinished = [
             item for item in scored if item.get("rerank_status") != "completed"
@@ -433,7 +443,8 @@ def global_search_tool(
                 ok=False,
                 data={
                     "coarse_candidate_count": len(candidates),
-                    "model_calls": len(candidates),
+                    "model_calls": len(candidates) + retry_model_calls,
+                    "retry_model_calls": retry_model_calls,
                     "unfinished_candidates": len(unfinished),
                 },
                 error="部分全局候选复筛未完成，请稍后重试。",
@@ -460,13 +471,46 @@ def global_search_tool(
             data={
                 "candidates": visible,
                 "coarse_candidate_count": len(candidates),
-                "model_calls": len(candidates),
+                "model_calls": len(candidates) + retry_model_calls,
+                "retry_model_calls": retry_model_calls,
                 "unfinished_candidates": 0,
             },
             next_state="WAIT_CANDIDATE_CHOICE" if visible else "NO_MATCH",
         )
     except Exception as exc:  # noqa: BLE001 - tool boundary returns a safe error.
         return ToolResult(ok=False, error=str(exc), next_state="ERROR")
+
+
+def _score_global_candidates(
+    query_image_path: str | Path,
+    candidates: list[dict[str, Any]],
+    *,
+    config: AgentToolConfig,
+) -> list[dict[str, Any]]:
+    if not candidates:
+        return []
+    workers = max(1, min(config.global_rerank_workers, len(candidates)))
+    scored = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                search.score_rerank_candidate,
+                str(query_image_path),
+                candidate,
+                timeout_seconds=config.global_candidate_timeout_seconds,
+                collect_timing=True,
+            ): candidate
+            for candidate in candidates
+        }
+        for future in as_completed(futures):
+            candidate = futures[future]
+            try:
+                scored.append(future.result())
+            except Exception:  # noqa: BLE001 - normalize scorer failure for one bounded retry.
+                failed = dict(candidate)
+                failed.update({"rerank_status": "error", "rerank_score": None})
+                scored.append(failed)
+    return scored
 
 
 def _collect_global_perfect_candidates(

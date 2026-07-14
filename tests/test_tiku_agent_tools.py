@@ -61,6 +61,7 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertTrue(result.ok, result.error)
         self.assertEqual(result.data["coarse_candidate_count"], 2)
         self.assertEqual(result.data["model_calls"], 2)
+        self.assertEqual(result.data["retry_model_calls"], 0)
         self.assertEqual(scorer.call_count, 2)
         self.assertEqual(len(result.data["candidates"]), 1)
         self.assertEqual(
@@ -85,18 +86,64 @@ class TikuAgentToolsTest(unittest.TestCase):
             "tiku_agent.tools.load_bank_excel", return_value=frame
         ), patch(
             "tiku_agent.tools.search.resolve_question_path",
-            return_value=(query, "query.jpg", False),
+            side_effect=lambda name, **_kwargs: (Path(name), name, False),
         ), patch("tiku_agent.tools.Path.is_file", return_value=True), patch(
             "tiku_agent.tools._file_sha256", return_value="question"
         ), patch(
             "tiku_agent.tools.search.score_rerank_candidate",
             side_effect=timed_out,
-        ):
+        ) as scorer:
             result = global_search_tool(loads, query, route="main")
 
         self.assertFalse(result.ok, result.to_dict())
         self.assertEqual(result.data["unfinished_candidates"], 1)
+        self.assertEqual(result.data["model_calls"], 2)
+        self.assertEqual(result.data["retry_model_calls"], 1)
+        self.assertEqual(scorer.call_count, 2)
         self.assertIn("未完成", result.error)
+
+    def test_global_search_retries_only_incomplete_candidate_once(self):
+        loads = [{"type": "集中", "raw": "P"}]
+        query = Path("query.jpg")
+        frame = pd.DataFrame(
+            [
+                {"题目名称": "query.jpg", "荷载": json.dumps({"loads": loads}, ensure_ascii=False)},
+                {"题目名称": "other.jpg", "荷载": json.dumps({"loads": loads}, ensure_ascii=False)},
+            ]
+        )
+        attempts = {"question": 0, "other": 0}
+
+        def complete_on_retry(_query, candidate, **_kwargs):
+            content_hash = candidate["content_hash"]
+            attempts[content_hash] += 1
+            if content_hash == "question" and attempts[content_hash] == 1:
+                raise ValueError("malformed model response")
+            item = dict(candidate)
+            score = 0.98 if content_hash == "question" else 0.94
+            item.update({"rerank_status": "completed", "rerank_score": score})
+            return item
+
+        with patch("tiku_agent.tools.CHAPTERS", ["4力法"]), patch(
+            "tiku_agent.tools.load_bank_excel", return_value=frame
+        ), patch(
+            "tiku_agent.tools.search.resolve_question_path",
+            side_effect=lambda name, **_kwargs: (Path(name), name, False),
+        ), patch("tiku_agent.tools.Path.is_file", return_value=True), patch(
+            "tiku_agent.tools._file_sha256",
+            side_effect=lambda path: "question" if Path(path).name == "query.jpg" else "other",
+        ), patch(
+            "tiku_agent.tools.search.score_rerank_candidate",
+            side_effect=complete_on_retry,
+        ) as scorer:
+            result = global_search_tool(loads, query, route="main")
+
+        self.assertTrue(result.ok, result.to_dict())
+        self.assertEqual(len(result.data["candidates"]), 1)
+        self.assertEqual(result.data["model_calls"], 3)
+        self.assertEqual(result.data["retry_model_calls"], 1)
+        self.assertEqual(result.data["unfinished_candidates"], 0)
+        self.assertEqual(scorer.call_count, 3)
+        self.assertEqual(attempts, {"question": 2, "other": 1})
 
     def test_agent_runtime_is_isolated_from_old_feishu_state(self):
         config = AgentToolConfig()
