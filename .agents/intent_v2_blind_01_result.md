@@ -44,3 +44,12 @@
 - Do not alter the frozen first-run result.
 - Discuss and implement safety gates before convenience/coverage fixes.
 - After fixes, Blind 01 becomes a regression set; generalization must be checked with a new Blind 02 set.
+
+## Safety Remediation Check
+
+The two unsafe cases were addressed without changing the frozen fixture:
+
+- Destructive language is now recognized by the combination of a destructive verb and a managed题库 object, independent of word order; “从库里清掉” is rejected before candidate parsing or Qwen.
+- Model-inferred question/candidate indexes now require code-verifiable reference evidence. “换一个” is executable only when exactly one alternative exists; multiple alternatives force clarification even when Qwen returns a rank.
+- A focused live Qwen rerun of the two original unsafe cases passed 2/2 with zero unsafe executions.
+- The two non-safety accuracy failures remain intentionally unfixed in this stage.

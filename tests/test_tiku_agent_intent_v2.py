@@ -81,7 +81,7 @@ class IntentV2Test(unittest.TestCase):
         decision = decide_intent_v2("那剩下那题呢", context, llm_client=model)
         self.assertEqual(decision.action, "select_question")
         self.assertEqual(decision.question_index, 1)
-        self.assertEqual(decision.source, "context_llm")
+        self.assertEqual(decision.source, "validator")
         self.assertEqual(len(calls), 1)
 
     def test_model_cannot_bypass_bounds_or_return_unknown_fields(self):
@@ -99,13 +99,95 @@ class IntentV2Test(unittest.TestCase):
             llm_client=lambda _prompt: {"action": "select_question", "question_index": 9},
         )
         self.assertEqual(out_of_range.action, "clarification")
-        self.assertEqual(out_of_range.clarification_reason, "out_of_range")
+        self.assertEqual(out_of_range.clarification_reason, "ambiguous_reference")
         malformed = decide_intent_v2(
             "回到之前那题",
             context,
             llm_client=lambda _prompt: {"action": "cancel", "tool": "delete"},
         )
         self.assertEqual(malformed.action, "clarification")
+
+    def test_delete_euphemism_is_rejected_before_candidate_selection(self):
+        calls = []
+        context = ConversationContextV2(
+            phase="ANSWERED",
+            active_namespace="candidate",
+            question_count=1,
+            candidate_count=2,
+            selected_candidate_rank=2,
+            has_active_image=True,
+            has_answer=True,
+        )
+        decision = decide_intent_v2(
+            "把候选一从库里清掉",
+            context,
+            llm_client=lambda _prompt: calls.append(True) or {"action": "select_candidate", "candidate_rank": 1},
+        )
+        self.assertEqual(decision.action, "reject")
+        self.assertEqual(decision.requested_action, "delete")
+        self.assertEqual(calls, [])
+
+    def test_model_candidate_choice_requires_unique_reference_evidence(self):
+        multiple = ConversationContextV2(
+            phase="ANSWERED",
+            active_namespace="candidate",
+            question_count=1,
+            candidate_count=3,
+            selected_candidate_rank=1,
+            has_active_image=True,
+            has_answer=True,
+        )
+        unsafe_guess = decide_intent_v2(
+            "换一个",
+            multiple,
+            llm_client=lambda _prompt: {"action": "select_candidate", "candidate_rank": 2},
+        )
+        self.assertEqual(unsafe_guess.action, "clarification")
+        self.assertEqual(unsafe_guess.clarification_reason, "ambiguous_reference")
+
+        unique = ConversationContextV2(
+            phase="ANSWERED",
+            active_namespace="candidate",
+            question_count=1,
+            candidate_count=2,
+            selected_candidate_rank=1,
+            has_active_image=True,
+            has_answer=True,
+        )
+        verified = decide_intent_v2(
+            "换个答案看看",
+            unique,
+            llm_client=lambda _prompt: {"action": "select_candidate", "candidate_rank": 1},
+        )
+        self.assertEqual(verified.action, "select_candidate")
+        self.assertEqual(verified.candidate_rank, 2)
+        self.assertEqual(verified.source, "validator")
+
+    def test_model_question_choice_requires_recorded_reference_evidence(self):
+        context = ConversationContextV2(
+            phase="ANSWERED",
+            active_namespace="question",
+            question_count=3,
+            candidate_count=2,
+            selected_question_index=2,
+            previous_question_index=1,
+            completed_question_indexes=(1, 2),
+            remaining_question_indexes=(3,),
+            has_active_image=True,
+            has_answer=True,
+        )
+        previous = decide_intent_v2(
+            "上一道",
+            context,
+            llm_client=lambda _prompt: {"action": "select_question", "question_index": 3},
+        )
+        self.assertEqual(previous.question_index, 1)
+        remaining = decide_intent_v2(
+            "还没查的那一道",
+            context,
+            llm_client=lambda _prompt: {"action": "select_question", "question_index": 2},
+        )
+        self.assertEqual(remaining.question_index, 3)
 
     def test_image_event_consumes_pending_chapter_semantically(self):
         context = ConversationContextV2.from_mapping(

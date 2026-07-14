@@ -71,6 +71,9 @@ def decide_intent_v2(
         decision = ActionDecisionV2.from_dict(payload)
     except (TypeError, ValueError, KeyError, json.JSONDecodeError):
         return _clarification("ambiguous_action", source="validator")
+    evidence_checked = _validate_contextual_selection_evidence(clean, decision, context)
+    if evidence_checked is not None:
+        decision = evidence_checked
     return _authorize_or_clarify(decision, context)
 
 
@@ -267,7 +270,9 @@ def _clarification(reason: str, *, source: str) -> ActionDecisionV2:
 def _forbidden_request(text: str) -> str | None:
     if re.search(r"(?:所有|全部|每个|跨).{0,4}章节", text):
         return "cross_chapter_search"
-    if re.search(r"(?:删除|删掉|删了|移除).{0,8}(?:题|候选|答案|这个|第)", text):
+    destructive_verb = re.search(r"(?:删除|删掉|删了|移除|清掉|清除|抹掉|剔除)", text)
+    managed_object = re.search(r"(?:题库|库里|候选|答案|题目|第\s*[0-9一二两三四五六七八九十]+)", text)
+    if destructive_verb and managed_object:
         return "delete"
     if re.search(r"(?:入库|录入题库|加入题库|收录)", text):
         return "store"
@@ -347,6 +352,65 @@ def _is_retry(text: str) -> bool:
 
 def _looks_contextual(text: str) -> bool:
     return any(word in text for word in ("另一个", "刚才那", "之前那", "剩下", "那个", "那题"))
+
+
+def _validate_contextual_selection_evidence(
+    text: str,
+    decision: ActionDecisionV2,
+    context: ConversationContextV2,
+) -> ActionDecisionV2 | None:
+    """Require code-verifiable evidence for model-inferred selection indexes."""
+
+    if decision.source != "context_llm":
+        return None
+    if decision.action == "select_candidate" and _explicit_candidate_rank(text) is None:
+        if _is_alternative_reference(text) and context.selected_candidate_rank is not None:
+            alternatives = tuple(
+                rank
+                for rank in range(1, context.candidate_count + 1)
+                if rank != context.selected_candidate_rank
+            )
+            if len(alternatives) == 1:
+                return ActionDecisionV2(
+                    action="select_candidate",
+                    candidate_rank=alternatives[0],
+                    confidence=decision.confidence,
+                    reason="代码确认只剩一个可替代候选",
+                    source="validator",
+                )
+        return _clarification("ambiguous_reference", source="validator")
+
+    if decision.action == "select_question" and _explicit_question_index(text) is None:
+        if _is_previous_reference(text) and context.previous_question_index is not None:
+            return ActionDecisionV2(
+                action="select_question",
+                question_index=context.previous_question_index,
+                confidence=decision.confidence,
+                reason="代码使用已记录的上一题",
+                source="validator",
+            )
+        if _is_remaining_reference(text) and len(context.remaining_question_indexes) == 1:
+            return ActionDecisionV2(
+                action="select_question",
+                question_index=context.remaining_question_indexes[0],
+                confidence=decision.confidence,
+                reason="代码确认只剩一道未完成题",
+                source="validator",
+            )
+        return _clarification("ambiguous_reference", source="validator")
+    return None
+
+
+def _is_alternative_reference(text: str) -> bool:
+    return any(word in text for word in ("换一个", "换个", "另一个", "别的", "其他"))
+
+
+def _is_previous_reference(text: str) -> bool:
+    return any(word in text for word in ("上一道", "上一题", "刚才那题", "之前那题", "回到刚才"))
+
+
+def _is_remaining_reference(text: str) -> bool:
+    return any(word in text for word in ("剩下", "还没查", "未完成"))
 
 
 def _parse_chapter_v2(text: str) -> str | None:
