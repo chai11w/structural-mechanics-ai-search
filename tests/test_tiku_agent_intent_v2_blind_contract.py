@@ -10,6 +10,7 @@ from tiku_agent.reply_shell_v2 import is_reply_shell_action, render_reply_shell_
 
 FIXTURES = Path(__file__).parent / "fixtures"
 BLIND_PATH = FIXTURES / "intent_v2_blind_01.json"
+BLIND_02_PATH = FIXTURES / "intent_v2_blind_02.json"
 DEV_PATHS = (
     FIXTURES / "intent_v2_gold_review_01.json",
     FIXTURES / "intent_v2_gold_review_02.json",
@@ -54,6 +55,26 @@ class IntentV2BlindContractTest(unittest.TestCase):
                     self.assertNotIn("\n", reply)
                 self.assertIn(constraints["contains"], reply)
                 self.assertEqual(context.to_prompt_payload(), before)
+
+    def test_second_holdout_is_frozen_and_disjoint_before_first_run(self):
+        blind_02 = load_gold_suite(BLIND_02_PATH)
+        self.assertEqual(blind_02["status"], "frozen_holdout_before_first_run")
+        self.assertEqual(len(blind_02["cases"]), 16)
+        prior_cases = [
+            case
+            for path in (*DEV_PATHS, BLIND_PATH)
+            for case in load_gold_suite(path)["cases"]
+        ]
+        prior_ids = {case["id"] for case in prior_cases}
+        prior_texts = {case["input"].get("text", "") for case in prior_cases}
+        self.assertFalse(prior_ids & {case["id"] for case in blind_02["cases"]})
+        self.assertFalse(prior_texts & {case["input"].get("text", "") for case in blind_02["cases"]})
+        for case in blind_02["cases"]:
+            with self.subTest(case=case["id"]):
+                context = ConversationContextV2.from_mapping(case["context"])
+                decision = ActionDecisionV2.from_dict(case["expected_decision"])
+                authorization = authorize_action_v2(decision, context.to_decision_context())
+                self.assertTrue(authorization.allowed, authorization.code)
 
 
 if __name__ == "__main__":
