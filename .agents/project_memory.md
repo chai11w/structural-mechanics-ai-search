@@ -5,8 +5,9 @@
 - 项目位于 `F:\cc\7-题库检索`，用于维护结构力学题库并按题图或荷载检索相似题、返回答案。
 - CLI、现有飞书检索/入库/删除、章节 2-8、主库/字母库分流和字母库结构类型筛选可用。
 - 独立 `tiku_agent/` 已完成工具层、LLM intent、对话状态和单题/多题 MVP；LangGraph checkpoint 与新飞书机器人尚未接入。
+- MVP 后的当前阶段已确定为 Intent V2：先提高多轮指代、上下文动作判断和安全追问的可靠性，不直接重构 LangGraph。
 - Agent 使用 `.tmp_tiku_agent`，现有飞书使用 `.tmp_feishu_tiku`；两套入口和运行状态必须持续隔离。
-- FastAPI Demo 监听 `127.0.0.1:8790`，通过独立 Cloudflare Tunnel 和稳定公网域名开放；电脑、Demo 和 tunnel 在线时公网可用。
+- FastAPI Demo 监听 `127.0.0.1:8790`，题库飞书监听 `127.0.0.1:8788`；两者使用固定 Cloudflare Tunnel，已配置 Windows 登录自启，tunnel 系统服务为自动启动。
 - Demo 保留首次访问建会话和刷新恢复题图，并已修复微信裁剪产物缺少文件名/MIME 时的上传链路；HEIC/HEIF 仍不在支持范围。
 - 当前分支为 `codex/llm-rerank-support-filter`；`data/feishu_chapter_failure_log.jsonl` 有用户运行日志改动，禁止混入普通提交。
 
@@ -30,11 +31,14 @@
 
 ## In Progress
 
-- 当前没有未完成代码改动；下一阶段原计划是增强 intent 的隐私受限上下文和多轮指代推理。
+- Intent V2 已完成方案审查和 8 步动作拆解，尚未开始代码修改；详细顺序与验收门槛见 `.agents/roadmap.md`。
+- 当前工作树没有 Intent V2 半成品；下一步先冻结 V1 基线，再定义 ActionDecision V2 和状态—动作权限矩阵。
 
 ## Not Implemented
 
 - 尚未引入 LangGraph 图或 checkpoint，也未创建、连接新的飞书机器人。
+- 尚未实现 ConversationContext V2、题目/候选编号命名空间、结构化动作协议、歧义追问和 V1/V2 影子对照。
+- 尚未建立约 40 组真实多轮意图评测集；现有测试覆盖规则和状态转换，但不足以衡量“另一个/刚才那个/剩下那题”等连续指代。
 - 复筛并发数、首轮超时和补评上限尚未配置化。
 - 缺少 pipeline 级超时回退、真实飞书事件和持久状态集成测试。
 - HEIC/HEIF 浏览器解码兼容尚未实现；当前支持 JPEG、PNG、WEBP、GIF、BMP，空 MIME 或 `application/octet-stream` 会先尝试按真实图片字节解码。
@@ -50,11 +54,14 @@
 - 主库保存数值荷载和已赋值符号题，字母库保存未赋值字母题；只有字母库图片检索使用结构类型筛选。
 - 复筛只处理粗筛候选，不改变候选池；未完成批次不能混合视觉分排序。
 - 修改共享检索、储存、索引或 Agent 逻辑时，同步检查 CLI、飞书、Agent 和项目 Skill 文档。
+- Intent V2 每个用户回合最多执行一个高层动作；LLM 负责理解，代码负责状态权限、参数范围和禁止动作校验，不开放自由多工具循环。
+- Intent 上下文只提供完成判断所需的会话摘要，不暴露本地绝对路径、凭据、完整模型原始输出或无关题库数据。
 
 ## Known Risks
 
 - 微信/荣耀真机裁剪文件的实际 `File.name`、`File.type` 和原始字节仍未采样；当前以 Chromium 模拟无后缀、通用 MIME 的裁剪产物验证通过，但真机 canvas 内存、EXIF 方向和 HEIC 解码仍需实测。
 - Intent 获得的会话上下文有限，“另一个/刚才那个/剩下那道”等指代仍容易误判。
+- 当前模型只看到 phase、题目数、候选数和本轮文本；`AgentState` 中已有的题目、候选、章节和最近动作尚未形成可校验的上下文摘要。
 - 同粗筛分的超时候选补评顺序可能受线程完成顺序影响，尚无确定性次序。
 - `search.py` 和现有飞书脚本体量较大，章节及中文序号解析存在行为漂移风险。
 - 单元测试以 mock/纯函数为主，外部模型、飞书事件与持久状态覆盖不足。
@@ -76,14 +83,15 @@
 
 ## Next Best Step
 
-1. 在真实微信内置浏览器分别用 JPG、PNG 完成裁剪上传、失败重试和后续搜题，并采集失败样本的 `name/type/size`；若仍失败再按真实字节最小修复。
-2. 若回到 Agent 主线，为 intent 增加隐私受限会话摘要与受约束动作推理，并用多轮指代样本做新旧对照测试。
-3. 面试演示前从电脑浏览器和微信各跑一遍上传、刷新恢复、候选选择和答案返回，不再临时扩大改动范围。
+1. 冻结 Intent V1 行为：检查 Git、运行现有测试并记录当前输入、动作输出和已知失败样本。
+2. 先设计 ActionDecision V2 与状态—动作权限矩阵，再据此建立约 40 组真实多轮评测，不从改 Prompt 开始。
+3. 评测基线完成后实现 ConversationContext V2、受约束 Qwen 动作判断和歧义追问；LangGraph 留到动作协议稳定后再评估。
 
 ## Important Commands
 
 ```powershell
 python -B -m unittest discover -s tests -p "test_*.py"
+python -B -m unittest tests.test_tiku_agent_intent tests.test_tiku_agent_agent tests.test_tiku_agent_session_runtime
 python -B scripts/smoke_test.py
 python -B scripts/search_by_loads.py --help
 python -B search.py --help
