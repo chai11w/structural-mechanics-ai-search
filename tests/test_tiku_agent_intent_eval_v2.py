@@ -2,7 +2,8 @@ import unittest
 from pathlib import Path
 
 from tiku_agent.action_decision_v2 import ActionDecisionV2
-from tiku_agent.action_permissions_v2 import DecisionContextV2, authorize_action_v2
+from tiku_agent.action_permissions_v2 import authorize_action_v2
+from tiku_agent.conversation_context_v2 import ConversationContextV2
 from tiku_agent.intent_eval_v2 import (
     compare_system_reports,
     evaluate_v1_rule_suite,
@@ -49,12 +50,8 @@ class IntentEvalV2Test(unittest.TestCase):
         for case in suite["cases"]:
             with self.subTest(case=case["id"]):
                 decision = ActionDecisionV2.from_dict(case["expected_decision"])
-                context_payload = {
-                    key: value
-                    for key, value in case["context"].items()
-                    if key in DecisionContextV2.__dataclass_fields__
-                }
-                authorization = authorize_action_v2(decision, DecisionContextV2(**context_payload))
+                context = ConversationContextV2.from_mapping(case["context"])
+                authorization = authorize_action_v2(decision, context.to_decision_context())
                 self.assertTrue(authorization.allowed, authorization.code)
 
     def test_combined_review_set_matches_approved_category_distribution(self):
