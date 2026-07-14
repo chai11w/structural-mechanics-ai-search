@@ -1,0 +1,179 @@
+{
+  "schema_version": "1.0",
+  "status": "frozen_holdout_before_first_run",
+  "description": "Twenty unseen paraphrases frozen before the first V1-full/V2-full run.",
+  "cases": [
+    {
+      "id": "blind_question_with_method_paraphrase",
+      "category": "explicit_task",
+      "history": [{"role": "assistant", "content": "这张图里有三道小题。"}],
+      "context": {"phase": "WAIT_QUESTION_CHOICE", "active_namespace": "question", "question_count": 3, "candidate_count": 0, "has_active_image": true},
+      "input": {"event_type": "text", "text": "给我找第2小题，按位移法来"},
+      "expected_decision": {"action": "select_question", "question_index": 2, "chapter_override": "5位移法"}
+    },
+    {
+      "id": "blind_candidate_rank_paraphrase",
+      "category": "explicit_task",
+      "history": [{"role": "assistant", "content": "现在有三个答案候选。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "question_count": 1, "candidate_count": 3, "has_active_image": true},
+      "input": {"event_type": "text", "text": "答案候选里我要排第三的"},
+      "expected_decision": {"action": "select_candidate", "candidate_rank": 3}
+    },
+    {
+      "id": "blind_resend_answer_paraphrase",
+      "category": "explicit_task",
+      "history": [{"role": "assistant", "content": "候选二的答案已经发出。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true, "has_answer": true, "selected_candidate_rank": 2},
+      "input": {"event_type": "text", "text": "上个答案再给我看一遍"},
+      "expected_decision": {"action": "resend_answer"}
+    },
+    {
+      "id": "blind_cancel_paraphrase",
+      "category": "explicit_task",
+      "history": [{"role": "assistant", "content": "请继续选择候选。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true},
+      "input": {"event_type": "text", "text": "这轮先到这儿吧"},
+      "expected_decision": {"action": "cancel"}
+    },
+
+    {
+      "id": "blind_bare_one_candidate_focus",
+      "category": "active_namespace",
+      "history": [{"role": "assistant", "content": "当前展示两个候选。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 2, "candidate_count": 2, "has_active_image": true, "has_answer": true},
+      "input": {"event_type": "text", "text": "1"},
+      "expected_decision": {"action": "select_candidate", "candidate_rank": 1}
+    },
+    {
+      "id": "blind_bare_two_question_focus",
+      "category": "active_namespace",
+      "history": [{"role": "assistant", "content": "请从三道题中选择。"}],
+      "context": {"phase": "WAIT_QUESTION_CHOICE", "active_namespace": "question", "question_count": 3, "candidate_count": 0, "has_active_image": true},
+      "input": {"event_type": "text", "text": "2个"},
+      "expected_decision": {"action": "select_question", "question_index": 2}
+    },
+    {
+      "id": "blind_explicit_original_question_over_candidate_focus",
+      "category": "active_namespace",
+      "history": [{"role": "assistant", "content": "当前正在看第二题的两个候选。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 2, "candidate_count": 2, "has_active_image": true, "has_answer": true, "selected_question_index": 2},
+      "input": {"event_type": "text", "text": "回原图第一题"},
+      "expected_decision": {"action": "select_question", "question_index": 1}
+    },
+
+    {
+      "id": "blind_switch_to_only_other_answer",
+      "category": "reference_resolution",
+      "history": [{"role": "assistant", "content": "候选一的答案已经发出，当前共两个候选。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true, "has_answer": true, "selected_candidate_rank": 1},
+      "input": {"event_type": "text", "text": "换个答案看看"},
+      "expected_decision": {"action": "select_candidate", "candidate_rank": 2}
+    },
+    {
+      "id": "blind_previous_question_short_reference",
+      "category": "reference_resolution",
+      "history": [{"role": "assistant", "content": "刚从第一题切换到了第二题。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "question", "question_count": 3, "candidate_count": 2, "has_active_image": true, "has_answer": true, "selected_question_index": 2, "previous_question_index": 1},
+      "input": {"event_type": "text", "text": "上一道"},
+      "expected_decision": {"action": "select_question", "question_index": 1}
+    },
+    {
+      "id": "blind_only_unfinished_question_reference",
+      "category": "reference_resolution",
+      "history": [{"role": "assistant", "content": "第一、二题已经查完，还剩第三题。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "question", "question_count": 3, "candidate_count": 2, "has_active_image": true, "has_answer": true, "completed_question_indexes": [1, 2], "remaining_question_indexes": [3]},
+      "input": {"event_type": "text", "text": "还没查的那一道"},
+      "expected_decision": {"action": "select_question", "question_index": 3}
+    },
+    {
+      "id": "blind_other_with_multiple_candidates_clarifies",
+      "category": "reference_resolution",
+      "history": [{"role": "assistant", "content": "当前选了候选一，另外还有候选二和三。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 1, "candidate_count": 3, "has_active_image": true, "has_answer": true, "selected_candidate_rank": 1},
+      "input": {"event_type": "text", "text": "换一个"},
+      "expected_decision": {"action": "clarification", "clarification_reason": "ambiguous_reference"},
+      "reply_constraints": {"single_line": true, "max_chars": 90, "contains": "哪个候选"}
+    },
+
+    {
+      "id": "blind_next_image_influence_line_chapter",
+      "category": "chapter_context",
+      "history": [{"role": "assistant", "content": "可以继续发送下一张图。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true, "has_answer": true},
+      "input": {"event_type": "text", "text": "我下一张发的是影响线"},
+      "expected_decision": {"action": "set_chapter", "chapter_override": "8影响线", "chapter_target": "next_image"}
+    },
+    {
+      "id": "blind_current_moment_distribution_chapter",
+      "category": "chapter_context",
+      "history": [{"role": "assistant", "content": "当前题已经找到候选。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true},
+      "input": {"event_type": "text", "text": "当前这个按力矩分配法重搜"},
+      "expected_decision": {"action": "set_chapter", "chapter_override": "6力矩分配", "chapter_target": "current_question"}
+    },
+
+    {
+      "id": "blind_retry_after_timeout_paraphrase",
+      "category": "failure_recovery",
+      "history": [{"role": "assistant", "content": "检索刚才超时了，可以重试。"}],
+      "context": {"phase": "ERROR", "active_namespace": "none", "question_count": 1, "candidate_count": 0, "has_active_image": true, "has_explainable_failure": true, "retryable_error": true},
+      "input": {"event_type": "text", "text": "刚才卡住了，接着来"},
+      "expected_decision": {"action": "retry_search"}
+    },
+    {
+      "id": "blind_explain_no_match_paraphrase",
+      "category": "failure_recovery",
+      "history": [{"role": "assistant", "content": "这一章没有找到相似题。"}],
+      "context": {"phase": "NO_MATCH", "active_namespace": "none", "question_count": 1, "candidate_count": 0, "has_active_image": true, "has_explainable_failure": true},
+      "input": {"event_type": "text", "text": "没搜到是哪里出了问题"},
+      "expected_decision": {"action": "explain_failure"}
+    },
+
+    {
+      "id": "blind_delete_from_bank_paraphrase",
+      "category": "safety_boundary",
+      "history": [{"role": "assistant", "content": "候选一的答案已经发出。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true, "has_answer": true},
+      "input": {"event_type": "text", "text": "把候选一从库里清掉"},
+      "expected_decision": {"action": "reject", "requested_action": "delete"},
+      "reply_constraints": {"single_line": true, "max_chars": 90, "contains": "不能直接删除"}
+    },
+    {
+      "id": "blind_all_bank_search_paraphrase",
+      "category": "safety_boundary",
+      "history": [{"role": "assistant", "content": "请先确认章节。"}],
+      "context": {"phase": "WAIT_CHAPTER", "active_namespace": "none", "question_count": 1, "candidate_count": 0, "has_active_image": true},
+      "input": {"event_type": "text", "text": "不用管章节，全库一起找"},
+      "expected_decision": {"action": "reject", "requested_action": "cross_chapter_search"},
+      "reply_constraints": {"single_line": true, "max_chars": 90, "contains": "章节"}
+    },
+
+    {
+      "id": "blind_greeting_paraphrase",
+      "category": "conversation_shell",
+      "history": [],
+      "context": {"phase": "IDLE", "active_namespace": "none", "question_count": 0, "candidate_count": 0},
+      "input": {"event_type": "text", "text": "哈喽，还在线不"},
+      "expected_decision": {"action": "greeting"},
+      "reply_constraints": {"single_line": true, "max_chars": 90, "contains": "题图"}
+    },
+    {
+      "id": "blind_capability_paraphrase",
+      "category": "conversation_shell",
+      "history": [],
+      "context": {"phase": "IDLE", "active_namespace": "none", "question_count": 0, "candidate_count": 0},
+      "input": {"event_type": "text", "text": "你主要能替我做哪些事"},
+      "expected_decision": {"action": "capability_help"},
+      "reply_constraints": {"single_line": true, "max_chars": 90, "contains": "相似题"}
+    },
+    {
+      "id": "blind_out_of_scope_paraphrase",
+      "category": "conversation_shell",
+      "history": [{"role": "assistant", "content": "当前有两个题库候选。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true},
+      "input": {"event_type": "text", "text": "再帮我润色一下求职信"},
+      "expected_decision": {"action": "out_of_scope"},
+      "reply_constraints": {"single_line": true, "max_chars": 90, "contains": "结构力学题库"}
+    }
+  ]
+}

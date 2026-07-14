@@ -1,0 +1,1999 @@
+"""
+Feishu bot MVP for the structure-mechanics question bank.
+
+The first version is intentionally project-local and dry-run friendly:
+- the Feishu HTTP/event shell is present;
+- text/image session state is implemented;
+- local dry-run commands can exercise image -> chapter -> choice;
+- real Feishu image download/upload is isolated behind small client methods.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import ssl
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+from PIL import Image, ImageDraw
+
+try:
+    import cv2
+    import numpy as np
+except ImportError:  # pragma: no cover - optional multi-question diagram crops.
+    cv2 = None
+    np = None
+
+BASE = Path(__file__).resolve().parents[1]
+if str(BASE) not in sys.path:
+    sys.path.insert(0, str(BASE))
+
+from multi_agent_pipeline import MultiAgentCoordinator, is_auto_chapter  # noqa: E402
+from search import ANSWER_OUTPUT, DISPLAY_MAX_RESULTS, answer, cfg  # noqa: E402
+from scripts.chapter_judgment_log import append_chapter_judgment_log  # noqa: E402
+from scripts.feishu_delete_flow import (  # noqa: E402
+    DeletePlan,
+    FeishuDeleteService,
+    format_delete_confirmation,
+    format_delete_success,
+    parse_delete_choice,
+)
+from scripts.feishu_store_flow import (  # noqa: E402
+    FeishuStoreService,
+    StoreDraft,
+    format_answer_prompt,
+    format_answer_received,
+    format_store_chapter_prompt,
+    format_store_confirmation,
+    format_store_success,
+    is_store_entry_command,
+)
+from scripts.classify_question_bank import (  # noqa: E402
+    DEFAULT_ENDPOINT,
+    DEFAULT_MODEL,
+    find_diagram_blocks_cv,
+    image_to_data_url,
+    parse_model_json,
+    safe_crop,
+)
+
+
+FEISHU_OPEN_API = "https://open.feishu.cn/open-apis"
+CHAPTERS = ["2静定结构", "3静定结构位移", "4力法", "5位移法", "6力矩分配", "7矩阵位移", "8影响线"]
+DEFAULT_SESSION_TTL_SECONDS = 10 * 60
+CHAPTER_MODE_AUTO = "auto"
+CHAPTER_MODE_MANUAL = "manual"
+CHAPTER_MODE_TOGGLE = "toggle"
+STORE_STATES = {"store_waiting_question", "store_waiting_chapter", "store_waiting_answers", "store_confirm"}
+DELETE_CONFIRM_STATE = "confirm_delete"
+
+BLOCK_FILTER_PROMPT = """你是结构力学图块筛选助手。图片里有若干编号 block。
+请只判断哪些 block 是完整或接近完整的结构力学结构图/受力图。
+
+返回 true 的情况:
+- 包含梁、刚架、桁架、杆件、支座、荷载箭头、弯矩箭头等主体结构。
+- 图形基本完整，即使缺少少量边缘也可以。
+
+返回 false 的情况:
+- 纯题干文字、页眉页脚、水印。
+- 只有尺寸线、图名、题号。
+- 只有局部支座或局部标注。
+- 残缺到看不出主体结构。
+
+只输出 JSON:
+{"structure_blocks":[2,3,4],"rejected_blocks":[1,5,6],"reason":"简短说明"}"""
+
+
+@dataclass
+class FeishuTikuOptions:
+    app_id: str = ""
+    app_secret: str = ""
+    verification_token: str | None = None
+    dry_run: bool = False
+    session_ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS
+    temp_dir: Path = BASE / ".tmp_feishu_tiku"
+    top_k: int = 3
+    rerank_top: int = DISPLAY_MAX_RESULTS
+    max_message_age_seconds: int = 15 * 60
+    working_reaction: str | None = "OK"
+
+
+@dataclass
+class TikuSession:
+    state: str = "idle"
+    image_path: Path | None = None
+    chapter: str | None = None
+    results: list[dict[str, Any]] = field(default_factory=list)
+    multi_questions: list[dict[str, Any]] = field(default_factory=list)
+    current_question: str | None = None
+    diagram_crops: dict[str, str] = field(default_factory=dict)
+    store: StoreDraft | None = None
+    pending_chapter_failure: dict[str, Any] | None = None
+    pending_delete: DeletePlan | None = None
+    delete_return_state: str | None = None
+    updated_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class BotResponse:
+    texts: list[str] = field(default_factory=list)
+    images: list[Path] = field(default_factory=list)
+
+
+class TikuSessionStore:
+    def __init__(self, ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS) -> None:
+        self.ttl_seconds = ttl_seconds
+        self._sessions: dict[str, TikuSession] = {}
+        self._lock = threading.Lock()
+
+    def get(self, sender: str) -> TikuSession:
+        with self._lock:
+            session = self._sessions.get(sender)
+            if session is None or self._is_expired(session):
+                session = TikuSession()
+                self._sessions[sender] = session
+            return session
+
+    def save(self, sender: str, session: TikuSession) -> None:
+        session.updated_at = time.time()
+        with self._lock:
+            self._sessions[sender] = session
+
+    def clear(self, sender: str) -> None:
+        with self._lock:
+            self._sessions.pop(sender, None)
+
+    def _is_expired(self, session: TikuSession) -> bool:
+        return time.time() - session.updated_at > self.ttl_seconds
+
+
+class FeishuClient:
+    def __init__(self, app_id: str, app_secret: str, dry_run: bool = False) -> None:
+        self.app_id = app_id
+        self.app_secret = app_secret
+        self.dry_run = dry_run
+        self._tenant_access_token: str | None = None
+        self._token_expires_at = 0.0
+        self._lock = threading.Lock()
+
+    def reply_text(self, message_id: str, text: str) -> None:
+        if self.dry_run:
+            print(f"[dry-run] reply_text {message_id}: {text}", flush=True)
+            return
+        token = self.tenant_access_token()
+        body = {
+            "msg_type": "text",
+            "content": json.dumps({"text": text}, ensure_ascii=False),
+        }
+        request_json(
+            f"{FEISHU_OPEN_API}/im/v1/messages/{message_id}/reply",
+            method="POST",
+            payload=body,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    def reply_image(self, message_id: str, image_path: Path) -> None:
+        if self.dry_run:
+            print(f"[dry-run] reply_image {message_id}: {image_path}", flush=True)
+            return
+        image_key = self.upload_image(image_path)
+        token = self.tenant_access_token()
+        body = {
+            "msg_type": "image",
+            "content": json.dumps({"image_key": image_key}, ensure_ascii=False),
+        }
+        request_json(
+            f"{FEISHU_OPEN_API}/im/v1/messages/{message_id}/reply",
+            method="POST",
+            payload=body,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    def add_reaction(self, message_id: str, emoji_type: str) -> None:
+        if self.dry_run:
+            print(f"[dry-run] add_reaction {message_id}: {emoji_type}", flush=True)
+            return
+        token = self.tenant_access_token()
+        body = {"reaction_type": {"emoji_type": emoji_type}}
+        request_json(
+            f"{FEISHU_OPEN_API}/im/v1/messages/{message_id}/reactions",
+            method="POST",
+            payload=body,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    def download_message_image(self, message_id: str, image_key: str, output_path: Path) -> Path:
+        """Download an image resource from Feishu.
+
+        The exact Feishu resource endpoint can vary by app permission/version. Keep
+        the method isolated so the state machine can be tested without network.
+        """
+        if self.dry_run:
+            raise RuntimeError("dry-run cannot download Feishu image resources")
+        token = self.tenant_access_token()
+        url = (
+            f"{FEISHU_OPEN_API}/im/v1/messages/{message_id}/resources/"
+            f"{image_key}?type=image"
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"}, method="GET")
+        with urllib.request.urlopen(request, timeout=60) as response:
+            output_path.write_bytes(response.read())
+        return output_path
+
+    def upload_image(self, image_path: Path) -> str:
+        if self.dry_run:
+            return f"dry-run:{image_path.name}"
+        token = self.tenant_access_token()
+        boundary = f"----tiku{int(time.time() * 1000)}"
+        image_bytes = image_path.read_bytes()
+        body = build_multipart_form_data(
+            boundary,
+            fields={"image_type": "message"},
+            files={"image": (image_path.name, image_bytes, "image/jpeg")},
+        )
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        }
+        data = request_json(
+            f"{FEISHU_OPEN_API}/im/v1/images",
+            method="POST",
+            raw_body=body,
+            headers=headers,
+        )
+        image_key = str((data.get("data") or {}).get("image_key") or "")
+        if not image_key:
+            raise RuntimeError(f"Feishu image upload returned no image_key: {data}")
+        return image_key
+
+    def tenant_access_token(self) -> str:
+        now = time.time()
+        with self._lock:
+            if self._tenant_access_token and now < self._token_expires_at:
+                return self._tenant_access_token
+            data = request_json(
+                f"{FEISHU_OPEN_API}/auth/v3/tenant_access_token/internal",
+                method="POST",
+                payload={"app_id": self.app_id, "app_secret": self.app_secret},
+            )
+            token = str(data.get("tenant_access_token") or "")
+            if not token:
+                raise RuntimeError(f"failed to get tenant_access_token: {data}")
+            expire = int(data.get("expire") or 7200)
+            self._tenant_access_token = token
+            self._token_expires_at = now + max(60, expire - 120)
+            return token
+
+
+class TikuBot:
+    def __init__(
+        self,
+        *,
+        options: FeishuTikuOptions,
+        coordinator: MultiAgentCoordinator | None = None,
+        sessions: TikuSessionStore | None = None,
+        store_service: FeishuStoreService | None = None,
+        delete_service: FeishuDeleteService | None = None,
+    ) -> None:
+        self.options = options
+        self.coordinator = coordinator or MultiAgentCoordinator(top_k=options.top_k)
+        self.sessions = sessions or TikuSessionStore(options.session_ttl_seconds)
+        self.store_service = store_service or FeishuStoreService(dry_run=options.dry_run)
+        self.delete_service = delete_service or FeishuDeleteService(dry_run=options.dry_run)
+        self._chapter_modes: dict[str, str] = {}
+        self._mode_lock = threading.Lock()
+
+    def receive_image(self, sender: str, image_path: Path) -> BotResponse:
+        session = self.sessions.get(sender)
+        if session.state in STORE_STATES:
+            return self._handle_store_image(sender, session, image_path)
+
+        if self.chapter_mode(sender) == CHAPTER_MODE_AUTO:
+            layout_response, single_analysis = self._try_start_multi_question_session(sender, image_path)
+            if layout_response is not None:
+                return layout_response
+            session = TikuSession(state="searching", image_path=image_path)
+            return self._search(sender, session, "auto", classified=single_analysis)
+        session = TikuSession(state="waiting_chapter", image_path=image_path)
+        self.sessions.save(sender, session)
+        return BotResponse(texts=[format_chapter_prompt(image_path)])
+
+    def receive_text(self, sender: str, text: str) -> BotResponse:
+        clean = text.strip()
+        session = self.sessions.get(sender)
+
+        if session.state == DELETE_CONFIRM_STATE:
+            return self._handle_delete_confirmation(sender, session, clean)
+
+        if is_store_entry_command(clean):
+            session = TikuSession(state="store_waiting_question")
+            self.sessions.save(sender, session)
+            return BotResponse(texts=["已进入新增题目模式，请发送题目图。\n\n0  取消"])
+
+        if session.state in STORE_STATES:
+            return self._handle_store_text(sender, session, clean)
+
+        if session.state in {"waiting_multi_question", "waiting_multi_choice"} and clean == "0":
+            return self._handle_multi_text(sender, session, clean)
+
+        if is_cancel(clean):
+            self.sessions.clear(sender)
+            return BotResponse(texts=["已取消本次搜题。"])
+
+        mode = parse_chapter_mode(clean)
+        if mode:
+            if mode == CHAPTER_MODE_TOGGLE:
+                mode = (
+                    CHAPTER_MODE_MANUAL
+                    if self.chapter_mode(sender) == CHAPTER_MODE_AUTO
+                    else CHAPTER_MODE_AUTO
+                )
+            self.set_chapter_mode(sender, mode)
+            self.sessions.clear(sender)
+            if mode == CHAPTER_MODE_MANUAL:
+                return BotResponse(texts=["已切换到手动章节模式。请重新发送题图，我会先让你选择章节。发送 a 可切回自动。"])
+            return BotResponse(texts=["已切换到自动章节模式。请重新发送题图，我会先尝试自动识别章节。发送 a 可切回手动。"])
+
+        if session.state in {"waiting_multi_question", "waiting_multi_choice"}:
+            return self._handle_multi_text(sender, session, clean)
+
+        if session.state == "waiting_chapter":
+            chapter = parse_chapter(clean)
+            if not chapter:
+                return BotResponse(texts=[format_chapter_prompt(session.image_path)])
+            if not session.image_path:
+                self.sessions.clear(sender)
+                return BotResponse(texts=["这次会话里没有题图，请先发送图片。"])
+            if session.pending_chapter_failure:
+                log_manual_chapter_after_failure(
+                    source="feishu_auto_failed_manual_chapter",
+                    image_path=session.image_path,
+                    manual_text=clean,
+                    final_chapter=chapter,
+                    failure=session.pending_chapter_failure,
+                )
+                session.pending_chapter_failure = None
+            return self._search(sender, session, chapter)
+
+        if session.state == "waiting_choice":
+            delete_choice = parse_delete_choice(clean)
+            if delete_choice is not None:
+                return self._start_delete_candidate(sender, session, delete_choice, "waiting_choice")
+            choice = parse_choice(clean)
+            if choice is None:
+                count = len(session.results)
+                return BotResponse(texts=[f"回复 {choice_shortcuts(count)} 获取对应答案；回复 {delete_shortcuts(count)} 删除对应错题；0 退出。"])
+            return self._answer_choice(sender, session, choice)
+
+        chapter = parse_chapter(clean)
+        if chapter:
+            return BotResponse(texts=["请先发送题目图片，然后我会用这个章节检索。"])
+        mode_label = "自动章节" if self.chapter_mode(sender) == CHAPTER_MODE_AUTO else "手动章节"
+        return BotResponse(texts=[f"请先发送题目图片。当前模式：{mode_label}。发送“手动”或“自动”可切换。"])
+
+    def _start_delete_candidate(
+        self,
+        sender: str,
+        session: TikuSession,
+        choice: int,
+        return_state: str,
+    ) -> BotResponse:
+        if choice < 1 or choice > len(session.results):
+            return BotResponse(texts=[f"当前只有 {len(session.results)} 个候选，请回复 -1 到 -{len(session.results)} 删除。"])
+        try:
+            plan = self.delete_service.prepare_plan(
+                session.results[choice - 1],
+                choice,
+                session.chapter,
+            )
+        except Exception as exc:  # noqa: BLE001 - user-facing maintenance command.
+            return BotResponse(texts=[f"暂不能删除：{exc}"])
+
+        session.pending_delete = plan
+        session.delete_return_state = return_state
+        session.state = DELETE_CONFIRM_STATE
+        self.sessions.save(sender, session)
+        return BotResponse(texts=[format_delete_confirmation(plan)])
+
+    def _handle_delete_confirmation(self, sender: str, session: TikuSession, clean: str) -> BotResponse:
+        if clean == "0":
+            session.state = session.delete_return_state or "waiting_choice"
+            session.pending_delete = None
+            session.delete_return_state = None
+            self.sessions.save(sender, session)
+            return BotResponse(texts=["已取消删除。"])
+        if clean != "1":
+            return BotResponse(texts=["回复 1 确认删除，回复 0 取消。"])
+        if not session.pending_delete:
+            self.sessions.clear(sender)
+            return BotResponse(texts=["删除会话已失效，请重新检索后再删。"])
+
+        plan = session.pending_delete
+        try:
+            result = self.delete_service.apply_plan(plan)
+        except Exception as exc:  # noqa: BLE001 - keep the candidate session for retry/cancel.
+            return BotResponse(texts=[f"删除失败：{exc}\n请检查后重试，或回复 0 取消。"])
+
+        if 1 <= plan.rank <= len(session.results):
+            del session.results[plan.rank - 1]
+        return_state = session.delete_return_state or "waiting_choice"
+        session.pending_delete = None
+        session.delete_return_state = None
+        session.state = return_state
+
+        success = format_delete_success(result)
+        if not session.results:
+            self.sessions.clear(sender)
+            return BotResponse(texts=[success + "\n\n当前没有剩余候选，已结束本次搜题。"])
+
+        self.sessions.save(sender, session)
+        if return_state == "waiting_multi_choice":
+            question = find_multi_question(session, session.current_question or "")
+            if question:
+                return BotResponse(texts=[
+                    success + "\n\n" + format_multi_action_lines(question, len(session.results), heading="请继续回复：")
+                ])
+        return BotResponse(texts=[success + "\n\n" + format_single_action_lines(len(session.results), heading="请继续回复：")])
+
+    def _handle_store_image(self, sender: str, session: TikuSession, image_path: Path) -> BotResponse:
+        if session.state == "store_waiting_question":
+            try:
+                draft = self.store_service.classify_question(image_path, self.coordinator)
+            except Exception as exc:  # noqa: BLE001 - let the user retry or cancel.
+                session.state = "store_waiting_question"
+                self.sessions.save(sender, session)
+                return BotResponse(texts=[f"题目图识别失败：{exc}\n请重新发送题目图，或回复 0 取消。"])
+
+            log_store_chapter_decision(draft)
+
+            if not draft.loads:
+                session.state = "store_waiting_question"
+                self.sessions.save(sender, session)
+                return BotResponse(texts=["未识别到可入库荷载，暂不自动入库。\n请重新发送题目图，或回复 0 取消。"])
+            if draft.route not in {"main", "symbolic"}:
+                session.state = "store_waiting_question"
+                self.sessions.save(sender, session)
+                return BotResponse(texts=[f"这题需要人工复核，暂不自动入库。\n分类：{draft.category}\n原因：{draft.reason}\n请重新发送题目图，或回复 0 取消。"])
+
+            session.store = draft
+            if not draft.chapter:
+                session.state = "store_waiting_chapter"
+                self.sessions.save(sender, session)
+                return BotResponse(texts=[format_store_chapter_prompt(draft)])
+            session.state = "store_waiting_answers"
+            self.sessions.save(sender, session)
+            return BotResponse(texts=[f"题目图已识别。\n章节：{draft.chapter}\n荷载：{format_loads(draft.loads)}\n\n{format_answer_prompt()}"])
+
+        if session.state == "store_waiting_answers":
+            if not session.store:
+                session.state = "store_waiting_question"
+                self.sessions.save(sender, session)
+                return BotResponse(texts=["新增会话缺少题目图，请重新发送题目图。\n\n0  取消"])
+            session.store.answer_image_paths.append(str(image_path))
+            self.sessions.save(sender, session)
+            return BotResponse(texts=[format_answer_received(len(session.store.answer_image_paths))])
+
+        return BotResponse(texts=["当前新增流程不需要图片。\n回复 1 继续，或回复 0 取消。"])
+
+    def _handle_store_text(self, sender: str, session: TikuSession, clean: str) -> BotResponse:
+        if clean == "0" or is_cancel(clean):
+            self.sessions.clear(sender)
+            return BotResponse(texts=["已取消本次新增。"])
+
+        if session.state == "store_waiting_question":
+            return BotResponse(texts=["请发送题目图。\n\n0  取消"])
+
+        if session.state == "store_waiting_chapter":
+            if not session.store:
+                session.state = "store_waiting_question"
+                self.sessions.save(sender, session)
+                return BotResponse(texts=["新增会话缺少题目图，请重新发送题目图。\n\n0  取消"])
+            chapter = parse_chapter(clean)
+            if not chapter:
+                return BotResponse(texts=[format_store_chapter_prompt(session.store)])
+            append_chapter_judgment_log(
+                source="feishu_store_auto_failed_manual_chapter",
+                image_path=session.store.question_image_path,
+                requested_chapter="auto",
+                final_chapter=chapter,
+                decision_mode="manual_after_auto_failed",
+                classified={
+                    "chapter_hint": session.store.chapter_hint,
+                    "chapter_confidence": session.store.chapter_confidence,
+                    "chapter_evidence": session.store.chapter_evidence,
+                    "loads": session.store.loads,
+                },
+                loads=session.store.loads,
+                route=session.store.route,
+                category=session.store.category,
+                extra={"manual_text": clean},
+            )
+            session.store.chapter = chapter
+            session.state = "store_waiting_answers"
+            self.sessions.save(sender, session)
+            return BotResponse(texts=[f"章节已设为：{chapter}\n\n{format_answer_prompt()}"])
+
+        if session.state == "store_waiting_answers":
+            if clean != "1":
+                return BotResponse(texts=["请继续发送答案图；发完回复 1，取消回复 0。"])
+            if not session.store:
+                session.state = "store_waiting_question"
+                self.sessions.save(sender, session)
+                return BotResponse(texts=["新增会话缺少题目图，请重新发送题目图。\n\n0  取消"])
+            if not session.store.answer_image_paths:
+                return BotResponse(texts=["还没有收到答案图，请先发送答案图；取消回复 0。"])
+            try:
+                plan = self.store_service.prepare_plan(session.store)
+            except Exception as exc:  # noqa: BLE001
+                return BotResponse(texts=[f"暂不能进入确认：{exc}\n请继续发送答案图，或回复 0 取消。"])
+            session.state = "store_confirm"
+            self.sessions.save(sender, session)
+            return BotResponse(texts=[format_store_confirmation(plan)])
+
+        if session.state == "store_confirm":
+            if clean != "1":
+                return BotResponse(texts=["回复 1 确认新增并写入题库，或回复 0 取消。"])
+            if not session.store:
+                self.sessions.clear(sender)
+                return BotResponse(texts=["新增会话已失效，请重新发送 + 开始。"])
+            try:
+                result = self.store_service.apply_plan(session.store)
+            except Exception as exc:  # noqa: BLE001
+                return BotResponse(texts=[f"新增失败：{exc}\n未完成写入，请检查后重试或回复 0 取消。"])
+            self.sessions.clear(sender)
+            return BotResponse(texts=[format_store_success(result)])
+
+        return BotResponse(texts=["新增会话状态异常，请回复 0 取消后重新开始。"])
+
+    def _try_start_multi_question_session(self, sender: str, image_path: Path) -> tuple[BotResponse | None, dict[str, Any] | None]:
+        started = time.perf_counter()
+        try:
+            scope = self.coordinator.analyze_image_scope(image_path)
+        except Exception as exc:  # noqa: BLE001 - keep the existing single-question flow available.
+            print(f"image scope analysis failed, fallback to single flow: {exc}", file=sys.stderr, flush=True)
+            return None, None
+        layout_seconds = time.perf_counter() - started
+        if scope.get("question_layout") != "multi":
+            return None, scope.get("single_analysis") if scope.get("question_layout") == "single" else None
+        try:
+            layout = self.coordinator.analyze_image_layout(image_path)
+        except Exception as exc:  # noqa: BLE001
+            print(f"multi-question detail analysis failed: {exc}", file=sys.stderr, flush=True)
+            return None, None
+        questions = normalize_multi_questions(layout.get("questions", []))
+        if len(questions) < 2:
+            return None, None
+        for question in questions:
+            log_multi_chapter_decision(image_path=image_path, question=question)
+        crop_started = time.perf_counter()
+        diagram_crops = prepare_multi_diagram_crops(
+            image_path,
+            questions,
+            self.options.temp_dir / "multi_diagrams",
+        )
+        crop_seconds = time.perf_counter() - crop_started
+        print(
+            "multi question session: "
+            f"questions={len(questions)} crops={len(diagram_crops)} "
+            f"layout_seconds={layout_seconds:.2f} "
+            f"crop_seconds={crop_seconds:.2f} "
+            f"total_seconds={time.perf_counter() - started:.2f}",
+            file=sys.stderr,
+            flush=True,
+        )
+        session = TikuSession(
+            state="waiting_multi_question",
+            image_path=image_path,
+            multi_questions=questions,
+            diagram_crops=diagram_crops,
+        )
+        self.sessions.save(sender, session)
+        return BotResponse(texts=[format_multi_question_list(session)]), None
+
+    def _handle_multi_text(self, sender: str, session: TikuSession, clean: str) -> BotResponse:
+        if session.state == "waiting_multi_choice" and clean == "0":
+            session.state = "waiting_multi_question"
+            session.results = []
+            session.current_question = None
+            self.sessions.save(sender, session)
+            return BotResponse(texts=[format_multi_question_list(session)])
+        if session.state == "waiting_multi_question" and clean == "0":
+            self.sessions.clear(sender)
+            return BotResponse(texts=["已结束本次多题搜题。"])
+
+        if session.state == "waiting_multi_choice":
+            delete_choice = parse_delete_choice(clean)
+            if delete_choice is not None:
+                return self._start_delete_candidate(sender, session, delete_choice, "waiting_multi_choice")
+
+        command = parse_multi_command(clean)
+        if not command:
+            return BotResponse(texts=[format_multi_help(session)])
+        question = find_multi_question(session, command["question"])
+        if question is None:
+            return BotResponse(texts=[f"没有找到第 {command['question']} 题。\n\n{format_multi_question_list(session)}"])
+
+        if command["kind"] == "answer":
+            if session.state != "waiting_multi_choice" or normalize_question_key(session.current_question) != normalize_question_key(question["label"]):
+                return BotResponse(texts=[f"请先回复 {question['label']} 检索第{question['label']}题，再选择答案。"])
+            return self._answer_multi_choice(sender, session, question, int(command["value"]))
+
+        chapter = command["value"] if command["kind"] == "chapter" else None
+        if chapter and not effective_question_chapter(question):
+            append_chapter_judgment_log(
+                source="feishu_multi_auto_failed_manual_chapter",
+                image_path=session.image_path,
+                requested_chapter="auto",
+                final_chapter=chapter,
+                decision_mode="manual_after_auto_failed",
+                classified=question,
+                loads=question.get("loads", []),
+                route="",
+                category="",
+                extra={
+                    "manual_text": clean,
+                    "question_label": question.get("label", ""),
+                    "diagram_crop": session.diagram_crops.get(normalize_question_key(question["label"]), ""),
+                },
+            )
+        return self._search_multi_question(sender, session, question, chapter)
+
+    def _search(self, sender: str, session: TikuSession, chapter: str, *, classified: dict[str, Any] | None = None) -> BotResponse:
+        assert session.image_path is not None
+        result = self.coordinator.search_image(
+            session.image_path,
+            chapter,
+            rerank=True,
+            rerank_top=self.options.rerank_top,
+            classified=classified,
+        )
+        log_search_chapter_decision(
+            source="feishu_chapter_decision",
+            image_path=session.image_path,
+            requested_chapter=chapter,
+            result=result,
+        )
+        if result.route.route == "needs_chapter":
+            session.state = "waiting_chapter"
+            session.pending_chapter_failure = failure_from_pipeline_result(result)
+            self.sessions.save(sender, session)
+            return BotResponse(texts=[format_chapter_prompt(session.image_path, result)])
+        if result.route.route == "needs_review":
+            self.sessions.clear(sender)
+            return BotResponse(
+                texts=[
+                    "这张题图暂时不能自动检索，需要人工复核。\n"
+                    f"分类：{result.route.category}"
+                ]
+            )
+        if not result.results:
+            self.sessions.clear(sender)
+            return BotResponse(texts=[format_no_match_reply(result)])
+
+        top_results = result.results
+        session.state = "waiting_choice"
+        session.chapter = result.chapter or chapter
+        session.results = top_results
+        self.sessions.save(sender, session)
+
+        chapter_text = result.chapter or chapter
+        texts = [format_candidate_reply(chapter_text, top_results, rerank_note=getattr(result, "rerank_note", ""))]
+        images = [Path(item["path"]) for item in top_results]
+        return BotResponse(texts=texts, images=images)
+
+    def _search_multi_question(
+        self,
+        sender: str,
+        session: TikuSession,
+        question: dict[str, Any],
+        chapter_override: str | None,
+    ) -> BotResponse:
+        loads = question.get("loads", [])
+        if not loads:
+            return BotResponse(texts=[f"第{question['label']}题没有识别到可检索荷载，请单独裁剪后重发。"])
+
+        chapter = chapter_override or effective_question_chapter(question)
+        if not chapter:
+            return BotResponse(texts=[format_multi_question_needs_chapter(question)])
+        if chapter == "unsupported":
+            return BotResponse(texts=[f"第{question['label']}题暂不在当前 2-8 章题库范围内。"])
+
+        diagram_crop = session.diagram_crops.get(normalize_question_key(question["label"]))
+        result = self.coordinator.search_loads(
+            loads,
+            chapter,
+            query_image_path=diagram_crop,
+            rerank=bool(diagram_crop),
+            rerank_top=self.options.rerank_top,
+            force_rerank=bool(diagram_crop),
+            status_callback=None,
+            classified=question,
+        )
+        if result.route.route == "needs_review":
+            return BotResponse(texts=[f"第{question['label']}题暂时不能自动检索，需要人工复核。\n分类：{result.route.category}"])
+        if result.route.route == "needs_chapter":
+            return BotResponse(texts=[format_multi_question_needs_chapter(question)])
+        if not result.results:
+            return BotResponse(texts=[format_no_match_reply(result, question_label=question["label"])])
+
+        top_results = result.results
+        session.state = "waiting_multi_choice"
+        session.current_question = question["label"]
+        session.chapter = result.chapter or chapter
+        session.results = top_results
+        self.sessions.save(sender, session)
+
+        texts = [
+            format_multi_candidate_reply(
+                question,
+                session.chapter,
+                top_results,
+                reranked=result.reranked,
+                rerank_note=getattr(result, "rerank_note", ""),
+            )
+        ]
+        images = [Path(item["path"]) for item in top_results]
+        return BotResponse(texts=texts, images=images)
+
+    def _answer_multi_choice(
+        self,
+        sender: str,
+        session: TikuSession,
+        question: dict[str, Any],
+        choice: int,
+    ) -> BotResponse:
+        if choice < 1 or choice > len(session.results):
+            return BotResponse(texts=[f"当前第{question['label']}题只有 {len(session.results)} 个候选，请回复 {question['label']}-1 到 {question['label']}-{len(session.results)}。"])
+
+        if self.options.dry_run:
+            selected = Path(session.results[choice - 1]["path"])
+            self.sessions.save(sender, session)
+            return BotResponse(
+                texts=[
+                    f"[dry-run] 将发送第{question['label']}题第 {choice} 名答案。"
+                    f"\n\n{format_multi_next_actions(question, len(session.results))}"
+                ],
+                images=[selected],
+            )
+
+        before = answer_output_files()
+        answer(choice)
+        after = answer_output_files()
+        new_files = [path for path in after if path not in before]
+        answer_images = new_files or after[-3:]
+        self.sessions.save(sender, session)
+        if not answer_images:
+            return BotResponse(
+                texts=[
+                    f"已执行第{question['label']}题第 {choice} 名答案提取，但没有找到输出图片。"
+                    f"\n\n{format_multi_next_actions(question, len(session.results))}"
+                ]
+            )
+        return BotResponse(
+            texts=[
+                f"第{question['label']}题第 {choice} 名答案："
+                f"\n\n{format_multi_next_actions(question, len(session.results))}"
+            ],
+            images=answer_images,
+        )
+
+    def chapter_mode(self, sender: str) -> str:
+        with self._mode_lock:
+            return self._chapter_modes.get(sender, CHAPTER_MODE_AUTO)
+
+    def set_chapter_mode(self, sender: str, mode: str) -> None:
+        with self._mode_lock:
+            self._chapter_modes[sender] = mode
+
+    def _answer_choice(self, sender: str, session: TikuSession, choice: int) -> BotResponse:
+        if choice == 0:
+            self.sessions.clear(sender)
+            return BotResponse(texts=["已退出本次搜题。"])
+        if choice < 1 or choice > len(session.results):
+            return BotResponse(texts=[f"当前只有 {len(session.results)} 个候选，请回复 0-{len(session.results)}。"])
+
+        if self.options.dry_run:
+            selected = Path(session.results[choice - 1]["path"])
+            self.sessions.clear(sender)
+            return BotResponse(texts=[f"[dry-run] 将发送第 {choice} 名答案。"], images=[selected])
+
+        before = answer_output_files()
+        answer(choice)
+        after = answer_output_files()
+        new_files = [path for path in after if path not in before]
+        answer_images = new_files or after[-3:]
+        self.sessions.clear(sender)
+        if not answer_images:
+            return BotResponse(texts=["已执行答案提取，但没有找到输出图片。"])
+        return BotResponse(texts=[f"第 {choice} 名答案："], images=answer_images)
+
+
+class MockCoordinator:
+    def __init__(self, image_paths: list[Path], *, auto_needs_chapter: bool = False) -> None:
+        self.image_paths = image_paths
+        self.auto_needs_chapter = auto_needs_chapter
+        self.qwen = type(
+            "MockQwen",
+            (),
+            {
+                "classify_image": lambda _self, _image_path: {
+                    "loads": [{"type": "集中", "raw": "10kN"}],
+                    "chapter_hint": "5位移法",
+                    "chapter_confidence": 1.0,
+                    "chapter_evidence": "mock",
+                }
+            },
+        )()
+
+    def search_image(
+        self,
+        image_path: Path,
+        chapter: str,
+        *,
+        rerank: bool = True,
+        rerank_top: int = DISPLAY_MAX_RESULTS,
+        source: str = "mock_image_search",
+        classified: dict[str, Any] | None = None,
+    ) -> Any:
+        del image_path, rerank, rerank_top, source, classified
+        if self.auto_needs_chapter and str(chapter).strip().lower() == "auto":
+            return type(
+                "MockPipelineResult",
+                (),
+                {
+                    "route": type(
+                        "MockRoute",
+                        (),
+                        {"route": "needs_chapter", "category": "main_numeric"},
+                    )(),
+                    "results": [],
+                    "chapter": None,
+                    "chapter_hint": "unknown",
+                    "chapter_confidence": 0.1,
+                    "chapter_evidence": "mock",
+                    "rerank_note": "",
+                },
+            )()
+        resolved_chapter = "5位移法" if str(chapter).strip().lower() == "auto" else chapter
+        return type(
+            "MockPipelineResult",
+            (),
+            {
+                "route": type(
+                    "MockRoute",
+                    (),
+                    {"route": "main", "category": "main_numeric"},
+                )(),
+                "chapter": resolved_chapter,
+                "chapter_hint": resolved_chapter,
+                "chapter_confidence": 1.0,
+                "chapter_evidence": "mock",
+                "rerank_note": "",
+                "results": [
+                    {
+                        "rank": index,
+                        "path": str(path),
+                        "name": path.name,
+                        "score": 1.0,
+                    }
+                    for index, path in enumerate(self.image_paths, 1)
+                ],
+            },
+        )()
+
+    def analyze_image_layout(self, image_path: Path) -> dict[str, Any]:
+        del image_path
+        return {"question_layout": "single", "questions": []}
+
+    def analyze_image_scope(self, image_path: Path) -> dict[str, Any]:
+        del image_path
+        return {
+            "question_layout": "single",
+            "single_analysis": {
+                "loads": [{"type": "集中", "raw": "10"}],
+                "chapter_hint": "5位移法",
+                "chapter_confidence": 1.0,
+                "chapter_evidence": "mock",
+            },
+        }
+
+    def search_loads(
+        self,
+        loads: list[dict[str, Any]],
+        chapter: str,
+        *,
+        rerank: bool = False,
+        force_rerank: bool = False,
+        status_callback=None,
+        classified: dict[str, Any] | None = None,
+        source: str = "mock_load_search",
+    ) -> Any:
+        del loads, rerank, force_rerank, status_callback, classified, source
+        return type(
+            "MockPipelineResult",
+            (),
+            {
+                "route": type(
+                    "MockRoute",
+                    (),
+                    {"route": "main", "category": "main_numeric"},
+                )(),
+                "chapter": chapter,
+                "reranked": False,
+                "rerank_note": "",
+                "results": [
+                    {
+                        "rank": index,
+                        "path": str(path),
+                        "name": path.name,
+                        "score": 1.0,
+                    }
+                    for index, path in enumerate(self.image_paths, 1)
+                ],
+            },
+        )()
+
+
+class FeishuTikuBridge:
+    def __init__(self, bot: TikuBot, client: FeishuClient, options: FeishuTikuOptions) -> None:
+        self.bot = bot
+        self.client = client
+        self.options = options
+        self._seen_event_ids: set[str] = set()
+
+    def handle_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if "encrypt" in payload:
+            return {"ok": False, "error": "encrypted events are not supported in MVP"}
+
+        if is_url_verification(payload):
+            if not self._valid_token(payload):
+                return {"ok": False, "error": "invalid verification token"}
+            return {"challenge": payload.get("challenge")}
+
+        if not self._valid_token(payload):
+            return {"ok": False, "error": "invalid verification token"}
+
+        header = payload.get("header") or {}
+        event_type = header.get("event_type") or payload.get("type")
+        if event_type != "im.message.receive_v1":
+            return {"ok": True, "ignored": event_type or "unknown"}
+
+        event_id = str(header.get("event_id") or "")
+        if event_id and event_id in self._seen_event_ids:
+            return {"ok": True, "duplicate": event_id}
+        if event_id:
+            self._seen_event_ids.add(event_id)
+
+        event = payload.get("event") or {}
+        message = event.get("message") or {}
+        message_id = str(message.get("message_id") or "")
+        sender = extract_sender(event)
+        if not message_id:
+            return {"ok": True, "ignored": "missing-message-id"}
+        if is_stale_message(extract_message_created_at(payload, event, message), self.options.max_message_age_seconds):
+            return {"ok": True, "ignored": "stale-message", "message_id": message_id}
+
+        thread = threading.Thread(
+            target=self._process_and_reply,
+            args=(message_id, sender, message),
+            daemon=True,
+        )
+        thread.start()
+        return {"ok": True, "accepted": message_id}
+
+    def _process_and_reply(self, message_id: str, sender: str, message: dict[str, Any]) -> None:
+        try:
+            response = self._response_for_message(message_id, sender, message)
+        except Exception as exc:
+            response = BotResponse(texts=[f"处理失败：{exc}"])
+        for text in response.texts:
+            self.client.reply_text(message_id, text)
+        for image in response.images:
+            self.client.reply_image(message_id, image)
+
+    def _response_for_message(self, message_id: str, sender: str, message: dict[str, Any]) -> BotResponse:
+        self._mark_working_async(message_id)
+        message_type = message.get("message_type")
+        if message_type == "text":
+            return self.bot.receive_text(sender, extract_text_message(message))
+        if message_type == "image":
+            image_key = extract_image_key(message)
+            if not image_key:
+                return BotResponse(texts=["收到图片消息，但没有拿到 image_key。"])
+            output = self.options.temp_dir / "incoming" / f"{message_id}_{image_key}.jpg"
+            image_path = self.client.download_message_image(message_id, image_key, output)
+            return self.bot.receive_image(sender, image_path)
+        return BotResponse(texts=["当前只支持题图图片和章节/编号文字。"])
+
+    def _mark_working_async(self, message_id: str) -> None:
+        if not self.options.working_reaction:
+            return
+        thread = threading.Thread(
+            target=self._mark_working,
+            args=(message_id,),
+            daemon=True,
+        )
+        thread.start()
+
+    def _mark_working(self, message_id: str) -> None:
+        emoji_type = self.options.working_reaction
+        if not emoji_type:
+            return
+        try:
+            self.client.add_reaction(message_id, emoji_type)
+            print(f"reacted to {message_id}: {emoji_type}", flush=True)
+        except Exception as exc:
+            print(f"failed to react {message_id}: {exc}", file=sys.stderr, flush=True)
+
+    def _valid_token(self, payload: dict[str, Any]) -> bool:
+        expected = self.options.verification_token
+        if not expected:
+            return True
+        actual = (payload.get("header") or {}).get("token") or payload.get("token")
+        return actual == expected
+
+
+class FeishuHandler(BaseHTTPRequestHandler):
+    bridge: FeishuTikuBridge
+
+    def do_GET(self) -> None:
+        if self.path == "/health":
+            self._send_json({"ok": True})
+            return
+        self._send_json({"error": "not found"}, status=404)
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length).decode("utf-8")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            self._send_json({"ok": False, "error": "invalid json"}, status=400)
+            return
+
+        if self.path not in {"/feishu/events", "/"}:
+            self._send_json({"ok": False, "error": "not found"}, status=404)
+            return
+
+        result = self.bridge.handle_payload(payload)
+        status = 200 if result.get("ok", True) else 403
+        self._send_json(result, status=status)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+    def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def format_chapter_prompt(image_path: Path | None = None, result: Any | None = None) -> str:
+    prefix = "收到题图" if image_path else "请选择章节"
+    lines = [f"{prefix}，请选择章节："]
+    if result is not None:
+        hint = getattr(result, "chapter_hint", "")
+        confidence = getattr(result, "chapter_confidence", 0.0)
+        evidence = getattr(result, "chapter_evidence", "")
+        if hint and hint != "unknown":
+            lines.append(f"自动识别不够确定：{hint}（{round(float(confidence) * 100)}%）")
+        elif evidence:
+            lines.append("未能自动确定章节。")
+    lines.extend(f"- {chapter}" for chapter in CHAPTERS)
+    lines.append("回复章节号 2/3/4/5/6/7/8，或直接回复章节名；回复 0 退出。")
+    lines.append("发送 a 可在自动/手动章节模式之间切换。")
+    return "\n".join(lines)
+
+
+def format_candidate_reply(chapter: str, results: list[dict[str, Any]], *, rerank_note: str = "") -> str:
+    scores = "、".join(format_result_score(item) for item in results)
+    count = len(results)
+    lines = [
+        f"章节：{chapter}",
+        f"下面是相似题目 Top {len(results)}，相似比分别为：{scores}",
+        f"{delete_shortcuts(count)}：删除对应错题",
+        "0：结束",
+        "a：切换手动识别章节",
+    ]
+    if rerank_note:
+        lines.insert(2, rerank_note)
+    return "\n".join(lines)
+
+
+def format_no_match_reply(result: Any, question_label: str | None = None) -> str:
+    prefix = f"第{question_label}题：" if question_label else ""
+    chapter = getattr(result, "chapter", None) or getattr(result, "chapter_hint", None) or "未知"
+    loads = getattr(result, "loads", []) or []
+    lines = [
+        f"{prefix}没有找到匹配题目。",
+        f"识别章节：{chapter}",
+        f"识别荷载：{format_loads(loads)}",
+    ]
+    return "\n".join(lines)
+
+
+def format_multi_question_list(session: TikuSession) -> str:
+    lines = ["识别到多题："]
+    for question in session.multi_questions:
+        label = question["label"]
+        chapter_text = display_summary_chapter(question)
+        loads_text = format_summary_loads(question.get("loads", []))
+        lines.extend([
+            f"第{label}题：章节：{chapter_text}",
+            f"荷载：{loads_text}",
+        ])
+    example_label = session.multi_questions[0]["label"] if session.multi_questions else "1"
+    example = question_command_label(example_label)
+    lines.extend([
+        "",
+        "回复：",
+        f"{example}        查第{example_label}题，按识别章节",
+        f"{example}-力法   查第{example_label}题，指定力法",
+        "0        结束",
+    ])
+    return "\n".join(lines)
+
+
+def format_multi_help(session: TikuSession) -> str:
+    return "没有识别到有效指令。\n\n" + format_multi_question_list(session)
+
+
+def format_multi_question_needs_chapter(question: dict[str, Any]) -> str:
+    label = question["label"]
+    command_label = question_command_label(label)
+    return "\n".join([
+        f"第{label}题章节不确定，请指定章节后检索。",
+        f"例如：{command_label}-力法、{command_label}-位移法、{command_label}-静定结构",
+    ])
+
+
+def format_multi_candidate_reply(
+    question: dict[str, Any],
+    chapter: str,
+    results: list[dict[str, Any]],
+    *,
+    reranked: bool = False,
+    rerank_note: str = "",
+) -> str:
+    label = question["label"]
+    command_label = question_command_label(label)
+    scores = "、".join(format_result_score(item) for item in results)
+    mode = "已复筛" if reranked else "未复筛"
+    lines = [
+        f"第{label}题：{chapter}（{mode}）",
+        f"下面是相似题目 Top {len(results)}，相似比分别为：{scores}",
+    ]
+    if rerank_note:
+        lines.append(rerank_note)
+    lines.extend(["", format_multi_action_lines(question, len(results), heading="回复：")])
+    return "\n".join(lines)
+
+
+def format_multi_next_actions(question: dict[str, Any], result_count: int) -> str:
+    return format_multi_action_lines(question, result_count, heading="请继续回复：")
+
+
+def format_multi_action_lines(question: dict[str, Any], result_count: int, *, heading: str) -> str:
+    label = question["label"]
+    command_label = question_command_label(label)
+    lines = [heading]
+    lines.extend(f"{command_label}-{index}      获取第{label}题第{index}个答案" for index in range(1, result_count + 1))
+    lines.append(f"{delete_shortcuts(result_count)}  删除当前候选错题")
+    lines.append("0        返回多题列表")
+    return "\n".join(lines)
+
+
+def choice_shortcuts(count: int) -> str:
+    count = max(0, int(count))
+    if count <= 0:
+        return "0"
+    return "/".join(str(index) for index in range(1, count + 1))
+
+
+def delete_shortcuts(count: int) -> str:
+    count = max(0, int(count))
+    if count <= 0:
+        return "-1"
+    return "/".join(f"-{index}" for index in range(1, count + 1))
+
+
+def failure_from_pipeline_result(result: Any) -> dict[str, Any]:
+    return {
+        "chapter_hint": getattr(result, "chapter_hint", "unknown"),
+        "chapter_confidence": getattr(result, "chapter_confidence", 0.0),
+        "chapter_evidence": getattr(result, "chapter_evidence", ""),
+        "loads": getattr(result, "loads", []),
+        "route": getattr(getattr(result, "route", None), "route", ""),
+        "category": getattr(getattr(result, "route", None), "category", ""),
+        "reason": getattr(getattr(result, "route", None), "reason", ""),
+    }
+
+
+def chapter_decision_mode(*, requested_chapter: str | None, final_chapter: str | None, route: str = "") -> str:
+    if not is_auto_chapter(requested_chapter):
+        return "manual"
+    if final_chapter:
+        return "auto_used"
+    if route == "needs_chapter":
+        return "manual_required"
+    return "auto_no_chapter"
+
+
+def log_search_chapter_decision(
+    *,
+    source: str,
+    image_path: Path | str | None,
+    requested_chapter: str | None,
+    result: Any,
+) -> None:
+    route = str(getattr(getattr(result, "route", None), "route", "") or "")
+    final_chapter = str(getattr(result, "chapter", "") or "")
+    append_chapter_judgment_log(
+        source=source,
+        image_path=image_path,
+        requested_chapter=requested_chapter,
+        final_chapter=final_chapter,
+        decision_mode=chapter_decision_mode(
+            requested_chapter=requested_chapter,
+            final_chapter=final_chapter,
+            route=route,
+        ),
+        classified={
+            "chapter_hint": getattr(result, "chapter_hint", "unknown"),
+            "chapter_confidence": getattr(result, "chapter_confidence", 0.0),
+            "chapter_evidence": getattr(result, "chapter_evidence", ""),
+            "loads": getattr(result, "loads", []),
+        },
+        loads=getattr(result, "loads", []),
+        route=route,
+        category=str(getattr(getattr(result, "route", None), "category", "") or ""),
+        result_count=len(getattr(result, "results", []) or []),
+    )
+
+
+def log_store_chapter_decision(draft: StoreDraft) -> None:
+    append_chapter_judgment_log(
+        source="feishu_store_chapter_decision",
+        image_path=draft.question_image_path,
+        requested_chapter="auto",
+        final_chapter=draft.chapter or "",
+        decision_mode="auto_used" if draft.chapter else "manual_required",
+        classified={
+            "chapter_hint": draft.chapter_hint,
+            "chapter_confidence": draft.chapter_confidence,
+            "chapter_evidence": draft.chapter_evidence,
+            "loads": draft.loads,
+        },
+        loads=draft.loads,
+        route=draft.route,
+        category=draft.category,
+    )
+
+
+def log_multi_chapter_decision(*, image_path: Path | str | None, question: dict[str, Any]) -> None:
+    final_chapter = effective_question_chapter(question)
+    append_chapter_judgment_log(
+        source="feishu_multi_chapter_decision",
+        image_path=image_path,
+        requested_chapter="auto",
+        final_chapter=final_chapter if final_chapter not in {None, "unsupported"} else "",
+        decision_mode="auto_used" if final_chapter and final_chapter != "unsupported" else "manual_required",
+        classified=question,
+        loads=question.get("loads", []),
+        route="",
+        category="",
+        extra={
+            "question_label": question.get("label", ""),
+        },
+    )
+
+
+def log_manual_chapter_after_failure(
+    *,
+    source: str,
+    image_path: Path | str | None,
+    manual_text: str,
+    final_chapter: str,
+    failure: dict[str, Any],
+) -> None:
+    append_chapter_judgment_log(
+        source=source,
+        image_path=image_path,
+        requested_chapter="auto",
+        final_chapter=final_chapter,
+        decision_mode="manual_after_auto_failed",
+        classified={
+            "chapter_hint": failure.get("chapter_hint", "unknown"),
+            "chapter_confidence": failure.get("chapter_confidence", 0.0),
+            "chapter_evidence": failure.get("chapter_evidence", ""),
+            "loads": failure.get("loads", []),
+        },
+        loads=failure.get("loads", []),
+        route=str(failure.get("route") or ""),
+        category=str(failure.get("category") or ""),
+        extra={
+            "manual_text": manual_text,
+            "failure_reason": str(failure.get("reason") or ""),
+        },
+    )
+
+
+def format_single_action_lines(result_count: int, *, heading: str) -> str:
+    lines = [heading]
+    lines.extend(f"{index}        获取第{index}名答案" for index in range(1, result_count + 1))
+    lines.append(f"{delete_shortcuts(result_count)}  删除对应错题")
+    lines.append("0        结束")
+    return "\n".join(lines)
+
+
+def question_command_label(label: object) -> str:
+    return normalize_question_key(label) or str(label or "").strip()
+
+
+def normalize_multi_questions(raw_questions: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_questions, list):
+        return []
+    questions = []
+    for index, raw in enumerate(raw_questions, 1):
+        if not isinstance(raw, dict):
+            continue
+        label = str(raw.get("label") or index).strip() or str(index)
+        loads = [item for item in raw.get("loads", []) if isinstance(item, dict)]
+        questions.append({
+            "label": label,
+            "key": normalize_question_key(label),
+            "bbox": raw.get("bbox"),
+            "loads": loads,
+            "chapter_hint": str(raw.get("chapter_hint") or "unknown").strip(),
+            "chapter_confidence": safe_float(raw.get("chapter_confidence")),
+            "chapter_evidence": str(raw.get("chapter_evidence") or "").strip(),
+        })
+    return questions
+
+
+def is_probable_structure_block(box: tuple[int, int, int, int, int], image_shape: tuple[int, ...]) -> bool:
+    x, _y, w, h, area = box
+    image_height, image_width = image_shape[:2]
+    area_ratio = area / max(1, image_width * image_height)
+    height_ratio = h / max(1, image_height)
+    width_ratio = w / max(1, image_width)
+    aspect_ratio = w / max(1, h)
+    fill_ratio = area / max(1, w * h)
+
+    if height_ratio < 0.08:
+        return False
+    if area_ratio < 0.012:
+        return False
+    if width_ratio < 0.18:
+        return False
+    if aspect_ratio > 8:
+        return False
+    if fill_ratio > 0.75 and height_ratio < 0.12:
+        return False
+    if x > image_width * 0.68 and width_ratio < 0.16:
+        return False
+    return True
+
+
+def finalize_ordered_multi_crops(
+    questions: list[dict[str, Any]],
+    selected_paths: list[Path],
+    output_dir: Path,
+) -> dict[str, str]:
+    crops: dict[str, str] = {}
+    for index, (question, selected_path) in enumerate(zip(questions, selected_paths), 1):
+        label = str(question.get("label") or index).strip()
+        key = normalize_question_key(label)
+        final_path = output_dir / f"question_{safe_filename_part(label)}_diagram.jpg"
+        if selected_path != final_path:
+            final_path.write_bytes(selected_path.read_bytes())
+        crops[key] = str(final_path)
+    return crops
+
+
+def build_block_contact_sheet(block_paths: list[Path], output_path: Path) -> Path:
+    thumb_width = 380
+    thumb_height = 260
+    columns = 2
+    rows = max(1, (len(block_paths) + columns - 1) // columns)
+    sheet = Image.new("RGB", (thumb_width * columns, thumb_height * rows), "white")
+    for index, path in enumerate(block_paths, 1):
+        with Image.open(path).convert("RGB") as image:
+            image.thumbnail((thumb_width - 20, thumb_height - 42))
+            tile = Image.new("RGB", (thumb_width, thumb_height), "white")
+            tile.paste(image, ((thumb_width - image.width) // 2, 34))
+        draw = ImageDraw.Draw(tile)
+        draw.text((10, 8), f"block_{index}", fill="black")
+        x = (index - 1) % columns * thumb_width
+        y = (index - 1) // columns * thumb_height
+        sheet.paste(tile, (x, y))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(output_path, quality=92)
+    return output_path
+
+
+def qwen_filter_structure_blocks(block_paths: list[Path], output_dir: Path, api_key: str) -> list[Path]:
+    if not block_paths:
+        return []
+    contact_sheet = build_block_contact_sheet(block_paths, output_dir / "block_contact_sheet.jpg")
+    payload = {
+        "model": DEFAULT_MODEL,
+        "messages": [
+            {"role": "system", "content": BLOCK_FILTER_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_to_data_url(contact_sheet)}},
+                    {"type": "text", "text": "只输出JSON。"},
+                ],
+            },
+        ],
+        "temperature": 0,
+        "max_tokens": 256,
+        "enable_thinking": False,
+    }
+    request = urllib.request.Request(
+        DEFAULT_ENDPOINT,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    started = time.perf_counter()
+    with urllib.request.urlopen(request, timeout=120) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    seconds = time.perf_counter() - started
+    content = data["choices"][0]["message"]["content"]
+    parsed = parse_model_json(content)
+    indexes = parsed.get("structure_blocks", [])
+    selected: list[Path] = []
+    if isinstance(indexes, list):
+        for value in indexes:
+            try:
+                index = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= index <= len(block_paths):
+                selected.append(block_paths[index - 1])
+    print(
+        "multi diagram qwen block filter: "
+        f"selected={len(selected)} seconds={seconds:.2f}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return selected
+
+
+def prepare_multi_diagram_crops(
+    image_path: Path,
+    questions: list[dict[str, Any]],
+    output_root: Path,
+) -> dict[str, str]:
+    try:
+        if cv2 is None or np is None:
+            return {}
+        image = cv2.imdecode(np.fromfile(str(image_path), dtype=np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            return {}
+        boxes = find_diagram_blocks_cv(image)
+        if not boxes:
+            return {}
+        output_dir = output_root / f"{int(time.time() * 1000)}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        candidates: list[Path] = []
+        probable_structure_paths: list[Path] = []
+        with Image.open(image_path).convert("RGB") as pil:
+            for index, box in enumerate(boxes, 1):
+                x, y, w, h, _area = box
+                crop = safe_crop(pil, [x, y, x + w, y + h], padding_ratio=0.06)
+                if crop is None:
+                    continue
+                crop_path = output_dir / f"block_{index}_diagram.jpg"
+                crop.save(crop_path, quality=94)
+                candidates.append(crop_path)
+                if is_probable_structure_block(box, image.shape):
+                    probable_structure_paths.append(crop_path)
+
+        if not candidates:
+            return {}
+
+        print(
+            "multi diagram crops: "
+            f"questions={len(questions)} cv_blocks={len(candidates)} "
+            f"local_structure_blocks={len(probable_structure_paths)}",
+            file=sys.stderr,
+            flush=True,
+        )
+        if len(probable_structure_paths) == len(questions):
+            return finalize_ordered_multi_crops(questions, probable_structure_paths, output_dir)
+
+        api_key = os.environ.get("DASHSCOPE_API_KEY", "") or cfg.get("dashscope_api_key", "")
+        if api_key:
+            try:
+                qwen_structure_paths = qwen_filter_structure_blocks(candidates, output_dir, api_key)
+            except Exception as exc:  # noqa: BLE001 - fallback to load-only multi search.
+                print(f"multi diagram qwen block filter failed: {exc}", file=sys.stderr, flush=True)
+                qwen_structure_paths = []
+            if len(qwen_structure_paths) == len(questions):
+                return finalize_ordered_multi_crops(questions, qwen_structure_paths, output_dir)
+
+        print(
+            "multi diagram crops: no reliable binding; fallback to load-only search",
+            file=sys.stderr,
+            flush=True,
+        )
+        return {}
+    except Exception as exc:  # noqa: BLE001 - crop is optional; fall back to non-reranked multi search.
+        print(f"multi diagram crop failed: {exc}", file=sys.stderr, flush=True)
+        return {}
+
+
+def display_question_chapter(question: dict[str, Any]) -> str:
+    chapter = effective_question_chapter(question)
+    if chapter == "unsupported":
+        return "不在当前题库范围"
+    if chapter:
+        return chapter
+    return "章节未知"
+
+
+def display_summary_chapter(question: dict[str, Any]) -> str:
+    chapter = display_question_chapter(question)
+    return re.sub(r"^\d+", "", chapter)
+
+
+def format_summary_loads(loads: list[dict[str, Any]]) -> str:
+    return format_loads(loads).replace(":", "：")
+
+
+def effective_question_chapter(question: dict[str, Any]) -> str | None:
+    hint = str(question.get("chapter_hint") or "").strip()
+    confidence = safe_float(question.get("chapter_confidence"))
+    if hint in CHAPTERS and confidence >= 0.8:
+        return hint
+    return None
+
+
+def format_loads(loads: list[dict[str, Any]]) -> str:
+    parts = []
+    for item in loads:
+        typ = str(item.get("type") or "").strip()
+        raw = str(item.get("raw") or "").strip()
+        if typ and raw:
+            parts.append(f"{typ}:{raw}")
+        elif raw:
+            parts.append(raw)
+    return "、".join(parts) if parts else "未识别"
+
+
+def parse_multi_command(text: str) -> dict[str, Any] | None:
+    clean = text.strip()
+    if not clean:
+        return None
+    if "-" not in clean:
+        return {"kind": "search", "question": clean, "value": None}
+    left, right = clean.split("-", 1)
+    left = left.strip()
+    right = right.strip()
+    if not left or not right:
+        return None
+    if right.isdigit():
+        return {"kind": "answer", "question": left, "value": int(right)}
+    chapter = parse_chapter(right)
+    if not chapter:
+        return None
+    return {"kind": "chapter", "question": left, "value": chapter}
+
+
+def find_multi_question(session: TikuSession, raw_label: str) -> dict[str, Any] | None:
+    key = normalize_question_key(raw_label)
+    for question in session.multi_questions:
+        if normalize_question_key(question.get("label")) == key:
+            return question
+    return None
+
+
+def normalize_question_key(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"第|题|图|[()\uff08\uff09\s]", "", text)
+    number = chinese_question_number_to_int(text)
+    if number is not None:
+        return str(number)
+    return text
+
+
+def chinese_question_number_to_int(text: str) -> int | None:
+    text = str(text or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+
+    digits = {
+        "零": 0,
+        "〇": 0,
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+    }
+    if text in digits and digits[text] > 0:
+        return digits[text]
+    if text == "十":
+        return 10
+    if "十" not in text:
+        return None
+
+    left, right = text.split("十", 1)
+    if left == "":
+        tens = 1
+    elif left in digits and digits[left] > 0:
+        tens = digits[left]
+    else:
+        return None
+
+    if right == "":
+        ones = 0
+    elif right in digits:
+        ones = digits[right]
+    else:
+        return None
+    return tens * 10 + ones
+
+
+def safe_filename_part(value: object) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]+", "_", text)
+    return text.strip("_") or "question"
+
+
+def safe_float(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def format_result_score(item: dict[str, Any]) -> str:
+    score = item.get("final_score") if item.get("final_score") is not None else item.get("score", 0)
+    try:
+        return f"{round(float(score) * 100)}%"
+    except (TypeError, ValueError):
+        return "未知"
+
+
+def parse_chapter(text: str) -> str | None:
+    clean = text.strip()
+    if clean.isdigit():
+        for chapter in CHAPTERS:
+            if chapter.startswith(clean):
+                return chapter
+    for chapter in CHAPTERS:
+        if clean == chapter or clean in chapter:
+            return chapter
+    return None
+
+
+def parse_choice(text: str) -> int | None:
+    clean = text.strip()
+    if not re.fullmatch(r"[0-3]", clean):
+        return None
+    return int(clean)
+
+
+def parse_chapter_mode(text: str) -> str | None:
+    clean = text.strip().lower()
+    if clean == "a":
+        return CHAPTER_MODE_TOGGLE
+    if clean in {"自动", "auto"}:
+        return CHAPTER_MODE_AUTO
+    if clean in {"手动", "manual", "m"}:
+        return CHAPTER_MODE_MANUAL
+    return None
+
+
+def is_cancel(text: str) -> bool:
+    return text.strip().lower() in {"0", "取消", "cancel", "退出", "算了"}
+
+
+def answer_output_files() -> list[Path]:
+    root = Path(ANSWER_OUTPUT)
+    if not root.exists():
+        return []
+    patterns = ["*.jpg", "*.jpeg", "*.png", "*.webp"]
+    files: list[Path] = []
+    for pattern in patterns:
+        files.extend(root.glob(pattern))
+    return sorted(files, key=lambda path: path.stat().st_mtime)
+
+
+def extract_text_message(message: dict[str, Any]) -> str:
+    if message.get("message_type") != "text":
+        return ""
+    try:
+        content = json.loads(str(message.get("content") or "{}"))
+    except json.JSONDecodeError:
+        return ""
+    return str(content.get("text") or "").strip()
+
+
+def extract_image_key(message: dict[str, Any]) -> str:
+    try:
+        content = json.loads(str(message.get("content") or "{}"))
+    except json.JSONDecodeError:
+        return ""
+    return str(content.get("image_key") or "").strip()
+
+
+def extract_sender(event: dict[str, Any]) -> str:
+    sender = event.get("sender") or {}
+    sender_id = sender.get("sender_id") or {}
+    for key in ("user_id", "open_id", "union_id"):
+        value = sender_id.get(key)
+        if value:
+            return str(value)
+    return "feishu"
+
+
+def is_url_verification(payload: dict[str, Any]) -> bool:
+    payload_type = payload.get("type") or (payload.get("header") or {}).get("type")
+    return payload_type == "url_verification" and "challenge" in payload
+
+
+def extract_message_created_at(
+    payload: dict[str, Any],
+    event: dict[str, Any],
+    message: dict[str, Any],
+) -> float | None:
+    header = payload.get("header") or {}
+    for candidate in (
+        message.get("create_time"),
+        message.get("update_time"),
+        event.get("create_time"),
+        header.get("create_time"),
+        header.get("event_create_time"),
+        header.get("timestamp"),
+    ):
+        parsed = parse_feishu_timestamp(candidate)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def parse_feishu_timestamp(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    if timestamp <= 0:
+        return None
+    if timestamp > 10_000_000_000_000:
+        return timestamp / 1_000_000
+    if timestamp > 10_000_000_000:
+        return timestamp / 1000
+    return timestamp
+
+
+def is_stale_message(created_at: float | None, max_age_seconds: int) -> bool:
+    if created_at is None or max_age_seconds <= 0:
+        return False
+    return time.time() - created_at > max_age_seconds
+
+
+def request_json(
+    url: str,
+    *,
+    method: str,
+    payload: dict[str, Any] | None = None,
+    raw_body: bytes | None = None,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    if raw_body is not None:
+        body = raw_body
+        request_headers = {}
+    else:
+        body = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
+        request_headers = {"Content-Type": "application/json; charset=utf-8"}
+    if headers:
+        request_headers.update(headers)
+
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        request = urllib.request.Request(url, data=body, headers=request_headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Feishu HTTP error {exc.code}: {detail}") from exc
+        except (urllib.error.URLError, TimeoutError, ssl.SSLError) as exc:
+            last_error = exc
+            if attempt == 3:
+                raise RuntimeError(f"Feishu request failed after retries: {exc}") from exc
+            time.sleep(0.8 * attempt)
+    else:
+        raise RuntimeError(f"Feishu request failed: {last_error}")
+
+    code = data.get("code", 0)
+    if code not in {0, "0"}:
+        raise RuntimeError(f"Feishu API error: {data}")
+    return data
+
+
+def build_multipart_form_data(
+    boundary: str,
+    *,
+    fields: dict[str, str],
+    files: dict[str, tuple[str, bytes, str]],
+) -> bytes:
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.extend([
+            f"--{boundary}\r\n".encode("utf-8"),
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"),
+            str(value).encode("utf-8"),
+            b"\r\n",
+        ])
+    for name, (filename, content, content_type) in files.items():
+        chunks.extend([
+            f"--{boundary}\r\n".encode("utf-8"),
+            (
+                f'Content-Disposition: form-data; name="{name}"; '
+                f'filename="{filename}"\r\n'
+            ).encode("utf-8"),
+            f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"),
+            content,
+            b"\r\n",
+        ])
+    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+    return b"".join(chunks)
+
+
+def load_options(args: argparse.Namespace) -> FeishuTikuOptions:
+    app_id = get_env_or_user(args.app_id_env) or cfg.get("feishu_app_id", "")
+    app_secret = get_env_or_user(args.app_secret_env) or cfg.get("feishu_app_secret", "")
+    verification_token = get_env_or_user(args.verification_token_env) or cfg.get("feishu_verification_token")
+    return FeishuTikuOptions(
+        app_id=app_id,
+        app_secret=app_secret,
+        verification_token=verification_token,
+        dry_run=args.dry_run,
+        session_ttl_seconds=args.session_ttl_minutes * 60,
+        temp_dir=Path(args.temp_dir),
+        top_k=args.top,
+        rerank_top=args.rerank_top,
+        max_message_age_seconds=args.max_message_age_minutes * 60,
+        working_reaction=args.working_reaction or None,
+    )
+
+
+def get_env_or_user(name: str) -> str:
+    value = os.environ.get(name)
+    if value:
+        return value
+    if sys.platform != "win32":
+        return ""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            value, _ = winreg.QueryValueEx(key, name)
+            return str(value or "")
+    except OSError:
+        return ""
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="结构力学题库飞书机器人")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8788)
+    parser.add_argument("--dry-run", action="store_true", help="不调用飞书发送/下载接口")
+    parser.add_argument("--app-id-env", default="FEISHU_TIKU_APP_ID")
+    parser.add_argument("--app-secret-env", default="FEISHU_TIKU_APP_SECRET")
+    parser.add_argument("--verification-token-env", default="FEISHU_TIKU_VERIFICATION_TOKEN")
+    parser.add_argument("--temp-dir", default=str(BASE / ".tmp_feishu_tiku"))
+    parser.add_argument("--session-ttl-minutes", type=int, default=10)
+    parser.add_argument("--max-message-age-minutes", type=int, default=15)
+    parser.add_argument("--top", type=int, default=3)
+    parser.add_argument("--rerank-top", type=int, default=DISPLAY_MAX_RESULTS)
+    parser.add_argument(
+        "--working-reaction",
+        default="OK",
+        help="收到图片后给原消息添加的 emoji_type；留空则关闭",
+    )
+
+    sub = parser.add_subparsers(dest="cmd")
+    dry = sub.add_parser("dry-run-flow", help="用本地图片模拟图片->章节流程")
+    dry.add_argument("--image", required=True, help="本地题图路径")
+    dry.add_argument("--chapter", required=True, help="章节编号或章节名")
+    dry.add_argument("--choice", type=int, help="可选：继续模拟选择答案 0/1/2/3")
+    dry.add_argument(
+        "--real-search",
+        action="store_true",
+        help="调用真实 Qwen/题库检索；默认只用本地 mock 结果测试状态机",
+    )
+    return parser
+
+
+def print_response(response: BotResponse) -> None:
+    for text in response.texts:
+        print(text)
+    for image in response.images:
+        print(f"[image] {image}")
+
+
+def run_dry_flow(args: argparse.Namespace, options: FeishuTikuOptions) -> int:
+    options.dry_run = True
+    coordinator = None
+    if not args.real_search:
+        image = Path(args.image)
+        coordinator = MockCoordinator([image, image, image])
+    bot = TikuBot(options=options, coordinator=coordinator)
+    sender = "dry-run"
+    bot.set_chapter_mode(sender, CHAPTER_MODE_MANUAL)
+    print_response(bot.receive_image(sender, Path(args.image)))
+    print_response(bot.receive_text(sender, args.chapter))
+    if args.choice is not None:
+        print_response(bot.receive_text(sender, str(args.choice)))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    configure_utf8_stdio()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    options = load_options(args)
+
+    if args.cmd == "dry-run-flow":
+        return run_dry_flow(args, options)
+
+    if not options.dry_run and (not options.app_id or not options.app_secret):
+        raise SystemExit("missing Feishu app id/secret; set env vars or use --dry-run")
+
+    client = FeishuClient(options.app_id, options.app_secret, dry_run=options.dry_run)
+    bot = TikuBot(options=options)
+    FeishuHandler.bridge = FeishuTikuBridge(bot=bot, client=client, options=options)
+    server = ThreadingHTTPServer((args.host, args.port), FeishuHandler)
+    print(f"Feishu tiku bot listening on http://{args.host}:{args.port}/feishu/events", flush=True)
+    print(f"dry_run={options.dry_run}", flush=True)
+    server.serve_forever()
+    return 0
+
+
+def configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -20,6 +20,10 @@ import json
 import re
 import sys
 import argparse
+import shutil
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 os.environ['no_proxy'] = '*'
@@ -48,17 +52,38 @@ cfg = load_local_config()
 ROOT = Path(cfg.get("root", r"D:\桌面\答疑、帮做\结构力学\帮做"))
 ANSWER_OUTPUT = Path(cfg.get("answer_output", r"D:\桌面\答疑、帮做\答案输出"))
 LAST_SEARCH_FILE = ROOT / "_last_search.json"
-ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY", "")
-TOP_K = cfg.get("top_k", 5)
+ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY") or cfg.get("zhipuai_api_key", "")
+TOP_K = cfg.get("top_k", 3)
+RERANK_MIN_LOAD_SCORE = 0.5
+DISPLAY_ALL_SCORE = 0.9
+DISPLAY_MAX_RESULTS = 3
+RERANK_LOAD_WEIGHT = 0.5
+RERANK_VISION_WEIGHT = 0.5
+LENGTH_TIE_FINAL_FLOOR = 0.9
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
+_PATH_REPAIR_BACKUPS = set()
+_PATH_REPAIR_BACKUP_DIR = None
 
 SYSTEM_PROMPT = """从图片中提取所有外部荷载信息。严格按以下JSON格式输出，不要输出任何其他内容。
 
-{"loads": [{"type": "<荷载类型>", "raw": "<图中标注>"}]}
+{"loads": [{"type": "<荷载类型>", "raw": "<去掉单位后的荷载标注；赋值保留符号=数值>"}]}
 
 荷载类型只有三种:
 - "集中": 集中力, 如 10kN, P, F=20kN, Fp=100kN
-- "均布": 均布荷载/分布荷载, 如 q=4kN/m, 20kN/m, q
-- "弯矩": 弯矩/力偶, 如 10kN·m, M=20kN·m
+- "均布": 均布荷载/分布荷载, 如 q=4kN/m, 20kN/m, q, F/L
+- "弯矩": 弯矩/力偶, 如 10kN·m, M=20kN·m, FL, ql²
+
+荷载类型必须根据图形形态判断，不要根据单位判断:
+- 直箭头/集中箭头是集中力。
+- 一排分布箭头是均布荷载。
+- 弧形箭头/力偶符号才是弯矩。
+- 如果图形是均布荷载但文字单位误写成 kN·m 或 kN.m，仍输出均布，不要额外输出弯矩。
+
+raw 不要输出单位:
+- 5kN、5kN/m、5kN·m、5kN.m 都只输出 5。
+- q=20kN/m 输出 q=20。
+- M=20kN·m 输出 M=20。
+- q、P、2P/a、ql² 等纯符号表达保持原样。
 
 不是荷载的(忽略):
 - 刚度: EI, 2EI, EA
@@ -69,28 +94,193 @@ SYSTEM_PROMPT = """从图片中提取所有外部荷载信息。严格按以下J
 - 虚功单位力
 - 公式: ql²/8, ql/2
 
-raw字段保留图中原标注。无荷载输出{"loads":[]}。按集中→均布→弯矩排序。"""
+符号荷载规则:
+- 先检查题干文字或图片说明里是否给出符号赋值，例如 P=40kN、q=20kN/m、F1=40kN、F2=80kN、M=20kN·m。若符号荷载在图中出现且题干给出赋值，raw 必须保留“符号=数值”但删除单位：输出 P=40、q=20、F1=40、M=20，而不是只输出 P 或 q，也不要输出 P=40kN 或 q=20kN/m。
+- 如果同一符号荷载出现多次且题干只给出一次赋值，每个对应荷载都使用这个赋值 raw；带下标的符号如 F1/F2/P1/P2 要分别匹配自己的赋值。
+- 复合符号要作为整体提取，不要拆分。例如图上是 ql 只输出 ql，不要额外输出 q；图上是 qa² 只输出 qa²，不要额外输出 q。
+- F/L, F, FL 是同一 F 符号体系在不同量纲下的表达；q, qL, ql² 是同一 q 符号体系在不同量纲下的表达；M/L², M/L, M 是同一 M 符号体系在不同量纲下的表达。
+- Pa, ql, qL, qa, qa², ql², FL 这类表达如果作为外荷载标注出现，应保留完整 raw。
+
+无荷载输出{"loads":[]}。按集中→均布→弯矩排序。"""
 
 
 # ============================================================
 # 相似度计算
 # ============================================================
 
-def normalize_raw(raw):
-    s = raw.strip()
+SYMBOL_FAMILY_BASES = {
+    "distributed": 0.010, # 均布力为主题: A, AL, AL²
+    "force": 0.020,       # 集中力为主题: A/L, A, AL
+    "moment": 0.030,      # 集中弯矩为主题: A/L², A/L, A
+}
+
+
+def _format_symbol_code(base, factor):
+    value = base + (factor - 1.0) * 0.001
+    if abs(value - round(value, 3)) < 1e-9:
+        return f"{value:.3f}"
+    return f"{value:.4f}"
+
+
+def _split_symbol_factor(expr):
+    match = re.match(r"^(\d+(?:\.\d+)?)(.+)$", expr)
+    if match:
+        return float(match.group(1)), match.group(2)
+
+    match = re.match(r"^([a-z]+)/(\d+(?:\.\d+)?)$", expr)
+    if match:
+        return 1.0 / float(match.group(2)), match.group(1)
+
+    return 1.0, expr
+
+
+def _canonical_symbol_expr(raw):
+    s = str(raw or "").strip()
+    s = re.sub(r"\s+", "", s)
+    if "=" in s:
+        s = s.split("=", 1)[1]
+    s = s.lower()
+    s = s.replace("（", "(").replace("）", ")")
+    s = s.replace("^2", "²").replace("平方", "²").replace("方", "²")
+    s = s.replace("²", "2")
+    s = s.replace("·", "").replace("*", "").replace("×", "")
+    s = s.replace("_", "")
+    return s
+
+
+def _symbol_length_power(body):
+    if body in {"fp"}:
+        return 0
+    if "/" in body:
+        denominator = body.rsplit("/", 1)[1]
+        if re.fullmatch(r"[a-z]+2", denominator):
+            return -2
+        if re.fullmatch(r"[a-z]+", denominator):
+            return -1
+    if re.fullmatch(r"[a-z]+2", body) and len(body) > 2:
+        return 2
+    if re.fullmatch(r"[a-z]+", body) and len(body) > 1:
+        return 1
+    return 0
+
+
+def _symbol_family_by_dimension(body, load_type):
+    power = _symbol_length_power(body)
+    if load_type == "均布":
+        if power == -1:
+            return "force"
+        if power == -2:
+            return "moment"
+        return "distributed"
+    if load_type == "集中":
+        if power == 1:
+            return "distributed"
+        if power == -1:
+            return "moment"
+        return "force"
+    if load_type == "弯矩":
+        if power == 2:
+            return "distributed"
+        if power == 1:
+            return "force"
+        return "moment"
+    return None
+
+
+def _symbol_family_fallback(body):
+    distributed_family = {"q", "ql", "qa", "ql2", "qa2"}
+    force_family = {"f/l", "p/l", "fp/l", "f", "p", "fp", "fl", "pl", "pa", "fa", "fpl"}
+    moment_family = {"m/l2", "m/l", "m"}
+    if body in distributed_family:
+        return "distributed"
+    if body in force_family:
+        return "force"
+    if body in moment_family:
+        return "moment"
+    return None
+
+
+def _symbol_family_and_factor(raw, load_type=None):
+    s = _canonical_symbol_expr(raw)
+    factor, body = _split_symbol_factor(s)
+    body = body.strip("()")
+
+    if not re.search(r"[a-z]", body):
+        return None, factor
+
+    family = _symbol_family_by_dimension(body, load_type) if load_type else None
+    if family is None:
+        family = _symbol_family_fallback(body)
+    return family, factor
+
+
+def normalize_symbol_raw(raw, load_type=None, family_override=None):
+    """Map letter loads into reserved comparison codes.
+
+    The load type still separates 均布/集中/弯矩. These codes only encode the
+    symbol family and coefficient so the old similarity algorithm can be reused.
+    """
+    family, factor = _symbol_family_and_factor(raw, load_type)
+    if family_override and family:
+        family = family_override
+    if family:
+        return _format_symbol_code(SYMBOL_FAMILY_BASES[family], factor)
+    return None
+
+
+def _assignment_rhs(raw):
+    s = str(raw or "").strip()
+    if "=" not in s:
+        return s
+    left, right = s.split("=", 1)
+    if re.fullmatch(r"\s*[A-Za-z][A-Za-z0-9_]*\s*", left) and right.strip():
+        return right.strip()
+    return s
+
+
+def _looks_like_numeric_unit(raw):
+    s = str(raw or "").strip()
+    s = re.sub(r"\s+", "", s).lower()
+    return re.match(r"^\d+(?:\.\d+)?(?:k|kn|n)(?:[/·\.\-*a-z0-9]*)?$", s) is not None
+
+
+LOAD_UNIT_PATTERNS = [
+    r"kN[·.\-*×]?m",
+    r"N[·.\-*×]?m",
+    r"kN/m",
+    r"N/m",
+    r"kN",
+    r"(?<=\d)k\b",
+    r"\bN\b",
+]
+
+
+def strip_load_unit(raw):
+    """Remove physical units from a load label while keeping symbols/assignments."""
+    text = str(raw or "").strip()
+    text = re.sub(r"\s+", "", text)
+    text = text.replace("KN", "kN").replace("kn", "kN")
+    for pattern in LOAD_UNIT_PATTERNS:
+        text = re.sub(pattern, "", text, flags=re.I)
+    text = text.strip(".·*-×/")
+    return text
+
+
+def normalize_raw(raw, load_type=None, family_override=None):
+    comparable_raw = _assignment_rhs(strip_load_unit(raw))
+    if not _looks_like_numeric_unit(comparable_raw):
+        symbol_code = normalize_symbol_raw(comparable_raw, load_type, family_override)
+        if symbol_code is not None:
+            return symbol_code
+
+    s = str(comparable_raw or "").strip()
     s = re.sub(r'\s+', '', s)
     s = s.lower()
-    s = s.replace('kn', 'kN')
-    # 去掉等号前缀: F=10kN→10kN, q=4kN/m→4kN/m, M=20kN·m→20kN·m
-    s = re.sub(r'^[a-z_]+=\s*', '', s)
-    # 符号归一化: ql/qL → q
-    s = re.sub(r'^q[lL]$', 'q', s)
-    # F_P/Fp → F
-    s = re.sub(r'^[fF]_?[pP]$', 'F', s)
-    # 去掉力学单位后缀，只保留数值/符号（20kN→20, 4kN/m→4, 10kN·m→10）
+    # 去掉等号前缀: F=10kN→10kN, F1=40kN→40kN, q=4kN/m→4kN/m
+    s = re.sub(r'^[a-z][a-z0-9_]*=\s*', '', s)
+    # 去掉数值荷载单位后缀，只保留数值/符号（20k/20kN→20, 4kN/m→4, 10kN·m→10）
     # 类型已经由 type 字段区分，单位信息冗余
-    s = re.sub(r'kN.*', '', s)
-    s = re.sub(r'[kK][nN].*', '', s)
+    s = re.sub(r'(?<=\d)k(?:n)?.*$', '', s)
     s = s.strip('.')
     return s
 
@@ -108,25 +298,510 @@ def _safe_parse_loads(raw_str):
         return []
 
 
+def normalize_load_type(load_type, raw=None):
+    typ = str(load_type or "").strip()
+    aliases = {
+        "集中": "集中",
+        "集中力": "集中",
+        "单个力": "集中",
+        "点荷载": "集中",
+        "均布": "均布",
+        "均布荷载": "均布",
+        "分布力": "均布",
+        "分布荷载": "均布",
+        "弯矩": "弯矩",
+        "力偶": "弯矩",
+        "集中力偶": "弯矩",
+        "集中弯矩": "弯矩",
+    }
+    if typ in aliases:
+        return aliases[typ]
+
+    family, _ = _symbol_family_and_factor(raw, None)
+    if family == "moment":
+        return "弯矩"
+    return typ
+
+
+DEFAULT_NUMERIC_UNITS = {
+    "集中": "kN",
+    "均布": "kN/m",
+    "弯矩": "kN·m",
+}
+
+
+def add_default_numeric_unit(raw, load_type):
+    """Normalize manual input under the unitless storage/search rule."""
+    text = str(raw or "").strip()
+    return strip_load_unit(text)
+
+
+def normalize_query_loads(loads):
+    """Normalize user/query loads before routing and similarity comparison."""
+    normalized = fix_load_types([dict(item) for item in loads])
+    for item in normalized:
+        item["raw"] = strip_load_unit(item.get("raw", ""))
+    return normalized
+
+
 def fix_load_types(loads):
-    """修正分类错误"""
+    """修正模型输出的荷载类型别名。"""
     for item in loads:
-        raw = item.get("raw", "")
-        # ql/qL 是均布荷载q标注在跨度l旁，模型误合并，非集中力
-        if re.match(r'^q[lL]$', raw.lower().strip().replace(' ', '')):
-            item["type"] = "均布"
+        item["type"] = normalize_load_type(item.get("type", ""), item.get("raw", ""))
     return loads
+
+
+def _canonical_symbol(raw):
+    """Return a compact symbol expression for post-processing only."""
+    s = str(raw or "").strip()
+    s = re.sub(r"\s+", "", s)
+    if "=" in s:
+        s = s.split("=", 1)[1]
+    s = s.replace("^2", "²").replace("^3", "³")
+    s = s.replace("L", "l")
+    s = s.replace("·", "").replace("*", "")
+    s = re.sub(r"^[0-9.]+", "", s)
+    return s.lower()
+
+
+def postprocess_extracted_loads(result):
+    """Normalize model output without deleting independent symbol loads."""
+    loads = result.get("loads", [])
+    if not isinstance(loads, list):
+        result["loads"] = []
+        return result
+
+    result["loads"] = fix_load_types(loads)
+    for item in result["loads"]:
+        item["raw"] = strip_load_unit(item.get("raw", ""))
+    return result
+
+
+def _dominant_symbol_family(loads):
+    counts = Counter()
+    for item in loads:
+        typ = normalize_load_type(item.get("type", ""), item.get("raw", ""))
+        family, _ = _symbol_family_and_factor(item.get("raw", ""), typ)
+        if family:
+            counts[family] += 1
+    if not counts:
+        return None
+    top_family, top_count = counts.most_common(1)[0]
+    if top_count < 2:
+        return None
+    if len(counts) == 1:
+        return top_family
+    second_count = counts.most_common(2)[1][1]
+    if top_count > second_count:
+        return top_family
+    return None
+
+
+def normalize_load_for_similarity(item, dominant_family=None):
+    typ = normalize_load_type(item.get("type", ""), item.get("raw", ""))
+    raw = item.get("raw", "")
+    family, _ = _symbol_family_and_factor(raw, typ)
+    override = dominant_family if family and dominant_family and family != dominant_family else None
+    return normalize_raw(raw, typ, family_override=override)
+
+
+LEGACY_RERANK_PROMPT = """你是结构力学搜题结果复筛器。候选题已经通过荷载相似度粗筛。
+
+你会看到：
+1. 查询题图片
+2. 一个候选题图片
+
+请根据结构形状是否相近、荷载位置和方向是否相同给候选题打相似度分数。
+
+不要解题。
+不要重新计算荷载数量。
+不要重新判断荷载类型数量。
+不要因为题号、节点字母、尺寸标注不同而降分。
+
+严格输出JSON，不要输出其它文字：
+{"score":0.95,"reason":"短评"}
+reason 必须少于8个汉字。"""
+
+
+SHAPE_RERANK_PROMPT = """你是结构力学题图的形状复筛器。
+
+你会看到：
+1. 查询题图片
+2. 一个候选题图片
+
+只看主杆件骨架：整体外轮廓、主要杆件数量、主要连接位置。
+忽略荷载、尺寸、文字、节点编号、题号、支座符号细节。
+不要解题，不要分析荷载，不要比较荷载位置。
+
+评分：
+0.90-1.00：主骨架同类且外轮廓基本一致
+0.60-0.80：同类骨架，但有明显多/少杆件或连接位置差异
+0.00-0.50：主骨架类型明显不同
+
+如果主骨架明显不是同一类，score 不得超过 0.50。
+主骨架类别不同、跨数明显不同、主要杆件数量明显不同，score 不得超过 0.50。
+
+严格输出JSON，不要输出其它文字：
+{"score":0.95,"reason":"短评"}
+reason 必须少于6个汉字。"""
+
+
+RERANK_PROMPT = SHAPE_RERANK_PROMPT
+
+# Shared defaults for Feishu, CLI, and the isolated Agent. Keep the first
+# pass bounded, then retry only the most promising timed-out candidates.
+RERANK_CONCURRENT_MAX_WORKERS = 10
+RERANK_PRIMARY_TIMEOUT_SECONDS = 8.0
+RERANK_RETRY_TIMEOUT_SECONDS = 10.0
+RERANK_RETRY_MAX_CANDIDATES = 3
+
+
+LENGTH_TIE_PROMPT = """你是结构力学搜题结果打平复核器。候选题已经被判定为高度相似。
+
+你会看到：
+1. 查询题图片
+2. 一个候选题图片
+
+请只比较杆件长度、跨长、高度、分段长度和整体比例是否一致。
+不要解题。
+不要判断荷载位置。
+不要重新计算荷载数量。
+不要重新判断荷载类型数量。
+不要因为题号、节点字母不同而降分。
+
+严格输出JSON，不要输出其它文字：
+{"score":0.95,"reason":"理由不超过20字"}"""
+
+
+def score_candidate_pair(client, query_image_path, candidate_path, prompt=RERANK_PROMPT, timeout_seconds=None):
+    content = [
+        {"type": "text", "text": prompt},
+        {"type": "text", "text": "查询题图片："},
+        {
+            "type": "image_url",
+            "image_url": {"url": encode_image_base64(query_image_path)},
+        },
+        {"type": "text", "text": "候选题图片："},
+        {
+            "type": "image_url",
+            "image_url": {"url": encode_image_base64(candidate_path)},
+        },
+    ]
+
+    request = {
+        "model": "GLM-5V-Turbo",
+        "messages": [
+            {"role": "system", "content": "你只输出JSON。"},
+            {"role": "user", "content": content},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 128,
+        "extra_body": {"thinking": {"type": "disabled"}},
+    }
+    if timeout_seconds is not None:
+        request["timeout"] = float(timeout_seconds)
+
+    resp = client.chat.completions.create(**request)
+    raw_text = resp.choices[0].message.content.strip()
+    raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
+    raw_text = re.sub(r"\s*```$", "", raw_text)
+    parsed = json.loads(raw_text)
+    score = float(parsed.get("score", 0))
+    score = max(0.0, min(1.0, score))
+    return score, str(parsed.get("reason", "")).strip()
+
+
+def compute_final_rerank_score(load_score, rerank_score):
+    load_score = max(0.0, min(1.0, float(load_score or 0)))
+    rerank_score = max(0.0, min(1.0, float(rerank_score or 0)))
+    return load_score * RERANK_LOAD_WEIGHT + rerank_score * RERANK_VISION_WEIGHT
+
+
+def apply_length_tie_break(client, query_image_path, scored, timeout_seconds=None):
+    perfect = [item for item in scored if float(item.get("final_score") or 0) >= 0.999]
+    if len(perfect) <= 1:
+        return scored
+
+    for item in perfect:
+        path = Path(item["path"])
+        try:
+            length_score, length_reason = score_candidate_pair(
+                client,
+                query_image_path,
+                str(path),
+                prompt=LENGTH_TIE_PROMPT,
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARNING: 候选 {item['rank']} 杆长复核失败: {exc}")
+            length_score, length_reason = 0.0, "杆长复核失败"
+        item["length_score"] = length_score
+        item["length_reason"] = length_reason
+        item["final_score"] = LENGTH_TIE_FINAL_FLOOR + (1.0 - LENGTH_TIE_FINAL_FLOOR) * length_score
+
+    return scored
+
+
+def prepare_rerank_candidates(candidates):
+    usable = []
+    for candidate in candidates:
+        direct_path = Path(str(candidate["path"]))
+        if direct_path.is_absolute() and direct_path.is_file():
+            item = dict(candidate)
+            item["path"] = str(direct_path)
+            usable.append(item)
+            continue
+
+        path, resolved_name, repaired = resolve_question_path(candidate["path"], update_excel=False)
+        if not path.is_file():
+            continue
+        item = dict(candidate)
+        item["path"] = str(path)
+        if repaired:
+            item["name"] = resolved_name
+        usable.append(item)
+    return usable
+
+
+def _is_timeout_error(exc):
+    message = str(exc).lower()
+    return isinstance(exc, TimeoutError) or "timeout" in message or "timed out" in message
+
+
+def score_rerank_candidate(
+    query_image_path,
+    candidate,
+    client=None,
+    timeout_seconds=None,
+    collect_timing=False,
+):
+    # The SDK retries by default. For an explicit per-candidate deadline, retries
+    # would turn a 1s timeout into several delayed attempts, so disable them.
+    client = client or ZhipuAI(
+        api_key=ZHIPUAI_API_KEY,
+        max_retries=0 if timeout_seconds is not None else 3,
+    )
+    path = Path(candidate["path"])
+    started = time.perf_counter() if collect_timing else None
+    status = "completed"
+    try:
+        score, reason = score_candidate_pair(
+            client,
+            query_image_path,
+            str(path),
+            timeout_seconds=timeout_seconds,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: 候选 {candidate['rank']} 复筛失败: {exc}")
+        if _is_timeout_error(exc):
+            # A timeout must not silently eliminate a potentially correct candidate.
+            score, reason, status = None, "复筛超时，保留初筛", "timeout"
+        else:
+            score, reason, status = 0.0, "复筛失败", "failed"
+
+    item = dict(candidate)
+    item["rerank_score"] = score
+    item["final_score"] = (
+        float(item.get("score") or 0)
+        if status == "timeout"
+        else compute_final_rerank_score(item.get("score", 0), score)
+    )
+    item["rerank_reason"] = reason
+    item["rerank_status"] = status
+    if started is not None:
+        item["rerank_seconds"] = round(time.perf_counter() - started, 3)
+    return item
+
+
+def finalize_rerank_results(client, query_image_path, scored, top_n=DISPLAY_MAX_RESULTS, timeout_seconds=None):
+    scored = apply_length_tie_break(client, query_image_path, scored, timeout_seconds=timeout_seconds)
+    scored.sort(
+        key=lambda x: (
+            x.get("final_score", 0),
+            x.get("length_score", 1),
+            x.get("score", 0),
+            x.get("rerank_score", 0),
+        ),
+        reverse=True,
+    )
+    return select_display_results(scored)
+
+
+def rerank_candidates(query_image_path, candidates, top_n=DISPLAY_MAX_RESULTS):
+    """Rerank candidates with the shared bounded-concurrency policy."""
+    return rerank_candidates_concurrent(
+        query_image_path,
+        candidates,
+        top_n=top_n,
+        max_workers=RERANK_CONCURRENT_MAX_WORKERS,
+        candidate_timeout_seconds=RERANK_PRIMARY_TIMEOUT_SECONDS,
+        retry_timeout_seconds=RERANK_RETRY_TIMEOUT_SECONDS,
+        retry_max_candidates=RERANK_RETRY_MAX_CANDIDATES,
+    )
+
+
+def rerank_results_complete(results):
+    """Whether a rerank result is safe to present as a final visual ranking."""
+    unfinished = {"timeout", "failed", "incomplete"}
+    return bool(results) and all(item.get("rerank_status") not in unfinished for item in results)
+
+
+def rerank_incomplete_note(results):
+    for item in results:
+        if item.get("rerank_status") == "incomplete":
+            return str(item.get("rerank_reason") or "部分候选复筛未完成，已回退粗筛排序。")
+    return "部分候选复筛未完成，已回退粗筛排序。"
+
+
+def mark_rerank_incomplete(candidates, note):
+    """Keep the original coarse order when a visual rerank batch is incomplete."""
+    marked = []
+    for candidate in candidates:
+        item = dict(candidate)
+        item["rerank_status"] = "incomplete"
+        item["rerank_reason"] = note
+        item.pop("rerank_score", None)
+        item.pop("final_score", None)
+        marked.append(item)
+    return marked
+
+
+def rerank_candidates_concurrent(
+    query_image_path,
+    candidates,
+    top_n=DISPLAY_MAX_RESULTS,
+    max_workers=3,
+    candidate_timeout_seconds=None,
+    retry_timeout_seconds=None,
+    retry_max_candidates=0,
+    on_candidate_scored=None,
+):
+    """Concurrent rerank with bounded timeouts and a selective retry.
+
+    Timed-out candidates can be retried one at a time. If any candidate remains
+    unfinished, return the original coarse list marked ``incomplete`` rather
+    than mixing unverified items into a final visual ranking.
+    """
+    if not query_image_path or not candidates:
+        return []
+
+    usable = prepare_rerank_candidates(candidates)
+    if not usable:
+        return []
+
+    workers = max(1, min(int(max_workers or 1), len(usable)))
+    scored = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(
+                score_rerank_candidate,
+                query_image_path,
+                candidate,
+                timeout_seconds=candidate_timeout_seconds,
+                collect_timing=on_candidate_scored is not None,
+            )
+            for candidate in usable
+        ]
+        for future in as_completed(futures):
+            item = future.result()
+            scored.append(item)
+    timed_out = [item for item in scored if item.get("rerank_status") == "timeout"]
+    retry_limit = max(0, int(retry_max_candidates or 0))
+    for first_attempt in sorted(timed_out, key=lambda item: float(item.get("score") or 0), reverse=True)[:retry_limit]:
+        retried = score_rerank_candidate(
+            query_image_path,
+            first_attempt,
+            timeout_seconds=retry_timeout_seconds,
+            collect_timing=on_candidate_scored is not None,
+        )
+        initial_seconds = float(first_attempt.get("rerank_seconds") or 0)
+        retry_seconds = float(retried.get("rerank_seconds") or 0)
+        retried["rerank_attempts"] = 2
+        retried["rerank_initial_seconds"] = round(initial_seconds, 3)
+        retried["rerank_retry_seconds"] = round(retry_seconds, 3)
+        retried["rerank_seconds"] = round(initial_seconds + retry_seconds, 3)
+        if retried.get("rerank_status") == "completed":
+            retried["rerank_status"] = "retried"
+        scored = [
+            retried if item.get("path") == first_attempt.get("path") else item
+            for item in scored
+        ]
+
+    if not rerank_results_complete(scored):
+        note = "部分候选两次复筛仍未完成，已回退粗筛排序。"
+        fallback = mark_rerank_incomplete(usable, note)
+        if on_candidate_scored is not None:
+            for item in fallback:
+                on_candidate_scored(dict(item))
+        return fallback
+
+    if on_candidate_scored is not None:
+        for item in scored:
+            on_candidate_scored(dict(item))
+
+    client = ZhipuAI(
+        api_key=ZHIPUAI_API_KEY,
+        max_retries=0 if candidate_timeout_seconds is not None else 3,
+    )
+    return finalize_rerank_results(
+        client,
+        query_image_path,
+        scored,
+        top_n=top_n,
+        timeout_seconds=candidate_timeout_seconds,
+    )
+
+
+def display_similarity_score(item):
+    """Return the similarity score shown to users for thresholded result output."""
+    if isinstance(item, dict):
+        final_score = item.get("final_score")
+        if final_score is not None:
+            return float(final_score or 0)
+        return float(item.get("score") or 0)
+    return float(item[0] or 0)
+
+
+def select_coarse_results(results):
+    """Keep every perfect coarse match, or only the single best fallback."""
+    if not results:
+        return []
+
+    perfect = [item for item in results if display_similarity_score(item) >= 1.0]
+    return perfect or [max(results, key=display_similarity_score)]
+
+
+def select_display_results(
+    results,
+    all_score=DISPLAY_ALL_SCORE,
+):
+    """Show all results at or above 90%; otherwise show only the best result."""
+    if not results:
+        return []
+
+    very_high = [item for item in results if display_similarity_score(item) >= all_score]
+    selected = very_high or [max(results, key=display_similarity_score)]
+
+    renumbered = []
+    for rank, item in enumerate(selected, 1):
+        if isinstance(item, dict):
+            copied = dict(item)
+            copied["rank"] = rank
+            renumbered.append(copied)
+        else:
+            renumbered.append(item)
+    return renumbered
 
 
 def compute_similarity(query_loads, db_loads):
     """类型级相似度：每类取交集/各自总数的 min，0/0 跳过，返回 0~1"""
     def group_by_type(loads):
         groups = {"集中": [], "均布": [], "弯矩": []}
+        dominant_family = _dominant_symbol_family(loads)
         for item in loads:
-            typ = item.get("type", "")
-            raw = item.get("raw", "")
+            typ = normalize_load_type(item.get("type", ""), item.get("raw", ""))
             if typ in groups:
-                groups[typ].append(normalize_raw(raw))
+                groups[typ].append(normalize_load_for_similarity(item, dominant_family))
         return groups
 
     q = group_by_type(query_loads)
@@ -208,6 +883,7 @@ def extract_loads(client, image_path):
             if "loads" not in result:
                 raise ValueError("Missing 'loads' key")
 
+            result = postprocess_extracted_loads(result)
             type_order = {"集中": 0, "均布": 1, "弯矩": 2}
             result["loads"].sort(key=lambda x: type_order.get(x.get("type", ""), 99))
             return result
@@ -248,36 +924,192 @@ def load_chapter_excel(chapter_name):
 
 
 # ============================================================
-# 检索
+# 题目路径解析 / 检索
 # ============================================================
+
+def _rel_path_from_question_path(question_path):
+    p = Path(str(question_path))
+    if p.is_absolute():
+        try:
+            return p.relative_to(ROOT).as_posix()
+        except ValueError:
+            return p.as_posix()
+    return str(question_path).replace("\\", "/")
+
+
+def _exact_case_path(base, relative_path):
+    """Resolve a relative path while preserving actual filesystem casing."""
+    current = Path(base)
+    exact_case = True
+
+    for part in str(relative_path).replace("\\", "/").split("/"):
+        if not part:
+            continue
+        if not current.is_dir():
+            return False, exact_case, None
+        try:
+            children = list(current.iterdir())
+        except OSError:
+            return False, exact_case, None
+
+        exact = next((child for child in children if child.name == part), None)
+        if exact is not None:
+            current = exact
+            continue
+
+        case_match = next((child for child in children if child.name.lower() == part.lower()), None)
+        if case_match is not None:
+            current = case_match
+            exact_case = False
+            continue
+
+        return False, exact_case, None
+
+    return current.is_file(), exact_case, current if current.is_file() else None
+
+
+def _common_prefix_len(left, right):
+    count = 0
+    for a, b in zip(left, right):
+        if a.lower() != b.lower():
+            break
+        count += 1
+    return count
+
+
+def _find_relocated_question_image(relative_path, chapter_name=None):
+    """Find a moved question image by searching the nearest question folder."""
+    rel = str(relative_path).replace("\\", "/")
+    parts = [part for part in rel.split("/") if part]
+    if not parts:
+        return None
+
+    filename = parts[-1].lower()
+    if Path(filename).suffix.lower() not in IMAGE_SUFFIXES:
+        return None
+
+    candidate_anchors = []
+    for end in range(len(parts) - 1, 0, -1):
+        anchor = ROOT.joinpath(*parts[:end])
+        if anchor.is_dir():
+            candidate_anchors.append(anchor)
+            break
+
+    if chapter_name:
+        chapter_anchor = ROOT / chapter_name
+        if chapter_anchor.is_dir() and chapter_anchor not in candidate_anchors:
+            candidate_anchors.append(chapter_anchor)
+    elif len(parts) > 1:
+        chapter_anchor = ROOT / parts[0]
+        if chapter_anchor.is_dir() and chapter_anchor not in candidate_anchors:
+            candidate_anchors.append(chapter_anchor)
+
+    for anchor in candidate_anchors:
+        candidates = [
+            p for p in anchor.rglob("*")
+            if p.is_file()
+            and p.suffix.lower() in IMAGE_SUFFIXES
+            and p.name.lower() == filename
+        ]
+        if not candidates:
+            continue
+        if len(candidates) == 1:
+            return candidates[0]
+
+        scored = []
+        for candidate in candidates:
+            try:
+                cand_rel = candidate.relative_to(ROOT).as_posix().split("/")
+            except ValueError:
+                cand_rel = candidate.as_posix().split("/")
+            scored.append((
+                _common_prefix_len(parts[:-1], cand_rel[:-1]),
+                -abs(len(cand_rel) - len(parts)),
+                candidate,
+            ))
+        scored.sort(reverse=True, key=lambda item: (item[0], item[1]))
+        if len(scored) == 1 or scored[0][:2] != scored[1][:2]:
+            return scored[0][2]
+
+    return None
+
+
+def _backup_excel_for_path_repair(xlsx_path):
+    global _PATH_REPAIR_BACKUP_DIR
+
+    xlsx_path = Path(xlsx_path)
+    if xlsx_path in _PATH_REPAIR_BACKUPS or not xlsx_path.exists():
+        return
+
+    if _PATH_REPAIR_BACKUP_DIR is None:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _PATH_REPAIR_BACKUP_DIR = Path(__file__).parent / "backups" / f"auto_path_repair_{stamp}"
+        _PATH_REPAIR_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+    backup_path = _PATH_REPAIR_BACKUP_DIR / xlsx_path.name
+    if not backup_path.exists():
+        shutil.copy2(xlsx_path, backup_path)
+    _PATH_REPAIR_BACKUPS.add(xlsx_path)
+
 
 def _update_excel_path(chapter_name, old_rel, new_rel):
     """更新 Excel 中失效的题目路径"""
     if old_rel == new_rel:
-        return
+        return False
     xlsx_path = ROOT / f"{chapter_name}.xlsx"
     if not xlsx_path.exists():
         matches = list(ROOT.glob(f"*{chapter_name}*.xlsx"))
         if not matches:
-            return
+            return False
         xlsx_path = matches[0]
     df = pd.read_excel(xlsx_path)
     mask = df["题目名称"] == old_rel
     if not mask.any():
-        return
+        return False
+    _backup_excel_for_path_repair(xlsx_path)
     df.loc[mask, "题目名称"] = new_rel
+    before = len(df)
+    df = df.drop_duplicates(subset=["题目名称", "荷载"], keep="first")
     df.to_excel(xlsx_path, index=False)
-    print(f"[路径更新] {old_rel} -> {new_rel}")
+    removed = before - len(df)
+    suffix = f"，删除重复 {removed} 条" if removed else ""
+    print(f"[路径更新] {old_rel} -> {new_rel}{suffix}")
+    return True
 
 
-def search(query_loads, chapter_name, top_k=TOP_K):
+def resolve_question_path(question_path, chapter_name=None, update_excel=False):
+    """Resolve stale Excel question paths and optionally repair the workbook."""
+    old_rel = _rel_path_from_question_path(question_path)
+    exists, exact_case, actual_path = _exact_case_path(ROOT, old_rel)
+
+    if exists and actual_path is not None:
+        new_rel = actual_path.relative_to(ROOT).as_posix()
+        repaired = new_rel != old_rel or not exact_case
+        if repaired and update_excel and chapter_name:
+            _update_excel_path(chapter_name, old_rel, new_rel)
+        return actual_path, new_rel, repaired
+
+    relocated = _find_relocated_question_image(old_rel, chapter_name)
+    if relocated is not None and relocated.is_file():
+        try:
+            new_rel = relocated.relative_to(ROOT).as_posix()
+        except ValueError:
+            new_rel = relocated.as_posix()
+        if update_excel and chapter_name:
+            _update_excel_path(chapter_name, old_rel, new_rel)
+        return relocated, new_rel, True
+
+    return ROOT / old_rel, old_rel, False
+
+
+def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, rerank_top=DISPLAY_MAX_RESULTS):
     df = load_chapter_excel(chapter_name)
     if df is None:
         print(f"ERROR: Chapter '{chapter_name}' not found")
         return
 
-    # 修正查询荷载分类
-    query_loads = fix_load_types(query_loads)
+    # 修正查询荷载分类，并给手动纯数值输入补默认单位
+    query_loads = normalize_query_loads(query_loads)
 
     results = []
     for _, row in df.iterrows():
@@ -291,13 +1123,8 @@ def search(query_loads, chapter_name, top_k=TOP_K):
 
     results.sort(key=lambda x: x[0], reverse=True)
 
-    # 100% 相似的不管几个都输出，不足 top_k 再补次高分
-    perfect = [r for r in results if r[0] >= 1.0]
-    if len(perfect) >= top_k:
-        top = perfect
-    else:
-        rest = [r for r in results if r[0] < 1.0][:top_k - len(perfect)]
-        top = perfect + rest
+    # 粗筛只保留全部 100% 匹配；没有 100% 时只保留最相似的 1 个。
+    top = select_coarse_results(results)
 
     if not top or top[0][0] == 0:
         print("(未找到高相似度匹配，以下是章节内最近题目)")
@@ -309,9 +1136,19 @@ def search(query_loads, chapter_name, top_k=TOP_K):
         if score <= 0:
             continue
         pct = round(score * 100)
-        full_path = str(ROOT / name)
-        lines.append(f"{rank}. {full_path}    相似度: {pct}%")
-        paths.append({"rank": rank, "path": full_path, "score": score})
+        resolved_path, resolved_name, repaired = resolve_question_path(
+            name, chapter_name=chapter_name, update_excel=True
+        )
+        if repaired:
+            name = resolved_name
+        full_path = str(resolved_path)
+        paths.append({"rank": rank, "path": full_path, "score": score, "name": name})
+
+    all_paths = list(paths)
+    lines = []
+    for item in paths:
+        pct = round(display_similarity_score(item) * 100)
+        lines.append(f"{item['rank']}. {item['path']}    相似度: {pct}%")
 
     result_text = "\n".join(lines) if lines else "无匹配结果"
     output_path.write_text(result_text, encoding="utf-8")
@@ -319,18 +1156,41 @@ def search(query_loads, chapter_name, top_k=TOP_K):
     print(result_text)
     print(f"\n结果已保存: {output_path}")
 
-    # 自动打开 Top 结果图片（倒序，最后打开#1在最上层；跳过0%）
-    import time
-    opened = 0
-    for score, name in reversed(top):
-        if score <= 0:
-            continue
-        img_path = str(ROOT / name)
-        os.startfile(img_path)
-        opened += 1
-        time.sleep(0.3)
-    if opened:
-        print(f"已打开 {opened} 个匹配图片")
+    filtered_rerank_paths = [item for item in all_paths if item["score"] >= RERANK_MIN_LOAD_SCORE]
+    if rerank_image_path and filtered_rerank_paths:
+        reranked = rerank_candidates(rerank_image_path, filtered_rerank_paths, rerank_top)
+        if reranked and rerank_results_complete(reranked):
+            reranked = select_display_results(reranked)
+            rerank_lines = []
+            rerank_paths = []
+            for rank, item in enumerate(reranked, 1):
+                final_pct = round(float(item.get("final_score") or 0) * 100)
+                reason = item.get("rerank_reason") or "LLM复筛"
+                rerank_lines.append(
+                    f"{rank}. {item['path']}    相似度: {final_pct}%"
+                )
+                rerank_paths.append({
+                    "rank": rank,
+                    "path": item["path"],
+                    "score": item["score"],
+                    "coarse_rank": item["rank"],
+                    "rerank_score": item.get("rerank_score"),
+                    "final_score": item.get("final_score"),
+                    "length_score": item.get("length_score"),
+                    "length_reason": item.get("length_reason"),
+                    "rerank_reason": reason,
+                })
+            rerank_text = "\n".join(rerank_lines)
+            output_path.write_text(rerank_text, encoding="utf-8")
+            LAST_SEARCH_FILE.write_text(json.dumps(rerank_paths, ensure_ascii=False), encoding="utf-8")
+            print("\nLLM复筛结果:")
+            print(rerank_text)
+            print(f"\n复筛结果已保存: {output_path}")
+        elif reranked:
+            note = rerank_incomplete_note(reranked)
+            print(f"\n{note}")
+
+    # （已禁用自动弹图片）
 
 
 # ============================================================
@@ -366,6 +1226,10 @@ def store(chapter_name, *, image_path=None, rel_path=None, loads_json=None):
         loads = extract_loads(client, image_path)
         print(f"荷载: {json.dumps(loads, ensure_ascii=False)}")
 
+        if not loads.get("loads"):
+            print("未识别到荷载，取消储存")
+            return
+
         # 用相对于 ROOT 的路径作为题目名称
         try:
             rel_path = str(Path(image_path).relative_to(ROOT)).replace("\\", "/")
@@ -392,7 +1256,7 @@ def find_answer_files(question_path):
     规则: 题目路径里以"题目"开头的目录，替换为同级"答案"文件夹，
     然后匹配 {编号}, {编号}+, {编号}++, ... 等所有图片
     """
-    p = Path(question_path)
+    p, _, _ = resolve_question_path(question_path, update_excel=False)
     parts = p.parts
     stem = p.stem  # 文件名不含扩展，如 "3"
 
@@ -471,6 +1335,7 @@ def main():
     p_search.add_argument("--loads", help="荷载 JSON 字符串")
     p_search.add_argument("--chapter", required=True, help="章节名称，如 '2静定结构'")
     p_search.add_argument("--top", type=int, default=TOP_K, help=f"返回条数 (默认 {TOP_K})")
+    p_search.add_argument("--rerank", action="store_true", help="对图片搜索的粗筛结果进行 LLM 复筛，并按复筛相似度阈值输出")
 
     # store
     p_store = sub.add_parser("store", help="储存新题目")
@@ -486,7 +1351,9 @@ def main():
     args = parser.parse_args()
 
     if args.cmd == "search":
+        query_image_path = None
         if args.image:
+            query_image_path = args.image
             client = ZhipuAI(api_key=ZHIPUAI_API_KEY)
             print(f"识别查询图: {args.image}")
             result = extract_loads(client, args.image)
@@ -504,11 +1371,16 @@ def main():
             df = load_chapter_excel(args.chapter)
             if df is not None:
                 for i, (_, row) in enumerate(df.head(args.top).iterrows()):
-                    full_path = str(ROOT / row["题目名称"])
+                    full_path = str(resolve_question_path(
+                        row["题目名称"], chapter_name=args.chapter, update_excel=True
+                    )[0])
                     print(f"{i+1}. {full_path}    相似度: N/A")
             return
 
-        search(query_loads, args.chapter, args.top or TOP_K)
+        rerank_image_path = query_image_path if args.rerank else None
+        if args.rerank and not rerank_image_path:
+            print("WARNING: --rerank 只支持 --image 搜索，当前跳过复筛")
+        search(query_loads, args.chapter, args.top or TOP_K, rerank_image_path=rerank_image_path)
 
     elif args.cmd == "store":
         store(

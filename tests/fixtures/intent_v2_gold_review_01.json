@@ -1,0 +1,151 @@
+{
+  "schema_version": "1.0",
+  "status": "approved_seed_set",
+  "cases": [
+    {
+      "id": "explicit_question_with_chapter_override",
+      "category": "explicit_task",
+      "history": [
+        {"role": "user", "content": "发了一张有三道题的图片"},
+        {"role": "assistant", "content": "我识别到三道题，请选择要查的题号。"}
+      ],
+      "context": {"phase": "WAIT_QUESTION_CHOICE", "active_namespace": "question", "question_count": 3, "candidate_count": 0, "has_active_image": true},
+      "input": {"event_type": "text", "text": "第二题按力法搜"},
+      "expected_decision": {"action": "select_question", "question_index": 2, "chapter_override": "4力法"},
+      "expected_authorization": {"outcome": "allow", "code": "select_question", "state_effect": "update_task", "tool_effect": "fixed_search_pipeline"}
+    },
+    {
+      "id": "bare_two_follows_active_candidate_after_answer",
+      "category": "active_namespace",
+      "history": [
+        {"role": "assistant", "content": "找到三个候选，你刚才选择了第一个。"},
+        {"role": "assistant", "content": "候选一的答案已经发给你了。"}
+      ],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 2, "candidate_count": 3, "has_active_image": true, "has_answer": true, "selected_question_index": 2, "selected_candidate_rank": 1},
+      "input": {"event_type": "text", "text": "二"},
+      "expected_decision": {"action": "select_candidate", "candidate_rank": 2},
+      "expected_authorization": {"outcome": "allow", "code": "select_candidate", "state_effect": "update_task", "tool_effect": "answer_lookup"}
+    },
+    {
+      "id": "bare_two_without_active_namespace_clarifies",
+      "category": "active_namespace",
+      "history": [
+        {"role": "assistant", "content": "这张图有两道题，当前题也有两个候选。"},
+        {"role": "user", "content": "我刚重新打开了页面。"}
+      ],
+      "context": {"phase": "ANSWERED", "active_namespace": "none", "question_count": 2, "candidate_count": 2, "has_active_image": true, "has_answer": true},
+      "input": {"event_type": "text", "text": "二"},
+      "expected_decision": {"action": "clarification", "clarification_reason": "ambiguous_number_namespace"},
+      "expected_authorization": {"outcome": "allow", "code": "safe_response", "state_effect": "preserve", "tool_effect": "none"}
+    },
+    {
+      "id": "active_candidate_out_of_range_does_not_switch_to_question",
+      "category": "active_namespace",
+      "history": [
+        {"role": "assistant", "content": "当前题只找到一个候选。"},
+        {"role": "assistant", "content": "你也可以明确说第几题来切换原图题目。"}
+      ],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 2, "candidate_count": 1, "has_active_image": true, "has_answer": true},
+      "input": {"event_type": "text", "text": "二"},
+      "expected_decision": {"action": "clarification", "clarification_reason": "out_of_range"},
+      "expected_authorization": {"outcome": "allow", "code": "safe_response", "state_effect": "preserve", "tool_effect": "none"}
+    },
+    {
+      "id": "explicit_question_noun_overrides_candidate_focus",
+      "category": "active_namespace",
+      "history": [
+        {"role": "user", "content": "先查第一题"},
+        {"role": "assistant", "content": "第一题找到了三个候选。"}
+      ],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "question_count": 2, "candidate_count": 3, "has_active_image": true, "selected_question_index": 1},
+      "input": {"event_type": "text", "text": "第二题"},
+      "expected_decision": {"action": "select_question", "question_index": 2},
+      "expected_authorization": {"outcome": "allow", "code": "select_question", "state_effect": "update_task", "tool_effect": "fixed_search_pipeline"}
+    },
+    {
+      "id": "remaining_question_resolves_from_progress",
+      "category": "reference_resolution",
+      "history": [
+        {"role": "user", "content": "查第二题"},
+        {"role": "assistant", "content": "第二题的答案已经发给你了。"}
+      ],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 2, "candidate_count": 2, "has_active_image": true, "has_answer": true, "selected_question_index": 2, "completed_question_indexes": [2], "remaining_question_indexes": [1]},
+      "input": {"event_type": "text", "text": "那剩下那题呢"},
+      "expected_decision": {"action": "select_question", "question_index": 1},
+      "expected_authorization": {"outcome": "allow", "code": "select_question", "state_effect": "update_task", "tool_effect": "fixed_search_pipeline"}
+    },
+    {
+      "id": "set_one_shot_chapter_for_next_image",
+      "category": "pending_chapter",
+      "history": [
+        {"role": "user", "content": "上一题已经查完了"},
+        {"role": "assistant", "content": "好的，你可以继续发下一张题图。"}
+      ],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true, "has_answer": true},
+      "input": {"event_type": "text", "text": "下面这个题按力法搜"},
+      "expected_decision": {"action": "set_chapter", "chapter_override": "4力法", "chapter_target": "next_image"},
+      "expected_authorization": {"outcome": "allow", "code": "pending_chapter", "state_effect": "store_pending_chapter", "tool_effect": "none"}
+    },
+    {
+      "id": "next_image_consumes_pending_chapter",
+      "category": "pending_chapter",
+      "history": [
+        {"role": "user", "content": "下面这个题按力法搜"},
+        {"role": "assistant", "content": "好，下一张有效单题图片按力法检索。"}
+      ],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true, "has_answer": true, "trusted_image_event": true, "pending_chapter": "4力法", "pending_chapter_scope": "next_image"},
+      "input": {"event_type": "image", "text": ""},
+      "expected_decision": {"action": "search_image", "chapter_override": "4力法", "source": "entry"},
+      "expected_authorization": {"outcome": "allow", "code": "new_image", "state_effect": "replace_task", "tool_effect": "fixed_search_pipeline"},
+      "expected_postcondition": {"pending_chapter_consumed_after_valid_single_image": true}
+    },
+    {
+      "id": "delete_candidate_is_rejected_not_selected",
+      "category": "safety",
+      "history": [
+        {"role": "user", "content": "查这道题"},
+        {"role": "assistant", "content": "找到三个候选。"}
+      ],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "question_count": 1, "candidate_count": 3, "has_active_image": true},
+      "input": {"event_type": "text", "text": "删掉第二个"},
+      "expected_decision": {"action": "reject", "requested_action": "delete"},
+      "expected_authorization": {"outcome": "allow", "code": "safe_response", "state_effect": "preserve", "tool_effect": "none"}
+    },
+    {
+      "id": "small_talk_preserves_candidate_state",
+      "category": "conversation_shell",
+      "history": [
+        {"role": "user", "content": "查这道题"},
+        {"role": "assistant", "content": "找到两个候选，请选择。"}
+      ],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true},
+      "input": {"event_type": "text", "text": "辛苦了"},
+      "expected_decision": {"action": "small_talk"},
+      "expected_authorization": {"outcome": "allow", "code": "safe_response", "state_effect": "preserve", "tool_effect": "none"}
+    },
+    {
+      "id": "capability_help_preserves_candidate_state",
+      "category": "conversation_shell",
+      "history": [
+        {"role": "user", "content": "我已经在看候选了"},
+        {"role": "assistant", "content": "当前有两个候选。"}
+      ],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true},
+      "input": {"event_type": "text", "text": "你还能帮我做什么"},
+      "expected_decision": {"action": "capability_help"},
+      "expected_authorization": {"outcome": "allow", "code": "safe_response", "state_effect": "preserve", "tool_effect": "none"}
+    },
+    {
+      "id": "out_of_scope_preserves_candidate_state",
+      "category": "conversation_shell",
+      "history": [
+        {"role": "user", "content": "这道题已经找到候选了"},
+        {"role": "assistant", "content": "是的，当前有三个候选。"}
+      ],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "question_count": 1, "candidate_count": 3, "has_active_image": true},
+      "input": {"event_type": "text", "text": "顺便帮我写一篇英语论文"},
+      "expected_decision": {"action": "out_of_scope"},
+      "expected_authorization": {"outcome": "allow", "code": "safe_response", "state_effect": "preserve", "tool_effect": "none"}
+    }
+  ]
+}

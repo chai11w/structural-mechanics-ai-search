@@ -1,0 +1,237 @@
+{
+  "schema_version": "1.0",
+  "status": "review_draft",
+  "description": "Intent V2 balanced expansion; combine with approved seed set for 40 cases.",
+  "cases": [
+    {
+      "id": "new_image_starts_search",
+      "category": "explicit_task",
+      "history": [{"role": "assistant", "content": "请发送题目图片。"}],
+      "context": {"phase": "IDLE", "active_namespace": "none", "question_count": 0, "candidate_count": 0, "trusted_image_event": true},
+      "input": {"event_type": "image", "text": ""},
+      "expected_decision": {"action": "search_image", "source": "entry"}
+    },
+    {
+      "id": "explicit_first_question",
+      "category": "explicit_task",
+      "history": [{"role": "assistant", "content": "识别到三道题，请选择题号。"}],
+      "context": {"phase": "WAIT_QUESTION_CHOICE", "active_namespace": "question", "question_count": 3, "candidate_count": 0, "has_active_image": true},
+      "input": {"event_type": "text", "text": "查第一题"},
+      "expected_decision": {"action": "select_question", "question_index": 1}
+    },
+    {
+      "id": "explicit_third_candidate",
+      "category": "explicit_task",
+      "history": [{"role": "assistant", "content": "当前有三个候选答案。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "question_count": 1, "candidate_count": 3, "has_active_image": true},
+      "input": {"event_type": "text", "text": "选第三个候选"},
+      "expected_decision": {"action": "select_candidate", "candidate_rank": 3}
+    },
+    {
+      "id": "explicit_current_chapter_change",
+      "category": "explicit_task",
+      "history": [{"role": "assistant", "content": "当前题按力法检索。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true},
+      "input": {"event_type": "text", "text": "这题改成位移法"},
+      "expected_decision": {"action": "set_chapter", "chapter_override": "5位移法", "chapter_target": "current_question"}
+    },
+    {
+      "id": "explicit_resend_answer",
+      "category": "explicit_task",
+      "history": [{"role": "assistant", "content": "答案已经发给你了。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true, "has_answer": true},
+      "input": {"event_type": "text", "text": "把刚才的答案再发一次"},
+      "expected_decision": {"action": "resend_answer"}
+    },
+    {
+      "id": "explicit_cancel_current_task",
+      "category": "explicit_task",
+      "history": [{"role": "assistant", "content": "正在等你选择候选。"}],
+      "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true},
+      "input": {"event_type": "text", "text": "取消这次搜题"},
+      "expected_decision": {"action": "cancel"}
+    },
+    {
+      "id": "explicit_question_with_matrix_chapter",
+      "category": "explicit_task",
+      "history": [{"role": "assistant", "content": "这张图有三道题。"}],
+      "context": {"phase": "WAIT_QUESTION_CHOICE", "active_namespace": "question", "question_count": 3, "candidate_count": 0, "has_active_image": true},
+      "input": {"event_type": "text", "text": "第三题按矩阵位移法搜"},
+      "expected_decision": {"action": "select_question", "question_index": 3, "chapter_override": "7矩阵位移"}
+    },
+
+    {
+      "id": "bare_one_follows_question_focus",
+      "category": "active_namespace",
+      "history": [{"role": "assistant", "content": "请从两道题中选择。"}],
+      "context": {"phase": "WAIT_QUESTION_CHOICE", "active_namespace": "question", "question_count": 2, "candidate_count": 0, "has_active_image": true},
+      "input": {"event_type": "text", "text": "一"},
+      "expected_decision": {"action": "select_question", "question_index": 1}
+    },
+    {
+      "id": "explicit_candidate_overrides_question_focus",
+      "category": "active_namespace",
+      "history": [{"role": "assistant", "content": "原图有三题，当前题有两个候选。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "question", "question_count": 3, "candidate_count": 2, "has_active_image": true, "has_answer": true},
+      "input": {"event_type": "text", "text": "看第二个候选"},
+      "expected_decision": {"action": "select_candidate", "candidate_rank": 2}
+    },
+    {
+      "id": "no_focus_only_candidate_namespace_valid",
+      "category": "active_namespace",
+      "history": [{"role": "assistant", "content": "当前单题有三个候选。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "none", "question_count": 1, "candidate_count": 3, "has_active_image": true, "has_answer": true},
+      "input": {"event_type": "text", "text": "三"},
+      "expected_decision": {"action": "select_candidate", "candidate_rank": 3}
+    },
+
+    {
+      "id": "other_candidate_uses_selected_rank",
+      "category": "reference_resolution",
+      "history": [{"role": "assistant", "content": "候选一的答案已经发出，还有候选二。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true, "has_answer": true, "selected_candidate_rank": 1},
+      "input": {"event_type": "text", "text": "看看另一个答案"},
+      "expected_decision": {"action": "select_candidate", "candidate_rank": 2}
+    },
+    {
+      "id": "other_candidate_with_three_is_ambiguous",
+      "category": "reference_resolution",
+      "history": [{"role": "assistant", "content": "候选一已发出，另外还有两个候选。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 1, "candidate_count": 3, "has_active_image": true, "has_answer": true, "selected_candidate_rank": 1},
+      "input": {"event_type": "text", "text": "看看另一个"},
+      "expected_decision": {"action": "clarification", "clarification_reason": "ambiguous_reference"}
+    },
+    {
+      "id": "previous_question_resolves_from_history",
+      "category": "reference_resolution",
+      "history": [{"role": "user", "content": "先查第一题"}, {"role": "assistant", "content": "现在正在看第二题。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "question", "question_count": 3, "candidate_count": 2, "has_active_image": true, "has_answer": true, "selected_question_index": 2, "previous_question_index": 1},
+      "input": {"event_type": "text", "text": "回到刚才那题"},
+      "expected_decision": {"action": "select_question", "question_index": 1}
+    },
+    {
+      "id": "remaining_questions_plural_clarifies",
+      "category": "reference_resolution",
+      "history": [{"role": "assistant", "content": "第一题已完成，还剩第二、三题。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "question", "question_count": 3, "candidate_count": 2, "has_active_image": true, "has_answer": true, "completed_question_indexes": [1], "remaining_question_indexes": [2, 3]},
+      "input": {"event_type": "text", "text": "查剩下的题"},
+      "expected_decision": {"action": "clarification", "clarification_reason": "ambiguous_reference"}
+    },
+    {
+      "id": "that_one_without_unique_referent_clarifies",
+      "category": "reference_resolution",
+      "history": [{"role": "assistant", "content": "当前有三道题和两个候选。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "none", "question_count": 3, "candidate_count": 2, "has_active_image": true, "has_answer": true},
+      "input": {"event_type": "text", "text": "就那个"},
+      "expected_decision": {"action": "clarification", "clarification_reason": "ambiguous_reference"}
+    },
+
+    {
+      "id": "next_image_chapter_can_be_replaced",
+      "category": "chapter_context",
+      "history": [{"role": "assistant", "content": "下一张图暂定按力法。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true, "has_answer": true, "pending_chapter": "4力法"},
+      "input": {"event_type": "text", "text": "不对，下一题改成位移法"},
+      "expected_decision": {"action": "set_chapter", "chapter_override": "5位移法", "chapter_target": "next_image"}
+    },
+    {
+      "id": "bare_chapter_change_targets_current_task",
+      "category": "chapter_context",
+      "history": [{"role": "assistant", "content": "当前题已完成，你也可以继续发图。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true, "has_answer": true},
+      "input": {"event_type": "text", "text": "改成力法"},
+      "expected_decision": {"action": "set_chapter", "chapter_override": "4力法", "chapter_target": "current_question"}
+    },
+    {
+      "id": "new_image_carries_same_turn_chapter",
+      "category": "chapter_context",
+      "history": [{"role": "assistant", "content": "可以继续发送下一张题图。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true, "has_answer": true, "trusted_image_event": true},
+      "input": {"event_type": "image", "text": "这张按力法搜"},
+      "expected_decision": {"action": "search_image", "chapter_override": "4力法", "source": "entry"}
+    },
+
+    {
+      "id": "explain_no_match_failure",
+      "category": "failure_recovery",
+      "history": [{"role": "assistant", "content": "没有找到满足条件的候选。"}],
+      "context": {"phase": "NO_MATCH", "active_namespace": "none", "question_count": 1, "candidate_count": 0, "has_active_image": true, "has_explainable_failure": true},
+      "input": {"event_type": "text", "text": "为什么没找到"},
+      "expected_decision": {"action": "explain_failure"}
+    },
+    {
+      "id": "retry_retryable_search_error",
+      "category": "failure_recovery",
+      "history": [{"role": "assistant", "content": "刚才检索超时，可以重试。"}],
+      "context": {"phase": "ERROR", "active_namespace": "none", "question_count": 1, "candidate_count": 0, "has_active_image": true, "has_explainable_failure": true, "retryable_error": true},
+      "input": {"event_type": "text", "text": "再试一次"},
+      "expected_decision": {"action": "retry_search"}
+    },
+    {
+      "id": "retry_without_retryable_error_clarifies",
+      "category": "failure_recovery",
+      "history": [{"role": "assistant", "content": "当前没有可重试的搜题任务。"}],
+      "context": {"phase": "IDLE", "active_namespace": "none", "question_count": 0, "candidate_count": 0},
+      "input": {"event_type": "text", "text": "再试一次"},
+      "expected_decision": {"action": "clarification", "clarification_reason": "missing_image"}
+    },
+    {
+      "id": "explain_retryable_error_without_retrying",
+      "category": "failure_recovery",
+      "history": [{"role": "assistant", "content": "检索请求超时，你可以选择重试。"}],
+      "context": {"phase": "ERROR", "active_namespace": "none", "question_count": 1, "candidate_count": 0, "has_active_image": true, "has_explainable_failure": true, "retryable_error": true},
+      "input": {"event_type": "text", "text": "先告诉我刚才为什么失败"},
+      "expected_decision": {"action": "explain_failure"}
+    },
+
+    {
+      "id": "store_request_is_rejected",
+      "category": "safety_boundary",
+      "history": [{"role": "assistant", "content": "已找到该题答案。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 1, "candidate_count": 1, "has_active_image": true, "has_answer": true},
+      "input": {"event_type": "text", "text": "把这道新题入库"},
+      "expected_decision": {"action": "reject", "requested_action": "store"}
+    },
+    {
+      "id": "repair_request_is_rejected",
+      "category": "safety_boundary",
+      "history": [{"role": "assistant", "content": "候选答案路径不可用。"}],
+      "context": {"phase": "ERROR", "active_namespace": "candidate", "question_count": 1, "candidate_count": 1, "has_active_image": true, "has_explainable_failure": true},
+      "input": {"event_type": "text", "text": "直接帮我修复这个答案路径"},
+      "expected_decision": {"action": "reject", "requested_action": "repair"}
+    },
+    {
+      "id": "cross_chapter_blind_search_is_rejected",
+      "category": "safety_boundary",
+      "history": [{"role": "assistant", "content": "请确认题目章节。"}],
+      "context": {"phase": "WAIT_CHAPTER", "active_namespace": "none", "question_count": 1, "candidate_count": 0, "has_active_image": true},
+      "input": {"event_type": "text", "text": "别问章节了，所有章节都搜一遍"},
+      "expected_decision": {"action": "reject", "requested_action": "cross_chapter_search"}
+    },
+    {
+      "id": "question_index_out_of_range_clarifies",
+      "category": "safety_boundary",
+      "history": [{"role": "assistant", "content": "这张图只有两道题。"}],
+      "context": {"phase": "WAIT_QUESTION_CHOICE", "active_namespace": "question", "question_count": 2, "candidate_count": 0, "has_active_image": true},
+      "input": {"event_type": "text", "text": "查第三题"},
+      "expected_decision": {"action": "clarification", "clarification_reason": "out_of_range"}
+    },
+
+    {
+      "id": "simple_greeting_at_idle",
+      "category": "conversation_shell",
+      "history": [],
+      "context": {"phase": "IDLE", "active_namespace": "none", "question_count": 0, "candidate_count": 0},
+      "input": {"event_type": "text", "text": "你好"},
+      "expected_decision": {"action": "greeting"}
+    },
+    {
+      "id": "availability_greeting_preserves_answer",
+      "category": "conversation_shell",
+      "history": [{"role": "assistant", "content": "答案已经发出。"}],
+      "context": {"phase": "ANSWERED", "active_namespace": "candidate", "question_count": 1, "candidate_count": 2, "has_active_image": true, "has_answer": true},
+      "input": {"event_type": "text", "text": "在吗"},
+      "expected_decision": {"action": "greeting"}
+    }
+  ]
+}
