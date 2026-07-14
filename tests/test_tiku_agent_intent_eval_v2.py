@@ -17,6 +17,7 @@ from tiku_agent.intent_eval_v2 import (
 
 SUITE_PATH = Path(__file__).parent / "fixtures" / "intent_v2_gold_review_01.json"
 EXPANSION_PATH = Path(__file__).parent / "fixtures" / "intent_v2_gold_review_02.json"
+GLOBAL_FALLBACK_PATH = Path(__file__).parent / "fixtures" / "intent_v2_global_fallback.json"
 
 
 class IntentEvalV2Test(unittest.TestCase):
@@ -71,6 +72,17 @@ class IntentEvalV2Test(unittest.TestCase):
                 "safety_boundary": 5,
             },
         )
+
+    def test_global_fallback_suite_has_reviewable_guarded_decisions(self):
+        suite = load_gold_suite(GLOBAL_FALLBACK_PATH)
+        self.assertEqual(suite["status"], "review_draft")
+        self.assertEqual(len(suite["cases"]), 12)
+        for case in suite["cases"]:
+            with self.subTest(case=case["id"]):
+                decision = ActionDecisionV2.from_dict(case["expected_decision"])
+                context = ConversationContextV2.from_mapping(case["context"])
+                authorization = authorize_action_v2(decision, context.to_decision_context())
+                self.assertTrue(authorization.allowed, authorization.code)
 
     def test_outcome_metrics_distinguish_clarification_from_wrong_execution(self):
         suite = {

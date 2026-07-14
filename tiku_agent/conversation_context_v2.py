@@ -40,6 +40,7 @@ class ConversationContextV2:
     has_explainable_failure: bool = False
     retryable_error: bool = False
     trusted_image_event: bool = False
+    global_search_offered: bool = False
     recent_actions: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -105,6 +106,7 @@ class ConversationContextV2:
             has_explainable_failure=bool(payload.get("has_explainable_failure")),
             retryable_error=bool(payload.get("retryable_error")),
             trusted_image_event=bool(payload.get("trusted_image_event")),
+            global_search_offered=bool(payload.get("global_search_offered")),
             recent_actions=tuple(str(item) for item in payload.get("recent_actions") or ()),
         )
 
@@ -119,6 +121,7 @@ class ConversationContextV2:
         pending_chapter: str | None = None,
         recent_actions: tuple[str, ...] = (),
         trusted_image_event: bool = False,
+        global_search_offered: bool = False,
         retryable_error: bool = False,
     ) -> "ConversationContextV2":
         completed = tuple(sorted(set(completed_question_indexes)))
@@ -143,6 +146,7 @@ class ConversationContextV2:
             has_explainable_failure=bool(state.last_error),
             retryable_error=retryable_error,
             trusted_image_event=trusted_image_event,
+            global_search_offered=global_search_offered,
             recent_actions=recent_actions,
         )
 
@@ -157,6 +161,7 @@ class ConversationContextV2:
             has_explainable_failure=self.has_explainable_failure,
             retryable_error=self.retryable_error,
             trusted_image_event=self.trusted_image_event,
+            global_search_offered=self.global_search_offered,
         )
 
     def to_prompt_payload(self) -> dict[str, Any]:
@@ -180,6 +185,7 @@ class ConversationContextV2:
             "has_explainable_failure": self.has_explainable_failure,
             "retryable_error": self.retryable_error,
             "trusted_image_event": self.trusted_image_event,
+            "global_search_offered": self.global_search_offered,
             "recent_actions": list(self.recent_actions),
         }
 

@@ -34,6 +34,7 @@ SCORED_FIELDS = (
 
 EXECUTING_ACTIONS = {
     "search_image",
+    "global_search",
     "set_chapter",
     "select_question",
     "select_candidate",

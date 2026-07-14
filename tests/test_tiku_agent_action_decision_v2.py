@@ -15,6 +15,7 @@ class ActionDecisionV2Test(unittest.TestCase):
             frozenset(
                 {
                 "search_image",
+                "global_search",
                 "set_chapter",
                 "select_question",
                 "select_candidate",
@@ -86,6 +87,12 @@ class ActionDecisionV2Test(unittest.TestCase):
                 chapter_override="4力法",
                 chapter_target="next_image",
             )
+
+    def test_global_search_is_a_parameter_free_guarded_action(self):
+        decision = ActionDecisionV2(action="global_search", source="rule")
+        self.assertEqual(decision.action, "global_search")
+        with self.assertRaisesRegex(ValueError, "chapter_override"):
+            ActionDecisionV2(action="global_search", chapter_override="4力法")
 
     def test_clarification_is_an_action_not_a_duplicate_boolean(self):
         decision = ActionDecisionV2(

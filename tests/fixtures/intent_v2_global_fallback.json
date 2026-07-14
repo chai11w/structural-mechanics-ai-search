@@ -1,0 +1,103 @@
+{
+  "schema_version": "1.0",
+  "status": "review_draft",
+  "description": "Strict global-search fallback intent cases; protocol/evaluation only, not connected to runtime tools.",
+  "cases": [
+    {
+      "id": "global_accept_plain_yes",
+      "category": "global_search_fallback",
+      "history": [{"role": "assistant", "content": "我还不能确定章节。也可以帮你全局搜索，不过会慢一点。"}],
+      "context": {"phase": "WAIT_CHAPTER", "has_active_image": true, "global_search_offered": true},
+      "input": {"event_type": "text", "text": "可以"},
+      "expected_decision": {"action": "global_search"}
+    },
+    {
+      "id": "global_accept_explicit",
+      "category": "global_search_fallback",
+      "history": [{"role": "assistant", "content": "你可以告诉我章节，也可以让我全局搜索。"}],
+      "context": {"phase": "WAIT_CHAPTER", "has_active_image": true, "global_search_offered": true},
+      "input": {"event_type": "text", "text": "那就全局搜一下"},
+      "expected_decision": {"action": "global_search"}
+    },
+    {
+      "id": "global_accept_slow_is_ok",
+      "category": "global_search_fallback",
+      "history": [{"role": "assistant", "content": "全局搜索可能会慢一点，要继续吗？"}],
+      "context": {"phase": "WAIT_CHAPTER", "has_active_image": true, "global_search_offered": true},
+      "input": {"event_type": "text", "text": "慢点没关系，帮我找"},
+      "expected_decision": {"action": "global_search"}
+    },
+    {
+      "id": "global_accept_go_ahead",
+      "category": "global_search_fallback",
+      "history": [{"role": "assistant", "content": "需要我全局搜索吗？"}],
+      "context": {"phase": "WAIT_CHAPTER", "has_active_image": true, "global_search_offered": true},
+      "input": {"event_type": "text", "text": "搜吧"},
+      "expected_decision": {"action": "global_search"}
+    },
+    {
+      "id": "global_decline_then_chapter",
+      "category": "global_search_fallback",
+      "history": [{"role": "assistant", "content": "也可以让我全局搜索。"}],
+      "context": {"phase": "WAIT_CHAPTER", "has_active_image": true, "global_search_offered": true},
+      "input": {"event_type": "text", "text": "不用，按力法搜"},
+      "expected_decision": {"action": "set_chapter", "chapter_override": "4力法", "chapter_target": "current_question"}
+    },
+    {
+      "id": "global_decline_only",
+      "category": "global_search_fallback",
+      "history": [{"role": "assistant", "content": "也可以让我全局搜索。"}],
+      "context": {"phase": "WAIT_CHAPTER", "has_active_image": true, "global_search_offered": true},
+      "input": {"event_type": "text", "text": "先不用"},
+      "expected_decision": {"action": "clarification", "clarification_reason": "missing_chapter"}
+    },
+    {
+      "id": "global_ambiguous_maybe",
+      "category": "global_search_fallback",
+      "history": [{"role": "assistant", "content": "需要我全局搜索吗？"}],
+      "context": {"phase": "WAIT_CHAPTER", "has_active_image": true, "global_search_offered": true},
+      "input": {"event_type": "text", "text": "可能吧"},
+      "expected_decision": {"action": "clarification", "clarification_reason": "ambiguous_action"}
+    },
+    {
+      "id": "global_yes_without_offer",
+      "category": "global_search_safety",
+      "history": [{"role": "assistant", "content": "请告诉我题目章节。"}],
+      "context": {"phase": "WAIT_CHAPTER", "has_active_image": true, "global_search_offered": false},
+      "input": {"event_type": "text", "text": "可以"},
+      "expected_decision": {"action": "clarification", "clarification_reason": "missing_chapter"}
+    },
+    {
+      "id": "global_request_without_offer",
+      "category": "global_search_safety",
+      "history": [{"role": "assistant", "content": "请告诉我题目章节。"}],
+      "context": {"phase": "WAIT_CHAPTER", "has_active_image": true, "global_search_offered": false},
+      "input": {"event_type": "text", "text": "所有章节都搜一遍"},
+      "expected_decision": {"action": "reject", "requested_action": "cross_chapter_search"}
+    },
+    {
+      "id": "global_request_without_image",
+      "category": "global_search_safety",
+      "history": [{"role": "assistant", "content": "我可以帮你全局搜索。"}],
+      "context": {"phase": "IDLE", "has_active_image": false, "global_search_offered": false},
+      "input": {"event_type": "text", "text": "全局搜吧"},
+      "expected_decision": {"action": "clarification", "clarification_reason": "missing_image"}
+    },
+    {
+      "id": "global_request_after_answer",
+      "category": "global_search_safety",
+      "history": [{"role": "assistant", "content": "已经找到候选题。"}],
+      "context": {"phase": "ANSWERED", "has_active_image": true, "has_answer": true, "candidate_count": 2, "active_namespace": "candidate", "global_search_offered": false},
+      "input": {"event_type": "text", "text": "再把所有章节搜一遍"},
+      "expected_decision": {"action": "reject", "requested_action": "cross_chapter_search"}
+    },
+    {
+      "id": "global_offer_does_not_override_chapter",
+      "category": "global_search_fallback",
+      "history": [{"role": "assistant", "content": "也可以让我全局搜索。"}],
+      "context": {"phase": "WAIT_CHAPTER", "has_active_image": true, "global_search_offered": true},
+      "input": {"event_type": "text", "text": "这是第三章，按静定结构位移搜"},
+      "expected_decision": {"action": "set_chapter", "chapter_override": "3静定结构位移", "chapter_target": "current_question"}
+    }
+  ]
+}

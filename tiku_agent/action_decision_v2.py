@@ -27,6 +27,7 @@ CONVERSATION_ACTIONS = frozenset(
 TASK_ACTIONS = frozenset(
     {
         "search_image",
+        "global_search",
         "set_chapter",
         "select_question",
         "select_candidate",
@@ -40,8 +41,10 @@ TASK_ACTIONS = frozenset(
 SAFETY_ACTIONS = frozenset({"reject"})
 ACTIONS = CONVERSATION_ACTIONS | TASK_ACTIONS | SAFETY_ACTIONS
 
-# These requests never become executable Intent V2 actions.  ``reject`` only
-# records which boundary was hit so the renderer can explain it safely.
+# These requests never become executable Intent V2 actions.  ``global_search``
+# is a separate, guarded fallback that is only legal after the Agent offered it
+# for the active question; an unsolicited blind cross-chapter search remains a
+# forbidden request. ``reject`` records which boundary was hit safely.
 FORBIDDEN_REQUESTS = frozenset({"delete", "store", "repair", "cross_chapter_search"})
 CHAPTER_TARGETS = frozenset({"current_question", "next_image"})
 

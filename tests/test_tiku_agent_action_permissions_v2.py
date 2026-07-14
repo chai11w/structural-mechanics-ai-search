@@ -12,6 +12,7 @@ from tiku_agent.action_permissions_v2 import (
     STATE_REPLACE_TASK,
     STATE_STORE_PENDING_CHAPTER,
     TOOLS_FIXED_SEARCH_PIPELINE,
+    TOOLS_GLOBAL_SEARCH_PIPELINE,
     TOOLS_NONE,
     ActionAuthorizationV2,
     DecisionContextV2,
@@ -125,6 +126,34 @@ class ActionPermissionsV2Test(unittest.TestCase):
         )
         self.assertEqual(result.outcome, OUTCOME_CLARIFY)
         self.assertEqual(result.code, "trusted_image_required")
+
+    def test_global_search_requires_wait_chapter_image_and_prior_offer(self):
+        decision = ActionDecisionV2(action="global_search")
+        allowed = authorize_action_v2(
+            decision,
+            DecisionContextV2(
+                phase="WAIT_CHAPTER",
+                has_active_image=True,
+                global_search_offered=True,
+            ),
+        )
+        not_offered = authorize_action_v2(
+            decision,
+            DecisionContextV2(phase="WAIT_CHAPTER", has_active_image=True),
+        )
+        wrong_phase = authorize_action_v2(
+            decision,
+            DecisionContextV2(
+                phase="ANSWERED",
+                has_active_image=True,
+                global_search_offered=True,
+            ),
+        )
+        self.assertTrue(allowed.allowed)
+        self.assertEqual(allowed.tool_effect, TOOLS_GLOBAL_SEARCH_PIPELINE)
+        self.assertEqual(not_offered.outcome, OUTCOME_REJECT)
+        self.assertEqual(not_offered.code, "global_search_not_offered")
+        self.assertEqual(wrong_phase.outcome, OUTCOME_CLARIFY)
 
     def test_next_image_chapter_is_stored_without_tools(self):
         decision = ActionDecisionV2(

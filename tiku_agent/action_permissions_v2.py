@@ -52,6 +52,7 @@ STATE_STORE_PENDING_CHAPTER = "store_pending_chapter"
 
 TOOLS_NONE = "none"
 TOOLS_FIXED_SEARCH_PIPELINE = "fixed_search_pipeline"
+TOOLS_GLOBAL_SEARCH_PIPELINE = "global_search_pipeline"
 TOOLS_ANSWER_LOOKUP = "answer_lookup"
 TOOLS_SAVED_ANSWER_ONLY = "saved_answer_only"
 
@@ -67,6 +68,7 @@ class DecisionContextV2:
     has_explainable_failure: bool = False
     retryable_error: bool = False
     trusted_image_event: bool = False
+    global_search_offered: bool = False
 
     def __post_init__(self) -> None:
         if self.phase not in KNOWN_PHASES:
@@ -121,6 +123,17 @@ def authorize_action_v2(
         if not _valid_chapter(decision.chapter_override, allow_none=True):
             return _clarify("invalid_chapter")
         return _allow("new_image", STATE_REPLACE_TASK, TOOLS_FIXED_SEARCH_PIPELINE)
+
+    if decision.action == "global_search":
+        if context.phase != "WAIT_CHAPTER" or not context.has_active_image:
+            return _clarify("chapter_unknown_question_required")
+        if not context.global_search_offered:
+            return _reject("global_search_not_offered")
+        return _allow(
+            "confirmed_global_search",
+            STATE_UPDATE_TASK,
+            TOOLS_GLOBAL_SEARCH_PIPELINE,
+        )
 
     if decision.action == "set_chapter":
         if not _valid_chapter(decision.chapter_override):
