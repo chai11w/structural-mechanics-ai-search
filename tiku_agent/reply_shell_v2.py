@@ -16,7 +16,7 @@ def render_reply_shell_v2(
     """Render only zero-tool conversation/rejection actions.
 
     Task actions deliberately raise so callers keep using the existing concise
-    V1 business renderers instead of duplicating search-result wording here.
+    existing business renderers instead of duplicating search-result wording here.
     """
 
     if decision.action == "greeting":

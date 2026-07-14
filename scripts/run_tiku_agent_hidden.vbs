@@ -16,7 +16,7 @@ runtimeDir = WScript.Arguments(1)
 
 shell.CurrentDirectory = projectDir
 command = Quote(pythonExe) & " -B scripts\run_tiku_agent_demo.py --host 127.0.0.1 --port " & port _
-  & " --intent-version v2 --runtime-dir " & Quote(runtimeDir)
+  & " --runtime-dir " & Quote(runtimeDir)
 
 exitCode = shell.Run(command, 0, True)
 WScript.Quit exitCode

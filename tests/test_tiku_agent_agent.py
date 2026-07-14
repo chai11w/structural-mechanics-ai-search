@@ -133,7 +133,6 @@ class TikuSearchAgentTest(unittest.TestCase):
             config=AgentToolConfig(top_k=3, rerank_top=3),
             use_llm_intent=llm_client is not None,
             llm_client=llm_client,
-            intent_version="v2",
         )
 
     def test_v2_conversation_shell_preserves_search_state_and_calls_no_tools(self):
@@ -375,7 +374,7 @@ class TikuSearchAgentTest(unittest.TestCase):
         first = agent.handle_image("q.jpg")
         self.assertEqual(agent.state.phase, STATE_WAIT_CHAPTER)
         self.assertIn("不能确定", first.text)
-        self.assertNotIn("全局搜索", first.text)
+        self.assertIn("全局搜索", first.text)
 
         second = agent.handle_text("这题应该是第三章")
         self.assertEqual(agent.state.phase, STATE_WAIT_CANDIDATE_CHOICE)
@@ -492,7 +491,8 @@ class TikuSearchAgentTest(unittest.TestCase):
 
         response = agent.handle_text("帮我入库这道题")
 
-        self.assertIn("没太明白", response.text)
+        self.assertIn("不能直接", response.text)
+        self.assertIn("确认流程", response.text)
 
     def test_greeting_introduces_agent_without_resetting_search_state(self):
         fake = FakeTools(chapter="4力法")
@@ -504,9 +504,8 @@ class TikuSearchAgentTest(unittest.TestCase):
         response = agent.handle_text("你好啊")
 
         self.assertEqual(response.intent, "greeting")
-        self.assertIn("我是力答", response.text)
-        self.assertIn("结构力学题库", response.text)
-        self.assertIn("发一张结构力学题图", response.text)
+        self.assertIn("在的", response.text)
+        self.assertIn("继续选题", response.text)
         self.assertEqual(agent.state.phase, phase_before)
         self.assertEqual(agent.state.candidates, candidates_before)
 

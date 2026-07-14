@@ -17,7 +17,7 @@ from tiku_agent.action_permissions_v2 import (
     resolve_bare_index_namespace,
 )
 from tiku_agent.conversation_context_v2 import ConversationContextV2
-from tiku_agent.intent import chinese_number_to_int, parse_chapter
+from tiku_agent.intent_contract import chinese_number_to_int, parse_chapter
 from scripts.classify_question_bank import DEFAULT_ENDPOINT, DEFAULT_MODEL, parse_model_json
 
 
@@ -182,6 +182,17 @@ def _rule_decision(
         return _simple("explain_failure")
     if _is_retry(text):
         return _simple("retry_search")
+    if (
+        context.active_namespace == NAMESPACE_CANDIDATE
+        and context.candidate_count == 1
+        and re.sub(r"[\s，。！？!?、,.]+", "", text) in {"就这个", "就它", "这个", "选这个"}
+    ):
+        return ActionDecisionV2(
+            action="select_candidate",
+            candidate_rank=1,
+            source="rule",
+            confidence=1.0,
+        )
 
     question_index = _explicit_question_index(text)
     if question_index is not None:

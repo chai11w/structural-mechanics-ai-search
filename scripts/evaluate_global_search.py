@@ -23,7 +23,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 import search
-from tiku_agent.intent import CHAPTERS
+from tiku_agent.intent_contract import CHAPTERS
 
 
 DEFAULT_COARSE_THRESHOLD = 0.999

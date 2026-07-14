@@ -13,7 +13,7 @@ from tiku_agent.action_decision_v2 import (
     CONVERSATION_ACTIONS,
     ActionDecisionV2,
 )
-from tiku_agent.intent import CHAPTERS
+from tiku_agent.intent_contract import CHAPTERS
 from tiku_agent.state import KNOWN_PHASES
 
 

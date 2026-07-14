@@ -9,7 +9,6 @@ from typing import Callable
 from uuid import uuid4
 
 from tiku_agent.agent import AgentResponse, TikuSearchAgent
-from tiku_agent.intent_runtime_v2 import INTENT_VERSION_V1, INTENT_VERSIONS
 from tiku_agent.session_artifacts import SessionArtifacts, session_key
 from tiku_agent.session_store import SessionStore
 from tiku_agent.state import AgentState
@@ -30,15 +29,11 @@ class AgentSessionRuntime:
         artifacts: SessionArtifacts | None = None,
         task_logger: TaskLogger | None = None,
         agent_factory: AgentFactory | None = None,
-        intent_version: str = INTENT_VERSION_V1,
     ) -> None:
-        if intent_version not in INTENT_VERSIONS:
-            raise ValueError(f"Unsupported intent version: {intent_version}")
         self.store = store
         self.artifacts = artifacts or SessionArtifacts()
         self.task_logger = task_logger or JsonlTaskLogger()
         self.agent_factory = agent_factory
-        self.intent_version = intent_version
 
     def handle_image(self, session_id: str, image_path: str | Path) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
@@ -134,7 +129,6 @@ class AgentSessionRuntime:
                 runtime_dir=self.artifacts.root.parent,
                 session_dir=self.artifacts.session_dir(state.session_id),
             ),
-            intent_version=self.intent_version,
         )
 
     def _purge_expired(self) -> None:

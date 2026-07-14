@@ -34,11 +34,11 @@ from scripts.feishu_tiku_bot import (
     normalize_question_key,
     prepare_multi_diagram_crops,
 )
-from tiku_agent.intent import CHAPTERS
+from tiku_agent.intent_contract import CHAPTERS
 
 
 BASE = Path(__file__).resolve().parent.parent
-DEFAULT_RUNTIME_DIR = BASE / ".tmp_tiku_agent"
+DEFAULT_RUNTIME_DIR = BASE / ".tmp_tiku_agent_v2"
 
 STRUCTURE_TYPES = {"梁", "钢架", "桁架", "拱"}
 

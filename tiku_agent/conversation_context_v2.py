@@ -10,7 +10,7 @@ from tiku_agent.action_permissions_v2 import (
     NAMESPACE_NONE,
     DecisionContextV2,
 )
-from tiku_agent.intent import CHAPTERS
+from tiku_agent.intent_contract import CHAPTERS
 from tiku_agent.state import AgentState, KNOWN_PHASES
 
 

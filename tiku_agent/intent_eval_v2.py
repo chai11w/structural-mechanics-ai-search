@@ -1,9 +1,4 @@
-"""Offline Intent V2 evaluation primitives.
-
-The first supported system is the deterministic V1 rule/fallback path.  It
-never calls Qwen or question-bank tools.  Later V2 evaluators can reuse the same
-gold schema and metrics.
-"""
+"""Offline Intent V2 evaluation primitives."""
 
 from __future__ import annotations
 
@@ -14,7 +9,6 @@ from typing import Any, Callable
 
 from tiku_agent.action_decision_v2 import ActionDecisionV2
 from tiku_agent.conversation_context_v2 import ConversationContextV2
-from tiku_agent.intent import IntentResult, call_qwen_intent, parse_user_intent
 from tiku_agent.intent_v2 import (
     DecisionModelV2,
     call_qwen_decision_v2,
@@ -86,22 +80,6 @@ def load_gold_suites(paths: list[str | Path]) -> dict[str, Any]:
         "source_statuses": [suite.get("status") for suite in suites],
         "cases": cases,
     }
-
-
-def evaluate_v1_rule_suite(suite: dict[str, Any]) -> dict[str, Any]:
-    return _evaluate_suite(suite, system="v1_rule", runner=lambda case: _run_v1(case, use_llm=False))
-
-
-def evaluate_v1_full_suite(
-    suite: dict[str, Any],
-    *,
-    llm_client: Callable[[str], dict[str, Any]] = call_qwen_intent,
-) -> dict[str, Any]:
-    return _evaluate_suite(
-        suite,
-        system="v1_full",
-        runner=lambda case: _run_v1(case, use_llm=True, llm_client=llm_client),
-    )
 
 
 def evaluate_v2_suite(
@@ -300,28 +278,6 @@ def compare_system_reports(
     }
 
 
-def _run_v1(
-    case: dict[str, Any],
-    *,
-    use_llm: bool,
-    llm_client: Callable[[str], dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    context = case["context"]
-    user_input = case["input"]
-    event_type = user_input.get("event_type", "text")
-    image_path = "fixture-question.jpg" if event_type == "image" else None
-    result = parse_user_intent(
-        user_input.get("text"),
-        state=context["phase"],
-        image_path=image_path,
-        candidate_count=int(context.get("candidate_count") or 0),
-        question_count=int(context.get("question_count") or 0),
-        use_llm=use_llm,
-        llm_client=llm_client,
-    )
-    return _adapt_v1_result(result)
-
-
 def _run_v2(
     case: dict[str, Any],
     *,
@@ -336,49 +292,6 @@ def _run_v2(
         llm_client=llm_client,
     )
     return decision.to_dict()
-
-
-def _adapt_v1_result(result: IntentResult) -> dict[str, Any]:
-    data = result.data
-    if result.intent == "unsupported":
-        requested_action = data.get("requested_action")
-        if requested_action in {"delete", "store", "repair", "cross_chapter_search"}:
-            return {"action": "reject", "requested_action": requested_action}
-        reason = _legacy_clarification_reason(result.error)
-        return {"action": "clarification", "clarification_reason": reason}
-
-    if result.intent == "select_question":
-        return {
-            "action": "select_question",
-            "question_index": data.get("question_index"),
-            "chapter_override": data.get("chapter_override"),
-        }
-    if result.intent == "select_candidate":
-        return {"action": "select_candidate", "candidate_rank": data.get("rank")}
-    if result.intent == "set_chapter":
-        return {
-            "action": "set_chapter",
-            "chapter_override": data.get("chapter"),
-            # V1 has no next-image target; its chapter correction refers to the
-            # current task whenever an image is already active.
-            "chapter_target": "current_question",
-        }
-    if result.intent == "search_image":
-        return {"action": "search_image"}
-    return {"action": result.intent}
-
-
-def _legacy_clarification_reason(error: str) -> str:
-    clean = str(error or "")
-    if "超出范围" in clean:
-        return "out_of_range"
-    if "题号" in clean:
-        return "missing_question_index"
-    if "候选" in clean:
-        return "missing_candidate_rank"
-    if "章节" in clean:
-        return "missing_chapter"
-    return "ambiguous_action"
 
 
 def _normalize_decision(payload: dict[str, Any]) -> dict[str, Any]:

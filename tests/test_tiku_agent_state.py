@@ -1,6 +1,6 @@
 import unittest
 
-from tiku_agent.intent import STATE_IDLE, STATE_WAIT_CANDIDATE_CHOICE, STATE_WAIT_CHAPTER
+from tiku_agent.intent_contract import STATE_IDLE, STATE_WAIT_CANDIDATE_CHOICE, STATE_WAIT_CHAPTER
 from tiku_agent.state import (
     PHASE_ANSWERED,
     PHASE_CANCELLED,

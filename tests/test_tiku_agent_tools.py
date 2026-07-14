@@ -147,7 +147,7 @@ class TikuAgentToolsTest(unittest.TestCase):
 
     def test_agent_runtime_is_isolated_from_old_feishu_state(self):
         config = AgentToolConfig()
-        self.assertEqual(config.runtime_dir, Path(__file__).resolve().parents[1] / ".tmp_tiku_agent")
+        self.assertEqual(config.runtime_dir, Path(__file__).resolve().parents[1] / ".tmp_tiku_agent_v2")
         self.assertNotIn(".tmp_feishu_tiku", str(config.runtime_dir))
         self.assertNotIn(".tmp_feishu_tiku", str(config.qwen_cache_path))
         self.assertNotIn(".tmp_feishu_tiku", str(config.answer_output_dir))

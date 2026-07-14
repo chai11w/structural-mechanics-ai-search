@@ -1,4 +1,4 @@
-"""Run rule-only diagnostics or paired live Intent V1/V2 evaluation."""
+"""Run rule-only or live Intent V2 evaluation."""
 
 from __future__ import annotations
 
@@ -13,9 +13,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tiku_agent.intent_eval_v2 import (  # noqa: E402
-    compare_system_reports,
-    evaluate_v1_full_suite,
-    evaluate_v1_rule_suite,
     evaluate_v2_full_suite,
     evaluate_v2_suite,
     load_gold_suites,
@@ -38,27 +35,17 @@ def main() -> int:
     )
     parser.add_argument(
         "--system",
-        choices=("v1-rule", "v2-rule", "compare-rules", "compare-live"),
-        default="compare-rules",
+        choices=("v2-rule", "v2-live"),
+        default="v2-rule",
     )
     parser.add_argument("--output", type=Path, help="Optional JSON report path")
     args = parser.parse_args()
 
     suite = load_gold_suites(args.suite or list(DEFAULT_SUITES))
-    if args.system == "v1-rule":
-        report = evaluate_v1_rule_suite(suite)
-    elif args.system == "v2-rule":
+    if args.system == "v2-rule":
         report = evaluate_v2_suite(suite)
-    elif args.system == "compare-live":
-        report = compare_system_reports(
-            evaluate_v1_full_suite(suite),
-            evaluate_v2_full_suite(suite),
-        )
     else:
-        report = compare_system_reports(
-            evaluate_v1_rule_suite(suite),
-            evaluate_v2_suite(suite),
-        )
+        report = evaluate_v2_full_suite(suite)
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     if args.output:
         args.output.write_text(rendered + "\n", encoding="utf-8")

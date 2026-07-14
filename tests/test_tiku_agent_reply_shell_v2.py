@@ -67,7 +67,7 @@ class ReplyShellV2Test(unittest.TestCase):
                 self.assertTrue("不能" in reply or "需" in reply)
                 self.assertNotIn("我来帮你", reply)
 
-    def test_task_actions_are_left_to_existing_v1_business_renderers(self):
+    def test_task_actions_are_left_to_existing_business_renderers(self):
         self.assertFalse(is_reply_shell_action("select_candidate"))
         with self.assertRaisesRegex(ValueError, "does not render task action"):
             render_reply_shell_v2(

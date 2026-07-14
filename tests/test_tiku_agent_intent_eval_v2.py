@@ -7,8 +7,6 @@ from tiku_agent.conversation_context_v2 import ConversationContextV2
 from tiku_agent.intent_eval_v2 import (
     _evaluate_suite,
     compare_system_reports,
-    evaluate_v1_full_suite,
-    evaluate_v1_rule_suite,
     evaluate_v2_suite,
     load_gold_suite,
     load_gold_suites,
@@ -26,25 +24,6 @@ class IntentEvalV2Test(unittest.TestCase):
         self.assertEqual(suite["status"], "approved_seed_set")
         self.assertEqual(len(suite["cases"]), 12)
 
-    def test_v1_rule_baseline_is_deterministic_and_reports_safety(self):
-        suite = load_gold_suite(SUITE_PATH)
-        first = evaluate_v1_rule_suite(suite)
-        second = evaluate_v1_rule_suite(suite)
-        self.assertEqual(first, second)
-        self.assertEqual(first["system"], "v1_rule")
-        self.assertEqual(first["total"], 12)
-        self.assertEqual(first["exact_count"] + len(first["failures"]), 12)
-        # Freeze the approved challenge-seed baseline. This is deliberately not
-        # presented as V1's overall accuracy because the seed set over-samples
-        # known context and safety failures.
-        self.assertEqual(first["exact_count"], 0)
-        self.assertEqual(first["exact_accuracy"], 0.0)
-        self.assertEqual(first["action_count"], 3)
-        self.assertEqual(first["action_accuracy"], 0.25)
-        self.assertEqual(first["safe_success_count"], 0)
-        self.assertEqual(first["safe_success_rate"], 0.0)
-        self.assertEqual(first["unsafe_executions"], 4)
-
     def test_combined_review_set_has_forty_valid_unique_decisions(self):
         suite = load_gold_suites([SUITE_PATH, EXPANSION_PATH])
         self.assertEqual(suite["status"], "combined_review_set")
@@ -59,7 +38,7 @@ class IntentEvalV2Test(unittest.TestCase):
                 self.assertTrue(authorization.allowed, authorization.code)
 
     def test_combined_review_set_matches_approved_category_distribution(self):
-        report = evaluate_v1_rule_suite(load_gold_suites([SUITE_PATH, EXPANSION_PATH]))
+        report = evaluate_v2_suite(load_gold_suites([SUITE_PATH, EXPANSION_PATH]))
         self.assertEqual(
             {name: values["total"] for name, values in report["categories"].items()},
             {
@@ -186,45 +165,6 @@ class IntentEvalV2Test(unittest.TestCase):
         self.assertEqual(comparison["metric_delta"]["unsafe_executions"], -1)
         self.assertEqual(comparison["baseline_metrics"]["exact_count"], 0)
         self.assertEqual(comparison["contender_metrics"]["exact_count"], 1)
-
-    def test_v1_and_v2_rule_layers_run_on_the_same_forty_cases(self):
-        suite = load_gold_suites([SUITE_PATH, EXPANSION_PATH])
-        v1 = evaluate_v1_rule_suite(suite)
-        v2 = evaluate_v2_suite(suite)
-        comparison = compare_system_reports(v1, v2)
-        self.assertEqual(v1["total"], 40)
-        self.assertEqual(v2["total"], 40)
-        self.assertEqual(comparison["total"], 40)
-        self.assertEqual(
-            [row["id"] for row in v1["cases"]],
-            [row["id"] for row in v2["cases"]],
-        )
-
-    def test_v1_full_runner_accepts_an_injected_model_without_network(self):
-        suite = {
-            "schema_version": "1.0",
-            "status": "test",
-            "cases": [
-                {
-                    "id": "model_case",
-                    "category": "conversation_shell",
-                    "context": {"phase": "IDLE"},
-                    "input": {"event_type": "text", "text": "你会做什么"},
-                    "expected_decision": {"action": "clarification", "clarification_reason": "ambiguous_action"},
-                }
-            ],
-        }
-        report = evaluate_v1_full_suite(
-            suite,
-            llm_client=lambda _prompt: {
-                "intent": "unsupported",
-                "confidence": 1.0,
-                "reason": "无法判断",
-            },
-        )
-        self.assertEqual(report["system"], "v1_full")
-        self.assertEqual(report["exact_count"], 1)
-
 
 if __name__ == "__main__":
     unittest.main()

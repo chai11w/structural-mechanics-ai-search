@@ -119,23 +119,18 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.assertEqual([entry.kind for entry in self.logger.entries], ["image", "text"])
         self.assertTrue(all(entry.duration_ms >= 0 for entry in self.logger.entries))
 
-    def test_runtime_intent_version_defaults_to_v1_and_requires_explicit_v2(self):
-        self.assertEqual(self.runtime.intent_version, "v1")
-        explicit = AgentSessionRuntime(
+    def test_runtime_builds_v2_agent_in_isolated_session_directory(self):
+        runtime = AgentSessionRuntime(
             self.store,
             artifacts=self.artifacts,
             task_logger=self.logger,
-            intent_version="v2",
         )
-        self.assertEqual(explicit.intent_version, "v2")
-        isolated_agent = explicit._make_agent(AgentState(session_id="isolated"))
+        isolated_agent = runtime._make_agent(AgentState(session_id="isolated"))
         self.assertEqual(isolated_agent.config.runtime_dir, self.artifacts.root.parent)
         self.assertEqual(
             isolated_agent.config.session_dir,
             self.artifacts.session_dir("isolated"),
         )
-        with self.assertRaises(ValueError):
-            AgentSessionRuntime(self.store, intent_version="v3")
 
     def test_cancel_clears_persisted_session(self):
         session_id = "cancel-session"
@@ -148,7 +143,7 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.assertFalse(self.artifacts.session_dir(session_id).exists())
         self.assertEqual(self.logger.entries[-1].outcome, "cancelled")
 
-    def test_v2_pending_chapter_survives_restart_and_is_consumed_once(self):
+    def test_pending_chapter_survives_restart_and_is_consumed_once(self):
         session_id = "v2-pending-session"
         self.addCleanup(lambda: self.artifacts.clear_session(session_id))
         runtime = AgentSessionRuntime(
@@ -159,7 +154,6 @@ class AgentSessionRuntimeTest(unittest.TestCase):
                 state=state,
                 tools=FakeTools().toolbox(),
                 use_llm_intent=False,
-                intent_version="v2",
             ),
         )
 
@@ -174,7 +168,6 @@ class AgentSessionRuntimeTest(unittest.TestCase):
                 state=state,
                 tools=FakeTools().toolbox(),
                 use_llm_intent=False,
-                intent_version="v2",
             ),
         )
         searched = restarted.handle_image(session_id, self.source_image)
@@ -183,7 +176,7 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.assertEqual(searched.state["pending_chapter"], "")
         self.assertEqual(self.store.load(session_id).pending_chapter, "")
 
-    def test_v2_global_search_offer_survives_restart_and_is_consumed(self):
+    def test_global_search_offer_survives_restart_and_is_consumed(self):
         session_id = "v2-global-offer-session"
         self.addCleanup(lambda: self.artifacts.clear_session(session_id))
         tools = FakeTools().toolbox()
@@ -201,7 +194,6 @@ class AgentSessionRuntimeTest(unittest.TestCase):
             state=state,
             tools=tools,
             use_llm_intent=False,
-            intent_version="v2",
         )
         runtime = AgentSessionRuntime(
             self.store,

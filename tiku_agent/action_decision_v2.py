@@ -67,7 +67,6 @@ DECISION_SOURCES = frozenset(
         "rule",
         "context_llm",
         "validator",
-        "v1_adapter",
         "gold",
         "unknown",
     }

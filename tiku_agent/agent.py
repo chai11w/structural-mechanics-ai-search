@@ -9,14 +9,8 @@ from typing import Any, Callable
 from tiku_agent import render
 from tiku_agent.action_decision_v2 import ActionDecisionV2
 from tiku_agent.conversation_context_v2 import ConversationContextV2
-from tiku_agent.intent import (
-    IntentResult,
-    parse_user_intent,
-)
+from tiku_agent.intent_contract import IntentResult
 from tiku_agent.intent_runtime_v2 import (
-    INTENT_VERSION_V1,
-    INTENT_VERSION_V2,
-    INTENT_VERSIONS,
     adapt_decision_v2,
     build_runtime_context_v2,
 )
@@ -73,61 +67,33 @@ class TikuSearchAgent:
         state: AgentState | None = None,
         tools: AgentToolbox | None = None,
         config: AgentToolConfig | None = None,
-        intent_parser: Callable[..., IntentResult] = parse_user_intent,
         use_llm_intent: bool = True,
         llm_client: Callable[[str], dict[str, Any]] | None = None,
-        intent_version: str = INTENT_VERSION_V1,
     ) -> None:
-        if intent_version not in INTENT_VERSIONS:
-            raise ValueError(f"Unsupported intent version: {intent_version}")
         self.state = state or AgentState()
         self.tools = tools or AgentToolbox()
         self.config = config or AgentToolConfig()
-        self.intent_parser = intent_parser
         self.use_llm_intent = use_llm_intent
         self.llm_client = llm_client
-        self.intent_version = intent_version
 
     def handle_image(self, image_path: str | Path) -> AgentResponse:
-        if self.intent_version == INTENT_VERSION_V2:
-            context = build_runtime_context_v2(self.state, trusted_image_event=True)
-            decision = decide_intent_v2(
-                None,
-                context,
-                event_type="image",
-                llm_client=self._v2_llm_client(),
-            )
-            return self._dispatch_v2(decision, context, image_path=image_path)
-        intent = self.intent_parser(
-            state=self.state.phase,
-            image_path=image_path,
-            candidate_count=self.state.candidate_count,
-            question_count=self.state.question_count,
-            use_llm=self.use_llm_intent,
-            llm_client=self.llm_client,
+        context = build_runtime_context_v2(self.state, trusted_image_event=True)
+        decision = decide_intent_v2(
+            None,
+            context,
+            event_type="image",
+            llm_client=self._v2_llm_client(),
         )
-        return self._dispatch(intent)
+        return self._dispatch_v2(decision, context, image_path=image_path)
 
     def handle_text(self, text: str) -> AgentResponse:
-        if self.intent_version == INTENT_VERSION_V2:
-            context = build_runtime_context_v2(self.state)
-            decision = decide_intent_v2(
-                text,
-                context,
-                llm_client=self._v2_llm_client(),
-            )
-            return self._dispatch_v2(decision, context)
-        if self.state.phase == PHASE_ERROR and text.strip() in {"重试", "再试", "再试一次"} and self.state.current_image_path:
-            return self._start_image_search(self.state.current_image_path)
-        intent = self.intent_parser(
+        context = build_runtime_context_v2(self.state)
+        decision = decide_intent_v2(
             text,
-            state=self.state.phase,
-            candidate_count=self.state.candidate_count,
-            question_count=self.state.question_count,
-            use_llm=self.use_llm_intent,
-            llm_client=self.llm_client,
+            context,
+            llm_client=self._v2_llm_client(),
         )
-        return self._dispatch(intent)
+        return self._dispatch_v2(decision, context)
 
     def _dispatch_v2(
         self,
@@ -239,8 +205,7 @@ class TikuSearchAgent:
         if pending_chapter:
             self.state.consume_pending_chapter()
         if self.state.phase == "WAIT_CHAPTER":
-            if self.intent_version == INTENT_VERSION_V2:
-                self.state.offer_global_search()
+            self.state.offer_global_search()
             return self._response(render.render_chapter_prompt(self.state), IntentResult("search_image"))
         return self._run_search()
 
@@ -280,8 +245,7 @@ class TikuSearchAgent:
         if pending_chapter:
             self.state.consume_pending_chapter()
         if self.state.phase == "WAIT_CHAPTER":
-            if self.intent_version == INTENT_VERSION_V2:
-                self.state.offer_global_search()
+            self.state.offer_global_search()
             return self._response(render.render_chapter_prompt(self.state), intent)
         return self._run_search(intent=intent, classified=question)
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from uuid import uuid4
 
-from tiku_agent.intent import (
+from tiku_agent.intent_contract import (
     CHAPTERS,
     STATE_IDLE,
     STATE_WAIT_CANDIDATE_CHOICE,

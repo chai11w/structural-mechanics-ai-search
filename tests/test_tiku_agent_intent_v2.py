@@ -55,6 +55,18 @@ class IntentV2Test(unittest.TestCase):
         self.assertEqual(decision.action, "clarification")
         self.assertEqual(decision.clarification_reason, "out_of_range")
 
+    def test_unique_candidate_accepts_natural_confirmation_without_model(self):
+        context = ConversationContextV2(
+            phase="WAIT_CANDIDATE_CHOICE",
+            active_namespace="candidate",
+            candidate_count=1,
+            has_active_image=True,
+        )
+        decision = decide_intent_v2("就这个", context)
+        self.assertEqual(decision.action, "select_candidate")
+        self.assertEqual(decision.candidate_rank, 1)
+        self.assertEqual(decision.source, "rule")
+
     def test_forbidden_and_conversation_rules_never_call_model(self):
         calls = []
 

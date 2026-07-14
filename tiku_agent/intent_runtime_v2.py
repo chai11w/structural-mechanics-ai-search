@@ -11,13 +11,8 @@ from tiku_agent.action_permissions_v2 import (
     NAMESPACE_QUESTION,
 )
 from tiku_agent.conversation_context_v2 import ConversationContextV2
-from tiku_agent.intent import IntentResult, STATE_WAIT_CANDIDATE_CHOICE, STATE_WAIT_QUESTION_CHOICE
+from tiku_agent.intent_contract import IntentResult, STATE_WAIT_CANDIDATE_CHOICE, STATE_WAIT_QUESTION_CHOICE
 from tiku_agent.state import PHASE_ANSWERED, PHASE_ERROR, AgentState
-
-
-INTENT_VERSION_V1 = "v1"
-INTENT_VERSION_V2 = "v2"
-INTENT_VERSIONS = frozenset({INTENT_VERSION_V1, INTENT_VERSION_V2})
 
 
 def build_runtime_context_v2(

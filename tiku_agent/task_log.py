@@ -9,9 +9,11 @@ from pathlib import Path
 from threading import Lock
 from typing import Literal
 
+from tiku_agent.tools import DEFAULT_RUNTIME_DIR
+
 
 TASK_LOG_SCHEMA_VERSION = 1
-DEFAULT_TASK_LOG_PATH = Path(__file__).resolve().parent.parent / ".tmp_tiku_agent" / "task_logs.jsonl"
+DEFAULT_TASK_LOG_PATH = DEFAULT_RUNTIME_DIR / "task_logs.jsonl"
 TaskKind = Literal["image", "text"]
 TaskOutcome = Literal["waiting", "candidates", "answered", "no_match", "cancelled", "error"]
 
