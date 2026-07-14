@@ -43,6 +43,7 @@ ACTIONS = CONVERSATION_ACTIONS | TASK_ACTIONS | SAFETY_ACTIONS
 # These requests never become executable Intent V2 actions.  ``reject`` only
 # records which boundary was hit so the renderer can explain it safely.
 FORBIDDEN_REQUESTS = frozenset({"delete", "store", "repair", "cross_chapter_search"})
+CHAPTER_TARGETS = frozenset({"current_question", "next_image"})
 
 CLARIFICATION_REASONS = frozenset(
     {
@@ -85,6 +86,7 @@ class ActionDecisionV2:
     question_index: int | None = None
     candidate_rank: int | None = None
     chapter_override: str | None = None
+    chapter_target: str | None = None
     clarification_reason: str | None = None
     requested_action: str | None = None
     confidence: float = 0.0
@@ -126,10 +128,17 @@ class ActionDecisionV2:
         if self.chapter_override is not None:
             if not isinstance(self.chapter_override, str) or not self.chapter_override.strip():
                 raise ValueError("chapter_override must be a non-empty string")
-            if self.action not in {"set_chapter", "select_question"}:
-                raise ValueError("chapter_override is only valid for set_chapter/select_question")
+            if self.action not in {"search_image", "set_chapter", "select_question"}:
+                raise ValueError(
+                    "chapter_override is only valid for search_image/set_chapter/select_question"
+                )
         if self.action == "set_chapter" and self.chapter_override is None:
             raise ValueError("set_chapter requires chapter_override")
+        if self.action == "set_chapter":
+            if self.chapter_target not in CHAPTER_TARGETS:
+                raise ValueError("set_chapter requires a known chapter_target")
+        elif self.chapter_target is not None:
+            raise ValueError("chapter_target is reserved for set_chapter")
 
     def _validate_clarification(self) -> None:
         if self.action == "clarification":

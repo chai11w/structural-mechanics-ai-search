@@ -67,8 +67,25 @@ class ActionDecisionV2Test(unittest.TestCase):
     def test_set_chapter_requires_chapter_override(self):
         with self.assertRaisesRegex(ValueError, "chapter_override"):
             ActionDecisionV2(action="set_chapter")
-        decision = ActionDecisionV2(action="set_chapter", chapter_override="3静定结构位移")
+        with self.assertRaisesRegex(ValueError, "chapter_target"):
+            ActionDecisionV2(action="set_chapter", chapter_override="3静定结构位移")
+        decision = ActionDecisionV2(
+            action="set_chapter",
+            chapter_override="3静定结构位移",
+            chapter_target="next_image",
+        )
         self.assertEqual(decision.chapter_override, "3静定结构位移")
+        self.assertEqual(decision.chapter_target, "next_image")
+
+    def test_search_image_can_carry_same_turn_chapter_override(self):
+        decision = ActionDecisionV2(action="search_image", chapter_override="4力法", source="entry")
+        self.assertEqual(decision.chapter_override, "4力法")
+        with self.assertRaisesRegex(ValueError, "chapter_target"):
+            ActionDecisionV2(
+                action="search_image",
+                chapter_override="4力法",
+                chapter_target="next_image",
+            )
 
     def test_clarification_is_an_action_not_a_duplicate_boolean(self):
         decision = ActionDecisionV2(

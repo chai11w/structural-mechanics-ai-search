@@ -18,7 +18,7 @@
 - `scripts/feishu_tiku_bot.py`：现有飞书单题/多题检索、章节选择、答案返回、入库和候选删除。
 - `scripts/feishu_store_flow.py` 与 `scripts/feishu_delete_flow.py`：题库写操作采用计划、确认和备份。
 - `tiku_agent/tools.py`、`state.py`、`agent.py`、`render.py`：隔离工具、状态和自然语言编排；支持章节纠正、多题选题、候选切换和答案回看。
-- V1 Intent 采用少量确定性规则、Qwen 动作判断、状态校验和规则降级；V2 已新增旁路 `ActionDecisionV2` 协议，严格区分 `question_index` / `candidate_rank`，支持题号携带章节覆盖，并定义专业交流、失败重试、追问和拒绝动作，尚未接入稳定入口。
+- V1 Intent 采用少量确定性规则、Qwen 动作判断、状态校验和规则降级；V2 已新增旁路 `ActionDecisionV2` 与纯函数权限矩阵，严格区分 `question_index` / `candidate_rank`，支持当前题/下一张图章节目标、题图携带章节覆盖，并定义专业交流、失败重试、追问和拒绝动作，尚未接入稳定入口。
 - SQLite 会话与 session 文件持久化已实现；最后活跃 2 小时过期，取消清理状态与临时文件。
 - 页面首次打开即创建会话 Cookie；首次上传后立即退出再进入、刷新或 Demo 重启时，两小时内可恢复会话绑定题图 URL。
 - Demo 已具备单会话聊天画布、移动端菜单、拖放上传、候选选择、大图预览、固定顶栏/输入区、中文安全错误和请求取消；选图结果统一经 canvas 输出质量 0.92 的 JPEG Blob，以 `file` multipart 字段上传，失败保留预览和 Blob 可直接重试，成功响应后才显示用户题图。
@@ -31,13 +31,13 @@
 
 ## In Progress
 
-- Intent V2 已完成方案审查、V1 小型离线问题探针和 `ActionDecisionV2` 协议；当前协议仅是可执行合同，没有改动 Prompt、`agent.py`、V1 状态机或检索链路。
-- 下一步按 `.agents/roadmap.md` 建立状态—动作权限矩阵，再建立正式多轮评测集与 V1 基线。
+- Intent V2 已完成方案审查、V1 小型离线问题探针、`ActionDecisionV2` 协议和状态—动作权限矩阵；当前均为旁路纯函数，没有改动 Prompt、`agent.py`、V1 状态机或检索链路。
+- 下一步按 `.agents/roadmap.md` 建立正式多轮搜题与专业交流评测集，运行可复现的 V1 基线。
 
 ## Not Implemented
 
 - 尚未引入 LangGraph 图或 checkpoint，也未创建、连接新的飞书机器人。
-- 尚未实现 ConversationContext V2、状态—动作权限矩阵、歧义追问执行、专业交流回复与 V1/V2 影子对照；题目/候选编号命名空间目前只在旁路协议中定义。
+- 尚未实现 ConversationContext V2、歧义追问执行、专业交流回复、一次性 `pending_chapter` 持久化/消费与 V1/V2 影子对照；活跃命名空间和权限目前只在旁路纯函数中定义。
 - 尚未建立约 40 组真实多轮意图评测集；现有测试覆盖规则和状态转换，但不足以衡量“另一个/刚才那个/剩下那题”等连续指代。
 - 复筛并发数、首轮超时和补评上限尚未配置化。
 - 缺少 pipeline 级超时回退、真实飞书事件和持久状态集成测试。
@@ -57,6 +57,8 @@
 - Intent V2 每个用户回合最多执行一个高层动作；LLM 负责理解，代码负责状态权限、参数范围和禁止动作校验，不开放自由多工具循环。
 - Intent 上下文只提供完成判断所需的会话摘要，不暴露本地绝对路径、凭据、完整模型原始输出或无关题库数据。
 - `greeting`、`small_talk`、`capability_help`、`out_of_scope` 和 `clarification` 不调用题库工具、不修改搜题业务状态，也不把 Agent 扩展成通用聊天机器人。
+- 模糊编号跟随最近活跃命名空间，本回合明确名词优先；活跃编号越界时追问，不静默切换到另一命名空间。
+- 发图前章节预设只作用于下一张有效单题图片；多题图片必须确认具体题号，不能把预设章节批量套用。
 
 ## Known Risks
 
@@ -84,8 +86,8 @@
 
 ## Next Best Step
 
-1. 基于 `ActionDecisionV2` 建立逐 phase 状态—动作权限矩阵，定义必需参数、边界、追问转换和交流动作零副作用。
-2. 建立约 40 组真实多轮搜题评测和专业交流外壳样本，运行正式 V1 基线，不从改 Prompt 开始。
+1. 建立约 40 组真实多轮搜题评测和专业交流外壳样本，覆盖活跃命名空间、编号越界、下一张图章节和多题追问。
+2. 实现离线评测器并运行正式 V1 基线，不从改 Prompt 开始。
 3. 评测基线完成后实现 ConversationContext V2、受约束 Qwen 动作判断和歧义追问；LangGraph 留到动作协议稳定后再评估。
 
 ## Important Commands
@@ -93,6 +95,7 @@
 ```powershell
 python -B -m unittest discover -s tests -p "test_*.py"
 python -B -m unittest tests.test_tiku_agent_action_decision_v2
+python -B -m unittest tests.test_tiku_agent_action_permissions_v2
 python -B -m unittest tests.test_tiku_agent_intent tests.test_tiku_agent_agent tests.test_tiku_agent_session_runtime
 python -B scripts/smoke_test.py
 python -B scripts/search_by_loads.py --help
