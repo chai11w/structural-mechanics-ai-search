@@ -40,20 +40,9 @@ Intent V2 还提供受限的全局搜索兜底：只有章节判断失败、Agen
 
 普通章节检索的候选阶段支持结果反馈：用户可以说“没有”“都不是”否定当前批次，说“继续搜”“换一批”查找下一批未尝试候选，答案返回后也可以说“答案不对”或“回到候选”。`continue_search` 会沿用当前题图、章节和题库路由，排除已经进入过粗筛批次的候选；没有剩余候选时只提示换章节或补充更清楚的题图，不会把错误恢复专用的 `retry_search` 当作继续检索，也不会自动放宽章节或全局搜索边界。
 
-## 决策轨迹人工评审实验
+## 实验分支
 
-[`experiments/decision_trace_lab`](experiments/decision_trace_lab) 是与展示主线隔离的观测分线。题库只有约 800 道题，单看“是否搜到答案”不能准确判断 Agent 是否工作正确；这个实验因此重点记录每一轮的中间决策，包括意图判断、权限校验、工具调用、状态变化和最终结果。
-
-实验左侧运行经过 SHA-256 校验的真实主线镜像，右侧提供人工复核面板。人工可以把关键步骤标记为“正确 / 错误 / 不确定”：当前选择会变绿，修改选择时绿色会移动；未复核项置顶，已复核项自动沉底，刷新页面后选择仍会保留。标记用于后续统计和定位问题，不会自动修改主线 Agent。
-
-启动独立 Demo：
-
-```powershell
-cd experiments\decision_trace_lab
-python app\run_mainline_observed_web.py
-```
-
-打开 `http://127.0.0.1:8793`。该入口使用独立 Cookie、会话目录、轨迹日志和人工标签，不复用或重启 8790/8788 服务；`data/`、`runtime/`、题图、人工标签、数据库和日志均被排除在 Git 之外。设计边界、验证方式和完整操作说明见[实验 README](experiments/decision_trace_lab/README.md)。
+[`experiments/decision_trace_lab`](experiments/decision_trace_lab) 用于在不影响展示主线的前提下，记录并人工复核真实 Agent 的中间决策，帮助定位意图、工具和状态流转问题。分支目的、运行方式和隔离边界见[实验 README](experiments/decision_trace_lab/README.md)。
 
 ## 系统流程
 
