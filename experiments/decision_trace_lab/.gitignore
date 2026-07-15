@@ -1,0 +1,24 @@
+# Runtime state and human review data must never enter Git.
+/data/
+/runtime/
+/export/
+/source_snapshot/
+
+# Python / test caches.
+__pycache__/
+*.py[cod]
+/.pytest_cache/
+/.mypy_cache/
+/.coverage
+
+# Local databases, logs, labels and generated media.
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.jsonl
+labels*.json
+*.png
+*.jpg
+*.jpeg
+*.webp

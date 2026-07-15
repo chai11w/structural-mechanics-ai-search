@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <title>力答 · 结构力学搜题</title>
+  <link rel="stylesheet" href="/assets/demo.css?v=20260714-candidate-viewport">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <button class="icon-button" id="menu-button" type="button" aria-label="打开会话菜单" aria-controls="session-drawer" aria-expanded="false">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      <a class="brand" href="/" aria-label="力答首页"><span class="brand-mark">力</span><span>力答</span></a>
+      <div class="top-actions">
+        <span class="session-chip"><span class="session-dot"></span>临时会话</span>
+        <button class="icon-button" id="top-new-chat" type="button" aria-label="开始新对话" title="新对话">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="main">
+      <section class="conversation" id="conversation">
+        <div class="empty" id="empty">
+          <div class="hero-mark" aria-hidden="true"><span>力</span></div>
+          <h1>结构力学题，一张图就够了</h1>
+          <p>识别题干与荷载特征，从题库中定位相似题，并继续查看对应答案。</p>
+          <button class="hero-upload" id="hero-upload" type="button">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4 4 4M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></svg>
+            上传一道题
+          </button>
+          <div class="capabilities" aria-label="支持的能力">
+            <span>单题 / 多题识别</span><i></i><span>自动判断章节</span><i></i><span>相似题视觉排序</span>
+          </div>
+        </div>
+        <div class="chat" id="chat" role="log" aria-live="polite" aria-relevant="additions text"></div>
+      </section>
+
+      <div class="composer-dock">
+        <div class="drop-target" id="drop-target">
+          <form class="composer" id="composer">
+            <textarea id="text" rows="1" maxlength="1000" aria-label="消息" placeholder="发题图，或继续选择候选题…"></textarea>
+            <div class="composer-toolbar">
+              <label class="tool-button" id="attach" role="button" tabindex="0" aria-label="上传题图" title="上传题图">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m21.4 11.6-8.9 8.9a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 1 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg>
+                <span>添加题图</span>
+                <input id="file" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp">
+              </label>
+              <span class="composer-hint" id="file-hint">PNG、JPG、WEBP · 最大 15MB</span>
+              <button class="send-button" id="send" type="submit" aria-label="发送消息" disabled>
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 19V5m0 0-6 6m6-6 6 6"/></svg>
+              </button>
+            </div>
+          </form>
+          <div class="runtime-status" id="runtime-status" role="status" aria-live="polite"><span class="status-dot"></span><span id="status-text">准备就绪</span></div>
+        </div>
+        <p class="fine-print">题图会用于云端模型识别 · 最后一次操作 2 小时后自动清理</p>
+      </div>
+    </main>
+  </div>
+
+  <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+  <aside class="drawer" id="session-drawer" aria-label="会话菜单" aria-hidden="true" inert>
+    <div class="drawer-header"><div class="brand"><span class="brand-mark">力</span><span>力答</span></div><button class="icon-button" id="close-drawer" type="button" aria-label="关闭会话菜单"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <button class="new-chat" id="new-chat" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>新对话</span></button>
+    <section class="drawer-section"><h2>当前会话</h2><div class="current-session"><span class="session-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z"/></svg></span><div><strong>临时搜题会话</strong><small>关闭或刷新页面也可继续</small></div></div></section>
+    <section class="drawer-section how-it-works"><h2>演示流程</h2><ol><li><span>1</span>上传结构力学题图</li><li><span>2</span>识别题干、章节与荷载</li><li><span>3</span>选择候选题查看答案</li></ol></section>
+    <div class="privacy-note"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg><p><strong>临时会话</strong><span>题图会调用云端视觉模型识别，2 小时后清理；请勿上传个人敏感信息。</span></p></div>
+  </aside>
+
+  <div class="drop-overlay" id="drop-overlay" aria-hidden="true"><div><span class="drop-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4 4 4M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></svg></span><strong>松开即可上传题图</strong><small>支持 PNG、JPG、WEBP 等图片，最大 15MB</small></div></div>
+  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="查看大图" hidden><button class="lightbox-close" id="lightbox-close" type="button" aria-label="关闭大图"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button><img id="lightbox-image" alt=""></div>
+  <script src="/assets/demo.js?v=20260714-candidate-viewport" defer></script>
+</body>
+</html>

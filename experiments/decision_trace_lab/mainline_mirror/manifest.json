@@ -1,0 +1,334 @@
+{
+    "schema_version":  1,
+    "source_repository":  "F:/cc/7-题库检索",
+    "source_branch":  "main",
+    "source_commit":  "bc27cba1339f8a73aee18c4a44e109cecd84bd3d",
+    "created_at":  "2026-07-15T05:12:11.7331546Z",
+    "snapshot_scope":  "tracked code, tests, fixtures and safe documentation; excludes .git, local config/secrets, xlsx question-bank assets, runtime/logs/caches, project-agent metadata, and special_unindexed_questions.json",
+    "files":  [
+                  {
+                      "path":  ".gitignore",
+                      "sha256":  "ce6f8687f32a6b848e59045a58e4247224c05747de5ac9a5862cbe19970ccbcb"
+                  },
+                  {
+                      "path":  "AGENTS.md",
+                      "sha256":  "ae662cc5c8cc6b94ba049c0e214793294f0826f61df376f2d0e5dd060b610e99"
+                  },
+                  {
+                      "path":  "build_index.py",
+                      "sha256":  "fb5a0eefa04788ae06a1bd960e0f07db9b09b570a0ba2bde3e46ef3afdf9dee7"
+                  },
+                  {
+                      "path":  "config.example.json",
+                      "sha256":  "f40f97b498c3b1a7f81e552d27ca240735a2ef690120a1f6f8f8be317c7e0ff9"
+                  },
+                  {
+                      "path":  "multi_agent_pipeline.py",
+                      "sha256":  "a11cc6ea3a0f466f6712d84df08c5d37b6423cf52d779d7ea19d4db56fd950b5"
+                  },
+                  {
+                      "path":  "README.md",
+                      "sha256":  "175cd458cb7ad67efe875faf2938caf53263ead8cfcad905acdd7b7fd9df00fe"
+                  },
+                  {
+                      "path":  "requirements.txt",
+                      "sha256":  "1d063fb92c795852358a5286ef3594d104196a7ebb6336f2277d594f997a9ecd"
+                  },
+                  {
+                      "path":  "scripts/apply_main_bank_update.py",
+                      "sha256":  "9887081c3451f4c7d24b61f8ef1fb1068d5e6324709ed7e47eb547b86f4f6e98"
+                  },
+                  {
+                      "path":  "scripts/audit_unindexed_questions.py",
+                      "sha256":  "4f59ddccdd8281004d92c1ed74ff2e23a3b22f570a55ddd86c85c91c4dbe1a85"
+                  },
+                  {
+                      "path":  "scripts/build_symbolic_bank.py",
+                      "sha256":  "ced2a5ecb04037b05cd254f4f71bd739847a8ab1cf4bba82987d76c8b0802b96"
+                  },
+                  {
+                      "path":  "scripts/chapter_judgment_log.py",
+                      "sha256":  "a1da5b3ef8bc9708338e037eadc0c7e299a77ee4b770a60589d453e3a8568fd9"
+                  },
+                  {
+                      "path":  "scripts/classify_question_bank.py",
+                      "sha256":  "df2afebd08b3d0c95d72d9cc6c8ae3260a0f9258f78581d63ddc6f70fb0e3f9b"
+                  },
+                  {
+                      "path":  "scripts/evaluate_concurrent_rerank.py",
+                      "sha256":  "c6a58f938a53e13ea521d73a650e7e680eedea37e860b665c83c136b6eb95229"
+                  },
+                  {
+                      "path":  "scripts/evaluate_global_search.py",
+                      "sha256":  "752a9aac354d4dfe7a0420f7e62dd2b214f26ac18e92186b119ccb9609ef41c6"
+                  },
+                  {
+                      "path":  "scripts/evaluate_intent_v2.py",
+                      "sha256":  "29d6ecebc0d8f7897f3fa938870ee07726df649ddae8e2401211c33274bb7f84"
+                  },
+                  {
+                      "path":  "scripts/evaluate_qwen_structure_type.py",
+                      "sha256":  "7fa8a209e1d2e56a257157b45d6055d0df73ba758921f03825fa57500200d616"
+                  },
+                  {
+                      "path":  "scripts/evaluate_shape_rerank_prompt.py",
+                      "sha256":  "764ae510072afce9f9a4a62331639f36bc924b59dc97fddab72f889ee2fc561b"
+                  },
+                  {
+                      "path":  "scripts/experiment_structure_type_filter.py",
+                      "sha256":  "18ca7171e21702ab50bb4d6ce0d38aaecc7ef13982ae749ed9e1e90d6b3a44db"
+                  },
+                  {
+                      "path":  "scripts/feishu_delete_flow.py",
+                      "sha256":  "06b04b8a76eb617db47121ce8799cc23595849a29e3c60da7823cc48d28785dc"
+                  },
+                  {
+                      "path":  "scripts/feishu_store_flow.py",
+                      "sha256":  "d3770b2f2fe3d584ef9567e88e1a872f4bef13c0c1cc4fd7da9d9f71d88263d3"
+                  },
+                  {
+                      "path":  "scripts/feishu_tiku_bot.py",
+                      "sha256":  "708b244ffabfe7f9e965de0441a8171e8b856981292fa81f86c98301f429a4f0"
+                  },
+                  {
+                      "path":  "scripts/multi_agent_search.py",
+                      "sha256":  "c8c78b1a1a91c724cd4b6c2465991d69236d51fa93b1daf3ce857e0fe88df933"
+                  },
+                  {
+                      "path":  "scripts/normalize_excel_load_units.py",
+                      "sha256":  "a6bc7b8f3cd5c45fcb9556ab638e92cd8e4de3918e4ffd3f1c6bcc084bc7dc3f"
+                  },
+                  {
+                      "path":  "scripts/run_tiku_agent_demo.py",
+                      "sha256":  "90bc69e100d61503a796ee54fb1980a7a145ba8127c200beccbced0a1c638efc"
+                  },
+                  {
+                      "path":  "scripts/run_tiku_agent_hidden.vbs",
+                      "sha256":  "94d92955c4700ed937a8f86b06683dc9e2d5a5e748706b5a89c1b60b09845a0d"
+                  },
+                  {
+                      "path":  "scripts/search_by_loads.py",
+                      "sha256":  "6abef3321037f9cdbf148290989272ce99765325566a53f1be1769b05e53bc2f"
+                  },
+                  {
+                      "path":  "scripts/smoke_test.py",
+                      "sha256":  "38c7b0b7aed6776df6aafeb8e681767f07c630815fda5e26376e9a89e6702c7f"
+                  },
+                  {
+                      "path":  "scripts/start_tiku_bot.ps1",
+                      "sha256":  "87fd1efe727cea3e67cc9d153947d255c9edf80eacea396b51eed177f25ec3aa"
+                  },
+                  {
+                      "path":  "scripts/store_unindexed_questions.py",
+                      "sha256":  "506ad3c4e2a4f516562f4731f8d9958721089d9a11b002f0f9ef4a965b227208"
+                  },
+                  {
+                      "path":  "scripts/structure_type_classifier.py",
+                      "sha256":  "d0ffe4ff5f5bd2a29075b3939e1f882402b143393496ab98666fa7f537a90ccb"
+                  },
+                  {
+                      "path":  "scripts/tiku_bot_watchdog.ps1",
+                      "sha256":  "794b2b496d4fa23f63ae0e4b518b082556e738cee48dc1196753e747f51f1f5e"
+                  },
+                  {
+                      "path":  "scripts/write_symbolic_structure_types.py",
+                      "sha256":  "493c5f9125404d3d1360d6b0484a16d6bc7225eae026199a0ffddeb8867ab9b5"
+                  },
+                  {
+                      "path":  "search.py",
+                      "sha256":  "8623be07226e363314b32a631c928eaebf01778d82be4f0000bbfdf3f34a3283"
+                  },
+                  {
+                      "path":  "SKILL.md",
+                      "sha256":  "f274815928aa2859384cfdcd58a15d3cffa37d6f5e1336e192b5539dfd61fc97"
+                  },
+                  {
+                      "path":  "tests/fixtures/intent_v2_blind_01.json",
+                      "sha256":  "d86ba23d2db16a3f0a1d6c6fadfeeadc92379ef778689b8780db1f8b79fc9b22"
+                  },
+                  {
+                      "path":  "tests/fixtures/intent_v2_blind_02.json",
+                      "sha256":  "c41364b43d84b88af9b7697c19c828c560c12be85375e2c60775ae2d994ee75f"
+                  },
+                  {
+                      "path":  "tests/fixtures/intent_v2_global_fallback.json",
+                      "sha256":  "50418eb2e468f2bab8e065653aa7938a5d8dfa3bf08e850652cc664409ffaa45"
+                  },
+                  {
+                      "path":  "tests/fixtures/intent_v2_gold_review_01.json",
+                      "sha256":  "cc81c74090d6d990a81f57c20ca16a815386aa593f0a0c279f8cba6d38c6e8cb"
+                  },
+                  {
+                      "path":  "tests/fixtures/intent_v2_gold_review_02.json",
+                      "sha256":  "b59b44d74c1a616dd6820bd9de396dce012049319e6f1289dd93bc495aa1da67"
+                  },
+                  {
+                      "path":  "tests/fixtures/intent_v2_result_feedback.json",
+                      "sha256":  "4860b8409e15598e8df36c47c94905a8b2971c9bef5329665effb545b8a52ba8"
+                  },
+                  {
+                      "path":  "tests/test_assigned_symbolic_routing.py",
+                      "sha256":  "547a5044adf143eaed7be24a80b40dc77a6b9e05e370309490a533db6a7650de"
+                  },
+                  {
+                      "path":  "tests/test_display_policy.py",
+                      "sha256":  "b0298b80abee6689e9865ccb0047efc1f5b3452cf97ab1ec3a67a82da76685d2"
+                  },
+                  {
+                      "path":  "tests/test_global_search_evaluation.py",
+                      "sha256":  "0f8b3569caa65d913fa22adf299c28ba4d43b1932b833a596a53f0803e4b5d4a"
+                  },
+                  {
+                      "path":  "tests/test_multi_agent_rerank_policy.py",
+                      "sha256":  "719d9ab74c9726ca27264617d174213baaaccbb9269732d777b9b57075dacc49"
+                  },
+                  {
+                      "path":  "tests/test_rerank_prompt.py",
+                      "sha256":  "5ea62a27c1aff409e58194f246b3368f35949eb2f2aeb1de1740788fbe04746d"
+                  },
+                  {
+                      "path":  "tests/test_tiku_agent_action_decision_v2.py",
+                      "sha256":  "d2e93a89a3279f2928ab7168439d336d99bb5a008f480bfc897adca47ecae909"
+                  },
+                  {
+                      "path":  "tests/test_tiku_agent_action_permissions_v2.py",
+                      "sha256":  "0a61df9fcc1e8b31dc1e02c0afd6659c8189fe16bf514c2647593015c7dc282f"
+                  },
+                  {
+                      "path":  "tests/test_tiku_agent_agent.py",
+                      "sha256":  "0ab7861d482965b82a2744732d1eaa3b57792a2e17074a3f517431d73f3acdf7"
+                  },
+                  {
+                      "path":  "tests/test_tiku_agent_conversation_context_v2.py",
+                      "sha256":  "8c64c459d0331786d595616979b0a0d4305cc227334b1cf396f45a7821889451"
+                  },
+                  {
+                      "path":  "tests/test_tiku_agent_fastapi_demo.py",
+                      "sha256":  "07b4df79dc4595bcc915bd83bc6f7f97805f3089d3b7f048156803895c87c986"
+                  },
+                  {
+                      "path":  "tests/test_tiku_agent_intent_eval_v2.py",
+                      "sha256":  "03eafbb1201db1d938536d66818323e9640b045757b03b189d2d5f704597af22"
+                  },
+                  {
+                      "path":  "tests/test_tiku_agent_intent_v2.py",
+                      "sha256":  "f85c27f87e5875f3b5e28a1c6dcd4f406284ffa9468a3ec1f028a84622a559b2"
+                  },
+                  {
+                      "path":  "tests/test_tiku_agent_intent_v2_blind_contract.py",
+                      "sha256":  "67a6ebcb85d4c5c41a601ae28f1a1df0f71cb502b50d80bb6af1c444b99207ad"
+                  },
+                  {
+                      "path":  "tests/test_tiku_agent_reply_shell_v2.py",
+                      "sha256":  "a05398e4bd77a9329c866b2a5712adc045387960b208aaa5be6c49acbda108e7"
+                  },
+                  {
+                      "path":  "tests/test_tiku_agent_session_artifacts.py",
+                      "sha256":  "88d4fdd197269607eeb3331eb7329f1aec44764d68c93aec790d933db2efad95"
+                  },
+                  {
+                      "path":  "tests/test_tiku_agent_session_runtime.py",
+                      "sha256":  "92f77615ab3db4f7a4e8fb7047a8febaba82c6cc88e781fcad7132db79d8b59b"
+                  },
+                  {
+                      "path":  "tests/test_tiku_agent_session_store.py",
+                      "sha256":  "4760cb1a7fdcad68fe898d5c30b86da405912a676ab7b623082ca06fc3da6826"
+                  },
+                  {
+                      "path":  "tests/test_tiku_agent_state.py",
+                      "sha256":  "a90dfe4f04be9ecada1bf16f00800deeae42b1409d563b795b2f5157fa73fa85"
+                  },
+                  {
+                      "path":  "tests/test_tiku_agent_task_log.py",
+                      "sha256":  "dc67ba8ebd1613ad855e20688127d60e92651b0e43077039bfe5108772b6579c"
+                  },
+                  {
+                      "path":  "tests/test_tiku_agent_tools.py",
+                      "sha256":  "a1ac3c15cdc731ceeb82656984d8d25d1307ce56b27d2db77f01745710a5e95b"
+                  },
+                  {
+                      "path":  "tiku_agent/__init__.py",
+                      "sha256":  "b9fd94353f21d71033476fff0857af0f94cf49540ef4105233d0cb4216f26a38"
+                  },
+                  {
+                      "path":  "tiku_agent/action_decision_v2.py",
+                      "sha256":  "16f1985a839a737120891a3e81154dd6c5fc4ac7c4aea221af81b54188d57a25"
+                  },
+                  {
+                      "path":  "tiku_agent/action_permissions_v2.py",
+                      "sha256":  "8f93aca25c1923f3adb4300227b572f4ab67c942f87c6df57ce048b9f5205f35"
+                  },
+                  {
+                      "path":  "tiku_agent/agent.py",
+                      "sha256":  "354757b4692c428253f2eeb0572b7f575eb8609a435b4a4c3ae3b0acd028bf23"
+                  },
+                  {
+                      "path":  "tiku_agent/conversation_context_v2.py",
+                      "sha256":  "2a8af13430f20bb5473e20fad3283c3032023811ced1d5cf8e271273344f213e"
+                  },
+                  {
+                      "path":  "tiku_agent/demo_web/demo.css",
+                      "sha256":  "93e92aeadf2f85ca174fa19701ab1d4190f0ae221a70b8ac81c10c8980b7fb5c"
+                  },
+                  {
+                      "path":  "tiku_agent/demo_web/demo.js",
+                      "sha256":  "17b7211a847a3e1611420e40a09bb6edb80ad65a781cd0ea37efa9c58bf222d4"
+                  },
+                  {
+                      "path":  "tiku_agent/demo_web/index.html",
+                      "sha256":  "b2ed87905132a27db29b510ade70e0e675fe75c5758a64a18b149819e1af0c21"
+                  },
+                  {
+                      "path":  "tiku_agent/fastapi_demo.py",
+                      "sha256":  "aadde3bf898912439951196b36e2940766fcf1ff02586e5d11a0f9fdca1b80f5"
+                  },
+                  {
+                      "path":  "tiku_agent/intent_contract.py",
+                      "sha256":  "219fcccd4d93541ad239762f54b95cad7d095bc9d8f018e314c10c4cdb16a167"
+                  },
+                  {
+                      "path":  "tiku_agent/intent_eval_v2.py",
+                      "sha256":  "dda28b9849ff38d17ed17917aeeaaaa5a0d67c7cb20639d5c6106ce11964980d"
+                  },
+                  {
+                      "path":  "tiku_agent/intent_runtime_v2.py",
+                      "sha256":  "20e0a116190dd0ee45f6b7f6eae4cf45ea956fcdbe25a897f8c6212989356537"
+                  },
+                  {
+                      "path":  "tiku_agent/intent_v2.py",
+                      "sha256":  "67d58d89c41844dc38435366bf19ae6008ee4ad3bf46da08b34f4c0c2aa7f0f4"
+                  },
+                  {
+                      "path":  "tiku_agent/render.py",
+                      "sha256":  "c28f12946d7291508ef397e7993670f6de5bb5db22e8ed626f264f07f8f297a5"
+                  },
+                  {
+                      "path":  "tiku_agent/reply_shell_v2.py",
+                      "sha256":  "68c8e4e902e6a372666019d97a33d142f444ad1202b0fd6bfca1c77b381797af"
+                  },
+                  {
+                      "path":  "tiku_agent/session_artifacts.py",
+                      "sha256":  "0335c3c4c05f9d88d8b5f46e135ee0f163e655c66a11b02304767b1bc0bbddf5"
+                  },
+                  {
+                      "path":  "tiku_agent/session_runtime.py",
+                      "sha256":  "9c963ba70ecc4c716718890a45ad4e0509efb20e48ed9821f917f527aa955c7d"
+                  },
+                  {
+                      "path":  "tiku_agent/session_store.py",
+                      "sha256":  "59911b34f3c50aa28f97f2bcb7c04b12ded34324a38c1db5e023a4cc0bbedb33"
+                  },
+                  {
+                      "path":  "tiku_agent/state.py",
+                      "sha256":  "f0e465ae8377eccc1e2b510fe99b52d7f78a2f9403152a603d27b6258a160779"
+                  },
+                  {
+                      "path":  "tiku_agent/task_log.py",
+                      "sha256":  "461320da4055adc32fd563e80126b4e29246cb61773da9194a6783cac1a830aa"
+                  },
+                  {
+                      "path":  "tiku_agent/tools.py",
+                      "sha256":  "66377d8000a7ccc842b4cebe6869adb56ef57a1de7fb112c5a755f0ad1e294ab"
+                  }
+              ]
+}
