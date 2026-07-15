@@ -1,0 +1,3 @@
+# The integrity manifest hashes the exact canonical bytes from source_commit.
+# Never let a user's core.autocrlf setting rewrite the isolated source mirror.
+mainline_mirror/source/** -text

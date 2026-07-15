@@ -40,10 +40,6 @@ Intent V2 还提供受限的全局搜索兜底：只有章节判断失败、Agen
 
 普通章节检索的候选阶段支持结果反馈：用户可以说“没有”“都不是”否定当前批次，说“继续搜”“换一批”查找下一批未尝试候选，答案返回后也可以说“答案不对”或“回到候选”。`continue_search` 会沿用当前题图、章节和题库路由，排除已经进入过粗筛批次的候选；没有剩余候选时只提示换章节或补充更清楚的题图，不会把错误恢复专用的 `retry_search` 当作继续检索，也不会自动放宽章节或全局搜索边界。
 
-## 实验分支
-
-[`experiments/decision_trace_lab`](experiments/decision_trace_lab) 用于在不影响展示主线的前提下，记录并人工复核真实 Agent 的中间决策，帮助定位意图、工具和状态流转问题。分支目的、运行方式和隔离边界见[实验 README](experiments/decision_trace_lab/README.md)。
-
 ## 系统流程
 
 ```mermaid
@@ -77,8 +73,6 @@ flowchart LR
 │   ├── audit_unindexed_questions.py
 │   ├── store_unindexed_questions.py
 │   └── smoke_test.py              # 只读验证
-├── experiments/
-│   └── decision_trace_lab/         # 隔离的主线轨迹记录与人工复核实验
 ├── config.example.json            # 配置模板
 └── requirements.txt
 ```
