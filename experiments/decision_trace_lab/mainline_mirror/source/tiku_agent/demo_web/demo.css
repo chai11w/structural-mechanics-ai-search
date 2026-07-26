@@ -72,6 +72,7 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .media-footer span { color: #777770; font-size: 12px; }
 .select-candidate { min-height: 32px; padding: 0 12px; border: 1px solid #d7d7d2; border-radius: 9px; background: #fff; font-size: 12px; font-weight: 600; cursor: pointer; }
 .select-candidate:hover { border-color: #aaa9a3; background: #f7f7f4; }
+.select-candidate:disabled { color: #999991; background: #f1f1ee; border-color: #e2e2dd; cursor: default; }
 .answer-label { display: inline-flex; align-items: center; gap: 6px; margin-top: 12px; color: var(--accent); font-size: 12px; font-weight: 650; }
 .answer-label::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #14b8a6; }
 .expired-image { display: block; padding: 24px 16px; color: #777770; font-size: 13px; text-align: center; }

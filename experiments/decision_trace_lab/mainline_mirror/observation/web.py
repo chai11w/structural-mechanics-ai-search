@@ -29,6 +29,8 @@ def create_observed_app(
     runtime: Any | None = None,
     store: ObservationStore | None = None,
     runtime_root: str | Path = DEFAULT_RUNTIME,
+    data_root: str | Path = DEFAULT_DATA,
+    runtime_namespace: str = "decision-trace-dev",
     agent_factory: Callable[[Any], Any] | None = None,
 ) -> Any:
     """Create 8793 from the verified mainline App, adding only a sidecar."""
@@ -43,7 +45,7 @@ def create_observed_app(
     from tiku_agent.tools import AgentToolConfig
 
     root = Path(runtime_root).resolve()
-    store = store or ObservationStore(DEFAULT_DATA)
+    store = store or ObservationStore(Path(data_root).resolve())
     hooks = HookManager()
     hooks.install()
 
@@ -80,6 +82,7 @@ def create_observed_app(
             "source_branch": manifest["source_branch"],
             "source_commit": manifest["source_commit"],
             "verified_files": len(manifest["files"]),
+            "runtime_namespace": runtime_namespace,
         }
 
     @app.get("/api/observation/turns")

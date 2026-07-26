@@ -82,7 +82,11 @@ def create_app(
     def session(request: Request) -> JSONResponse:
         session_id = _session_id(request)
         path = runtime.current_image_path(session_id)
-        result = JSONResponse({"uploaded_image": f"/api/upload/{path.name}" if path is not None else ""})
+        snapshot = runtime.session_snapshot(session_id)
+        result = JSONResponse({
+            "uploaded_image": f"/api/upload/{path.name}" if path is not None else "",
+            "session": snapshot,
+        })
         _set_session_cookie(result, session_id, secure_cookie=_is_secure_request(request))
         return result
 
@@ -98,6 +102,9 @@ def create_app(
         if not text:
             raise HTTPException(status_code=400, detail="text is required")
         session_id = _session_id(request)
+        stale = _validate_action_context(runtime, session_id, payload.get("action_context"))
+        if stale is not None:
+            return _agent_json(stale, runtime, session_id, secure_cookie=_is_secure_request(request))
         response = runtime.handle_text(session_id, text)
         return _agent_json(response, runtime, session_id, secure_cookie=_is_secure_request(request))
 
@@ -115,6 +122,9 @@ def create_app(
         session_id = _session_id(request)
 
         def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
+            stale = _validate_action_context(runtime, session_id, payload.get("action_context"))
+            if stale is not None:
+                return _agent_payload(stale, runtime, session_id)
             response = runtime.handle_text(session_id, text, progress=progress)
             return _agent_payload(response, runtime, session_id)
 
@@ -330,7 +340,45 @@ def _agent_payload(
         "images": image_urls,
         "uploaded_image": uploaded_image_url,
         "intent": response.intent,
+        "session": runtime.session_snapshot(session_id),
     }
+
+
+def _validate_action_context(
+    runtime: AgentSessionRuntime,
+    session_id: str,
+    raw_context: object,
+) -> AgentResponse | None:
+    """Reject a button action when it belongs to an older question/candidate list."""
+    if raw_context is None:
+        return None
+    if not isinstance(raw_context, dict) or raw_context.get("type") != "select_candidate":
+        return AgentResponse(text="这个操作已经失效，请使用当前页面中的操作。", intent="stale_action")
+    snapshot = runtime.session_snapshot(session_id)
+    try:
+        rank = int(raw_context.get("rank") or 0)
+        task_revision = int(raw_context.get("task_revision") or 0)
+    except (TypeError, ValueError):
+        rank = 0
+        task_revision = -1
+    generation = str(raw_context.get("candidate_generation") or "")
+    valid = (
+        snapshot.get("session_valid") is True
+        and snapshot.get("phase") == "WAIT_CANDIDATE_CHOICE"
+        and task_revision == snapshot.get("task_revision")
+        and generation
+        and generation == snapshot.get("candidate_generation")
+        and 1 <= rank <= int(snapshot.get("candidate_count") or 0)
+    )
+    if valid:
+        return None
+    has_image = snapshot.get("has_active_image") is True
+    message = (
+        "这是上一道题或上一轮搜索的候选，已经不能选择。请继续完成当前题目的章节确认和搜索。"
+        if has_image
+        else "这是已失效的候选，当前会话没有可选择的候选题，请重新上传题图。"
+    )
+    return AgentResponse(text=message, intent="stale_candidate")
 
 
 async def _stream_agent_events(

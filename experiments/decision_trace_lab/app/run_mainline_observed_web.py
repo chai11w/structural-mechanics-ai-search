@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import sys
 
 
@@ -11,7 +12,14 @@ if str(LAB_ROOT) not in sys.path:
 from mainline_mirror.observation.web import create_observed_app  # noqa: E402
 
 
-app = create_observed_app()
+runtime_root = os.environ.get("REVIEW_TIKU_RUNTIME_ROOT")
+data_root = os.environ.get("REVIEW_TIKU_DATA_ROOT")
+runtime_namespace = os.environ.get("REVIEW_TIKU_RUNTIME_NAMESPACE", "decision-trace-dev")
+app = create_observed_app(
+    **({"runtime_root": runtime_root} if runtime_root else {}),
+    **({"data_root": data_root} if data_root else {}),
+    runtime_namespace=runtime_namespace,
+)
 
 
 if __name__ == "__main__":

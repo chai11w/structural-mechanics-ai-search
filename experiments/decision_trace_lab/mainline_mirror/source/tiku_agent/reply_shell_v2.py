@@ -56,6 +56,7 @@ def _render_clarification(reason: str, context: ConversationContextV2) -> str:
         "ambiguous_action": "你想继续搜题、选择题号，还是查看候选答案？",
         "missing_question_index": "请告诉我是第几题。",
         "missing_candidate_rank": "请告诉我选第几个候选。",
+        "candidate_list_unavailable": "当前题目还没有可选择的候选，请先完成题图上传、章节确认和搜索。",
         "missing_chapter": "请告诉我这题按哪一章检索。",
         "missing_image": "请先发题图，我再继续处理。",
         "out_of_range": "这个编号超出当前范围了，请换一个。",

@@ -74,6 +74,9 @@ class AgentState:
     last_intent: dict = field(default_factory=dict)
     last_error: str = ""
     revision_count: int = 0
+    task_revision: int = 0
+    candidate_revision: int = 0
+    candidate_generation: str = ""
     pending_chapter: str = ""
     global_search_offered: bool = False
     attempted_candidate_keys: list[str] = field(default_factory=list)
@@ -101,6 +104,9 @@ class AgentState:
         last_intent: dict | None = None,
         last_error: str = "",
         revision_count: int = 0,
+        task_revision: int = 0,
+        candidate_revision: int = 0,
+        candidate_generation: str = "",
         pending_chapter: str = "",
         global_search_offered: bool = False,
         attempted_candidate_keys: list[str] | None = None,
@@ -133,6 +139,9 @@ class AgentState:
         self.last_intent = dict(last_intent or {})
         self.last_error = last_error
         self.revision_count = revision_count
+        self.task_revision = task_revision
+        self.candidate_revision = candidate_revision
+        self.candidate_generation = str(candidate_generation or "")
         self.pending_chapter = pending_chapter
         self.global_search_offered = global_search_offered
         self.attempted_candidate_keys = list(attempted_candidate_keys or [])
@@ -209,6 +218,10 @@ class AgentState:
             raise ValueError("completed_questions must contain positive indexes")
         if self.revision_count < 0:
             raise ValueError("revision_count must not be negative")
+        if self.task_revision < 0:
+            raise ValueError("task_revision must not be negative")
+        if self.candidate_revision < 0:
+            raise ValueError("candidate_revision must not be negative")
         if self.pending_chapter and self.pending_chapter not in CHAPTERS:
             raise ValueError("pending_chapter must be a supported chapter")
         if not isinstance(self.global_search_offered, bool):
@@ -226,6 +239,7 @@ class AgentState:
         self.last_intent = dict(intent)
 
     def start_search(self, image_path: str) -> None:
+        self.task_revision += 1
         self.current_image_path = str(image_path)
         self.current_question_image_path = ""
         self.current_loads = []
@@ -237,6 +251,8 @@ class AgentState:
         self.previous_question = None
         self.completed_questions = []
         self.candidates = []
+        self.candidate_revision = 0
+        self.candidate_generation = ""
         self.selected_rank = None
         self.last_answer_paths = []
         self.last_error = ""
@@ -257,6 +273,7 @@ class AgentState:
         if corrected and self.current_chapter and self.current_chapter != chapter:
             self.revision_count += 1
             self.candidates = []
+            self.candidate_generation = ""
             self.selected_rank = None
             self.last_answer_paths = []
             self._reset_search_recovery()
@@ -298,6 +315,7 @@ class AgentState:
         self.current_loads = list(question.get("loads") or self.current_loads)
         self.current_chapter = str(chapter_override or question.get("chapter") or self.current_chapter)
         self.candidates = []
+        self.candidate_generation = ""
         self.selected_rank = None
         self.last_answer_paths = []
         self.global_search_offered = False
@@ -308,6 +326,10 @@ class AgentState:
     def set_candidates(self, candidates: list[dict]) -> None:
         self.global_search_offered = False
         self.candidates = _renumber(candidates)
+        self.candidate_revision += 1
+        self.candidate_generation = (
+            f"{self.task_revision}:{self.candidate_revision}" if self.candidates else ""
+        )
         self.selected_rank = None
         self.last_answer_paths = []
         self.phase = STATE_WAIT_CANDIDATE_CHOICE if self.candidates else PHASE_NO_MATCH

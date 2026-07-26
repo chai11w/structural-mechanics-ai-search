@@ -59,6 +59,7 @@ CLARIFICATION_REASONS = frozenset(
         "ambiguous_action",
         "missing_question_index",
         "missing_candidate_rank",
+        "candidate_list_unavailable",
         "missing_chapter",
         "missing_image",
         "out_of_range",

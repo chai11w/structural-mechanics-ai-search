@@ -127,7 +127,7 @@ class MainlineAgentParityTest(unittest.TestCase):
     def test_manifest_verifies_required_mainline_files(self):
         manifest = verify_snapshot()
         paths = {row["path"] for row in manifest["files"]}
-        self.assertEqual(manifest["source_commit"], "bc27cba1339f8a73aee18c4a44e109cecd84bd3d")
+        self.assertEqual(manifest["source_commit"], "473caa22310ffd86ae395703d9a352558da96c5d")
         for required in ("tiku_agent/agent.py", "tiku_agent/intent_v2.py", "tiku_agent/action_permissions_v2.py", "tiku_agent/fastapi_demo.py", "tiku_agent/demo_web/demo.js", "search.py", "multi_agent_pipeline.py"):
             self.assertIn(required, paths)
 

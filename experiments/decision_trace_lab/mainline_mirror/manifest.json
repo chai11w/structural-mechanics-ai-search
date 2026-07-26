@@ -1,9 +1,9 @@
-{
+﻿{
     "schema_version":  1,
     "source_repository":  "F:/cc/7-题库检索",
-    "source_branch":  "main",
-    "source_commit":  "bc27cba1339f8a73aee18c4a44e109cecd84bd3d",
-    "created_at":  "2026-07-15T05:12:11.7331546Z",
+    "source_branch":  "codex/decision-trace-review-lab",
+    "source_commit":  "473caa22310ffd86ae395703d9a352558da96c5d",
+    "created_at":  "2026-07-26T07:19:40.4655134Z",
     "snapshot_scope":  "tracked code, tests, fixtures and safe documentation; excludes .git, local config/secrets, xlsx question-bank assets, runtime/logs/caches, project-agent metadata, and special_unindexed_questions.json",
     "files":  [
                   {
@@ -12,7 +12,7 @@
                   },
                   {
                       "path":  "AGENTS.md",
-                      "sha256":  "ae662cc5c8cc6b94ba049c0e214793294f0826f61df376f2d0e5dd060b610e99"
+                      "sha256":  "05929a5ca5cd1aa40f81b9e6efbc4462dfece5b535e25c7f0396dbaa944ad9dc"
                   },
                   {
                       "path":  "build_index.py",
@@ -28,7 +28,7 @@
                   },
                   {
                       "path":  "README.md",
-                      "sha256":  "175cd458cb7ad67efe875faf2938caf53263ead8cfcad905acdd7b7fd9df00fe"
+                      "sha256":  "777f1f2861de65142e7c42eae4150a5ccee745fa7c6a2124cd4b457368140a1c"
                   },
                   {
                       "path":  "requirements.txt",
@@ -204,7 +204,7 @@
                   },
                   {
                       "path":  "tests/test_tiku_agent_fastapi_demo.py",
-                      "sha256":  "07b4df79dc4595bcc915bd83bc6f7f97805f3089d3b7f048156803895c87c986"
+                      "sha256":  "77aaf6925a05f5d97bd5a9205b11539ef8e5be44bb104a76b0d1dd04cbecf1bf"
                   },
                   {
                       "path":  "tests/test_tiku_agent_intent_eval_v2.py",
@@ -236,7 +236,7 @@
                   },
                   {
                       "path":  "tests/test_tiku_agent_state.py",
-                      "sha256":  "a90dfe4f04be9ecada1bf16f00800deeae42b1409d563b795b2f5157fa73fa85"
+                      "sha256":  "16c57098a376a63dce3d7d3248c36d0fdaebca428f7f623aaf71728f9c2d0255"
                   },
                   {
                       "path":  "tests/test_tiku_agent_task_log.py",
@@ -252,7 +252,7 @@
                   },
                   {
                       "path":  "tiku_agent/action_decision_v2.py",
-                      "sha256":  "16f1985a839a737120891a3e81154dd6c5fc4ac7c4aea221af81b54188d57a25"
+                      "sha256":  "644d57b6347163a30defb9b38abcec2c632e5423a021a49816e1f188e38a32a9"
                   },
                   {
                       "path":  "tiku_agent/action_permissions_v2.py",
@@ -268,19 +268,19 @@
                   },
                   {
                       "path":  "tiku_agent/demo_web/demo.css",
-                      "sha256":  "93e92aeadf2f85ca174fa19701ab1d4190f0ae221a70b8ac81c10c8980b7fb5c"
+                      "sha256":  "ce5f522a23a5e27211e11c7542abef3377268b4cfe6e5524d0efea709c299377"
                   },
                   {
                       "path":  "tiku_agent/demo_web/demo.js",
-                      "sha256":  "17b7211a847a3e1611420e40a09bb6edb80ad65a781cd0ea37efa9c58bf222d4"
+                      "sha256":  "e20a3811e4b12787ab8042009acac5d44dde5a43588838828980aa82a29c8fc2"
                   },
                   {
                       "path":  "tiku_agent/demo_web/index.html",
-                      "sha256":  "b2ed87905132a27db29b510ade70e0e675fe75c5758a64a18b149819e1af0c21"
+                      "sha256":  "081ed45a9dff1bf3ef34ae493a3bf567b22fb5a9c4bb99112b2508b1d961c8c8"
                   },
                   {
                       "path":  "tiku_agent/fastapi_demo.py",
-                      "sha256":  "aadde3bf898912439951196b36e2940766fcf1ff02586e5d11a0f9fdca1b80f5"
+                      "sha256":  "1bf35225f38d3c40f2c04c018093a85ea73889d1ce211357e1c417420756c99d"
                   },
                   {
                       "path":  "tiku_agent/intent_contract.py",
@@ -296,7 +296,7 @@
                   },
                   {
                       "path":  "tiku_agent/intent_v2.py",
-                      "sha256":  "67d58d89c41844dc38435366bf19ae6008ee4ad3bf46da08b34f4c0c2aa7f0f4"
+                      "sha256":  "683cd7aee1c1e6b58e050244049a959267c81ba4a48f7662d6226df522478519"
                   },
                   {
                       "path":  "tiku_agent/render.py",
@@ -304,7 +304,7 @@
                   },
                   {
                       "path":  "tiku_agent/reply_shell_v2.py",
-                      "sha256":  "68c8e4e902e6a372666019d97a33d142f444ad1202b0fd6bfca1c77b381797af"
+                      "sha256":  "a168f4c4b67b7929cf708d3102ec00fa36a517d6f13f1f2a35477a266a719db0"
                   },
                   {
                       "path":  "tiku_agent/session_artifacts.py",
@@ -312,7 +312,7 @@
                   },
                   {
                       "path":  "tiku_agent/session_runtime.py",
-                      "sha256":  "9c963ba70ecc4c716718890a45ad4e0509efb20e48ed9821f917f527aa955c7d"
+                      "sha256":  "3e6fd457a4254a459c23bddfd96c659ea7009860422e6123946a5f4b17c81c2f"
                   },
                   {
                       "path":  "tiku_agent/session_store.py",
@@ -320,7 +320,7 @@
                   },
                   {
                       "path":  "tiku_agent/state.py",
-                      "sha256":  "f0e465ae8377eccc1e2b510fe99b52d7f78a2f9403152a603d27b6258a160779"
+                      "sha256":  "f703e9fcd437e1ad103d091e386569f9e260b65414f105217631d0d9c10b8a3f"
                   },
                   {
                       "path":  "tiku_agent/task_log.py",
