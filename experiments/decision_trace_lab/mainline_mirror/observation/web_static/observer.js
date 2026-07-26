@@ -295,12 +295,28 @@ function renderCausalChain() {
   }
   section.hidden = false;
   const host = document.querySelector('#observer-causal-chain');
-  host.replaceChildren(...[...currentEvents]
+  const usefulEvents = [...currentEvents]
     .sort((left, right) => Number(left.sequence || 0) - Number(right.sequence || 0))
-    .map(causalNode));
+    .filter(isUsefulCausalEvent);
+  if (!usefulEvents.length) {
+    host.replaceChildren(textNode('p', 'observer-empty', '本轮没有需要展开的关键节点；你仍可只记录最终结果和错误原因。'));
+    return;
+  }
+  host.replaceChildren(...usefulEvents.map((event, index) => causalNode(event, index + 1)));
 }
 
-function causalNode(event) {
+function isUsefulCausalEvent(event) {
+  if (eventIssues(event).length || getLabel(event.event_id, 'causal_suspicion')) return true;
+  const payload = event.payload || {};
+  if (event.event_type === 'intent_decided' || event.event_type === 'tool_completed') return true;
+  if (event.event_type === 'authorization_checked') return payload.allowed === false;
+  if (event.event_type === 'state_transition') {
+    return payload.phase_before !== payload.phase_after || Object.keys(payload.changes || {}).length > 0;
+  }
+  return false;
+}
+
+function causalNode(event, displayIndex) {
   const issues = eventIssues(event);
   const label = getLabel(event.event_id, 'causal_suspicion');
   const selected = Boolean(label);
@@ -309,10 +325,11 @@ function causalNode(event) {
   node.classList.toggle('has-issue', issues.length > 0);
   node.classList.toggle('is-selected', selected);
   node.dataset.eventId = event.event_id;
+  node.dataset.sequence = event.sequence;
   const header = document.createElement('label');
   header.className = 'observer-node-select';
   const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = selected;
-  header.append(checkbox, textNode('span', '', `${event.sequence}. ${eventLabel(event.event_type)}${event.payload?.tool_name ? ` · ${toolLabel(event.payload.tool_name)}` : ''}`));
+  header.append(checkbox, textNode('span', '', `${displayIndex}. ${eventLabel(event.event_type)}${event.payload?.tool_name ? ` · ${toolLabel(event.payload.tool_name)}` : ''}`));
   node.append(header, textNode('p', 'observer-node-summary', conciseEvent(event)));
   for (const issue of issues) {
     node.append(textNode('p', 'observer-node-issue', `自动提示：${ISSUE_TEXT[issue.code] || issue.code}`));

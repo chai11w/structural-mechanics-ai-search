@@ -83,7 +83,7 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertEqual(baseline.status_code, observed.status_code)
         self.assertEqual(baseline.text, strip_observer_markup(observed.text))
         self.assertIn("本轮结果", observed.text)
-        self.assertIn("实际决策链", observed.text)
+        self.assertIn("关键决策节点", observed.text)
         self.assertIn("技术详情（完整机器轨迹）", observed.text)
         for asset in ("demo.css", "demo.js"):
             self.assertEqual(self.base_client.get(f"/assets/{asset}").content, self.observed_client.get(f"/assets/{asset}").content)
@@ -157,8 +157,13 @@ class MainlineWebParityTest(unittest.TestCase):
             "用户输入（安全摘要）", "Agent 最终回答（安全摘要）", "这次最终结果怎么样？",
             "部分正确", "无法判断", "renderCausalChain", "所有中间节点保持未复核",
             "查看原始 JSON", "自动检查：未发现异常（不等于结果正确）",
+            "isUsefulCausalEvent", "本轮没有需要展开的关键节点",
         ):
             self.assertIn(required, script)
+        self.assertIn(
+            "这里只显示有助于定位问题的决策、工具结果和状态变化",
+            self.observed_client.get("/").text,
+        )
         self.assertNotIn("人工复核队列", script)
         self.assertNotIn("待复核 ${pending.length}", script)
         self.assertTrue(script.lstrip().startswith("(() => {"))

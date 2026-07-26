@@ -253,14 +253,14 @@ def _observer_markup() -> str:
     <div id="observer-result-card"><p class="observer-empty">完成一次对话后，可在这里评审结果。</p></div>
   </section>
   <section id="observer-causal-section" hidden aria-labelledby="observer-causal-heading">
-    <h2 id="observer-causal-heading">实际决策链</h2>
-    <p class="observer-guide">只选择你怀疑的节点；可选 0、1 或多个。未选择的节点保持未复核。</p>
+    <h2 id="observer-causal-heading">关键决策节点</h2>
+    <p class="observer-guide">这里只显示有助于定位问题的决策、工具结果和状态变化；可选 0、1 或多个。</p>
     <div id="observer-causal-chain"></div>
   </section>
   <details id="observer-technical"><summary>技术详情（完整机器轨迹）</summary><p id="observer-event-count">事件 0 条</p><div id="observer-events"></div></details>
 </aside>
-<link rel="stylesheet" href="/observer-assets/observer.css?v=20260726-result-first-v3">
-<script src="/observer-assets/observer.js?v=20260726-result-first-v3" defer></script>
+<link rel="stylesheet" href="/observer-assets/observer.css?v=20260726-useful-nodes-v4">
+<script src="/observer-assets/observer.js?v=20260726-useful-nodes-v4" defer></script>
 {INJECT_MARKER_END}
 """
 
