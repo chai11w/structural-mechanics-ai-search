@@ -34,17 +34,26 @@ python app\run_mainline_observed_web.py
 
 左侧由镜像主线的 `tiku_agent.fastapi_demo.create_app` 和 `tiku_agent/demo_web` 原样提供，上传、stream progress、文案、候选按钮、答案、错误、reset 和媒体归属遵循同一 commit 的主线。
 
-右侧是独立评审侧栏。机器完整保存真实：
+右侧是独立评审侧栏。普通评审先判断本轮最终回答：`正确 / 错误 / 部分正确 / 无法判断`。
+每次点击都会立即保存，不存在额外提交步骤；再次点击当前选项会取消本轮评审。若把“错误”改成
+“正确”，此前为该轮勾选的错误步骤会一起撤销，避免留下互相矛盾的隐藏标签。
+
+只有最终回答不是“正确”时，页面才展开“可能出错的步骤”。普通界面默认只显示经过中文解释的：
+
+- 最终意图判断成了什么；
+- 失败或完成的关键工具得到了什么结果；
+- 确实阻止过执行的处理规则。
+
+勾选步骤本身就会立即保存为可能出错点；错误原因可选，单独点击“保存原因”。机器字段、状态名、
+来源、完整 JSON 和自动轨迹检查只放在折叠的“技术详情（开发排查用）”中，不占用日常评审界面。
+不存在正文的事件保持空值，不保存或展示“正文未记录”这类占位文字。
+
+机器轨迹仍完整保存真实：
 
 `turn_started → intent_decided / authorization_checked / tool_started / tool_completed / state_transition → turn_completed`
 
-人工复核队列默认只展示：
-
-- `intent_decided（意图判断）`
-- `tool_completed（工具结果）`
-- `turn_completed（回合完成／最终结果）`
-
-只标想核对的关键项，不需要逐条评分；未标记保持 `unlabeled（未复核）`，不代表正确或错误。`NO_MATCH（未找到匹配）` 可另分 `reasonable_no_match / false_no_match / uncertain_no_match`，不会自动判错。
+只标想核对的步骤，不需要逐条评分；未勾选的步骤保持未复核，不代表正确或错误。
+`NO_MATCH（未找到匹配）` 可另分 `reasonable_no_match / false_no_match / uncertain_no_match`，不会自动判错。
 
 ## 透明性边界
 

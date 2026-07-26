@@ -118,6 +118,26 @@ def create_observed_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(row)
 
+    @app.post("/api/observation/turns/{turn_id}/withdraw-review")
+    def withdraw_turn_review(turn_id: str, request: Request) -> dict[str, Any]:
+        """Withdraw every active review label for one turn owned by this session."""
+
+        session_id = str(request.cookies.get(INTERNAL_COOKIE) or "").strip()
+        events = store.events(trace_id=trace_key(session_id), turn_id=turn_id) if session_id else []
+        if not events:
+            raise HTTPException(status_code=404, detail="turn not found")
+        target_ids = {turn_id} | {str(event.get("event_id") or "") for event in events}
+        withdrawn = []
+        for current in store.latest_labels(target_ids):
+            row = store.append_label({
+                "target_type": current.get("target_type"),
+                "target_id": current.get("target_id"),
+                "dimension": current.get("dimension"),
+                "label_state": "withdrawn",
+            })
+            withdrawn.append(row)
+        return {"turn_id": turn_id, "withdrawn_labels": withdrawn}
+
     @app.get("/api/observation/summary")
     def summary(request: Request) -> dict[str, Any]:
         session_id = str(request.cookies.get(INTERNAL_COOKIE) or "").strip()
@@ -244,23 +264,23 @@ def _validate_label_target(store: ObservationStore, payload: dict[str, Any], ses
 
 def _observer_markup() -> str:
     return f"""{INJECT_MARKER_START}
-<button id="observer-toggle" type="button" aria-controls="observer-panel" aria-expanded="false">评审轨迹 <span id="observer-toggle-badge"></span></button>
+<button id="observer-toggle" type="button" aria-controls="observer-panel" aria-expanded="false">评审</button>
 <aside id="observer-panel" aria-label="决策轨迹评审侧栏">
-  <header><strong>主线决策轨迹</strong><small id="observer-source">正在校验镜像…</small></header>
+  <header><strong>评审本轮回答</strong><small>选择后立即保存，不需要再提交</small></header>
   <div id="observer-alerts" role="alert"></div>
   <section id="observer-result-section" aria-labelledby="observer-result-heading">
-    <h2 id="observer-result-heading">本轮结果</h2>
+    <h2 id="observer-result-heading">回答结果</h2>
     <div id="observer-result-card"><p class="observer-empty">完成一次对话后，可在这里评审结果。</p></div>
   </section>
   <section id="observer-causal-section" hidden aria-labelledby="observer-causal-heading">
-    <h2 id="observer-causal-heading">关键决策节点</h2>
-    <p class="observer-guide">这里只显示有助于定位问题的决策、工具结果和状态变化；可选 0、1 或多个。</p>
+    <h2 id="observer-causal-heading">可能出错的步骤</h2>
+    <p class="observer-guide">勾选你认为出错的步骤；勾选后立即保存，可选 0、1 或多个。</p>
     <div id="observer-causal-chain"></div>
   </section>
-  <details id="observer-technical"><summary>技术详情（完整机器轨迹）</summary><p id="observer-event-count">事件 0 条</p><div id="observer-events"></div></details>
+  <details id="observer-technical"><summary>技术详情（开发排查用）</summary><p id="observer-source">正在校验镜像…</p><div id="observer-technical-alerts"></div><p id="observer-event-count">事件 0 条</p><div id="observer-events"></div></details>
 </aside>
-<link rel="stylesheet" href="/observer-assets/observer.css?v=20260726-useful-nodes-v5">
-<script src="/observer-assets/observer.js?v=20260726-useful-nodes-v5" defer></script>
+<link rel="stylesheet" href="/observer-assets/observer.css?v=20260726-final-review-v6">
+<script src="/observer-assets/observer.js?v=20260726-final-review-v6" defer></script>
 {INJECT_MARKER_END}
 """
 

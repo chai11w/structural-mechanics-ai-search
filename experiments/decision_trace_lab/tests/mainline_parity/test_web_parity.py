@@ -82,9 +82,10 @@ class MainlineWebParityTest(unittest.TestCase):
         observed = self.observed_client.get("/")
         self.assertEqual(baseline.status_code, observed.status_code)
         self.assertEqual(baseline.text, strip_observer_markup(observed.text))
-        self.assertIn("本轮结果", observed.text)
-        self.assertIn("关键决策节点", observed.text)
-        self.assertIn("技术详情（完整机器轨迹）", observed.text)
+        self.assertIn("评审本轮回答", observed.text)
+        self.assertIn("回答结果", observed.text)
+        self.assertIn("可能出错的步骤", observed.text)
+        self.assertIn("技术详情（开发排查用）", observed.text)
         for asset in ("demo.css", "demo.js"):
             self.assertEqual(self.base_client.get(f"/assets/{asset}").content, self.observed_client.get(f"/assets/{asset}").content)
         script = self.observed_client.get("/assets/demo.js").text
@@ -154,23 +155,30 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertEqual(detail["review_summary"]["automatic_issue_count"], len(detail["issues"]))
         script = self.observed_client.get("/observer-assets/observer.js").text
         for required in (
-            "用户输入", "Agent 最终结果", "这次最终结果怎么样？",
-            "部分正确", "无法判断", "renderCausalChain", "所有中间节点保持未复核",
-            "查看原始 JSON", "自动检查：未发现异常（不等于结果正确）",
-            "isUsefulCausalEvent", "本轮没有需要展开的关键节点",
+            "你的问题", "Agent 的回答", "这次回答对吗？", "部分正确", "无法判断",
+            "选择后立即保存，不需要再提交", "已保存 · 再点一次当前选项可取消",
+            "已取消，本轮现在是未评审状态", "withdraw-review", "判断为：",
+            "需要你补充章节", "renderCausalChain", "查看原始 JSON",
+            "isUsefulCausalEvent", "本轮没有可继续定位的步骤", "open ? '关闭' : '评审'",
         ):
             self.assertIn(required, script)
         self.assertIn(
-            "这里只显示有助于定位问题的决策、工具结果和状态变化",
+            "勾选你认为出错的步骤；勾选后立即保存",
             self.observed_client.get("/").text,
         )
+        for removed in (
+            "正文未记录", "内容未记录", "章节：未记录", "结束状态：",
+            "自动检查：未发现异常", "决定动作：", "来源：${payload.source}",
+            "NODE_VERDICTS", "错误类别（可选）", "期望结果（可选",
+        ):
+            self.assertNotIn(removed, script)
         self.assertNotIn("人工复核队列", script)
         self.assertNotIn("待复核 ${pending.length}", script)
         self.assertTrue(script.lstrip().startswith("(() => {"))
-        self.assertIn("观察面板加载失败", script)
+        self.assertIn("评审面板加载失败", script)
         self.assertIn("if (!response.ok)", script)
         self.assertIn("保存失败，请重试", script)
-        self.assertIn("内容可能包含不允许的敏感信息、路径或过长文字", script)
+        self.assertIn("文字可能包含本地路径、敏感信息或内容过长", script)
         css = self.observed_client.get("/observer-assets/observer.css").text
         self.assertIn("@media (max-width: 900px)", css)
         self.assertIn("min-height: 44px", css)
@@ -231,6 +239,51 @@ class MainlineWebParityTest(unittest.TestCase):
         summary = self.observed_client.get("/api/observation/summary").json()
         self.assertEqual((summary["result_turns"], summary["result_reviewed"]), (1, 1))
         self.assertEqual(summary["suspicious_nodes"], 0)
+
+    def test_clicking_selected_result_again_withdraws_entire_turn_review(self):
+        self.observed_client.post("/api/message", json={"text": "你好"})
+        turn = self.observed_client.get("/api/observation/turns").json()["turns"][0]
+        detail = self.observed_client.get(f"/api/observation/turns/{turn['turn_id']}").json()
+        intent = next(row for row in detail["events"] if row["event_type"] == "intent_decided")
+        for payload in (
+            {
+                "target_id": turn["turn_id"], "target_type": "turn",
+                "dimension": "result_interpretation", "verdict": "incorrect",
+            },
+            {
+                "target_id": intent["event_id"], "target_type": "event",
+                "dimension": "causal_suspicion", "verdict": "incorrect",
+                "error_category": "suspected",
+            },
+        ):
+            self.assertEqual(self.observed_client.post("/api/observation/labels", json=payload).status_code, 200)
+
+        withdrawn = self.observed_client.post(
+            f"/api/observation/turns/{turn['turn_id']}/withdraw-review"
+        )
+        self.assertEqual(withdrawn.status_code, 200)
+        self.assertEqual(len(withdrawn.json()["withdrawn_labels"]), 2)
+        refreshed = self.observed_client.get(f"/api/observation/turns/{turn['turn_id']}").json()
+        self.assertEqual(refreshed["latest_labels"], [])
+        summary = self.observed_client.get("/api/observation/summary").json()
+        self.assertEqual(summary["result_reviewed"], 0)
+        self.assertEqual(summary["suspicious_nodes"], 0)
+        audit_rows = self.observed.state.observation_store.labels()
+        self.assertEqual(sum(row.get("label_state") == "withdrawn" for row in audit_rows), 2)
+
+    def test_withdraw_review_rejects_unknown_and_cross_session_turns(self):
+        self.observed_client.post("/api/message", json={"text": "你好"})
+        turn = self.observed_client.get("/api/observation/turns").json()["turns"][0]
+        self.assertEqual(
+            self.observed_client.post("/api/observation/turns/not-real/withdraw-review").status_code,
+            404,
+        )
+        other_client = TestClient(self.observed)
+        other_client.post("/api/message", json={"text": "你好"})
+        self.assertEqual(
+            other_client.post(f"/api/observation/turns/{turn['turn_id']}/withdraw-review").status_code,
+            404,
+        )
 
     def test_partial_result_and_multiple_optional_causal_nodes_preserve_unreviewed(self):
         self.observed_client.post("/api/message", json={"text": "你好"})
