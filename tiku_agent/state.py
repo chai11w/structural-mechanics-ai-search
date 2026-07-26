@@ -75,6 +75,7 @@ class AgentState:
     last_error: str = ""
     revision_count: int = 0
     task_revision: int = 0
+    candidate_revision: int = 0
     candidate_generation: str = ""
     pending_chapter: str = ""
     global_search_offered: bool = False
@@ -104,6 +105,7 @@ class AgentState:
         last_error: str = "",
         revision_count: int = 0,
         task_revision: int = 0,
+        candidate_revision: int = 0,
         candidate_generation: str = "",
         pending_chapter: str = "",
         global_search_offered: bool = False,
@@ -138,6 +140,7 @@ class AgentState:
         self.last_error = last_error
         self.revision_count = revision_count
         self.task_revision = task_revision
+        self.candidate_revision = candidate_revision
         self.candidate_generation = str(candidate_generation or "")
         self.pending_chapter = pending_chapter
         self.global_search_offered = global_search_offered
@@ -217,6 +220,8 @@ class AgentState:
             raise ValueError("revision_count must not be negative")
         if self.task_revision < 0:
             raise ValueError("task_revision must not be negative")
+        if self.candidate_revision < 0:
+            raise ValueError("candidate_revision must not be negative")
         if self.pending_chapter and self.pending_chapter not in CHAPTERS:
             raise ValueError("pending_chapter must be a supported chapter")
         if not isinstance(self.global_search_offered, bool):
@@ -246,6 +251,7 @@ class AgentState:
         self.previous_question = None
         self.completed_questions = []
         self.candidates = []
+        self.candidate_revision = 0
         self.candidate_generation = ""
         self.selected_rank = None
         self.last_answer_paths = []
@@ -320,7 +326,10 @@ class AgentState:
     def set_candidates(self, candidates: list[dict]) -> None:
         self.global_search_offered = False
         self.candidates = _renumber(candidates)
-        self.candidate_generation = uuid4().hex if self.candidates else ""
+        self.candidate_revision += 1
+        self.candidate_generation = (
+            f"{self.task_revision}:{self.candidate_revision}" if self.candidates else ""
+        )
         self.selected_rank = None
         self.last_answer_paths = []
         self.phase = STATE_WAIT_CANDIDATE_CHOICE if self.candidates else PHASE_NO_MATCH
