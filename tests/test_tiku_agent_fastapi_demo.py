@@ -19,22 +19,48 @@ class FakeRuntime:
         self.calls = []
         self.upload_session = ""
         self.media_session = ""
+        self.snapshot = {
+            "session_valid": False,
+            "phase": "IDLE",
+            "has_active_image": False,
+            "task_revision": 0,
+            "candidate_generation": "",
+            "candidate_count": 0,
+        }
 
     def handle_text(self, session_id: str, text: str, *, progress=None) -> AgentResponse:
         self.calls.append(("text", session_id, text))
         if progress is not None:
             progress("searching", "正在按「4力法」搜索题目…")
+        self.snapshot.update({
+            "session_valid": True,
+            "phase": "WAIT_CANDIDATE_CHOICE",
+            "candidate_generation": "fake-generation",
+            "candidate_count": 1,
+        })
         return AgentResponse(text="我明白了。", images=[str(self.image_path)], intent="select_candidate")
 
     def handle_image(self, session_id: str, image_path: Path, *, progress=None) -> AgentResponse:
         self.calls.append(("image", session_id, image_path.is_file()))
         self.upload_session = session_id
+        self.snapshot.update({
+            "session_valid": True,
+            "phase": "WAIT_CHAPTER",
+            "has_active_image": True,
+            "task_revision": self.snapshot["task_revision"] + 1,
+            "candidate_generation": "",
+            "candidate_count": 0,
+        })
         if progress is not None:
             progress("searching", "正在按「4力法」搜索题目…")
         return AgentResponse(text="我正在帮你找。", intent="search_image")
 
     def clear(self, session_id: str) -> None:
         self.calls.append(("clear", session_id))
+        self.snapshot.update({"session_valid": False, "phase": "IDLE", "has_active_image": False})
+
+    def session_snapshot(self, session_id: str) -> dict[str, object]:
+        return dict(self.snapshot)
 
     def current_image_path(self, session_id: str) -> Path | None:
         return self.image_path if session_id == self.upload_session else None
@@ -83,7 +109,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260714-candidate-viewport"', 'src="/assets/demo.js?v=20260714-candidate-viewport"',
+            'href="/assets/demo.css?v=20260726-stale-candidate"', 'src="/assets/demo.js?v=20260726-stale-candidate"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -96,7 +122,7 @@ class FastApiDemoTest(unittest.TestCase):
             "function uploadImage", "document.addEventListener('dragenter'", "document.addEventListener('drop'",
             "new AbortController()", "activeController.abort('new-chat')", "function resetConversation",
             "function openDrawer", "function openLightbox", "className = 'select-candidate'",
-            "sendTextValue(`选择候选 ${index + 1}`)",
+            "action_context: actionContext", "function invalidateCandidateActions()",
             "event.key === 'Enter'", "!event.shiftKey", "!event.isComposing", "event.keyCode !== 229",
             "HISTORY_TTL_MS = 2 * 60 * 60 * 1000", "HISTORY_LIMIT = 50", "repairUploadedImageHistory()",
             "data.uploaded_image", "Number.isFinite(savedAt)", "无法连接本地服务",
@@ -293,6 +319,39 @@ class FastApiDemoTest(unittest.TestCase):
         image_events = [json.loads(line) for line in image_response.text.splitlines() if line]
         self.assertEqual([event["type"] for event in image_events], ["progress", "result"])
         self.assertTrue(image_events[-1]["data"]["uploaded_image"].startswith("/api/upload/"))
+
+    def test_old_candidate_button_is_rejected_without_running_agent(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"demo_stale_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        runtime = FakeRuntime(image_path)
+        client = TestClient(create_app(runtime=runtime))
+        client.get("/")
+
+        runtime.snapshot.update({
+            "session_valid": True,
+            "phase": "WAIT_CHAPTER",
+            "has_active_image": True,
+            "task_revision": 2,
+            "candidate_generation": "",
+            "candidate_count": 0,
+        })
+        response = client.post("/api/message/stream", json={
+            "text": "选择候选 1",
+            "action_context": {
+                "type": "select_candidate",
+                "rank": 1,
+                "task_revision": 1,
+                "candidate_generation": "old-generation",
+            },
+        })
+
+        events = [json.loads(line) for line in response.text.splitlines() if line]
+        self.assertEqual([event["type"] for event in events], ["result"])
+        self.assertIn("上一道题", events[0]["data"]["text"])
+        self.assertEqual(events[0]["data"]["intent"], "stale_candidate")
+        self.assertEqual(runtime.calls, [])
 
 
 if __name__ == "__main__":

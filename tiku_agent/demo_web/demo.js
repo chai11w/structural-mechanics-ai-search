@@ -38,6 +38,10 @@ let activeController = null;
 let focusBeforeModal = null;
 let operationVersion = 0;
 let pendingUpload = null;
+let sessionContext = {
+  session_valid: false, phase: 'IDLE', has_active_image: false,
+  task_revision: 0, candidate_generation: '', candidate_count: 0,
+};
 const objectUrls = new Set();
 
 function syncVisualViewport() {
@@ -85,6 +89,8 @@ function remember(item) {
     imageAlt: String(item.imageAlt || '题库图片'),
     intent: String(item.intent || ''),
     variant: String(item.variant || ''),
+    taskRevision: Number(item.taskRevision || 0),
+    candidateGeneration: String(item.candidateGeneration || ''),
   });
   history = history.slice(-HISTORY_LIMIT);
   saveHistory();
@@ -153,8 +159,19 @@ function createMediaCard(url, index, item) {
     const choose = document.createElement('button');
     choose.type = 'button';
     choose.className = 'select-candidate';
-    choose.textContent = '选择这道题';
-    choose.addEventListener('click', () => sendTextValue(`选择候选 ${index + 1}`));
+    const actionContext = {
+      type: 'select_candidate', rank: index + 1,
+      task_revision: Number(item.taskRevision || 0),
+      candidate_generation: String(item.candidateGeneration || ''),
+    };
+    const isCurrent = sessionContext.session_valid
+      && sessionContext.phase === 'WAIT_CANDIDATE_CHOICE'
+      && actionContext.task_revision === Number(sessionContext.task_revision || 0)
+      && actionContext.candidate_generation
+      && actionContext.candidate_generation === String(sessionContext.candidate_generation || '');
+    choose.disabled = !isCurrent;
+    choose.textContent = isCurrent ? '选择这道题' : '候选已失效';
+    choose.addEventListener('click', () => sendTextValue(`选择候选 ${index + 1}`, `选择候选 ${index + 1}`, actionContext));
     footer.append(label, choose);
     card.append(footer);
   }
@@ -235,6 +252,8 @@ function restoreHistory() {
 async function repairUploadedImageHistory() {
   try {
     const data = await request('/api/session', {}, 5000, '会话恢复超时。', false);
+    updateSessionContext(data);
+    renderHistory();
     if (!isPersistentImage(data.uploaded_image)) return;
     for (let index = history.length - 1; index >= 0; index -= 1) {
       const item = history[index];
@@ -438,16 +457,32 @@ async function requestStream(url, options, timeoutMs, timeoutMessage, onProgress
 }
 
 function responseItem(data) {
+  updateSessionContext(data);
   return {
     message: data.text || '处理完成。',
     me: false,
     images: data.images || [],
     imageAlt: data.intent === 'select_candidate' || data.intent === 'resend_answer' ? '题库答案' : '相似题候选',
     intent: data.intent || '',
+    taskRevision: Number(data.session?.task_revision || 0),
+    candidateGeneration: String(data.session?.candidate_generation || ''),
   };
 }
 
-async function sendTextValue(value, displayValue = value) {
+function updateSessionContext(data) {
+  if (!data?.session) return;
+  sessionContext = { ...sessionContext, ...data.session };
+}
+
+function invalidateCandidateActions() {
+  sessionContext = { ...sessionContext, session_valid: false, phase: 'PROCESSING', candidate_generation: '', candidate_count: 0 };
+  document.querySelectorAll('.select-candidate').forEach((button) => {
+    button.disabled = true;
+    button.textContent = '候选已失效';
+  });
+}
+
+async function sendTextValue(value, displayValue = value, actionContext = null) {
   const clean = String(value || '').trim();
   if (!clean || isBusy) return;
   addMessage({ message: displayValue, me: true });
@@ -459,7 +494,8 @@ async function sendTextValue(value, displayValue = value) {
   setStatus('working', '正在处理…');
   try {
     const data = await requestStream('/api/message/stream', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: clean }),
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: clean, ...(actionContext ? { action_context: actionContext } : {}) }),
     }, TEXT_TIMEOUT_MS, '请求等待时间过长，请稍后重试。', (event) => {
       if (operation !== operationVersion) return;
       if (!pending) pending = addMessage({ message: event.message, variant: 'pending' }, false);
@@ -572,6 +608,7 @@ async function uploadImage(selected) {
     addMessage({ message: validationError, variant: 'error' });
     return;
   }
+  invalidateCandidateActions();
   const sourcePreview = URL.createObjectURL(selected);
   objectUrls.add(sourcePreview);
   const uploadRow = addLocalUploadPreview(sourcePreview);

@@ -45,7 +45,7 @@ show_candidates 只返回当前候选列表；report_answer_mismatch 只记录�
   "confidence": 0.0,
   "reason": "简短理由"
 }
-clarification_reason 只允许：ambiguous_reference、ambiguous_number_namespace、ambiguous_action、missing_question_index、missing_candidate_rank、missing_chapter、missing_image、out_of_range、no_more_candidates。
+clarification_reason 只允许：ambiguous_reference、ambiguous_number_namespace、ambiguous_action、missing_question_index、missing_candidate_rank、candidate_list_unavailable、missing_chapter、missing_image、out_of_range、no_more_candidates。
 requested_action 只允许：delete、store、repair、cross_chapter_search。"""
 
 
@@ -296,7 +296,7 @@ def _authorization_reason(code: str) -> str:
     }:
         return "missing_image"
     if code == "candidate_list_required":
-        return "missing_candidate_rank"
+        return "candidate_list_unavailable"
     if code == "continuation_exhausted":
         return "no_more_candidates"
     if code == "invalid_chapter":

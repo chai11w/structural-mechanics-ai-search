@@ -36,6 +36,8 @@ class TikuAgentStateTest(unittest.TestCase):
                 "last_intent",
                 "last_error",
                 "revision_count",
+                "task_revision",
+                "candidate_generation",
                 "pending_chapter",
                 "global_search_offered",
                 "attempted_candidate_keys",
@@ -112,6 +114,8 @@ class TikuAgentStateTest(unittest.TestCase):
         self.assertEqual(state.current_chapter, "")
         self.assertEqual(state.candidates, [])
         self.assertEqual(state.last_answer_paths, [])
+        self.assertEqual(state.task_revision, 1)
+        self.assertEqual(state.candidate_generation, "")
 
     def test_analysis_without_chapter_waits_for_chapter(self):
         state = AgentState()
@@ -161,6 +165,20 @@ class TikuAgentStateTest(unittest.TestCase):
         self.assertEqual([item["rank"] for item in state.candidates], [1, 2])
         self.assertEqual(state.select_candidate(2)["name"], "b")
         self.assertEqual(state.selected_rank, 2)
+        self.assertTrue(state.candidate_generation)
+
+    def test_new_image_invalidates_previous_candidate_generation(self):
+        state = AgentState()
+        state.start_search("old.jpg")
+        state.set_candidates([{"name": "old"}])
+        old_generation = state.candidate_generation
+
+        state.start_search("new.jpg")
+
+        self.assertEqual(state.task_revision, 2)
+        self.assertEqual(state.candidates, [])
+        self.assertEqual(state.candidate_generation, "")
+        self.assertNotEqual(old_generation, state.candidate_generation)
 
     def test_no_candidates_is_terminal_no_match(self):
         state = AgentState()

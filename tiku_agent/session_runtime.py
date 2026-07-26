@@ -77,6 +77,29 @@ class AgentSessionRuntime:
         path = Path(state.current_image_path)
         return path if self.resolve_upload(clean_session_id, path.name) == path.resolve() else None
 
+    def session_snapshot(self, session_id: str) -> dict[str, object]:
+        """Return the small, non-sensitive state contract needed by the web client."""
+        clean_session_id = self._clean_session_id(session_id)
+        self._purge_expired()
+        state = self.store.load(clean_session_id)
+        if state is None:
+            return {
+                "session_valid": False,
+                "phase": "IDLE",
+                "has_active_image": False,
+                "task_revision": 0,
+                "candidate_generation": "",
+                "candidate_count": 0,
+            }
+        return {
+            "session_valid": True,
+            "phase": state.phase,
+            "has_active_image": bool(state.active_image_path),
+            "task_revision": state.task_revision,
+            "candidate_generation": state.candidate_generation,
+            "candidate_count": state.candidate_count,
+        }
+
     def resolve_upload(self, session_id: str, filename: str) -> Path | None:
         """Resolve one session-owned upload without exposing arbitrary paths."""
         return self._resolve_artifact(session_id, "uploads", filename)
