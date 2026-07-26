@@ -105,13 +105,33 @@ class ObservationStore:
         dimension = str(payload.get("dimension") or "result_interpretation").strip()
         verdict = str(payload.get("verdict") or "").strip()
         no_match = str(payload.get("no_match_classification") or "").strip()
-        if not target_id or verdict not in VERDICTS or (no_match and no_match not in NO_MATCH):
+        withdrawn = payload.get("label_state") == "withdrawn" or payload.get("withdrawn") is True
+        if not target_id or (not withdrawn and verdict not in VERDICTS) or (no_match and no_match not in NO_MATCH):
             raise ValueError("invalid label")
         rows = [
             row for row in self.labels()
             if row.get("target_id") == target_id and row.get("dimension") == dimension
         ]
         current = max(rows, key=lambda row: int(row.get("label_revision") or 0), default=None)
+        if withdrawn:
+            if current is None:
+                raise ValueError("cannot withdraw missing label")
+            if current.get("label_state") == "withdrawn":
+                return {**current, "unchanged": True}
+            revision = 1 + int(current.get("label_revision") or 0)
+            label = {
+                "label_id": uuid4().hex,
+                "target_type": str(payload.get("target_type") or current.get("target_type") or "event"),
+                "target_id": target_id,
+                "dimension": dimension,
+                "label_state": "withdrawn",
+                "label_revision": revision,
+                "labeled_at": _now(),
+            }
+            if _privacy_issues(label):
+                raise ValueError("label rejected by privacy policy")
+            self._append(self.labels_path, label)
+            return label
         optional = {
             key: str(payload.get(key) or "").strip()
             for key in ("expected", "reason", "error_category")
@@ -130,6 +150,7 @@ class ObservationStore:
             "target_type": str(payload.get("target_type") or "event"),
             "target_id": target_id,
             "dimension": dimension,
+            "label_state": "active",
             "verdict": verdict,
             "no_match_classification": no_match,
             "label_revision": revision,
@@ -150,7 +171,11 @@ class ObservationStore:
             key = (target_id, str(row.get("dimension") or ""))
             if int(row.get("label_revision") or 0) >= int(latest.get(key, {}).get("label_revision") or 0):
                 latest[key] = row
-        return list(latest.values())
+        return [
+            row for row in latest.values()
+            if row.get("label_state") != "withdrawn"
+            and not (row.get("dimension") == "causal_suspicion" and row.get("error_category") == "dismissed")
+        ]
 
     def events(self, *, trace_id: str = "", turn_id: str = "") -> list[dict[str, Any]]:
         rows = _read_jsonl(self.traces_path)
@@ -177,15 +202,85 @@ class ObservationStore:
                 "phase": (completed or {}).get("payload", {}).get("phase_after", ""),
                 "response_type": (completed or {}).get("payload", {}).get("response_type", ""),
                 "issues": [issue for issue in scan_events(events) if issue.get("turn_id") in {None, turn_id}],
+                "result_label": next((
+                    row for row in self.latest_labels({turn_id})
+                    if row.get("dimension") == "result_interpretation"
+                ), None),
             })
         return sorted(result, key=lambda row: row["recorded_at"], reverse=True)
 
+    def review_turn(self, events: list[dict[str, Any]], issues: list[dict[str, Any]]) -> dict[str, Any]:
+        """Build a whitelist-only result card from already-sanitized trace fields."""
+
+        started = next((row for row in events if row.get("event_type") == "turn_started"), {})
+        completed = next((row for row in reversed(events) if row.get("event_type") == "turn_completed"), {})
+        start_payload = started.get("payload", {}) if isinstance(started.get("payload"), dict) else {}
+        completed_payload = completed.get("payload", {}) if isinstance(completed.get("payload"), dict) else {}
+        context = start_payload.get("context_summary", {}) if isinstance(start_payload.get("context_summary"), dict) else {}
+        kind = str(start_payload.get("kind") or "unknown")
+        response_type = str(completed_payload.get("response_type") or "unknown")
+        candidate_count = int(completed_payload.get("candidate_count") or 0)
+        answer_count = int(completed_payload.get("answer_count") or 0)
+
+        input_summary = {
+            "image": "用户上传了一张题目图片",
+            "text": "用户发送了一条文字消息（内容未记录）",
+        }.get(kind, "本轮输入摘要不可用")
+        result_summary = {
+            "no_match": "Agent 未找到匹配题目",
+            "candidates": f"Agent 返回了 {candidate_count} 个候选题",
+            "answer": f"Agent 返回了 {answer_count} 张答案图片",
+            "error": "Agent 返回了错误状态",
+            "exception": "Agent 执行时发生异常",
+            "media": f"Agent 返回了 {answer_count} 个媒体结果",
+            "text": "Agent 返回了一条文字答复（正文未记录）",
+        }.get(response_type, "最终结果摘要不可用")
+        return {
+            "input_summary": input_summary,
+            "result_summary": result_summary,
+            "response_type": response_type,
+            "is_no_match": response_type == "no_match",
+            "context": {
+                "input_kind": kind,
+                "phase_before": str(start_payload.get("phase_before") or ""),
+                "phase_after": str(completed_payload.get("phase_after") or ""),
+                "chapter": str(context.get("chapter") or ""),
+                "has_active_image": bool(context.get("has_active_image", False) or kind == "image"),
+                "candidate_count": candidate_count,
+                "answer_count": answer_count,
+            },
+            "automatic_issue_count": len(issues),
+            "automatic_issue_codes": sorted({str(issue.get("code") or "unknown_issue") for issue in issues}),
+        }
+
     def summary(self, trace_id: str = "") -> dict[str, Any]:
         events = self.events(trace_id=trace_id)
-        latest = {str(row.get("target_id") or ""): row for row in self.latest_labels()}
-        eligible = [e for e in events if e.get("event_type") in {"intent_decided", "tool_completed", "turn_completed"}]
-        counts = Counter(latest.get(str(e.get("event_id")), {}).get("verdict", "unlabeled") for e in eligible)
-        return {"key_items": len(eligible), "reviewed": len(eligible) - counts["unlabeled"], "verdicts": dict(counts)}
+        latest = self.latest_labels()
+        completed_turns = {str(e.get("turn_id") or "") for e in events if e.get("event_type") == "turn_completed"}
+        reviewed_turns = {
+            str(row.get("target_id") or "") for row in latest
+            if row.get("target_type") == "turn" and row.get("dimension") == "result_interpretation"
+        }
+        causal_labels = [
+            row for row in latest
+            if row.get("dimension") == "causal_suspicion" and row.get("error_category") != "dismissed"
+        ]
+        causal_targets = {str(row.get("target_id") or "") for row in causal_labels}
+        causal_events = {
+            str(e.get("event_id") or "") for e in events
+            if e.get("event_type") in {"intent_decided", "authorization_checked", "tool_completed", "state_transition"}
+        }
+        verdicts = Counter(
+            row.get("verdict", "unlabeled") for row in latest
+            if row.get("target_type") == "turn" and row.get("dimension") == "result_interpretation"
+        )
+        return {
+            "result_turns": len(completed_turns),
+            "result_reviewed": len(completed_turns & reviewed_turns),
+            "suspicious_nodes": len(causal_targets),
+            "unreviewed_nodes": len(causal_events - causal_targets),
+            "verdicts": dict(verdicts),
+        }
 
     def scan(self, trace_id: str = "") -> list[dict[str, Any]]:
         return scan_events(self.events(trace_id=trace_id))

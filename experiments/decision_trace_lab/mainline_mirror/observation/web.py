@@ -93,19 +93,27 @@ def create_observed_app(
         events = store.events(trace_id=trace_key(session_id), turn_id=turn_id) if session_id else []
         if not events:
             raise HTTPException(status_code=404, detail="turn not found")
-        event_ids = {str(event.get("event_id") or "") for event in events}
+        event_ids = {str(event.get("event_id") or "") for event in events} | {turn_id}
+        issues = [
+            issue for issue in store.scan(trace_key(session_id))
+            if issue.get("turn_id") in {None, turn_id}
+        ]
         return {
             "turn_id": turn_id,
             "events": events,
             "latest_labels": store.latest_labels(event_ids),
-            "issues": store.scan(trace_key(session_id)),
+            "issues": issues,
+            "review_summary": store.review_turn(events, issues),
         }
 
     @app.post("/api/observation/labels")
     async def label(request: Request) -> JSONResponse:
         try:
             payload = await request.json()
-            row = store.append_label(dict(payload))
+            session_id = str(request.cookies.get(INTERNAL_COOKIE) or "").strip()
+            normalized = dict(payload)
+            _validate_label_target(store, normalized, session_id)
+            row = store.append_label(normalized)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(row)
@@ -192,19 +200,67 @@ def _translate_response_cookie(response: Response) -> None:
     ]
 
 
+def _validate_label_target(store: ObservationStore, payload: dict[str, Any], session_id: str) -> None:
+    """Allow labels only for real targets owned by the isolated current session."""
+
+    target_id = str(payload.get("target_id") or "").strip()
+    target_type = str(payload.get("target_type") or "").strip()
+    dimension = str(payload.get("dimension") or "").strip()
+    if target_type not in {"turn", "event"}:
+        raise ValueError("invalid target_type")
+    if not target_id or not session_id:
+        raise HTTPException(status_code=404, detail="label target not found")
+
+    events = store.events(trace_id=trace_key(session_id))
+    event_by_id = {str(event.get("event_id") or ""): event for event in events}
+    turn_ids = {str(event.get("turn_id") or "") for event in events}
+    if target_type == "turn":
+        if target_id in event_by_id:
+            raise ValueError("target_type does not match target")
+        if target_id not in turn_ids:
+            raise HTTPException(status_code=404, detail="label target not found")
+        if dimension != "result_interpretation":
+            raise ValueError("dimension is incompatible with turn target")
+        return
+
+    if target_id in turn_ids:
+        raise ValueError("target_type does not match target")
+    event = event_by_id.get(target_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="label target not found")
+    event_type = str(event.get("event_type") or "")
+    allowed = {
+        "intent": {"intent_decided"},
+        "tool_output": {"tool_completed"},
+        "result_interpretation": {"turn_completed"},
+        "causal_suspicion": {
+            "turn_started", "intent_decided", "authorization_checked", "tool_started",
+            "tool_completed", "state_transition", "turn_completed",
+        },
+    }
+    if dimension not in allowed or event_type not in allowed[dimension]:
+        raise ValueError("dimension is incompatible with event target")
+
+
 def _observer_markup() -> str:
     return f"""{INJECT_MARKER_START}
-<button id="observer-toggle" type="button" aria-controls="observer-panel" aria-expanded="true">评审轨迹</button>
+<button id="observer-toggle" type="button" aria-controls="observer-panel" aria-expanded="false">评审轨迹 <span id="observer-toggle-badge"></span></button>
 <aside id="observer-panel" aria-label="决策轨迹评审侧栏">
   <header><strong>主线决策轨迹</strong><small id="observer-source">正在校验镜像…</small></header>
-  <p class="observer-guide">只标你想核对的关键项，不需要逐条评分；未标记不代表正确或错误。</p>
-  <p class="observer-count-note">每个回合的轨迹数量不固定，取决于本轮调用了多少工具、发生了多少次状态变化。</p>
   <div id="observer-alerts" role="alert"></div>
-  <section><h2>人工复核队列</h2><p id="observer-review-count">待复核 0 · 已复核 0 · 共 0 个关键项</p><div id="observer-review-items"></div></section>
+  <section id="observer-result-section" aria-labelledby="observer-result-heading">
+    <h2 id="observer-result-heading">本轮结果</h2>
+    <div id="observer-result-card"><p class="observer-empty">完成一次对话后，可在这里评审结果。</p></div>
+  </section>
+  <section id="observer-causal-section" hidden aria-labelledby="observer-causal-heading">
+    <h2 id="observer-causal-heading">实际决策链</h2>
+    <p class="observer-guide">只选择你怀疑的节点；可选 0、1 或多个。未选择的节点保持未复核。</p>
+    <div id="observer-causal-chain"></div>
+  </section>
   <details id="observer-technical"><summary>技术详情（完整机器轨迹）</summary><p id="observer-event-count">事件 0 条</p><div id="observer-events"></div></details>
 </aside>
-<link rel="stylesheet" href="/observer-assets/observer.css?v=20260715-review-state-2">
-<script src="/observer-assets/observer.js?v=20260715-review-state-2" defer></script>
+<link rel="stylesheet" href="/observer-assets/observer.css?v=20260726-result-first-v3">
+<script src="/observer-assets/observer.js?v=20260726-result-first-v3" defer></script>
 {INJECT_MARKER_END}
 """
 
