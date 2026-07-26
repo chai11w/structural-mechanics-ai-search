@@ -224,7 +224,7 @@ class ObservationStore:
 
         input_summary = {
             "image": "用户上传了一张题目图片",
-            "text": "用户发送了一条文字消息（内容未记录）",
+            "text": "",
         }.get(kind, "本轮输入摘要不可用")
         result_summary = {
             "no_match": "Agent 未找到匹配题目",
@@ -233,7 +233,7 @@ class ObservationStore:
             "error": "Agent 返回了错误状态",
             "exception": "Agent 执行时发生异常",
             "media": f"Agent 返回了 {answer_count} 个媒体结果",
-            "text": "Agent 返回了一条文字答复（正文未记录）",
+            "text": "",
         }.get(response_type, "最终结果摘要不可用")
         return {
             "input_summary": input_summary,

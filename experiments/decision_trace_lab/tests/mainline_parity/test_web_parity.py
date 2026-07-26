@@ -148,13 +148,13 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertEqual(len(turns), 1)
         detail = self.observed_client.get(f"/api/observation/turns/{turns[0]['turn_id']}").json()
         self.assertGreaterEqual(len(detail["events"]), 3)
-        self.assertEqual(detail["review_summary"]["input_summary"], "用户发送了一条文字消息（内容未记录）")
-        self.assertIn("Agent", detail["review_summary"]["result_summary"])
+        self.assertEqual(detail["review_summary"]["input_summary"], "")
+        self.assertEqual(detail["review_summary"]["result_summary"], "")
         self.assertNotIn("你好", str(detail["review_summary"]))
         self.assertEqual(detail["review_summary"]["automatic_issue_count"], len(detail["issues"]))
         script = self.observed_client.get("/observer-assets/observer.js").text
         for required in (
-            "用户输入（安全摘要）", "Agent 最终回答（安全摘要）", "这次最终结果怎么样？",
+            "用户输入", "Agent 最终结果", "这次最终结果怎么样？",
             "部分正确", "无法判断", "renderCausalChain", "所有中间节点保持未复核",
             "查看原始 JSON", "自动检查：未发现异常（不等于结果正确）",
             "isUsefulCausalEvent", "本轮没有需要展开的关键节点",

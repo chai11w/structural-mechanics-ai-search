@@ -142,12 +142,18 @@ function renderResultCard() {
   const status = resultStatus(label);
   const card = document.createElement('article');
   card.className = 'observer-result-card';
-  card.append(
-    textNode('p', 'observer-eyebrow', '用户输入（安全摘要）'),
-    textNode('p', 'observer-summary-text', currentSummary.input_summary),
-    textNode('p', 'observer-eyebrow', 'Agent 最终回答（安全摘要）'),
-    textNode('p', 'observer-summary-text observer-final-summary', currentSummary.result_summary)
-  );
+  if (currentSummary.input_summary) {
+    card.append(
+      textNode('p', 'observer-eyebrow', '用户输入'),
+      textNode('p', 'observer-summary-text', currentSummary.input_summary)
+    );
+  }
+  if (currentSummary.result_summary) {
+    card.append(
+      textNode('p', 'observer-eyebrow', 'Agent 最终结果'),
+      textNode('p', 'observer-summary-text observer-final-summary', currentSummary.result_summary)
+    );
+  }
 
   const context = textNode('p', 'observer-context', [
     currentSummary.context?.chapter ? `章节：${currentSummary.context.chapter}` : '章节：未记录',
