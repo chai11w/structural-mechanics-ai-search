@@ -44,8 +44,12 @@ def create_app(
     *,
     runtime: AgentSessionRuntime | None = None,
     incoming_dir: str | Path = INCOMING_DIR,
+    session_cookie: str = SESSION_COOKIE,
 ) -> FastAPI:
     """Create a local-only demo app without any existing Feishu configuration."""
+    session_cookie = str(session_cookie).strip()
+    if not session_cookie:
+        raise ValueError("session_cookie is required")
     runtime = runtime or AgentSessionRuntime(SQLiteSessionStore(DEFAULT_RUNTIME_DIR / "session.db"))
     app = FastAPI(title="结构力学搜题 Agent", docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
@@ -69,9 +73,14 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
-        session_id = _session_id(request)
+        session_id = _session_id(request, cookie_name=session_cookie)
         result = HTMLResponse(_PAGE, headers={"Cache-Control": "no-store"})
-        _set_session_cookie(result, session_id, secure_cookie=_is_secure_request(request))
+        _set_session_cookie(
+            result,
+            session_id,
+            secure_cookie=_is_secure_request(request),
+            cookie_name=session_cookie,
+        )
         return result
 
     @app.get("/health")
@@ -80,14 +89,19 @@ def create_app(
 
     @app.get("/api/session")
     def session(request: Request) -> JSONResponse:
-        session_id = _session_id(request)
+        session_id = _session_id(request, cookie_name=session_cookie)
         path = runtime.current_image_path(session_id)
         snapshot = runtime.session_snapshot(session_id)
         result = JSONResponse({
             "uploaded_image": f"/api/upload/{path.name}" if path is not None else "",
             "session": snapshot,
         })
-        _set_session_cookie(result, session_id, secure_cookie=_is_secure_request(request))
+        _set_session_cookie(
+            result,
+            session_id,
+            secure_cookie=_is_secure_request(request),
+            cookie_name=session_cookie,
+        )
         return result
 
     @app.post("/api/message")
@@ -101,12 +115,24 @@ def create_app(
         text = str(payload.get("text") or "").strip()
         if not text:
             raise HTTPException(status_code=400, detail="text is required")
-        session_id = _session_id(request)
+        session_id = _session_id(request, cookie_name=session_cookie)
         stale = _validate_action_context(runtime, session_id, payload.get("action_context"))
         if stale is not None:
-            return _agent_json(stale, runtime, session_id, secure_cookie=_is_secure_request(request))
+            return _agent_json(
+                stale,
+                runtime,
+                session_id,
+                secure_cookie=_is_secure_request(request),
+                cookie_name=session_cookie,
+            )
         response = runtime.handle_text(session_id, text)
-        return _agent_json(response, runtime, session_id, secure_cookie=_is_secure_request(request))
+        return _agent_json(
+            response,
+            runtime,
+            session_id,
+            secure_cookie=_is_secure_request(request),
+            cookie_name=session_cookie,
+        )
 
     @app.post("/api/message/stream")
     async def message_stream(request: Request) -> StreamingResponse:
@@ -119,7 +145,7 @@ def create_app(
         text = str(payload.get("text") or "").strip()
         if not text:
             raise HTTPException(status_code=400, detail="text is required")
-        session_id = _session_id(request)
+        session_id = _session_id(request, cookie_name=session_cookie)
 
         def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
             stale = _validate_action_context(runtime, session_id, payload.get("action_context"))
@@ -129,22 +155,27 @@ def create_app(
             return _agent_payload(response, runtime, session_id)
 
         result = StreamingResponse(_stream_agent_events(execute), media_type="application/x-ndjson")
-        _set_session_cookie(result, session_id, secure_cookie=_is_secure_request(request))
+        _set_session_cookie(
+            result,
+            session_id,
+            secure_cookie=_is_secure_request(request),
+            cookie_name=session_cookie,
+        )
         return result
 
     @app.post("/api/reset")
     def reset(request: Request) -> JSONResponse:
-        session_id = str(request.cookies.get(SESSION_COOKIE) or "").strip()
+        session_id = str(request.cookies.get(session_cookie) or "").strip()
         if session_id:
             runtime.clear(session_id)
         result = JSONResponse({"ok": True})
-        result.delete_cookie(SESSION_COOKIE, secure=_is_secure_request(request), httponly=True, samesite="lax")
+        result.delete_cookie(session_cookie, secure=_is_secure_request(request), httponly=True, samesite="lax")
         return result
 
     @app.post("/api/image")
     async def image(request: Request) -> Response:
         content, filename, content_type = await _read_image_upload(request)
-        session_id = _session_id(request)
+        session_id = _session_id(request, cookie_name=session_cookie)
         incoming = _write_incoming_image(
             content,
             filename,
@@ -162,12 +193,13 @@ def create_app(
             session_id,
             uploaded_image=uploaded_image,
             secure_cookie=_is_secure_request(request),
+            cookie_name=session_cookie,
         )
 
     @app.post("/api/image/stream")
     async def image_stream(request: Request) -> StreamingResponse:
         content, filename, content_type = await _read_image_upload(request)
-        session_id = _session_id(request)
+        session_id = _session_id(request, cookie_name=session_cookie)
         incoming = _write_incoming_image(
             content,
             filename,
@@ -189,12 +221,17 @@ def create_app(
                 incoming.unlink(missing_ok=True)
 
         result = StreamingResponse(_stream_agent_events(execute), media_type="application/x-ndjson")
-        _set_session_cookie(result, session_id, secure_cookie=_is_secure_request(request))
+        _set_session_cookie(
+            result,
+            session_id,
+            secure_cookie=_is_secure_request(request),
+            cookie_name=session_cookie,
+        )
         return result
 
     @app.get("/api/upload/{filename}")
     def get_upload(filename: str, request: Request) -> FileResponse:
-        session_id = str(request.cookies.get(SESSION_COOKIE) or "").strip()
+        session_id = str(request.cookies.get(session_cookie) or "").strip()
         path = runtime.resolve_upload(session_id, filename) if session_id else None
         if path is None:
             raise HTTPException(status_code=404, detail="upload not found")
@@ -202,7 +239,7 @@ def create_app(
 
     @app.get("/api/media/{media_id}")
     def get_media(media_id: str, request: Request) -> FileResponse:
-        session_id = str(request.cookies.get(SESSION_COOKIE) or "").strip()
+        session_id = str(request.cookies.get(session_cookie) or "").strip()
         path = runtime.resolve_media(session_id, media_id) if session_id else None
         if path is None:
             raise HTTPException(status_code=404, detail="media not found")
@@ -211,8 +248,8 @@ def create_app(
     return app
 
 
-def _session_id(request: Request) -> str:
-    value = str(request.cookies.get(SESSION_COOKIE) or "").strip()
+def _session_id(request: Request, *, cookie_name: str = SESSION_COOKIE) -> str:
+    value = str(request.cookies.get(cookie_name) or "").strip()
     return value or secrets.token_urlsafe(24)
 
 
@@ -225,9 +262,15 @@ def _is_secure_request(request: Request) -> bool:
     return forwarded == "https" or (not forwarded and request.url.scheme == "https")
 
 
-def _set_session_cookie(response: Response, session_id: str, *, secure_cookie: bool) -> None:
+def _set_session_cookie(
+    response: Response,
+    session_id: str,
+    *,
+    secure_cookie: bool,
+    cookie_name: str = SESSION_COOKIE,
+) -> None:
     response.set_cookie(
-        SESSION_COOKIE,
+        cookie_name,
         session_id,
         max_age=2 * 60 * 60,
         httponly=True,
@@ -306,6 +349,7 @@ def _agent_json(
     *,
     uploaded_image: Path | None = None,
     secure_cookie: bool = False,
+    cookie_name: str = SESSION_COOKIE,
 ) -> JSONResponse:
     result = JSONResponse(
         _agent_payload(
@@ -315,7 +359,12 @@ def _agent_json(
             uploaded_image=uploaded_image,
         )
     )
-    _set_session_cookie(result, session_id, secure_cookie=secure_cookie)
+    _set_session_cookie(
+        result,
+        session_id,
+        secure_cookie=secure_cookie,
+        cookie_name=cookie_name,
+    )
     return result
 
 

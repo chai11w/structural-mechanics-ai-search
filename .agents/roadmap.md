@@ -14,11 +14,11 @@
 
 ## Delivery Stages
 
-### 1. Isolated 8794 Baseline
+### 1. Isolated 8794 Baseline — Completed
 
-- 创建 `codex/mainline-bounded-autonomy-v1`。
-- 使用独立8794端口、runtime、session、媒体、日志和启动入口。
-- 以同输入、同mock依赖比较8790与8794的响应、状态、工具调用和API行为；此阶段不改变Agent行为。
+- 已创建 `codex/mainline-bounded-autonomy-v1`。
+- 已使用独立8794端口、runtime、session、媒体、incoming、日志、Cookie和启动入口。
+- 已以同输入、同mock依赖比较8790与8794的响应、状态、调用序列和API行为；Agent行为未改变。
 
 ### 2. Structured Tool Outcomes
 
