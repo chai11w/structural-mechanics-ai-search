@@ -14,6 +14,7 @@ from scripts.run_tiku_agent_8794 import (
 )
 from tiku_agent.agent import AgentResponse
 from tiku_agent.fastapi_demo import SESSION_COOKIE as MAINLINE_SESSION_COOKIE, create_app
+from tiku_agent.state import AgentState
 
 
 class RecordingRuntime:
@@ -63,6 +64,33 @@ class Candidate8794BaselineTest(unittest.TestCase):
         self.assertEqual(DEFAULT_PORT, 8794)
         self.assertEqual(DEFAULT_RUNTIME_DIR.name, ".tmp_tiku_agent_v2_candidate_8794")
         self.assertNotEqual(CANDIDATE_SESSION_COOKIE, MAINLINE_SESSION_COOKIE)
+        default_agent = runtime._make_agent(AgentState(session_id="default-off"))
+        self.assertFalse(default_agent.enable_safe_answer_v0)
+        self.assertIsNone(default_agent.safe_answer_generator_v0)
+
+    def test_enabled_runtime_injects_generator_only_for_safe_conversation(self):
+        root = Path(__file__).resolve().parents[1] / f".tmp_test_8794_{uuid4().hex}"
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        requests = []
+
+        def model_client(request):
+            requests.append(request)
+            return "我是力答，专注结构力学题库搜索，通过题图检索相似候选题。"
+
+        runtime = build_runtime(
+            root,
+            enable_safe_answer_v0=True,
+            safe_answer_model_client=model_client,
+        )
+
+        safe_response = runtime.handle_text("safe-session", "你是谁")
+        business_response = runtime.handle_text("business-session", "帮我搜个题")
+
+        self.assertEqual(safe_response.intent, "safe_answer")
+        self.assertEqual(safe_response.reply_source, "model")
+        self.assertEqual(len(requests), 1)
+        self.assertNotEqual(business_response.intent, "safe_answer")
+        self.assertEqual(runtime.session_snapshot("safe-session")["phase"], "IDLE")
 
     def test_candidate_http_behavior_matches_mainline_with_separate_cookie(self):
         mainline_runtime = RecordingRuntime()
