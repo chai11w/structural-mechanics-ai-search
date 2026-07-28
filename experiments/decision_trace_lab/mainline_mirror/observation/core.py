@@ -25,6 +25,9 @@ STATE_METHODS = (
     "set_pending_chapter", "consume_pending_chapter", "offer_global_search",
     "consume_global_search_offer", "mark_done", "cancel", "fail",
 )
+REPLY_SHELL_ACTIONS = {
+    "greeting", "small_talk", "capability_help", "out_of_scope", "clarification", "reject",
+}
 
 
 def _safe_emit(event_type: str, payload_factory: Callable[[], dict[str, Any]], *, duration_ms: int | None = None) -> None:
@@ -280,10 +283,18 @@ class ObservedAgent:
         })
         try:
             result = call()
+            response_type = _response_type(result)
+            reply_mode, reply_kind = _reply_summary(
+                result,
+                response_type=response_type,
+                tool_counts=_TOOL_COUNTS.get() or {},
+            )
             _safe_emit("turn_completed", lambda: {
-                "response_type": _response_type(result),
+                "response_type": response_type,
                 "phase_after": str(getattr(self.state, "phase", "")),
                 "intent": str(getattr(result, "intent", "")),
+                "reply_mode": reply_mode,
+                "reply_kind": reply_kind,
                 "candidate_count": int(getattr(self.state, "candidate_count", 0)),
                 "answer_count": len(getattr(self.state, "last_answer_paths", []) or []),
                 "authorization_count": _AUTHORIZATION_COUNT.get(),
@@ -295,6 +306,8 @@ class ObservedAgent:
                 "response_type": "exception",
                 "phase_after": str(getattr(self.state, "phase", "")),
                 "intent": "",
+                "reply_mode": "error_reply",
+                "reply_kind": "exception",
                 "candidate_count": int(getattr(self.state, "candidate_count", 0)),
                 "answer_count": len(getattr(self.state, "last_answer_paths", []) or []),
                 "error_kind": type(exc).__name__,
@@ -309,6 +322,9 @@ class ObservedAgent:
 
 
 def _response_type(response: Any) -> str:
+    intent = str(getattr(response, "intent", "") or "")
+    if intent in REPLY_SHELL_ACTIONS:
+        return "text"
     state = getattr(response, "state", {}) or {}
     phase = str(state.get("phase") or "") if isinstance(state, dict) else ""
     images = list(getattr(response, "images", []) or [])
@@ -323,3 +339,21 @@ def _response_type(response: Any) -> str:
     if images:
         return "media"
     return "text"
+
+
+def _reply_summary(
+    response: Any,
+    *,
+    response_type: str,
+    tool_counts: dict[str, int],
+) -> tuple[str, str]:
+    """Describe how the reply was produced without recording reply text."""
+
+    intent = str(getattr(response, "intent", "") or "")
+    if response_type in {"error", "exception"}:
+        return "error_reply", intent or response_type
+    if intent in REPLY_SHELL_ACTIONS:
+        return "fixed_shell", intent
+    if any(int(count or 0) > 0 for count in tool_counts.values()):
+        return "tool_result", intent or response_type
+    return "business_renderer", intent or response_type

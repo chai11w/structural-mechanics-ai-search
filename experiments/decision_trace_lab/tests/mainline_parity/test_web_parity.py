@@ -15,10 +15,11 @@ from mainline_mirror.integrity import activate_verified_source
 
 activate_verified_source()
 
+from mainline_mirror.observation.core import _response_type  # noqa: E402
 from mainline_mirror.observation.storage import ObservationStore, scan_events  # noqa: E402
 from mainline_mirror.observation.web import EXTERNAL_COOKIE, create_observed_app, strip_observer_markup  # noqa: E402
 from tests.mainline_parity.test_agent_parity import DeterministicTools  # noqa: E402
-from tiku_agent.agent import TikuSearchAgent  # noqa: E402
+from tiku_agent.agent import AgentResponse, TikuSearchAgent  # noqa: E402
 from tiku_agent.fastapi_demo import create_app as create_mainline_app  # noqa: E402
 from tiku_agent.session_artifacts import SessionArtifacts  # noqa: E402
 from tiku_agent.session_runtime import AgentSessionRuntime  # noqa: E402
@@ -145,6 +146,10 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertEqual(self.base_client.get("/api/media/..%2Fsecret").status_code, self.observed_client.get("/api/media/..%2Fsecret").status_code)
 
     def test_result_first_ui_safe_summary_and_legacy_revision_compatibility(self):
+        self.assertEqual(
+            _response_type(AgentResponse(text="继续看题", state={"phase": "ANSWERED"}, intent="small_talk")),
+            "text",
+        )
         self.observed_client.post("/api/message", json={"text": "你好"})
         turns = self.observed_client.get("/api/observation/turns").json()["turns"]
         self.assertEqual(len(turns), 1)
@@ -154,6 +159,9 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertEqual(detail["review_summary"]["result_summary"], "")
         self.assertNotIn("你好", str(detail["review_summary"]))
         self.assertEqual(detail["review_summary"]["automatic_issue_count"], len(detail["issues"]))
+        completed = next(row for row in detail["events"] if row["event_type"] == "turn_completed")
+        self.assertEqual(completed["payload"]["reply_mode"], "fixed_shell")
+        self.assertEqual(completed["payload"]["reply_kind"], "greeting")
         script = self.observed_client.get("/observer-assets/observer.js").text
         for required in (
             "你的问题", "Agent 的回答", "这次回答对吗？", "部分正确", "无法判断",
@@ -162,6 +170,8 @@ class MainlineWebParityTest(unittest.TestCase):
             "需要你补充章节", "renderCausalChain", "查看原始 JSON",
             "isUsefulCausalEvent", "本轮没有可继续定位的步骤", "open ? '关闭' : '评审'",
             "执行结果：", "处理结果：", "等待用户选择候选题",
+            "回答生成", "回答方式：", "使用“${kind}”固定回复",
+            "模型在安全边界内自由回答", "根据工具执行结果组织回答",
             "评审信息暂时没有加载出来，请稍后重试。",
         ):
             self.assertIn(required, script)
@@ -182,6 +192,7 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertNotIn("变化：${changed}", script)
         self.assertIn("payload.phase_before !== payload.phase_after", script)
         self.assertIn("Boolean(PHASE_TEXT[payload.phase_after])", script)
+        self.assertIn("event.event_type === 'turn_completed') return true", script)
         self.assertIn("if (!response.ok)", script)
         self.assertIn("保存失败，请重试", script)
         self.assertIn("文字可能包含本地路径、敏感信息或内容过长", script)
@@ -228,6 +239,23 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertEqual((latest["verdict"], latest["label_revision"]), ("incorrect", 3))
         self.assertEqual((latest["expected"], latest["reason"], latest["error_category"]), ("route_search", "intent mismatch", "routing"))
         self.assertEqual(self.observed_client.get("/api/observation/summary").json()["result_reviewed"], 0)
+
+    def test_reply_generation_can_be_selected_as_the_suspected_cause(self):
+        self.observed_client.post("/api/message", json={"text": "你好"})
+        turn = self.observed_client.get("/api/observation/turns").json()["turns"][0]
+        detail = self.observed_client.get(f"/api/observation/turns/{turn['turn_id']}").json()
+        completed = next(row for row in detail["events"] if row["event_type"] == "turn_completed")
+
+        selected = self.observed_client.post("/api/observation/labels", json={
+            "target_id": completed["event_id"], "target_type": "event",
+            "dimension": "causal_suspicion", "verdict": "incorrect",
+            "error_category": "suspected", "reason": "回答方式不适合用户问题",
+        })
+
+        self.assertEqual(selected.status_code, 200)
+        refreshed = self.observed_client.get(f"/api/observation/turns/{turn['turn_id']}").json()
+        label = next(row for row in refreshed["latest_labels"] if row["target_id"] == completed["event_id"])
+        self.assertEqual((label["dimension"], label["verdict"]), ("causal_suspicion", "incorrect"))
 
     def test_correct_result_is_one_click_turn_label_without_event_labels(self):
         self.observed_client.post("/api/message", json={"text": "你好"})

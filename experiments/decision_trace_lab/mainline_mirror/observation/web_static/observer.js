@@ -4,7 +4,7 @@
 const EVENT_LABELS = {
   turn_started: '开始处理', intent_decided: '意图判断', authorization_checked: '处理规则',
   tool_started: '开始执行', tool_completed: '执行结果', state_transition: '状态变化',
-  turn_completed: '最终回答'
+  turn_completed: '回答生成'
 };
 const TOOL_LABELS = {
   analyze_multi_image: '判断单题或多题', prepare_question_units: '拆分多道题',
@@ -42,6 +42,11 @@ const PHASE_TEXT = {
   NO_MATCH: '搜索完成，但没有找到可靠结果',
   ERROR: '处理失败，等待用户重试',
   CANCELLED: '当前任务已经取消'
+};
+const REPLY_KIND_TEXT = {
+  greeting: '问候', small_talk: '日常交流', capability_help: '能力说明',
+  out_of_scope: '范围说明', clarification: '追问确认', reject: '安全拒绝',
+  exception: '异常提示'
 };
 const CLARIFICATION_TEXT = {
   ambiguous_reference: '需要确认你指的是哪一道题或候选题',
@@ -294,6 +299,17 @@ function humanStateResult(payload) {
   return PHASE_TEXT[phase] || '当前对话进度已更新';
 }
 
+function humanReplyResult(payload) {
+  const mode = String(payload.reply_mode || '');
+  const kind = REPLY_KIND_TEXT[payload.reply_kind] || '当前任务';
+  if (mode === 'fixed_shell') return `使用“${kind}”固定回复`;
+  if (mode === 'llm_safe_reply') return '模型在安全边界内自由回答';
+  if (mode === 'tool_result') return '根据工具执行结果组织回答';
+  if (mode === 'error_reply') return '使用错误或异常提示';
+  if (mode === 'business_renderer') return '根据当前任务状态组织业务回复';
+  return '回答方式未记录';
+}
+
 function humanToolResult(payload) {
   const name = payload.tool_name || '';
   const summary = payload.output_summary || {};
@@ -324,7 +340,7 @@ function conciseEvent(event) {
   if (event.event_type === 'state_transition') return `处理结果：${humanStateResult(payload)}`;
   if (event.event_type === 'turn_started') return `开始处理${payload.kind === 'image' ? '题目图片' : '文字消息'}`;
   if (event.event_type === 'tool_started') return `开始${toolLabel(payload.tool_name)}`;
-  if (event.event_type === 'turn_completed') return currentSummary?.result_summary || '本轮处理完成';
+  if (event.event_type === 'turn_completed') return `回答方式：${humanReplyResult(payload)}`;
   return '记录了一个内部步骤';
 }
 
@@ -336,6 +352,7 @@ function isUsefulCausalEvent(event) {
   if (eventIssues(event).length || getLabel(event.event_id, 'causal_suspicion')) return true;
   const payload = event.payload || {};
   if (event.event_type === 'intent_decided' || event.event_type === 'tool_completed') return true;
+  if (event.event_type === 'turn_completed') return true;
   if (event.event_type === 'authorization_checked') return payload.allowed === false;
   if (event.event_type === 'state_transition') {
     return payload.phase_before !== payload.phase_after && Boolean(PHASE_TEXT[payload.phase_after]);
