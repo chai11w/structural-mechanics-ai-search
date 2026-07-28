@@ -16,6 +16,7 @@ from tiku_agent.intent_runtime_v2 import (
 )
 from tiku_agent.intent_v2 import call_qwen_decision_v2, decide_intent_v2
 from tiku_agent.reply_shell_v2 import is_reply_shell_action, render_reply_shell_v2
+from tiku_agent.safe_answer_generator_v0 import SafeAnswerGeneratorV0
 from tiku_agent.safe_answer_policy_v0 import evaluate_safe_answer_policy
 from tiku_agent.safe_answer_reply_v0 import render_safe_answer_v0
 from tiku_agent.state import (
@@ -45,6 +46,8 @@ class AgentResponse:
     images: list[str] = field(default_factory=list)
     state: dict[str, Any] = field(default_factory=dict)
     intent: str = ""
+    reply_source: str = ""
+    fallback_reason: str = ""
 
 
 @dataclass
@@ -73,6 +76,7 @@ class TikuSearchAgent:
         llm_client: Callable[[str], dict[str, Any]] | None = None,
         progress_reporter: Callable[[str, str], None] | None = None,
         enable_safe_answer_v0: bool = False,
+        safe_answer_generator_v0: SafeAnswerGeneratorV0 | None = None,
     ) -> None:
         self.state = state or AgentState()
         self.tools = tools or AgentToolbox()
@@ -81,6 +85,7 @@ class TikuSearchAgent:
         self.llm_client = llm_client
         self.progress_reporter = progress_reporter
         self.enable_safe_answer_v0 = enable_safe_answer_v0
+        self.safe_answer_generator_v0 = safe_answer_generator_v0
 
     def handle_image(self, image_path: str | Path) -> AgentResponse:
         context = build_runtime_context_v2(self.state, trusted_image_event=True)
@@ -96,10 +101,27 @@ class TikuSearchAgent:
         if self.enable_safe_answer_v0:
             safe_decision = evaluate_safe_answer_policy(text)
             if safe_decision.eligible:
+                if self.safe_answer_generator_v0 is not None:
+                    try:
+                        generated = self.safe_answer_generator_v0.generate(text)
+                    except Exception:  # noqa: BLE001 - preserve the reviewed fixed fallback.
+                        generated = None
+                    if generated is not None and generated.source != "not_called":
+                        return AgentResponse(
+                            text=generated.text,
+                            state=self.state.to_dict(),
+                            intent="safe_answer",
+                            reply_source=generated.source,
+                            fallback_reason=generated.fallback_reason,
+                        )
                 return AgentResponse(
                     text=render_safe_answer_v0(safe_decision.category),
                     state=self.state.to_dict(),
                     intent="safe_answer",
+                    reply_source="fixed_fallback",
+                    fallback_reason=(
+                        "generator_error" if self.safe_answer_generator_v0 is not None else ""
+                    ),
                 )
         context = build_runtime_context_v2(self.state)
         decision = decide_intent_v2(

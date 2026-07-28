@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import Mock
 
 from tiku_agent.agent import AgentToolbox, TikuSearchAgent
+from tiku_agent.safe_answer_generator_v0 import SafeAnswerGeneratorV0
 from tiku_agent.safe_answer_reply_v0 import MAX_SAFE_ANSWER_CHARS
 from tiku_agent.state import AgentState, PHASE_ANSWERED
 
@@ -78,6 +79,7 @@ class SafeAnswerRouteV0Test(unittest.TestCase):
                 response = agent.handle_text(case["text"])
 
                 self.assertEqual(response.intent, "safe_answer")
+                self.assertEqual(response.reply_source, "fixed_fallback")
                 self.assertTrue(response.text)
                 self.assertLessEqual(len(response.text), MAX_SAFE_ANSWER_CHARS)
                 self.assertNotIn("\n", response.text)
@@ -99,6 +101,7 @@ class SafeAnswerRouteV0Test(unittest.TestCase):
                 candidate_state = AgentState(session_id="same-session")
                 baseline_tools, baseline_mocks = _toolbox_that_must_not_run()
                 candidate_tools, candidate_mocks = _toolbox_that_must_not_run()
+                generator = Mock()
                 baseline = TikuSearchAgent(
                     state=baseline_state,
                     tools=baseline_tools,
@@ -109,6 +112,7 @@ class SafeAnswerRouteV0Test(unittest.TestCase):
                     tools=candidate_tools,
                     use_llm_intent=False,
                     enable_safe_answer_v0=True,
+                    safe_answer_generator_v0=generator,
                 )
 
                 baseline_response = baseline.handle_text(case["text"])
@@ -121,6 +125,7 @@ class SafeAnswerRouteV0Test(unittest.TestCase):
                         candidate_mocks[name].call_args_list,
                         baseline_mocks[name].call_args_list,
                     )
+                generator.generate.assert_not_called()
 
     def test_reply_contract_is_concise_and_category_specific(self):
         expected_phrases = {
@@ -153,6 +158,76 @@ class SafeAnswerRouteV0Test(unittest.TestCase):
 
         self.assertEqual(implicit.handle_text("你是谁"), explicit.handle_text("你是谁"))
         self.assertNotEqual(implicit.handle_text("你好").intent, "safe_answer")
+
+    def test_injected_generator_answer_and_fallback_preserve_state_and_call_no_tools(self):
+        cases = (
+            (
+                lambda _request: "我是力答，专注结构力学题库搜索，通过题图检索相似候选题。",
+                "model",
+                "",
+            ),
+            (
+                lambda _request: "我已经帮你检索到答案。",
+                "fixed_fallback",
+                "output_fabricated_execution_claim",
+            ),
+            (
+                lambda _request: (_ for _ in ()).throw(TimeoutError("slow")),
+                "fixed_fallback",
+                "model_timeout",
+            ),
+        )
+        for model_client, source, reason in cases:
+            with self.subTest(source=source, reason=reason):
+                state = _representative_state()
+                before = deepcopy(state.to_dict())
+                toolbox, tool_mocks = _toolbox_that_must_not_run()
+                agent = TikuSearchAgent(
+                    state=state,
+                    tools=toolbox,
+                    use_llm_intent=False,
+                    enable_safe_answer_v0=True,
+                    safe_answer_generator_v0=SafeAnswerGeneratorV0(model_client),
+                )
+
+                response = agent.handle_text("你是谁")
+
+                self.assertEqual(response.intent, "safe_answer")
+                self.assertEqual(response.reply_source, source)
+                self.assertEqual(response.fallback_reason, reason)
+                self.assertEqual(agent.state.to_dict(), before)
+                self.assertEqual(response.state, before)
+                for tool_mock in tool_mocks.values():
+                    tool_mock.assert_not_called()
+
+    def test_unexpected_generator_error_uses_fixed_reply_without_leaking_details(self):
+        generator = Mock()
+        generator.generate.side_effect = RuntimeError("private provider details")
+        agent = TikuSearchAgent(
+            use_llm_intent=False,
+            enable_safe_answer_v0=True,
+            safe_answer_generator_v0=generator,
+        )
+
+        response = agent.handle_text("你好")
+
+        self.assertEqual(response.text, "你好。")
+        self.assertEqual(response.reply_source, "fixed_fallback")
+        self.assertEqual(response.fallback_reason, "generator_error")
+        self.assertNotIn("private provider details", repr(response))
+
+    def test_noneligible_text_does_not_call_injected_generator(self):
+        generator = Mock()
+        agent = TikuSearchAgent(
+            use_llm_intent=False,
+            enable_safe_answer_v0=True,
+            safe_answer_generator_v0=generator,
+        )
+
+        response = agent.handle_text("你好，帮我搜个题")
+
+        self.assertNotEqual(response.intent, "safe_answer")
+        generator.generate.assert_not_called()
 
 
 if __name__ == "__main__":
