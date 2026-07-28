@@ -28,7 +28,7 @@ from multi_agent_pipeline import (
     select_rerank_candidates,
     symbolic_root,
 )
-from scripts.feishu_tiku_bot import (
+from tiku_shared.multi_question import (
     effective_question_chapter,
     normalize_multi_questions,
     normalize_question_key,
@@ -181,7 +181,7 @@ def prepare_question_units_tool(
     for index, question in enumerate(questions, 1):
         item = dict(question)
         item["question_index"] = index
-        item["chapter"] = effective_question_chapter(item) or ""
+        item["chapter"] = effective_question_chapter(item, CHAPTERS) or ""
         analyzed_questions.append(item)
     questions = analyzed_questions
     prepared = []
@@ -197,7 +197,7 @@ def prepare_question_units_tool(
         item = dict(question)
         item["question_index"] = index
         item["question_image_path"] = crops.get(normalize_question_key(item.get("label")), "")
-        item["chapter"] = str(item.get("chapter") or effective_question_chapter(item) or "")
+        item["chapter"] = str(item.get("chapter") or effective_question_chapter(item, CHAPTERS) or "")
         prepared.append(item)
     return ToolResult(
         ok=True,
