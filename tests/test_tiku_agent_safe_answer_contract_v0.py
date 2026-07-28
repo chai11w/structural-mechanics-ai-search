@@ -86,6 +86,8 @@ class SafeAnswerContractV0Test(unittest.TestCase):
         variants = (
             ("你好。", "greeting"),
             ("不客气。", "courtesy"),
+            ("再见，随时欢迎回来。", "farewell"),
+            ("我主要处理结构力学题库相关问题。", "general"),
             ("我是力答，一个结构力学题库搜索助手，帮你从题库检索最相似的题目。", "identity"),
             ("我是力答，专注结构力学题库搜索，通过比对题图检索相似候选题并返回已有答案。", "identity"),
             ("我可以根据题图从题库检索最相似的题目。", "capability"),
@@ -108,6 +110,16 @@ class SafeAnswerContractV0Test(unittest.TestCase):
             with self.subTest(category=category, text=text):
                 validation = validate_safe_answer_output_v0(text, category)
                 self.assertTrue(validation.accepted, validation.reason)
+
+    def test_general_conversation_still_enforces_negative_safety_boundaries(self):
+        accepted = validate_safe_answer_output_v0("好的，随时欢迎回来。", "general")
+        self.assertTrue(accepted.accepted, accepted.reason)
+        rejected = validate_safe_answer_output_v0(
+            "我已经帮你检索到答案。",
+            "general",
+        )
+        self.assertFalse(rejected.accepted)
+        self.assertEqual(rejected.reason, "fabricated_execution_claim")
 
 
 if __name__ == "__main__":

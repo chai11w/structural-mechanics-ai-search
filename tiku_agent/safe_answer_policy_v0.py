@@ -1,4 +1,4 @@
-"""Pure eligibility policy for the first bounded safe-answer stage.
+"""Negative-boundary policy for the first bounded safe-answer stage.
 
 This module deliberately does not import the Agent runtime, call a model,
 authorize a business action, execute a tool, or mutate conversation state.  It
@@ -27,7 +27,7 @@ class SafeAnswerPolicyDecision:
     reason: str
 
 
-_PURE_SAFE_TEXTS = {
+_CATEGORY_EXAMPLES = {
     "greeting": frozenset(
         {
             "你好",
@@ -109,14 +109,14 @@ _AGENT_META_CATEGORY_PATTERNS = {
 }
 
 _BUSINESS_PATTERNS = (
-    r"(?:帮我|给我|替我)?(?:搜|找|查|检索)(?:题|一下|一遍|第|按|全局)",
+    r"(?:帮我|给我|替我)?(?:搜|找|查|检索)(?:个|道|一道|几道|一下|一遍|第|按|全局)?(?:题|一下)",
     r"(?:按|改成|换成|查|搜|找).{0,8}(?:第?[2-8]章|静定结构|力法|位移法|力矩分配|矩阵位移|影响线)",
     r"(?:选择|选|查看|打开).{0,5}(?:候选)?[0-9一二两三四五六七八九十]+",
     r"候选[0-9一二两三四五六七八九十]+",
     r"(?:第|选择|选).{0,3}[0-9一二两三四五六七八九十]+题",
     r"继续(?:搜索|搜|查|检索)|换一批|下一批",
     r"(?:刚才|上次).{0,5}答案.{0,5}(?:再发|重发)|(?:再发|重发).{0,5}答案|把答案发给我",
-    r"取消(?:当前)?(?:任务|搜索|检索|操作)?|退出|算了|不用了",
+    r"取消(?:当前)?(?:任务|搜索|检索|操作)?|(?:不再?|别|停止|结束|不用继续|不要继续).{0,6}(?:搜|搜索|检索|找题|任务)|(?:搜|搜索|检索|找题|任务).{0,6}(?:算了|停止|结束|取消)",
     r"全局搜索|全题库搜索|跨章节搜索",
 )
 
@@ -141,6 +141,15 @@ _OUT_OF_SCOPE_PATTERNS = (
 
 _AMBIGUOUS_TEXTS = frozenset({"那个", "这个", "然后呢", "怎么办"})
 
+_FAREWELL_PATTERN = re.compile(
+    r"(?:拜拜|再见|回头见|下次(?:再)?聊|我先走了|我要走了|先这样|晚安)"
+)
+_COURTESY_PATTERN = re.compile(r"(?:感谢|谢了|谢啦|谢咯|多谢|辛苦了|麻烦你了)")
+_GREETING_PATTERN = re.compile(
+    r"(?:你好|您好|哈喽|嗨|hello|hi|hey|在吗|早上好|下午好|晚上好)",
+    flags=re.IGNORECASE,
+)
+
 
 def evaluate_safe_answer_policy(
     text: str | None,
@@ -148,7 +157,7 @@ def evaluate_safe_answer_policy(
 ) -> SafeAnswerPolicyDecision:
     """Classify eligibility without interpreting or executing a business action."""
 
-    del context  # Reserved for reusable stage-two tests; the V0 allowlist is state-independent.
+    del context  # Text boundaries are state-independent in this first implementation.
     normalized = _normalize(text)
     compact = _compact(normalized)
 
@@ -173,17 +182,8 @@ def evaluate_safe_answer_policy(
     if compact in _AMBIGUOUS_TEXTS:
         return _deny("ambiguous", ROUTE_EXISTING_FALLBACK, "ambiguous_request")
 
-    exact_safe_category = _pure_safe_category(compact)
-    if exact_safe_category is not None:
-        return SafeAnswerPolicyDecision(
-            eligible=True,
-            category=exact_safe_category,
-            route=ROUTE_SAFE_ANSWER,
-            reason="pure_safe_conversation",
-        )
-
-    safe_category = _agent_meta_category(normalized)
-    has_safe_signal = safe_category is not None or _matches_any(
+    safe_category = _conversation_category(normalized, compact)
+    has_safe_signal = safe_category != "general" or _matches_any(
         normalized, _SAFE_SIGNAL_PATTERNS
     )
     business_text = re.sub(
@@ -191,25 +191,28 @@ def evaluate_safe_answer_policy(
         "",
         normalized,
     )
+    business_text = re.sub(
+        r"(?:怎么|如何).{0,4}(?:搜题|找题|检索)",
+        "",
+        business_text,
+    )
     has_business_signal = _matches_any(business_text, _BUSINESS_PATTERNS)
 
     if has_business_signal:
         if has_safe_signal:
             return _deny("mixed", ROUTE_EXISTING_INTENT, "business_priority")
         return _deny("business", ROUTE_EXISTING_ORCHESTRATOR, "business_request")
-    if safe_category is not None:
-        return SafeAnswerPolicyDecision(
-            eligible=True,
-            category=safe_category,
-            route=ROUTE_SAFE_ANSWER,
-            reason="pure_safe_conversation",
-        )
-    return _deny("unknown", ROUTE_EXISTING_FALLBACK, "not_in_safe_answer_allowlist")
+    return SafeAnswerPolicyDecision(
+        eligible=True,
+        category=safe_category,
+        route=ROUTE_SAFE_ANSWER,
+        reason="pure_safe_conversation",
+    )
 
 
-def _pure_safe_category(compact: str) -> str | None:
-    for category, approved_texts in _PURE_SAFE_TEXTS.items():
-        if compact in approved_texts:
+def _example_category(compact: str) -> str | None:
+    for category, example_texts in _CATEGORY_EXAMPLES.items():
+        if compact in example_texts:
             return category
     return None
 
@@ -221,6 +224,24 @@ def _agent_meta_category(text: str) -> str | None:
         if _matches_any(text, patterns):
             return category
     return None
+
+
+def _conversation_category(text: str, compact: str) -> str:
+    """Choose answer guidance after boundaries pass; never decide eligibility."""
+
+    example_category = _example_category(compact)
+    if example_category is not None:
+        return example_category
+    meta_category = _agent_meta_category(text)
+    if meta_category is not None:
+        return meta_category
+    if _FAREWELL_PATTERN.search(text):
+        return "farewell"
+    if _COURTESY_PATTERN.search(text):
+        return "courtesy"
+    if _GREETING_PATTERN.search(text):
+        return "greeting"
+    return "general"
 
 
 def _normalize(text: str | None) -> str:

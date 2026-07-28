@@ -55,12 +55,38 @@ class SafeAnswerPolicyV0Test(unittest.TestCase):
                 second = evaluate_safe_answer_policy(case["text"], contexts[case["context"]])
                 self.assertEqual(first, second)
 
-    def test_unknown_and_empty_text_fall_back_without_becoming_eligible(self):
-        for text in (None, "", "   ", "随便说点什么"):
+    def test_empty_text_falls_back_without_becoming_eligible(self):
+        for text in (None, "", "   "):
             with self.subTest(text=text):
                 decision = evaluate_safe_answer_policy(text)
                 self.assertFalse(decision.eligible)
                 self.assertEqual(decision.route, "existing_fallback")
+
+    def test_boundary_clear_conversation_does_not_need_an_allowlisted_phrase(self):
+        cases = (
+            ("感谢", "courtesy"),
+            ("拜拜", "farewell"),
+            ("算了我要走了", "farewell"),
+            ("今天状态怎么样", "general"),
+            ("随便说点什么", "general"),
+            ("下次再聊", "farewell"),
+        )
+        for text, category in cases:
+            with self.subTest(text=text):
+                decision = evaluate_safe_answer_policy(text)
+                self.assertTrue(decision.eligible)
+                self.assertEqual(decision.category, category)
+                self.assertEqual(decision.route, "safe_answer")
+
+    def test_explicit_business_cancellation_stays_in_existing_orchestrator(self):
+        for text in ("取消当前任务", "不搜了", "停止搜索", "算了，不用继续搜了"):
+            with self.subTest(text=text):
+                decision = evaluate_safe_answer_policy(text)
+                self.assertFalse(decision.eligible)
+                self.assertIn(
+                    decision.route,
+                    {"existing_intent", "existing_orchestrator"},
+                )
 
     def test_natural_agent_meta_questions_do_not_require_exact_templates(self):
         cases = (

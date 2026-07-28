@@ -12,6 +12,8 @@ FIXTURE = Path(__file__).parent / "fixtures" / "safe_answer_v0_cases.json"
 VALID_REPLIES = {
     "greeting": "你好。",
     "courtesy": "不客气。",
+    "farewell": "再见，随时欢迎回来。",
+    "general": "我主要处理结构力学题库相关问题。",
     "identity": "我是力答，一个结构力学题库搜索助手，帮你从题库检索最相似的题目。",
     "capability": "我可以根据题图从题库检索最相似的题目。",
     "workflow": "我会根据题图和章节检索并排序相似题。",
@@ -73,6 +75,13 @@ class SafeAnswerGeneratorV0Test(unittest.TestCase):
                 self.assertEqual(result.text, "")
                 self.assertEqual(result.category, case["expected"]["category"])
                 client.assert_not_called()
+
+    def test_boundary_clear_unlisted_conversation_calls_the_model(self):
+        client = Mock(return_value="再见，随时欢迎回来。")
+        result = SafeAnswerGeneratorV0(client).generate("拜拜")
+        self.assertEqual(result.source, "model")
+        self.assertEqual(result.category, "farewell")
+        client.assert_called_once()
 
     def test_provider_failures_and_invalid_type_use_fixed_fallback(self):
         failures = (

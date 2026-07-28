@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from tiku_agent import render
-from tiku_agent.action_decision_v2 import ActionDecisionV2
+from tiku_agent.action_decision_v2 import (
+    SAFETY_ACTIONS,
+    TASK_ACTIONS,
+    ActionDecisionV2,
+)
 from tiku_agent.conversation_context_v2 import ConversationContextV2
 from tiku_agent.intent_contract import IntentResult
 from tiku_agent.intent_runtime_v2 import (
@@ -101,28 +105,16 @@ class TikuSearchAgent:
         if self.enable_safe_answer_v0:
             safe_decision = evaluate_safe_answer_policy(text)
             if safe_decision.eligible:
-                if self.safe_answer_generator_v0 is not None:
-                    try:
-                        generated = self.safe_answer_generator_v0.generate(text)
-                    except Exception:  # noqa: BLE001 - preserve the reviewed fixed fallback.
-                        generated = None
-                    if generated is not None and generated.source != "not_called":
-                        return AgentResponse(
-                            text=generated.text,
-                            state=self.state.to_dict(),
-                            intent="safe_answer",
-                            reply_source=generated.source,
-                            fallback_reason=generated.fallback_reason,
-                        )
-                return AgentResponse(
-                    text=render_safe_answer_v0(safe_decision.category),
-                    state=self.state.to_dict(),
-                    intent="safe_answer",
-                    reply_source="fixed_fallback",
-                    fallback_reason=(
-                        "generator_error" if self.safe_answer_generator_v0 is not None else ""
-                    ),
-                )
+                if safe_decision.category == "general":
+                    context = build_runtime_context_v2(self.state)
+                    decision = decide_intent_v2(
+                        text,
+                        context,
+                        llm_client=self._v2_llm_client(),
+                    )
+                    if decision.action in TASK_ACTIONS | SAFETY_ACTIONS:
+                        return self._dispatch_v2(decision, context)
+                return self._safe_answer_response(text, safe_decision.category)
         context = build_runtime_context_v2(self.state)
         decision = decide_intent_v2(
             text,
@@ -130,6 +122,30 @@ class TikuSearchAgent:
             llm_client=self._v2_llm_client(),
         )
         return self._dispatch_v2(decision, context)
+
+    def _safe_answer_response(self, text: str, category: str) -> AgentResponse:
+        if self.safe_answer_generator_v0 is not None:
+            try:
+                generated = self.safe_answer_generator_v0.generate(text)
+            except Exception:  # noqa: BLE001 - preserve the reviewed fixed fallback.
+                generated = None
+            if generated is not None and generated.source != "not_called":
+                return AgentResponse(
+                    text=generated.text,
+                    state=self.state.to_dict(),
+                    intent="safe_answer",
+                    reply_source=generated.source,
+                    fallback_reason=generated.fallback_reason,
+                )
+        return AgentResponse(
+            text=render_safe_answer_v0(category),
+            state=self.state.to_dict(),
+            intent="safe_answer",
+            reply_source="fixed_fallback",
+            fallback_reason=(
+                "generator_error" if self.safe_answer_generator_v0 is not None else ""
+            ),
+        )
 
     def _dispatch_v2(
         self,

@@ -229,6 +229,61 @@ class SafeAnswerRouteV0Test(unittest.TestCase):
         self.assertNotEqual(response.intent, "safe_answer")
         generator.generate.assert_not_called()
 
+    def test_farewell_is_model_answered_without_cancelling_active_state(self):
+        state = _representative_state()
+        before = deepcopy(state.to_dict())
+        toolbox, tool_mocks = _toolbox_that_must_not_run()
+        agent = TikuSearchAgent(
+            state=state,
+            tools=toolbox,
+            use_llm_intent=False,
+            enable_safe_answer_v0=True,
+            safe_answer_generator_v0=SafeAnswerGeneratorV0(
+                lambda _request: "再见，随时欢迎回来。"
+            ),
+        )
+
+        response = agent.handle_text("算了我要走了")
+
+        self.assertEqual(response.intent, "safe_answer")
+        self.assertEqual(response.reply_source, "model")
+        self.assertEqual(agent.state.to_dict(), before)
+        for tool_mock in tool_mocks.values():
+            tool_mock.assert_not_called()
+
+    def test_general_text_uses_intent_as_a_business_safety_net(self):
+        generator = Mock()
+        agent = TikuSearchAgent(
+            state=_representative_state(),
+            use_llm_intent=False,
+            enable_safe_answer_v0=True,
+            safe_answer_generator_v0=generator,
+        )
+
+        response = agent.handle_text("算了")
+
+        self.assertNotEqual(response.intent, "safe_answer")
+        generator.generate.assert_not_called()
+
+    def test_general_nonbusiness_clarification_is_still_model_answered(self):
+        generator = SafeAnswerGeneratorV0(
+            lambda _request: "我在，可以聊聊结构力学题库相关的问题。"
+        )
+        agent = TikuSearchAgent(
+            use_llm_intent=True,
+            llm_client=lambda _prompt: {
+                "action": "clarification",
+                "clarification_reason": "ambiguous_action",
+            },
+            enable_safe_answer_v0=True,
+            safe_answer_generator_v0=generator,
+        )
+
+        response = agent.handle_text("随便说点什么")
+
+        self.assertEqual(response.intent, "safe_answer")
+        self.assertEqual(response.reply_source, "model")
+
 
 if __name__ == "__main__":
     unittest.main()
