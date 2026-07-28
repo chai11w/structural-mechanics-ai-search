@@ -62,6 +62,41 @@ class SafeAnswerPolicyV0Test(unittest.TestCase):
                 self.assertFalse(decision.eligible)
                 self.assertEqual(decision.route, "existing_fallback")
 
+    def test_natural_agent_meta_questions_do_not_require_exact_templates(self):
+        cases = (
+            ("你有什么作用", "capability"),
+            ("你能干嘛？", "capability"),
+            ("这个助手主要是做什么的", "capability"),
+            ("你的核心能力有哪些", "capability"),
+            ("你和其他agent区别", "identity"),
+            ("你跟别的机器人有什么不同？", "identity"),
+            ("力答是个什么助手", "identity"),
+            ("你具体如何工作", "workflow"),
+            ("这个助手的搜题原理是什么", "workflow"),
+        )
+        for text, category in cases:
+            with self.subTest(text=text):
+                decision = evaluate_safe_answer_policy(text)
+                self.assertTrue(decision.eligible)
+                self.assertEqual(decision.category, category)
+                self.assertEqual(decision.route, "safe_answer")
+
+    def test_broader_meta_detection_never_steals_business_or_mixed_requests(self):
+        cases = (
+            "介绍你自己并帮我搜第4章",
+            "说说你的作用，再把候选2发给我",
+            "你和其他agent区别，顺便继续搜索",
+            "这个助手怎么工作，把答案发给我",
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                decision = evaluate_safe_answer_policy(text)
+                self.assertFalse(decision.eligible)
+                self.assertIn(
+                    decision.route,
+                    {"existing_intent", "existing_orchestrator"},
+                )
+
     def test_agent_integration_is_default_disabled(self):
         agent = TikuSearchAgent(use_llm_intent=False)
         self.assertFalse(agent.enable_safe_answer_v0)

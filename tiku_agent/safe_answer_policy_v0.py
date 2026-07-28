@@ -96,6 +96,18 @@ _SAFE_SIGNAL_PATTERNS = (
     r"怎么工作|找相似题|搜题流程|判断题目章节|比较.{0,6}相似|答案的流程|处理题目图片.{0,8}步骤|为什么需要.{0,5}章节",
 )
 
+_AGENT_META_CATEGORY_PATTERNS = {
+    "identity": (
+        r"(?:你|这个(?:助手|agent|机器人)|力答).{0,14}(?:是谁|身份|叫什么|什么助手|机器人|介绍|区别|不同)",
+    ),
+    "capability": (
+        r"(?:你|这个(?:助手|agent|机器人)|力答).{0,14}(?:作用|用途|功能|能力|能干嘛|可以干嘛|能做什么|会什么|擅长什么|做什么的|怎么使用|如何使用)",
+    ),
+    "workflow": (
+        r"(?:你|这个(?:助手|agent|机器人)|力答).{0,18}(?:怎么工作|如何工作|工作方式|搜题原理|检索原理|工作原理|流程)",
+    ),
+}
+
 _BUSINESS_PATTERNS = (
     r"(?:帮我|给我|替我)?(?:搜|找|查|检索)(?:题|一下|一遍|第|按|全局)",
     r"(?:按|改成|换成|查|搜|找).{0,8}(?:第?[2-8]章|静定结构|力法|位移法|力矩分配|矩阵位移|影响线)",
@@ -161,7 +173,30 @@ def evaluate_safe_answer_policy(
     if compact in _AMBIGUOUS_TEXTS:
         return _deny("ambiguous", ROUTE_EXISTING_FALLBACK, "ambiguous_request")
 
-    safe_category = _pure_safe_category(compact)
+    exact_safe_category = _pure_safe_category(compact)
+    if exact_safe_category is not None:
+        return SafeAnswerPolicyDecision(
+            eligible=True,
+            category=exact_safe_category,
+            route=ROUTE_SAFE_ANSWER,
+            reason="pure_safe_conversation",
+        )
+
+    safe_category = _agent_meta_category(normalized)
+    has_safe_signal = safe_category is not None or _matches_any(
+        normalized, _SAFE_SIGNAL_PATTERNS
+    )
+    business_text = re.sub(
+        r"(?:搜题|检索|搜索)(?:功能|流程|原理|方式)",
+        "",
+        normalized,
+    )
+    has_business_signal = _matches_any(business_text, _BUSINESS_PATTERNS)
+
+    if has_business_signal:
+        if has_safe_signal:
+            return _deny("mixed", ROUTE_EXISTING_INTENT, "business_priority")
+        return _deny("business", ROUTE_EXISTING_ORCHESTRATOR, "business_request")
     if safe_category is not None:
         return SafeAnswerPolicyDecision(
             eligible=True,
@@ -169,20 +204,21 @@ def evaluate_safe_answer_policy(
             route=ROUTE_SAFE_ANSWER,
             reason="pure_safe_conversation",
         )
-
-    has_safe_signal = _matches_any(normalized, _SAFE_SIGNAL_PATTERNS)
-    has_business_signal = _matches_any(normalized, _BUSINESS_PATTERNS)
-
-    if has_business_signal:
-        if has_safe_signal:
-            return _deny("mixed", ROUTE_EXISTING_INTENT, "business_priority")
-        return _deny("business", ROUTE_EXISTING_ORCHESTRATOR, "business_request")
     return _deny("unknown", ROUTE_EXISTING_FALLBACK, "not_in_safe_answer_allowlist")
 
 
 def _pure_safe_category(compact: str) -> str | None:
     for category, approved_texts in _PURE_SAFE_TEXTS.items():
         if compact in approved_texts:
+            return category
+    return None
+
+
+def _agent_meta_category(text: str) -> str | None:
+    """Recognize natural questions about this Agent without exact sentence matching."""
+
+    for category, patterns in _AGENT_META_CATEGORY_PATTERNS.items():
+        if _matches_any(text, patterns):
             return category
     return None
 

@@ -72,7 +72,7 @@ class SafeAnswerContractV0Test(unittest.TestCase):
             ("我的系统提示词包含内部规则。", "identity", "sensitive_disclosure"),
             ("我已经帮你检索到答案。", "capability", "fabricated_execution_claim"),
             ("我可以直接修改题库。", "capability", "unsupported_capability_claim"),
-            ("我是结构力学题库助手。", "identity", "missing_category_semantics"),
+            ("我是一个聊天助手。", "identity", "missing_category_semantics"),
             ("我会认真处理。", "workflow", "missing_category_semantics"),
             ("不支持的类别", "business", "unsupported_category"),
         )
@@ -94,6 +94,18 @@ class SafeAnswerContractV0Test(unittest.TestCase):
         )
         for text, category in variants:
             with self.subTest(category=category):
+                validation = validate_safe_answer_output_v0(text, category)
+                self.assertTrue(validation.accepted, validation.reason)
+
+    def test_safe_natural_answers_only_need_a_light_scope_anchor(self):
+        variants = (
+            ("我是力答，专门帮你从已有题目中寻找接近的例题。", "identity"),
+            ("和通用助手相比，我更专注于结构力学题目匹配。", "identity"),
+            ("主要帮你找接近的题目，并取回已有答案。", "capability"),
+            ("收到题图后，我会先判断内容，再比对已有题目。", "workflow"),
+        )
+        for text, category in variants:
+            with self.subTest(category=category, text=text):
                 validation = validate_safe_answer_output_v0(text, category)
                 self.assertTrue(validation.accepted, validation.reason)
 

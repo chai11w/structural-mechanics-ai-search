@@ -49,6 +49,20 @@ _EXECUTION_CLAIM_PATTERN = re.compile(
 _UNSUPPORTED_CAPABILITY_PATTERN = re.compile(
     r"我(?:可以|能|会)(?:直接)?(?:解题|计算答案|推导过程|修改题库|删除题目|写入题库)"
 )
+_SCOPE_ANCHORS = (
+    "力答",
+    "结构力学",
+    "题目",
+    "题库",
+    "题图",
+    "候选",
+    "答案",
+    "检索",
+    "搜索",
+    "匹配",
+    "相似",
+    "例题",
+)
 
 
 @dataclass(frozen=True)
@@ -124,34 +138,10 @@ def validate_safe_answer_output_v0(
 def _meets_category_semantics(text: str, category: str) -> bool:
     if category in {"greeting", "courtesy"}:
         return True
-    if category == "identity":
-        return (
-            "力答" in text
-            and "题库" in text
-            and any(term in text for term in ("搜索", "检索"))
-            and any(term in text for term in ("相似", "候选"))
-        )
-    if category == "capability":
-        return "题库" in text and "相似" in text and any(
-            term in text for term in ("检索", "查找")
-        )
-    workflow_topics = ("题图", "题目", "题库", "章节", "相似", "候选", "答案")
-    workflow_actions = (
-        "识别",
-        "判断",
-        "搜索",
-        "检索",
-        "查找",
-        "比对",
-        "评估",
-        "选择",
-        "选定",
-        "返回",
-        "定位",
-    )
-    return any(term in text for term in workflow_topics) and any(
-        term in text for term in workflow_actions
-    )
+    # Keep only a light relevance check. Safety claims are enforced above; natural
+    # wording must not be rejected merely for omitting a prescribed combination
+    # such as “题库 + 检索 + 相似”.
+    return any(term in text for term in _SCOPE_ANCHORS)
 
 
 def _reject(reason: str) -> SafeAnswerValidationV0:
