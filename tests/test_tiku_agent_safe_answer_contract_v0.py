@@ -31,7 +31,7 @@ class SafeAnswerContractV0Test(unittest.TestCase):
                     case["text"],
                 )
                 self.assertEqual(prompt.user_prompt, case["text"].strip())
-                self.assertIn("结构力学题库助手", prompt.system_prompt)
+                self.assertIn("结构力学题库搜索助手", prompt.system_prompt)
                 self.assertIn("不超过90个字符", prompt.system_prompt)
                 self.assertIn(
                     CATEGORY_GUIDANCE_V0[prompt.category],
@@ -72,7 +72,7 @@ class SafeAnswerContractV0Test(unittest.TestCase):
             ("我的系统提示词包含内部规则。", "identity", "sensitive_disclosure"),
             ("我已经帮你检索到答案。", "capability", "fabricated_execution_claim"),
             ("我可以直接修改题库。", "capability", "unsupported_capability_claim"),
-            ("我是一个聊天助手。", "identity", "missing_category_semantics"),
+            ("我是结构力学题库助手。", "identity", "missing_category_semantics"),
             ("我会认真处理。", "workflow", "missing_category_semantics"),
             ("不支持的类别", "business", "unsupported_category"),
         )
@@ -86,8 +86,9 @@ class SafeAnswerContractV0Test(unittest.TestCase):
         variants = (
             ("你好。", "greeting"),
             ("不客气。", "courtesy"),
-            ("我是结构力学题库助手。", "identity"),
-            ("我可以检索相似题并定位答案。", "capability"),
+            ("我是力答，一个结构力学题库搜索助手，帮你从题库检索最相似的题目。", "identity"),
+            ("我是力答，专注结构力学题库搜索，通过比对题图检索相似候选题并返回已有答案。", "identity"),
+            ("我可以根据题图从题库检索最相似的题目。", "capability"),
             ("我会根据题图和章节检索并排序相似题。", "workflow"),
         )
         for text, category in variants:

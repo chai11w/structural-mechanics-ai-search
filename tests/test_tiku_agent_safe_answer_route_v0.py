@@ -124,11 +124,11 @@ class SafeAnswerRouteV0Test(unittest.TestCase):
 
     def test_reply_contract_is_concise_and_category_specific(self):
         expected_phrases = {
-            "你好": "题图",
+            "你好": "你好",
             "谢谢": "不客气",
-            "你是谁": "结构力学题库助手",
-            "你能做什么": "检索相似题",
-            "你是怎么工作的": "荷载与结构特征",
+            "你是谁": "力答",
+            "你能做什么": "检索最相似的题目",
+            "你是怎么工作的": "识别题图",
         }
         for text, phrase in expected_phrases.items():
             with self.subTest(text=text):

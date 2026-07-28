@@ -38,7 +38,7 @@ class SafeAnswerQwenV0Test(unittest.TestCase):
             temperature=0.2,
             max_tokens=120,
         )
-        payload = {"choices": [{"message": {"content": "我是结构力学题库助手。"}}]}
+        payload = {"choices": [{"message": {"content": "我是力答，一个结构力学题库搜索助手。"}}]}
         with patch.dict(os.environ, {"DASHSCOPE_API_KEY": "test-key"}), patch(
             "urllib.request.urlopen", return_value=_Response(payload)
         ) as urlopen:
@@ -46,7 +46,7 @@ class SafeAnswerQwenV0Test(unittest.TestCase):
                 model="test-model", endpoint="https://example.invalid/chat"
             )(request)
 
-        self.assertEqual(output, "我是结构力学题库助手。")
+        self.assertEqual(output, "我是力答，一个结构力学题库搜索助手。")
         http_request = urlopen.call_args.args[0]
         sent = json.loads(http_request.data.decode("utf-8"))
         self.assertEqual(sent["model"], "test-model")
@@ -79,8 +79,8 @@ class SafeAnswerQwenV0Test(unittest.TestCase):
         replies = {
             "greeting": "你好。",
             "courtesy": "不客气。",
-            "identity": "我是结构力学题库助手。",
-            "capability": "我可以检索相似题并定位答案。",
+            "identity": "我是力答，一个结构力学题库搜索助手，帮你从题库检索最相似的题目。",
+            "capability": "我可以根据题图从题库检索最相似的题目。",
             "workflow": "我会根据题图和章节检索并排序相似题。",
         }
         records = evaluate_cases(

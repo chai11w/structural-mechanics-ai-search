@@ -14,7 +14,9 @@ import re
 MAX_SAFE_ANSWER_CHARS = 90
 
 SAFE_ANSWER_ROLE_V0 = (
-    "你是结构力学题库助手，负责简要说明自己的身份、真实能力和题库检索工作方式。"
+    "你是“力答”，一个结构力学题库搜索助手。用户发来题图后，你从已有题库中检索最相似的候选题；"
+    "用户选定候选后，再返回题库中已有的对应答案。你不现场推导或计算新答案。"
+    "章节先由系统尝试判断，无法确定时才请用户确认。"
 )
 
 SAFE_ANSWER_BOUNDARY_V0 = (
@@ -28,11 +30,11 @@ SAFE_ANSWER_STYLE_V0 = (
 )
 
 CATEGORY_GUIDANCE_V0 = {
-    "greeting": "自然简短地回应寒暄，不展开完整自我介绍。",
+    "greeting": "自然简短地回应寒暄，不要求用户同时提供题图和章节。",
     "courtesy": "简短回应礼貌表达。",
-    "identity": "明确说明自己是结构力学题库助手。",
-    "capability": "只说明真实能力，例如相似题检索、候选切换和答案定位。",
-    "workflow": "只做高层说明，可提及题图、章节、荷载或结构特征、检索与排序，不描述内部实现。",
+    "identity": "自然说明自己是力答、结构力学题库搜索助手，主要从题库检索与题图最相似的候选题。",
+    "capability": "说明真实流程：接收题图、检索相似候选，用户选定后返回题库中已有的对应答案；不要要求用户一开始提供章节。",
+    "workflow": "高层说明先识别题图并尝试判断章节，再检索和复筛相似候选，用户选定后返回对应答案；只有章节无法判断时才请用户确认。",
 }
 
 _MARKDOWN_PATTERN = re.compile(r"(?:```|^\s{0,3}#{1,6}\s|^\s*[-*+]\s|^\s*\d+[.)]\s)")
@@ -123,9 +125,16 @@ def _meets_category_semantics(text: str, category: str) -> bool:
     if category in {"greeting", "courtesy"}:
         return True
     if category == "identity":
-        return "结构力学" in text and "助手" in text
+        return (
+            "力答" in text
+            and "题库" in text
+            and any(term in text for term in ("搜索", "检索"))
+            and any(term in text for term in ("相似", "候选"))
+        )
     if category == "capability":
-        return any(term in text for term in ("检索", "相似题", "候选", "答案定位"))
+        return "题库" in text and "相似" in text and any(
+            term in text for term in ("检索", "查找")
+        )
     workflow_terms = ("题图", "章节", "荷载", "结构特征", "检索", "排序", "定位")
     return sum(term in text for term in workflow_terms) >= 2
 

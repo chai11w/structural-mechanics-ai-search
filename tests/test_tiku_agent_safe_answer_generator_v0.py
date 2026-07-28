@@ -12,8 +12,8 @@ FIXTURE = Path(__file__).parent / "fixtures" / "safe_answer_v0_cases.json"
 VALID_REPLIES = {
     "greeting": "你好。",
     "courtesy": "不客气。",
-    "identity": "我是结构力学题库助手。",
-    "capability": "我可以检索相似题并定位答案。",
+    "identity": "我是力答，一个结构力学题库搜索助手，帮你从题库检索最相似的题目。",
+    "capability": "我可以根据题图从题库检索最相似的题目。",
     "workflow": "我会根据题图和章节检索并排序相似题。",
 }
 
@@ -28,12 +28,12 @@ class SafeAnswerGeneratorV0Test(unittest.TestCase):
 
         def client(request):
             seen.append(request)
-            return "我是结构力学题库助手。"
+            return "我是力答，一个结构力学题库搜索助手，帮你从题库检索最相似的题目。"
 
         ticks = iter((10.0, 10.125))
         result = SafeAnswerGeneratorV0(client, clock=lambda: next(ticks)).generate("你是谁")
 
-        self.assertEqual(result.text, "我是结构力学题库助手。")
+        self.assertEqual(result.text, "我是力答，一个结构力学题库搜索助手，帮你从题库检索最相似的题目。")
         self.assertEqual(result.source, "model")
         self.assertEqual(result.category, "identity")
         self.assertEqual(result.fallback_reason, "")
@@ -43,7 +43,7 @@ class SafeAnswerGeneratorV0Test(unittest.TestCase):
         self.assertEqual(seen[0].temperature, 0.2)
         self.assertEqual(seen[0].max_tokens, 120)
         self.assertEqual(seen[0].prompt.user_prompt, "你是谁")
-        self.assertIn("结构力学题库助手", seen[0].prompt.system_prompt)
+        self.assertIn("结构力学题库搜索助手", seen[0].prompt.system_prompt)
 
     def test_every_eligible_case_calls_the_model_exactly_once(self):
         eligible_cases = [
