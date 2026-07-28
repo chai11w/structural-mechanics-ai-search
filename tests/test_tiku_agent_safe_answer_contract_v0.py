@@ -90,6 +90,7 @@ class SafeAnswerContractV0Test(unittest.TestCase):
             ("我是力答，专注结构力学题库搜索，通过比对题图检索相似候选题并返回已有答案。", "identity"),
             ("我可以根据题图从题库检索最相似的题目。", "capability"),
             ("我会根据题图和章节检索并排序相似题。", "workflow"),
+            ("我通过比对结构形式、荷载类型及约束条件等关键力学特征来评估相似度。", "workflow"),
         )
         for text, category in variants:
             with self.subTest(category=category):

@@ -1,4 +1,4 @@
-"""Run the isolated 10-question x 3 Qwen safe-answer pilot."""
+"""Run isolated pilot or full-suite Qwen safe-answer evaluation."""
 
 from __future__ import annotations
 
@@ -44,6 +44,11 @@ def load_pilot_cases(fixture: Path = FIXTURE) -> list[dict]:
     suite = json.loads(fixture.read_text(encoding="utf-8"))
     by_id = {case["id"]: case for case in suite["cases"]}
     return [by_id[case_id] for case_id in PILOT_CASE_IDS]
+
+
+def load_full_cases(fixture: Path = FIXTURE) -> list[dict]:
+    suite = json.loads(fixture.read_text(encoding="utf-8"))
+    return [case for case in suite["cases"] if case["expected"]["eligible"]]
 
 
 def evaluate_cases(
@@ -129,6 +134,7 @@ def write_results(output_dir: Path, records: list[dict], summary: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate bounded safe answers with Qwen")
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--suite", choices=("pilot", "full"), default="pilot")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     parser.add_argument("--output-dir", type=Path)
@@ -138,8 +144,9 @@ def main() -> int:
     output_dir = args.output_dir or (
         DEFAULT_OUTPUT_ROOT / datetime.now().strftime("%Y%m%d_%H%M%S")
     )
+    cases = load_pilot_cases() if args.suite == "pilot" else load_full_cases()
     records = evaluate_cases(
-        load_pilot_cases(),
+        cases,
         runs=args.runs,
         model_client=QwenSafeAnswerClientV0(model=args.model, endpoint=args.endpoint),
     )

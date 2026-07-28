@@ -135,8 +135,23 @@ def _meets_category_semantics(text: str, category: str) -> bool:
         return "题库" in text and "相似" in text and any(
             term in text for term in ("检索", "查找")
         )
-    workflow_terms = ("题图", "章节", "荷载", "结构特征", "检索", "排序", "定位")
-    return sum(term in text for term in workflow_terms) >= 2
+    workflow_topics = ("题图", "题目", "题库", "章节", "相似", "候选", "答案")
+    workflow_actions = (
+        "识别",
+        "判断",
+        "搜索",
+        "检索",
+        "查找",
+        "比对",
+        "评估",
+        "选择",
+        "选定",
+        "返回",
+        "定位",
+    )
+    return any(term in text for term in workflow_topics) and any(
+        term in text for term in workflow_actions
+    )
 
 
 def _reject(reason: str) -> SafeAnswerValidationV0:

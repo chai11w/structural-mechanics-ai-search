@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from scripts.evaluate_safe_answer_qwen_v0 import (
     evaluate_cases,
+    load_full_cases,
     load_pilot_cases,
     summarize,
     write_results,
@@ -93,6 +94,25 @@ class SafeAnswerQwenV0Test(unittest.TestCase):
         self.assertEqual(summary["accepted"], 30)
         self.assertEqual(summary["acceptance_rate"], 1.0)
         self.assertTrue(all(record["model_output"] for record in records))
+
+    def test_full_suite_contains_all_thirty_eight_eligible_cases(self):
+        cases = load_full_cases()
+        self.assertEqual(len(cases), 38)
+        self.assertTrue(all(case["expected"]["eligible"] for case in cases))
+        category_counts = {
+            category: sum(case["expected"]["category"] == category for case in cases)
+            for category in ("greeting", "courtesy", "identity", "capability", "workflow")
+        }
+        self.assertEqual(
+            category_counts,
+            {
+                "greeting": 8,
+                "courtesy": 6,
+                "identity": 8,
+                "capability": 8,
+                "workflow": 8,
+            },
+        )
 
     def test_evaluation_outputs_are_written_only_to_the_requested_directory(self):
         records = [
