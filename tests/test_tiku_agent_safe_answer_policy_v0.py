@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import unittest
 
+from tiku_agent.agent import TikuSearchAgent
 from tiku_agent.conversation_context_v2 import ConversationContextV2
 from tiku_agent.safe_answer_policy_v0 import evaluate_safe_answer_policy
 
@@ -61,11 +62,9 @@ class SafeAnswerPolicyV0Test(unittest.TestCase):
                 self.assertFalse(decision.eligible)
                 self.assertEqual(decision.route, "existing_fallback")
 
-    def test_stage_one_policy_is_not_wired_into_the_agent_runtime(self):
-        agent_source = (Path(__file__).parents[1] / "tiku_agent" / "agent.py").read_text(
-            encoding="utf-8"
-        )
-        self.assertNotIn("safe_answer_policy_v0", agent_source)
+    def test_agent_integration_is_default_disabled(self):
+        agent = TikuSearchAgent(use_llm_intent=False)
+        self.assertFalse(agent.enable_safe_answer_v0)
 
 
 if __name__ == "__main__":

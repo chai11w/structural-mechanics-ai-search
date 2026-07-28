@@ -16,6 +16,8 @@ from tiku_agent.intent_runtime_v2 import (
 )
 from tiku_agent.intent_v2 import call_qwen_decision_v2, decide_intent_v2
 from tiku_agent.reply_shell_v2 import is_reply_shell_action, render_reply_shell_v2
+from tiku_agent.safe_answer_policy_v0 import evaluate_safe_answer_policy
+from tiku_agent.safe_answer_reply_v0 import render_safe_answer_v0
 from tiku_agent.state import (
     PHASE_ANSWERED,
     PHASE_ERROR,
@@ -70,6 +72,7 @@ class TikuSearchAgent:
         use_llm_intent: bool = True,
         llm_client: Callable[[str], dict[str, Any]] | None = None,
         progress_reporter: Callable[[str, str], None] | None = None,
+        enable_safe_answer_v0: bool = False,
     ) -> None:
         self.state = state or AgentState()
         self.tools = tools or AgentToolbox()
@@ -77,6 +80,7 @@ class TikuSearchAgent:
         self.use_llm_intent = use_llm_intent
         self.llm_client = llm_client
         self.progress_reporter = progress_reporter
+        self.enable_safe_answer_v0 = enable_safe_answer_v0
 
     def handle_image(self, image_path: str | Path) -> AgentResponse:
         context = build_runtime_context_v2(self.state, trusted_image_event=True)
@@ -89,6 +93,14 @@ class TikuSearchAgent:
         return self._dispatch_v2(decision, context, image_path=image_path)
 
     def handle_text(self, text: str) -> AgentResponse:
+        if self.enable_safe_answer_v0:
+            safe_decision = evaluate_safe_answer_policy(text)
+            if safe_decision.eligible:
+                return AgentResponse(
+                    text=render_safe_answer_v0(safe_decision.category),
+                    state=self.state.to_dict(),
+                    intent="safe_answer",
+                )
         context = build_runtime_context_v2(self.state)
         decision = decide_intent_v2(
             text,

@@ -36,13 +36,13 @@ python -B scripts/run_tiku_agent_demo.py --port 8790
 
 Agent 现在只有 Intent V2，不再提供 V1 运行开关。线上 8790 由隐藏计划任务启动，并使用独立生产目录 `.tmp_tiku_agent_v2_prod_8790/`。
 
-下一版主线候选使用独立的 8794 入口；当前基线与 8790 共用同一套 Agent 行为，仅隔离端口、Cookie 和全部可写运行状态：
+下一版主线候选使用独立 worktree、分支和 8794 入口。默认运行行为仍与 8790 等价，并隔离源码、端口、Cookie 和全部可写运行状态：
 
 ```powershell
 python -B scripts/run_tiku_agent_8794.py
 ```
 
-默认访问 `http://127.0.0.1:8794`，会话数据库、上传/媒体文件、临时 incoming 文件和任务日志统一位于 `.tmp_tiku_agent_v2_candidate_8794/`。8794 使用独立 Cookie `tiku_agent_8794_session`，不会与同一浏览器中的 8790 会话标识混用。该入口目前不包含自主规划或 LangGraph，只用于建立可验证的行为等价基线。
+默认访问 `http://127.0.0.1:8794`，会话数据库、上传/媒体文件、临时 incoming 文件和任务日志统一位于 `.tmp_tiku_agent_v2_candidate_8794/`。8794 使用独立 Cookie `tiku_agent_8794_session`，不会与同一浏览器中的 8790 会话标识混用。候选代码已加入默认关闭的安全回答 V0 固定路由；未显式开启时仍走原 Intent V2。该入口目前不包含模型自由回答、自主规划或 LangGraph。
 
 Intent V2 还提供受限的全局搜索兜底：只有章节判断失败、Agent 已明确提供该选项且用户明确同意时才会执行。它跨第 2–8 章收集粗筛分数 `>= 0.999` 的内容去重候选，以最多 10 路并发完成全部视觉复筛，只展示 `rerank_score > 0.95` 的结果并标注来源章节；结果仍是候选，必须由用户选择 `candidate_rank` 后才会读取答案。普通章节检索和现有飞书机器人不走该流程。
 
