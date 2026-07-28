@@ -5,7 +5,7 @@
 - 项目位于 `F:\cc\7-题库检索`，用于维护和检索结构力学题库，支持题图/荷载检索、章节路由、相似题排序与答案定位。
 - 8788 是现有题库飞书机器人；8790 是当前稳定网页主线，生产状态位于 `.tmp_tiku_agent_v2_prod_8790`，二者不得受新阶段开发影响。
 - 8793 是长期复用的观测与人工评审层，当前基于经哈希校验的主线镜像运行，独立状态位于 `.tmp_review_tiku_prod_8793`，运行身份为 `review-8793-prod`。
-- 当前分支为 `codex/mainline-bounded-autonomy-v1`；8794隔离基线已建立并在独立端口运行，行为仍与8790共用同一主线实现。
+- 稳定工作区使用 `codex/mainline-bounded-autonomy-v1`；8794已迁入 `F:\cc\7-题库检索-8794` 独立 worktree 和 `codex/8794-candidate-v1` 分支，源码、端口、Cookie、运行状态和答案输出均与8790/8793/8788隔离。
 - 下一阶段是在8794依次加入结构化工具结果、安全自由回答和影子规划；8793随后切换为基于8794做完整评审，成功后8794代码替换8790。
 - LangGraph不与8794同时引入，待有限自主行为稳定后再单独评估迁移。
 
@@ -19,14 +19,14 @@
 - 8793评审侧栏已改为结果导向摘要：意图显示用户想做什么，工具显示执行结果，状态只显示等待章节/候选/答案等业务阶段；错误回答的归因区还会显示“回答生成”，区分固定回复、工具结果回复、业务状态回复和异常回复。`last_intent_action`、原始 phase 和 JSON 仅保留在折叠技术详情。空轨迹或加载异常不再向评审者暴露代码报错原文。
 - 已修复“上传新题后点击上一题候选”：状态含题目版本与确定性候选批次，前后端共同拒绝旧候选并返回准确提示。
 - 8790与8793均已部署该修复并保持独立数据库；8793启动会校验固定运行身份。
-- 8794使用专用启动入口、端口8794、`.tmp_tiku_agent_v2_candidate_8794`运行目录和独立Cookie；Session、媒体、incoming与日志均不复用8790/8793/8788。
+- 8794使用独立 worktree、实验分支、专用启动入口、端口8794、候选工作区内的 `.tmp_tiku_agent_v2_candidate_8794` 运行目录和独立Cookie；本地配置只保留题库路径、候选输出目录和`top_k`，密钥来自环境，Session、媒体、incoming、日志和答案输出均不复用8790/8793/8788。
 - 多题图的题号归一、章节判定、裁图和Qwen图块筛选已抽至 `tiku_shared.multi_question`；8794 Agent不再依赖飞书运行脚本，8788保留同名兼容入口并调用同一实现。
 - 飞书事件去重已改为30分钟TTL、20,000条上限和加锁的缓存，避免长跑时事件ID无界增长；代码待8788下次受控重启后加载。
-- 8790/8794同mock HTTP行为、状态与调用序列已有基线测试；当前Agent专项168项、全量测试205项、主线/观测镜像一致性19项通过，8788/8790/8793/8794接口均实测可用。
+- 8790/8794同mock HTTP行为、状态与调用序列已有基线测试；8794独立工作区全量测试205项、主线/观测镜像一致性19项通过，8788/8790/8793/8794接口均实测可用。
 
 ## In Progress
 
-- 8794隔离基线和单章节粗筛收敛已完成；下一步进入结构化工具结果协议，尚未改变Agent行为。
+- 8794源码与运行隔离已经完成；下一步进入结构化工具结果协议，尚未改变Agent行为。
 - 8794后续采用“选择性自主”：先允许身份、能力、失败解释等无工具问题在安全边界内自由回答；普通业务请求仍走固定快速编排，只有编排未覆盖的长尾才进入受限AI规划。
 - 8788仍在运行旧进程；飞书事件去重修复需要一次受控重启才会实际生效。
 
@@ -40,7 +40,7 @@
 
 ## Architecture Rules
 
-- 8790保持稳定；8794必须使用新分支、独立端口和独立运行目录，不能复用8790/8793/8788状态。
+- 8790保持稳定；8794必须使用独立 worktree、实验分支、端口、Cookie、输出和运行目录，不能复用8790/8793/8788源码工作区或状态。
 - 8793是可复用测试外壳；8794可测试后，8793镜像切换到8794确定commit，验收成功再把8794代码部署到8790。
 - 8794不包含8793完整技术评审侧栏；测试、轨迹和逐事件标注继续留在8793。
 - 固定编排处理快速路径；AI只在长尾内提出计划，所有步骤由代码权限层审核。
@@ -75,10 +75,11 @@
 ## Important Commands
 
 ```powershell
-python -B -m unittest discover -s tests -p "test_tiku_agent_*.py"
-$env:PYTHONPATH = (Resolve-Path experiments\decision_trace_lab).Path
-python -B -m unittest discover -s experiments\decision_trace_lab\tests\mainline_parity -p "test_*.py"
-python -B scripts/run_tiku_agent_8794.py
+Set-Location -LiteralPath "F:\cc\7-题库检索-8794"
+python -B -m unittest discover -s tests -p "test_*.py"
+Set-Location -LiteralPath experiments\decision_trace_lab
+python -B -m unittest discover -s tests\mainline_parity -p "test_*.py"
+python -B "F:\cc\7-题库检索-8794\scripts\run_tiku_agent_8794.py"
 Invoke-RestMethod http://127.0.0.1:8790/health
 Invoke-RestMethod http://127.0.0.1:8794/health
 Invoke-RestMethod http://127.0.0.1:8793/api/observation/source
