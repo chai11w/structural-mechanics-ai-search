@@ -11,6 +11,7 @@ The first version is intentionally project-local and dry-run friendly:
 from __future__ import annotations
 
 import argparse
+from collections import OrderedDict
 import json
 import os
 import re
@@ -23,7 +24,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
@@ -924,12 +925,65 @@ class MockCoordinator:
         )()
 
 
+DEFAULT_EVENT_DEDUPE_TTL_SECONDS = 30 * 60
+DEFAULT_EVENT_DEDUPE_MAX_ENTRIES = 20_000
+
+
+class RecentEventIdCache:
+    """Thread-safe, bounded duplicate-event cache for the long-running bridge."""
+
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float = DEFAULT_EVENT_DEDUPE_TTL_SECONDS,
+        max_entries: int = DEFAULT_EVENT_DEDUPE_MAX_ENTRIES,
+        now: Callable[[], float] | None = None,
+    ) -> None:
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        if max_entries <= 0:
+            raise ValueError("max_entries must be positive")
+        self.ttl_seconds = float(ttl_seconds)
+        self.max_entries = int(max_entries)
+        self._now = now or time.monotonic
+        self._entries: OrderedDict[str, float] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def seen_or_add(self, event_id: str) -> bool:
+        """Return whether the ID is still recent; otherwise remember it atomically."""
+        clean_id = str(event_id or "").strip()
+        if not clean_id:
+            return False
+        with self._lock:
+            now = self._now()
+            self._prune_expired(now)
+            if clean_id in self._entries:
+                return True
+            self._entries[clean_id] = now
+            while len(self._entries) > self.max_entries:
+                self._entries.popitem(last=False)
+            return False
+
+    def __len__(self) -> int:
+        with self._lock:
+            self._prune_expired(self._now())
+            return len(self._entries)
+
+    def _prune_expired(self, now: float) -> None:
+        cutoff = now - self.ttl_seconds
+        while self._entries:
+            _event_id, received_at = next(iter(self._entries.items()))
+            if received_at > cutoff:
+                break
+            self._entries.popitem(last=False)
+
+
 class FeishuTikuBridge:
     def __init__(self, bot: TikuBot, client: FeishuClient, options: FeishuTikuOptions) -> None:
         self.bot = bot
         self.client = client
         self.options = options
-        self._seen_event_ids: set[str] = set()
+        self._seen_event_ids = RecentEventIdCache()
 
     def handle_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         if "encrypt" in payload:
@@ -949,10 +1003,8 @@ class FeishuTikuBridge:
             return {"ok": True, "ignored": event_type or "unknown"}
 
         event_id = str(header.get("event_id") or "")
-        if event_id and event_id in self._seen_event_ids:
+        if event_id and self._seen_event_ids.seen_or_add(event_id):
             return {"ok": True, "duplicate": event_id}
-        if event_id:
-            self._seen_event_ids.add(event_id)
 
         event = payload.get("event") or {}
         message = event.get("message") or {}
