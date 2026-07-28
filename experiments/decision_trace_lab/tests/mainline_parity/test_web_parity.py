@@ -158,9 +158,11 @@ class MainlineWebParityTest(unittest.TestCase):
         for required in (
             "你的问题", "Agent 的回答", "这次回答对吗？", "部分正确", "无法判断",
             "选择后立即保存，不需要再提交", "已保存 · 再点一次当前选项可取消",
-            "已取消，本轮现在是未评审状态", "withdraw-review", "判断为：",
+            "已取消，本轮现在是未评审状态", "withdraw-review", "判断结果：",
             "需要你补充章节", "renderCausalChain", "查看原始 JSON",
             "isUsefulCausalEvent", "本轮没有可继续定位的步骤", "open ? '关闭' : '评审'",
+            "执行结果：", "处理结果：", "等待用户选择候选题",
+            "评审信息暂时没有加载出来，请稍后重试。",
         ):
             self.assertIn(required, script)
         self.assertIn(
@@ -176,7 +178,10 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertNotIn("人工复核队列", script)
         self.assertNotIn("待复核 ${pending.length}", script)
         self.assertTrue(script.lstrip().startswith("(() => {"))
-        self.assertIn("评审面板加载失败", script)
+        self.assertNotIn("评审面板加载失败：${error", script)
+        self.assertNotIn("变化：${changed}", script)
+        self.assertIn("payload.phase_before !== payload.phase_after", script)
+        self.assertIn("Boolean(PHASE_TEXT[payload.phase_after])", script)
         self.assertIn("if (!response.ok)", script)
         self.assertIn("保存失败，请重试", script)
         self.assertIn("文字可能包含本地路径、敏感信息或内容过长", script)

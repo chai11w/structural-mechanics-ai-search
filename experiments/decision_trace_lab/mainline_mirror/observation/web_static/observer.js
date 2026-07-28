@@ -24,14 +24,24 @@ const NO_MATCH = [
   ['uncertain_no_match', '暂时无法判断']
 ];
 const INTENT_TEXT = {
-  greeting: '日常问候', small_talk: '日常交流', capability_help: '询问可以做什么',
-  out_of_scope: '与搜题无关的问题', search_image: '搜索当前题图', global_search: '全章节搜索',
-  set_chapter: '设置题目章节', select_question: '选择多题中的一道题',
-  select_candidate: '选择一个候选题', reject_candidates: '排除当前候选题',
-  continue_search: '继续搜索其他候选题', show_candidates: '重新显示候选题',
-  report_answer_mismatch: '反馈答案不匹配', resend_answer: '重新发送答案',
-  explain_failure: '询问失败原因', retry_search: '重新搜索', cancel: '取消当前任务',
-  reject: '拒绝不安全的操作'
+  greeting: '用户正在问候', small_talk: '用户想进行日常交流', capability_help: '用户在询问 Agent 能做什么',
+  out_of_scope: '用户提出了题库范围外的问题', search_image: '用户想搜索当前题图', global_search: '用户想搜索全部章节',
+  set_chapter: '用户想设置题目章节', select_question: '用户想选择多题中的一道题',
+  select_candidate: '用户想选择一个候选题', reject_candidates: '用户认为当前候选题都不匹配',
+  continue_search: '用户想继续搜索其他候选题', show_candidates: '用户想重新查看候选题',
+  report_answer_mismatch: '用户反馈答案不匹配', resend_answer: '用户想重新查看答案',
+  explain_failure: '用户在询问失败原因', retry_search: '用户想重新搜索', cancel: '用户想取消当前任务',
+  reject: '用户请求了不允许执行的操作'
+};
+const PHASE_TEXT = {
+  IDLE: '等待用户上传题图或输入要求',
+  WAIT_CHAPTER: '等待用户补充题目章节',
+  WAIT_QUESTION_CHOICE: '等待用户选择其中一道题',
+  WAIT_CANDIDATE_CHOICE: '等待用户选择候选题',
+  ANSWERED: '答案已经返回',
+  NO_MATCH: '搜索完成，但没有找到可靠结果',
+  ERROR: '处理失败，等待用户重试',
+  CANCELLED: '当前任务已经取消'
 };
 const CLARIFICATION_TEXT = {
   ambiguous_reference: '需要确认你指的是哪一道题或候选题',
@@ -96,7 +106,8 @@ function textNode(tag, className, text) {
 function showLoadError(error) {
   const alerts = document.querySelector('#observer-alerts');
   if (!alerts) return;
-  alerts.replaceChildren(textNode('p', 'observer-alert', `评审面板加载失败：${error?.message || '未知错误'}`));
+  console.error('observer refresh failed', error);
+  alerts.replaceChildren(textNode('p', 'observer-alert', '评审信息暂时没有加载出来，请稍后重试。'));
 }
 
 function resultStatus(label) {
@@ -272,10 +283,15 @@ function noMatchControls(label) {
 function humanIntent(payload) {
   const action = payload.final_action || '';
   if (action === 'clarification') return CLARIFICATION_TEXT[payload.clarification_reason] || '需要向你确认更多信息';
-  if (action === 'set_chapter' && payload.chapter) return `把题目章节设置为“${payload.chapter}”`;
-  if (action === 'select_question' && payload.question_index != null) return `选择第 ${Number(payload.question_index) + 1} 道题`;
-  if (action === 'select_candidate' && payload.candidate_rank != null) return `选择第 ${Number(payload.candidate_rank)} 个候选题`;
+  if (action === 'set_chapter' && payload.chapter) return `用户想把题目章节设置为“${payload.chapter}”`;
+  if (action === 'select_question' && payload.question_index != null) return `用户想选择第 ${Number(payload.question_index) + 1} 道题`;
+  if (action === 'select_candidate' && payload.candidate_rank != null) return `用户想选择第 ${Number(payload.candidate_rank)} 个候选题`;
   return INTENT_TEXT[action] || '无法识别这句话的意图';
+}
+
+function humanStateResult(payload) {
+  const phase = String(payload.phase_after || '');
+  return PHASE_TEXT[phase] || '当前对话进度已更新';
 }
 
 function humanToolResult(payload) {
@@ -300,12 +316,12 @@ function humanToolResult(payload) {
 
 function conciseEvent(event) {
   const payload = event.payload || {};
-  if (event.event_type === 'intent_decided') return `判断为：${humanIntent(payload)}`;
+  if (event.event_type === 'intent_decided') return `判断结果：${humanIntent(payload)}`;
   if (event.event_type === 'authorization_checked') return payload.allowed
     ? `当前条件允许继续执行“${INTENT_TEXT[payload.requested_action] || '这个操作'}”`
     : `原本理解为“${INTENT_TEXT[payload.requested_action] || '这个操作'}”，但当前条件不满足，已改为追问`;
-  if (event.event_type === 'tool_completed') return humanToolResult(payload);
-  if (event.event_type === 'state_transition') return '对话进入下一阶段';
+  if (event.event_type === 'tool_completed') return `执行结果：${humanToolResult(payload)}`;
+  if (event.event_type === 'state_transition') return `处理结果：${humanStateResult(payload)}`;
   if (event.event_type === 'turn_started') return `开始处理${payload.kind === 'image' ? '题目图片' : '文字消息'}`;
   if (event.event_type === 'tool_started') return `开始${toolLabel(payload.tool_name)}`;
   if (event.event_type === 'turn_completed') return currentSummary?.result_summary || '本轮处理完成';
@@ -320,7 +336,11 @@ function isUsefulCausalEvent(event) {
   if (eventIssues(event).length || getLabel(event.event_id, 'causal_suspicion')) return true;
   const payload = event.payload || {};
   if (event.event_type === 'intent_decided' || event.event_type === 'tool_completed') return true;
-  return event.event_type === 'authorization_checked' && payload.allowed === false;
+  if (event.event_type === 'authorization_checked') return payload.allowed === false;
+  if (event.event_type === 'state_transition') {
+    return payload.phase_before !== payload.phase_after && Boolean(PHASE_TEXT[payload.phase_after]);
+  }
+  return false;
 }
 
 function renderCausalChain() {
@@ -427,7 +447,8 @@ function renderTechnicalAlerts() {
 async function refreshObserver() {
   try {
     const source = await fetchJson('/api/observation/source');
-    document.querySelector('#observer-source').textContent = `来源：${source.source_branch}@${source.source_commit.slice(0, 12)} · 镜像已校验`;
+    const sourceNode = document.querySelector('#observer-source');
+    if (sourceNode) sourceNode.textContent = `来源：${source.source_branch}@${source.source_commit.slice(0, 12)} · 镜像已校验`;
     const turns = await fetchJson('/api/observation/turns');
     const latest = turns.turns?.[0];
     if (!latest) {
@@ -443,8 +464,10 @@ async function refreshObserver() {
     currentLabels = new Map((detail.latest_labels || []).map(label => [labelKey(label.target_id, label.dimension), label]));
     if (turnChanged) resultNotice = '';
     renderResultCard(); renderCausalChain(); renderTechnicalAlerts();
-    document.querySelector('#observer-event-count').textContent = `事件 ${currentEvents.length} 条`;
-    document.querySelector('#observer-events').replaceChildren(...currentEvents.map(rawCard));
+    const eventCountNode = document.querySelector('#observer-event-count');
+    if (eventCountNode) eventCountNode.textContent = `事件 ${currentEvents.length} 条`;
+    const eventHost = document.querySelector('#observer-events');
+    if (eventHost) eventHost.replaceChildren(...currentEvents.map(rawCard));
   } catch (error) { showLoadError(error); }
 }
 
