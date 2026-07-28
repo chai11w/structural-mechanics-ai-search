@@ -7,8 +7,10 @@ a later bounded model generator must satisfy.
 
 from __future__ import annotations
 
-
-MAX_SAFE_ANSWER_CHARS = 90
+from tiku_agent.safe_answer_contract_v0 import (
+    MAX_SAFE_ANSWER_CHARS,
+    validate_safe_answer_output_v0,
+)
 
 _SAFE_REPLIES = {
     "greeting": "你好，需要搜题时把题图和章节发给我就行。",
@@ -26,6 +28,9 @@ def render_safe_answer_v0(category: str) -> str:
         reply = _SAFE_REPLIES[category]
     except KeyError as exc:
         raise ValueError(f"unsupported safe-answer category: {category}") from exc
-    if not reply or len(reply) > MAX_SAFE_ANSWER_CHARS or "\n" in reply:
-        raise ValueError("safe-answer V0 reply violates the concise response contract")
-    return reply
+    validation = validate_safe_answer_output_v0(reply, category)
+    if not validation.accepted:
+        raise ValueError(
+            f"safe-answer V0 reply violates the response contract: {validation.reason}"
+        )
+    return validation.normalized_text
