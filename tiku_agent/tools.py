@@ -311,31 +311,22 @@ def coarse_search_tool(
 
     try:
         excel_root = search.ROOT if route == "main" else symbolic_root(search.ROOT)
-        df = load_bank_excel(excel_root, chapter)
-        if df is None:
-            return ToolResult(ok=False, error=f"Chapter not found: {chapter}", next_state="ERROR")
-
         filter_type = normalize_structure_type(structure_type)
-        structure_filter_applied = False
-        if route == "symbolic" and filter_type and "结构类型" in df.columns:
-            filtered = df[df["结构类型"].astype(str) == filter_type]
-            if not filtered.empty:
-                df = filtered
-                structure_filter_applied = True
-
-        normalized_loads = search.normalize_query_loads(loads)
+        scan = search.scan_chapter_candidates(
+            loads,
+            chapter,
+            excel_root,
+            structure_type=filter_type if route == "symbolic" else "",
+            load_excel=load_bank_excel,
+        )
+        if scan is None:
+            return ToolResult(ok=False, error=f"Chapter not found: {chapter}", next_state="ERROR")
         excluded = {str(key).strip() for key in (exclude_candidate_keys or []) if str(key).strip()}
         scored: list[tuple[float, str, str]] = []
-        for _, row in df.iterrows():
-            db_loads = search._safe_parse_loads(row["荷载"])
-            db_loads = search.fix_load_types(db_loads)
-            score = search.compute_similarity(normalized_loads, db_loads)
-            name = str(row["题目名称"])
+        for score, name in scan.scored:
             candidate_key = _candidate_key(chapter, route, name)
             if candidate_key not in excluded:
                 scored.append((score, name, candidate_key))
-
-        scored.sort(key=lambda item: item[0], reverse=True)
         scored = [item for item in scored if item[0] > 0]
         top = search.select_coarse_results(scored)
         has_more = len(scored) > len(top)
@@ -355,8 +346,8 @@ def coarse_search_tool(
                     "score": score,
                     "route": route,
                     "chapter": chapter,
-                    "structure_type": filter_type if structure_filter_applied else "",
-                    "structure_filter": structure_filter_applied,
+                    "structure_type": filter_type if scan.structure_filter_applied else "",
+                    "structure_filter": scan.structure_filter_applied,
                     "path_repaired_in_memory": repaired,
                     "candidate_key": candidate_key,
                 }
@@ -368,7 +359,7 @@ def coarse_search_tool(
                 "chapter": chapter,
                 "route": route,
                 "structure_type": filter_type,
-                "structure_filter_applied": structure_filter_applied,
+                "structure_filter_applied": scan.structure_filter_applied,
                 "candidates": candidates,
                 "has_more": has_more,
                 "remaining_candidate_count": max(0, len(scored) - len(top)),
@@ -534,26 +525,24 @@ def _collect_global_perfect_candidates(
     threshold: float,
 ) -> list[dict[str, Any]]:
     excel_root = search.ROOT if route == "main" else symbolic_root(search.ROOT)
-    normalized_loads = search.normalize_query_loads(loads)
     filter_type = normalize_structure_type(structure_type)
     by_content: dict[str, dict[str, Any]] = {}
 
     for chapter in CHAPTERS:
-        df = load_bank_excel(excel_root, chapter)
-        if df is None:
+        scan = search.scan_chapter_candidates(
+            loads,
+            chapter,
+            excel_root,
+            structure_type=filter_type if route == "symbolic" else "",
+            load_excel=load_bank_excel,
+        )
+        if scan is None:
             continue
-        if route == "symbolic" and filter_type and "结构类型" in df.columns:
-            filtered = df[df["结构类型"].astype(str) == filter_type]
-            if not filtered.empty:
-                df = filtered
-
-        for _, row in df.iterrows():
-            db_loads = search.fix_load_types(search._safe_parse_loads(row["荷载"]))
-            score = search.compute_similarity(normalized_loads, db_loads)
+        for score, name in scan.scored:
             if score < threshold:
                 continue
             path, resolved_name, _ = search.resolve_question_path(
-                str(row["题目名称"]),
+                name,
                 chapter_name=chapter,
                 update_excel=False,
             )

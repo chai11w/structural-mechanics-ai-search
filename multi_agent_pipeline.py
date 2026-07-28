@@ -15,8 +15,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-
 import search
 from scripts.classify_question_bank import (
     DEFAULT_ENDPOINT,
@@ -418,14 +416,9 @@ def infer_structure_type_from_text(classified: dict[str, Any] | None) -> str:
     return ""
 
 
-def load_bank_excel(excel_root: Path, chapter: str) -> pd.DataFrame | None:
-    xlsx_path = excel_root / f"{chapter}.xlsx"
-    if not xlsx_path.exists():
-        matches = list(excel_root.glob(f"*{chapter}*.xlsx"))
-        if not matches:
-            return None
-        xlsx_path = matches[0]
-    return pd.read_excel(xlsx_path)
+def load_bank_excel(excel_root: Path, chapter: str):
+    """Compatibility seam for callers and tests; scanning lives in ``search``."""
+    return search.load_bank_excel(excel_root, chapter)
 
 
 def rank_bank_candidates(
@@ -435,27 +428,17 @@ def rank_bank_candidates(
     top_k: int,
     structure_type: str | None = None,
 ) -> list[dict[str, Any]]:
-    df = load_bank_excel(excel_root, chapter)
-    if df is None:
-        return []
     filter_type = normalize_structure_type(structure_type)
-    structure_filter_applied = False
-    if filter_type and "结构类型" in df.columns:
-        filtered = df[df["结构类型"].astype(str) == filter_type]
-        if not filtered.empty:
-            df = filtered
-            structure_filter_applied = True
-
-    query_loads = search.normalize_query_loads(query_loads)
-    scored: list[tuple[float, str]] = []
-    for _, row in df.iterrows():
-        db_loads = search._safe_parse_loads(row["荷载"])
-        db_loads = search.fix_load_types(db_loads)
-        score = search.compute_similarity(query_loads, db_loads)
-        scored.append((score, str(row["题目名称"])))
-
-    scored.sort(key=lambda item: item[0], reverse=True)
-    top = search.select_coarse_results(scored)
+    scan = search.scan_chapter_candidates(
+        query_loads,
+        chapter,
+        excel_root,
+        structure_type=filter_type,
+        load_excel=load_bank_excel,
+    )
+    if scan is None:
+        return []
+    top = search.select_coarse_results(scan.scored)
     top = [item for item in top if item[0] > 0]
 
     results = []
@@ -466,8 +449,8 @@ def rank_bank_candidates(
             "path": str(path),
             "name": resolved_name,
             "score": score,
-            "structure_type": filter_type if structure_filter_applied else "",
-            "structure_filter": structure_filter_applied,
+            "structure_type": filter_type if scan.structure_filter_applied else "",
+            "structure_filter": scan.structure_filter_applied,
         })
     return results
 

@@ -23,8 +23,10 @@ import argparse
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 os.environ['no_proxy'] = '*'
 os.environ['NO_PROXY'] = '*'
@@ -909,18 +911,66 @@ def extract_loads(client, image_path):
 # 加载 Excel
 # ============================================================
 
-def load_chapter_excel(chapter_name):
-    """加载章节 Excel，返回 DataFrame 或 None"""
-    xlsx_path = ROOT / f"{chapter_name}.xlsx"
+def load_bank_excel(excel_root, chapter_name):
+    """Load one chapter Excel from an explicit bank root."""
+    xlsx_path = Path(excel_root) / f"{chapter_name}.xlsx"
     if not xlsx_path.exists():
-        # 尝试模糊匹配
-        matches = list(ROOT.glob(f"*{chapter_name}*.xlsx"))
+        matches = list(Path(excel_root).glob(f"*{chapter_name}*.xlsx"))
         if matches:
             xlsx_path = matches[0]
         else:
             return None
-    df = pd.read_excel(xlsx_path)
-    return df
+    return pd.read_excel(xlsx_path)
+
+
+def load_chapter_excel(chapter_name):
+    """加载主库章节 Excel，返回 DataFrame 或 None。"""
+    return load_bank_excel(ROOT, chapter_name)
+
+
+@dataclass(frozen=True)
+class ChapterCandidateScan:
+    """Read-only ranked coarse candidates for one already-authorized chapter."""
+
+    scored: list[tuple[float, str]]
+    structure_filter_applied: bool
+
+
+def scan_chapter_candidates(
+    query_loads,
+    chapter_name,
+    excel_root,
+    *,
+    structure_type="",
+    load_excel: Callable | None = None,
+):
+    """Load, optionally filter, score, and sort one chapter without side effects.
+
+    Callers retain their own responsibilities after this boundary: result display,
+    continuation exclusion, path repair policy, cache writes, and cross-chapter
+    deduplication deliberately stay outside the shared scanner.
+    """
+    loader = load_excel or load_bank_excel
+    df = loader(Path(excel_root), chapter_name)
+    if df is None:
+        return None
+
+    filter_type = str(structure_type or "").strip()
+    structure_filter_applied = False
+    if filter_type and "结构类型" in df.columns:
+        filtered = df[df["结构类型"].astype(str) == filter_type]
+        if not filtered.empty:
+            df = filtered
+            structure_filter_applied = True
+
+    normalized_loads = normalize_query_loads(query_loads)
+    scored = []
+    for _, row in df.iterrows():
+        db_loads = fix_load_types(_safe_parse_loads(row["荷载"]))
+        score = compute_similarity(normalized_loads, db_loads)
+        scored.append((score, str(row["题目名称"])))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return ChapterCandidateScan(scored=scored, structure_filter_applied=structure_filter_applied)
 
 
 # ============================================================
@@ -1103,25 +1153,12 @@ def resolve_question_path(question_path, chapter_name=None, update_excel=False):
 
 
 def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, rerank_top=DISPLAY_MAX_RESULTS):
-    df = load_chapter_excel(chapter_name)
-    if df is None:
+    scan = scan_chapter_candidates(query_loads, chapter_name, ROOT)
+    if scan is None:
         print(f"ERROR: Chapter '{chapter_name}' not found")
         return
 
-    # 修正查询荷载分类，并给手动纯数值输入补默认单位
-    query_loads = normalize_query_loads(query_loads)
-
-    results = []
-    for _, row in df.iterrows():
-        db_loads = _safe_parse_loads(row["荷载"])
-
-        # 修正数据库荷载分类
-        db_loads = fix_load_types(db_loads)
-
-        score = compute_similarity(query_loads, db_loads)
-        results.append((score, row["题目名称"]))
-
-    results.sort(key=lambda x: x[0], reverse=True)
+    results = scan.scored
 
     # 粗筛只保留全部 100% 匹配；没有 100% 时只保留最相似的 1 个。
     top = select_coarse_results(results)
