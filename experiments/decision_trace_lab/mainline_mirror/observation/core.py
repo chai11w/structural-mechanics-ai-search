@@ -352,6 +352,10 @@ def _reply_summary(
     intent = str(getattr(response, "intent", "") or "")
     if response_type in {"error", "exception"}:
         return "error_reply", intent or response_type
+    if intent == "safe_answer":
+        if str(getattr(response, "reply_source", "") or "") == "model":
+            return "llm_safe_reply", "safe_answer"
+        return "fixed_shell", "safe_answer_fallback"
     if intent in REPLY_SHELL_ACTIONS:
         return "fixed_shell", intent
     if any(int(count or 0) > 0 for count in tool_counts.values()):

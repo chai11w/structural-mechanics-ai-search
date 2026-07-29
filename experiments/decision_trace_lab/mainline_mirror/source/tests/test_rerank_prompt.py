@@ -30,8 +30,15 @@ class RerankPromptTest(unittest.TestCase):
         ]
         vision_scores = {"a.jpg": 0.2, "b.jpg": 0.9, "c.jpg": 0.4}
 
-        def fake_score(client, query_image_path, candidate_path, prompt=search.RERANK_PROMPT, timeout_seconds=None):
-            del client, query_image_path, prompt, timeout_seconds
+        def fake_score(
+            client,
+            query_image_path,
+            candidate_path,
+            prompt=search.RERANK_PROMPT,
+            timeout_seconds=None,
+            model=search.DEFAULT_ZHIPU_RERANK_MODEL,
+        ):
+            del client, query_image_path, prompt, timeout_seconds, model
             name = Path(candidate_path).name
             return vision_scores[name], name
 

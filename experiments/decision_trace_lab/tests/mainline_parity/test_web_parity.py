@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -98,9 +99,36 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertIn(EXTERNAL_COOKIE, response.headers.get("set-cookie", ""))
         self.assertNotIn("tiku_agent_session=", response.headers.get("set-cookie", ""))
         source = self.observed_client.get("/api/observation/source").json()
-        self.assertEqual(source["source_commit"], "473caa22310ffd86ae395703d9a352558da96c5d")
+        self.assertEqual(source["source_commit"], "a771758b08a81e75ffbbb6576dec8a0996a788e1")
         self.assertEqual(source["runtime_namespace"], "decision-trace-dev")
-        self.assertEqual(source["verified_files"], 81)
+        self.assertEqual(source["verified_files"], 103)
+
+    def test_default_8793_runtime_uses_mainline_safe_answers_and_records_reply_mode(self):
+        root = TEST_TMP / uuid4().hex[:6]
+        root.mkdir(parents=True, exist_ok=True)
+        store = ObservationStore(root / "data")
+        with patch(
+            "tiku_agent.safe_answer_qwen_v0.QwenSafeAnswerClientV0.__call__",
+            return_value="我是力答，专注结构力学题库搜索，通过题图检索相似候选题。",
+        ):
+            app = create_observed_app(runtime_root=root / "runtime", store=store)
+            try:
+                client = TestClient(app)
+                response = client.post("/api/message", json={"text": "你是谁"})
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["intent"], "safe_answer")
+                turns = client.get("/api/observation/turns").json()["turns"]
+                detail = client.get(
+                    f"/api/observation/turns/{turns[0]['turn_id']}"
+                ).json()
+                completed = next(
+                    row for row in detail["events"]
+                    if row["event_type"] == "turn_completed"
+                )
+                self.assertEqual(completed["payload"]["reply_mode"], "llm_safe_reply")
+            finally:
+                app.state.hook_manager.uninstall()
 
     def test_external_session_wins_over_stale_legacy_internal_cookie(self):
         self.observed_client.get("/")

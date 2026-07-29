@@ -12,9 +12,10 @@ activate_verified_source()
 
 from mainline_mirror.observation.core import (  # noqa: E402
     HookManager, ObservedAgent, ObservedToolbox, _authorization_summary, _decision_summary,
+    _reply_summary,
 )
 from mainline_mirror.observation.storage import ObservationStore  # noqa: E402
-from tiku_agent.agent import AgentToolbox, TikuSearchAgent  # noqa: E402
+from tiku_agent.agent import AgentResponse, AgentToolbox, TikuSearchAgent  # noqa: E402
 from tiku_agent.state import AgentState  # noqa: E402
 from tiku_agent.tools import AgentToolConfig, ToolResult  # noqa: E402
 
@@ -124,11 +125,32 @@ SCENARIOS = {
 
 
 class MainlineAgentParityTest(unittest.TestCase):
+    def test_safe_answer_reply_source_is_visible_without_recording_text(self):
+        model_reply = AgentResponse(
+            text="private generated text",
+            intent="safe_answer",
+            reply_source="model",
+        )
+        fallback_reply = AgentResponse(
+            text="private fallback text",
+            intent="safe_answer",
+            reply_source="fixed_fallback",
+        )
+
+        self.assertEqual(
+            _reply_summary(model_reply, response_type="text", tool_counts={}),
+            ("llm_safe_reply", "safe_answer"),
+        )
+        self.assertEqual(
+            _reply_summary(fallback_reply, response_type="text", tool_counts={}),
+            ("fixed_shell", "safe_answer_fallback"),
+        )
+
     def test_manifest_verifies_required_mainline_files(self):
         manifest = verify_snapshot()
         paths = {row["path"] for row in manifest["files"]}
-        self.assertEqual(manifest["source_commit"], "473caa22310ffd86ae395703d9a352558da96c5d")
-        for required in ("tiku_agent/agent.py", "tiku_agent/intent_v2.py", "tiku_agent/action_permissions_v2.py", "tiku_agent/fastapi_demo.py", "tiku_agent/demo_web/demo.js", "search.py", "multi_agent_pipeline.py"):
+        self.assertEqual(manifest["source_commit"], "a771758b08a81e75ffbbb6576dec8a0996a788e1")
+        for required in ("tiku_agent/agent.py", "tiku_agent/intent_v2.py", "tiku_agent/action_permissions_v2.py", "tiku_agent/fastapi_demo.py", "tiku_agent/safe_answer_policy_v0.py", "tiku_agent/demo_web/demo.js", "search.py", "multi_agent_pipeline.py"):
             self.assertIn(required, paths)
 
     def test_default_entry_uses_mirror_and_legacy_launchers_are_omitted(self):

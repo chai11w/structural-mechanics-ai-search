@@ -46,6 +46,7 @@ const PHASE_TEXT = {
 const REPLY_KIND_TEXT = {
   greeting: '问候', small_talk: '日常交流', capability_help: '能力说明',
   out_of_scope: '范围说明', clarification: '追问确认', reject: '安全拒绝',
+  safe_answer_fallback: '安全回答兜底',
   exception: '异常提示'
 };
 const CLARIFICATION_TEXT = {

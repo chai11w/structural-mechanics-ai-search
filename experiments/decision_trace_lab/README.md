@@ -14,6 +14,8 @@
 
 当前镜像来源、commit 和逐文件哈希记录在 `mainline_mirror/manifest.json`。启动前会校验全部镜像文件，缺失、被修改或未进入 manifest 的文件都会拒绝启动，不会回退旧私有 Agent。
 
+镜像通过 `scripts/sync_mainline_mirror.py` 从明确的 Git 提交原始 blob 重建，不从当前工作区复制。当前镜像包含已提升到8790的安全回答 V0；8793 默认使用同一安全回答生成器，右侧继续旁路显示回答方式和完整评审信息。
+
 ## 唯一有效网页入口
 
 ```powershell

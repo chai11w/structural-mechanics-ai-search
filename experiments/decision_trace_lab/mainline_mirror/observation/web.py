@@ -38,6 +38,8 @@ def create_observed_app(
     manifest = activate_verified_source()
     from tiku_agent.agent import AgentToolbox, TikuSearchAgent
     from tiku_agent.fastapi_demo import create_app as create_mainline_app
+    from tiku_agent.safe_answer_generator_v0 import SafeAnswerGeneratorV0
+    from tiku_agent.safe_answer_qwen_v0 import QwenSafeAnswerClientV0
     from tiku_agent.session_artifacts import SessionArtifacts
     from tiku_agent.session_runtime import AgentSessionRuntime
     from tiku_agent.session_store import SQLiteSessionStore
@@ -50,6 +52,9 @@ def create_observed_app(
     hooks.install()
 
     if runtime is None:
+        artifacts = SessionArtifacts(root / "sessions")
+        safe_answer_generator = SafeAnswerGeneratorV0(QwenSafeAnswerClientV0())
+
         def observed_factory(state: Any) -> Any:
             if agent_factory is not None:
                 base = agent_factory(state)
@@ -58,14 +63,20 @@ def create_observed_app(
                     runtime_dir=root,
                     session_dir=root / "sessions" / state.session_id,
                 )
-                base = TikuSearchAgent(state=state, tools=ObservedToolbox(AgentToolbox()), config=config)
+                base = TikuSearchAgent(
+                    state=state,
+                    tools=ObservedToolbox(AgentToolbox()),
+                    config=config,
+                    enable_safe_answer_v0=True,
+                    safe_answer_generator_v0=safe_answer_generator,
+                )
             if not isinstance(getattr(base, "tools", None), ObservedToolbox):
                 base.tools = ObservedToolbox(base.tools)
             return ObservedAgent(base, store)
 
         runtime = AgentSessionRuntime(
             SQLiteSessionStore(root / "session.db"),
-            artifacts=SessionArtifacts(root / "sessions"),
+            artifacts=artifacts,
             task_logger=JsonlTaskLogger(root / "task_logs.jsonl"),
             agent_factory=observed_factory,
         )

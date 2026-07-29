@@ -40,13 +40,14 @@ def load_local_config():
 cfg = load_local_config()
 ROOT = Path(cfg.get("root", r"D:/桌面/答疑、帮做/结构力学/帮做"))
 ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY") or cfg.get("zhipuai_api_key", "")
+DEFAULT_ZHIPU_RERANK_MODEL = cfg.get("zhipu_rerank_model", "glm-4.6v")
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 REQUEST_INTERVAL = 1.0
 MAX_RETRIES = 2
 
 # ============================================================
-# Prompt (optimized for GLM-5V-Turbo with thinking disabled)
+# Prompt (optimized for the configured Zhipu vision model)
 # ============================================================
 
 SYSTEM_PROMPT = """从图片中提取所有外部荷载信息。严格按以下JSON格式输出，不要输出任何其他内容。
@@ -265,7 +266,7 @@ def extract_loads(client: ZhipuAI, image_path: Path) -> dict:
     for attempt in range(1 + MAX_RETRIES):
         try:
             response = client.chat.completions.create(
-                model="GLM-5V-Turbo",
+                model=DEFAULT_ZHIPU_RERANK_MODEL,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": [

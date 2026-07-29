@@ -23,8 +23,10 @@ import argparse
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 os.environ['no_proxy'] = '*'
 os.environ['NO_PROXY'] = '*'
@@ -60,6 +62,7 @@ DISPLAY_MAX_RESULTS = 3
 RERANK_LOAD_WEIGHT = 0.5
 RERANK_VISION_WEIGHT = 0.5
 LENGTH_TIE_FINAL_FLOOR = 0.9
+DEFAULT_ZHIPU_RERANK_MODEL = cfg.get("zhipu_rerank_model", "glm-4.6v")
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 _PATH_REPAIR_BACKUPS = set()
 _PATH_REPAIR_BACKUP_DIR = None
@@ -473,7 +476,14 @@ LENGTH_TIE_PROMPT = """你是结构力学搜题结果打平复核器。候选题
 {"score":0.95,"reason":"理由不超过20字"}"""
 
 
-def score_candidate_pair(client, query_image_path, candidate_path, prompt=RERANK_PROMPT, timeout_seconds=None):
+def score_candidate_pair(
+    client,
+    query_image_path,
+    candidate_path,
+    prompt=RERANK_PROMPT,
+    timeout_seconds=None,
+    model=DEFAULT_ZHIPU_RERANK_MODEL,
+):
     content = [
         {"type": "text", "text": prompt},
         {"type": "text", "text": "查询题图片："},
@@ -489,7 +499,7 @@ def score_candidate_pair(client, query_image_path, candidate_path, prompt=RERANK
     ]
 
     request = {
-        "model": "GLM-5V-Turbo",
+        "model": model or DEFAULT_ZHIPU_RERANK_MODEL,
         "messages": [
             {"role": "system", "content": "你只输出JSON。"},
             {"role": "user", "content": content},
@@ -517,7 +527,13 @@ def compute_final_rerank_score(load_score, rerank_score):
     return load_score * RERANK_LOAD_WEIGHT + rerank_score * RERANK_VISION_WEIGHT
 
 
-def apply_length_tie_break(client, query_image_path, scored, timeout_seconds=None):
+def apply_length_tie_break(
+    client,
+    query_image_path,
+    scored,
+    timeout_seconds=None,
+    model=DEFAULT_ZHIPU_RERANK_MODEL,
+):
     perfect = [item for item in scored if float(item.get("final_score") or 0) >= 0.999]
     if len(perfect) <= 1:
         return scored
@@ -531,6 +547,7 @@ def apply_length_tie_break(client, query_image_path, scored, timeout_seconds=Non
                 str(path),
                 prompt=LENGTH_TIE_PROMPT,
                 timeout_seconds=timeout_seconds,
+                model=model,
             )
         except Exception as exc:  # noqa: BLE001
             print(f"WARNING: 候选 {item['rank']} 杆长复核失败: {exc}")
@@ -574,6 +591,7 @@ def score_rerank_candidate(
     client=None,
     timeout_seconds=None,
     collect_timing=False,
+    model=DEFAULT_ZHIPU_RERANK_MODEL,
 ):
     # The SDK retries by default. For an explicit per-candidate deadline, retries
     # would turn a 1s timeout into several delayed attempts, so disable them.
@@ -590,6 +608,7 @@ def score_rerank_candidate(
             query_image_path,
             str(path),
             timeout_seconds=timeout_seconds,
+            model=model,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"WARNING: 候选 {candidate['rank']} 复筛失败: {exc}")
@@ -613,8 +632,21 @@ def score_rerank_candidate(
     return item
 
 
-def finalize_rerank_results(client, query_image_path, scored, top_n=DISPLAY_MAX_RESULTS, timeout_seconds=None):
-    scored = apply_length_tie_break(client, query_image_path, scored, timeout_seconds=timeout_seconds)
+def finalize_rerank_results(
+    client,
+    query_image_path,
+    scored,
+    top_n=DISPLAY_MAX_RESULTS,
+    timeout_seconds=None,
+    model=DEFAULT_ZHIPU_RERANK_MODEL,
+):
+    scored = apply_length_tie_break(
+        client,
+        query_image_path,
+        scored,
+        timeout_seconds=timeout_seconds,
+        model=model,
+    )
     scored.sort(
         key=lambda x: (
             x.get("final_score", 0),
@@ -627,16 +659,23 @@ def finalize_rerank_results(client, query_image_path, scored, top_n=DISPLAY_MAX_
     return select_display_results(scored)
 
 
-def rerank_candidates(query_image_path, candidates, top_n=DISPLAY_MAX_RESULTS):
+def rerank_candidates(
+    query_image_path,
+    candidates,
+    top_n=DISPLAY_MAX_RESULTS,
+    model=DEFAULT_ZHIPU_RERANK_MODEL,
+    max_workers=None,
+):
     """Rerank candidates with the shared bounded-concurrency policy."""
     return rerank_candidates_concurrent(
         query_image_path,
         candidates,
         top_n=top_n,
-        max_workers=RERANK_CONCURRENT_MAX_WORKERS,
+        max_workers=max_workers or RERANK_CONCURRENT_MAX_WORKERS,
         candidate_timeout_seconds=RERANK_PRIMARY_TIMEOUT_SECONDS,
         retry_timeout_seconds=RERANK_RETRY_TIMEOUT_SECONDS,
         retry_max_candidates=RERANK_RETRY_MAX_CANDIDATES,
+        model=model,
     )
 
 
@@ -675,6 +714,7 @@ def rerank_candidates_concurrent(
     retry_timeout_seconds=None,
     retry_max_candidates=0,
     on_candidate_scored=None,
+    model=DEFAULT_ZHIPU_RERANK_MODEL,
 ):
     """Concurrent rerank with bounded timeouts and a selective retry.
 
@@ -699,6 +739,7 @@ def rerank_candidates_concurrent(
                 candidate,
                 timeout_seconds=candidate_timeout_seconds,
                 collect_timing=on_candidate_scored is not None,
+                model=model,
             )
             for candidate in usable
         ]
@@ -713,6 +754,7 @@ def rerank_candidates_concurrent(
             first_attempt,
             timeout_seconds=retry_timeout_seconds,
             collect_timing=on_candidate_scored is not None,
+            model=model,
         )
         initial_seconds = float(first_attempt.get("rerank_seconds") or 0)
         retry_seconds = float(retried.get("rerank_seconds") or 0)
@@ -749,6 +791,7 @@ def rerank_candidates_concurrent(
         scored,
         top_n=top_n,
         timeout_seconds=candidate_timeout_seconds,
+        model=model,
     )
 
 
@@ -851,7 +894,7 @@ def extract_loads(client, image_path):
     for attempt in range(3):
         try:
             resp = client.chat.completions.create(
-                model="GLM-5V-Turbo",
+                model=DEFAULT_ZHIPU_RERANK_MODEL,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": [
@@ -909,18 +952,66 @@ def extract_loads(client, image_path):
 # 加载 Excel
 # ============================================================
 
-def load_chapter_excel(chapter_name):
-    """加载章节 Excel，返回 DataFrame 或 None"""
-    xlsx_path = ROOT / f"{chapter_name}.xlsx"
+def load_bank_excel(excel_root, chapter_name):
+    """Load one chapter Excel from an explicit bank root."""
+    xlsx_path = Path(excel_root) / f"{chapter_name}.xlsx"
     if not xlsx_path.exists():
-        # 尝试模糊匹配
-        matches = list(ROOT.glob(f"*{chapter_name}*.xlsx"))
+        matches = list(Path(excel_root).glob(f"*{chapter_name}*.xlsx"))
         if matches:
             xlsx_path = matches[0]
         else:
             return None
-    df = pd.read_excel(xlsx_path)
-    return df
+    return pd.read_excel(xlsx_path)
+
+
+def load_chapter_excel(chapter_name):
+    """加载主库章节 Excel，返回 DataFrame 或 None。"""
+    return load_bank_excel(ROOT, chapter_name)
+
+
+@dataclass(frozen=True)
+class ChapterCandidateScan:
+    """Read-only ranked coarse candidates for one already-authorized chapter."""
+
+    scored: list[tuple[float, str]]
+    structure_filter_applied: bool
+
+
+def scan_chapter_candidates(
+    query_loads,
+    chapter_name,
+    excel_root,
+    *,
+    structure_type="",
+    load_excel: Callable | None = None,
+):
+    """Load, optionally filter, score, and sort one chapter without side effects.
+
+    Callers retain their own responsibilities after this boundary: result display,
+    continuation exclusion, path repair policy, cache writes, and cross-chapter
+    deduplication deliberately stay outside the shared scanner.
+    """
+    loader = load_excel or load_bank_excel
+    df = loader(Path(excel_root), chapter_name)
+    if df is None:
+        return None
+
+    filter_type = str(structure_type or "").strip()
+    structure_filter_applied = False
+    if filter_type and "结构类型" in df.columns:
+        filtered = df[df["结构类型"].astype(str) == filter_type]
+        if not filtered.empty:
+            df = filtered
+            structure_filter_applied = True
+
+    normalized_loads = normalize_query_loads(query_loads)
+    scored = []
+    for _, row in df.iterrows():
+        db_loads = fix_load_types(_safe_parse_loads(row["荷载"]))
+        score = compute_similarity(normalized_loads, db_loads)
+        scored.append((score, str(row["题目名称"])))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return ChapterCandidateScan(scored=scored, structure_filter_applied=structure_filter_applied)
 
 
 # ============================================================
@@ -1103,25 +1194,12 @@ def resolve_question_path(question_path, chapter_name=None, update_excel=False):
 
 
 def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, rerank_top=DISPLAY_MAX_RESULTS):
-    df = load_chapter_excel(chapter_name)
-    if df is None:
+    scan = scan_chapter_candidates(query_loads, chapter_name, ROOT)
+    if scan is None:
         print(f"ERROR: Chapter '{chapter_name}' not found")
         return
 
-    # 修正查询荷载分类，并给手动纯数值输入补默认单位
-    query_loads = normalize_query_loads(query_loads)
-
-    results = []
-    for _, row in df.iterrows():
-        db_loads = _safe_parse_loads(row["荷载"])
-
-        # 修正数据库荷载分类
-        db_loads = fix_load_types(db_loads)
-
-        score = compute_similarity(query_loads, db_loads)
-        results.append((score, row["题目名称"]))
-
-    results.sort(key=lambda x: x[0], reverse=True)
+    results = scan.scored
 
     # 粗筛只保留全部 100% 匹配；没有 100% 时只保留最相似的 1 个。
     top = select_coarse_results(results)
