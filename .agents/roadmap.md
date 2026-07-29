@@ -20,18 +20,18 @@
 - 已使用独立8794端口、runtime、session、媒体、incoming、日志、Cookie和启动入口。
 - 已以同输入、同mock依赖比较8790与8794的响应、状态、调用序列和API行为；Agent行为未改变。
 
-### 2. Structured Tool Outcomes
+### 2. Safe Conversational Replies — Completed
+
+- 身份、能力、工作方式、寒暄、致谢和告别等无需业务操作的问题，允许模型在角色与安全边界内自由组织简短回答。
+- 采用负面边界：业务操作、结果/状态依赖、敏感信息和越界请求不进入安全回答；安全信号与业务信号混合时业务优先。
+- 此路径不调用工具、不修改题目/章节/候选状态、不编造题库结果；模型失败或输出校验不通过时使用安全兜底。
+- 已用“你是谁”、能力询问、自然寒暄与告别等真实样本验收，并保留原业务编排回归测试。
+
+### 3. Structured Tool Outcomes — Next
 
 - 工具统一返回 `SUCCESS / NO_MATCH / NEEDS_INPUT / PARTIAL / TOOL_ERROR`。
 - 同时返回候选数、是否完成、可重试性和安全错误类别。
 - 编排代码据此确定未命中、失败和下一步，不让AI猜。
-
-### 3. Safe Conversational Replies
-
-- 身份、能力、工作方式、失败解释等不需要业务操作的问题，允许模型在角色与安全边界内自由组织简短回答。
-- 此路径不得调用工具、修改题目/章节/候选状态、编造题库结果或扩展成通用聊天机器人。
-- 高频明确问候仍可走规则快速路径；“你是谁”等当前固定回复失败样本进入8793验收。
-- 观测层记录 `reply_mode=llm_safe_reply`，与固定回复、工具结果回复和异常回复区分。
 
 ### 4. Shadow Planning and Permission Contract
 
