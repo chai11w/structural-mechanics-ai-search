@@ -7,7 +7,7 @@ const EVENT_LABELS = {
   turn_completed: '回答生成'
 };
 const TOOL_LABELS = {
-  analyze_multi_image: '判断单题或多题', prepare_question_units: '拆分多道题',
+  analyze_multi_image: '识别题图', prepare_question_units: '拆分多道题',
   analyze_image: '识别题图信息', route_bank: '判断荷载形式', classify_structure: '识别结构类型',
   coarse_search: '搜索相似题', global_search: '全章节搜索',
   rerank_candidates: '复筛候选题', answer_candidate: '查找答案'
@@ -411,7 +411,6 @@ function isUsefulCausalEvent(event) {
     if (payload.tool_name === 'classify_structure' && payload.code === 'STRUCTURE_FILTER_NOT_APPLICABLE') return false;
     return true;
   }
-  if (event.event_type === 'turn_completed') return true;
   if (event.event_type === 'authorization_checked') return payload.allowed === false;
   if (event.event_type === 'state_transition') {
     return payload.phase_before !== payload.phase_after && Boolean(PHASE_TEXT[payload.phase_after]);

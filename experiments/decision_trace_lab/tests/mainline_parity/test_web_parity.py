@@ -88,7 +88,7 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertIn("回答结果", observed.text)
         self.assertIn("可能出错的步骤", observed.text)
         self.assertIn("技术详情（开发排查用）", observed.text)
-        self.assertIn("observer.js?v=20260729-user-language-loads-v11", observed.text)
+        self.assertIn("observer.js?v=20260729-focused-causal-v12", observed.text)
         for asset in ("demo.css", "demo.js"):
             self.assertEqual(self.base_client.get(f"/assets/{asset}").content, self.observed_client.get(f"/assets/{asset}").content)
         script = self.observed_client.get("/assets/demo.js").text
@@ -198,15 +198,13 @@ class MainlineWebParityTest(unittest.TestCase):
             "已取消，本轮现在是未评审状态", "withdraw-review", "判断结果：",
             "需要你补充章节", "renderCausalChain", "查看原始 JSON",
             "isUsefulCausalEvent", "本轮没有可继续定位的步骤", "open ? '关闭' : '评审'",
-            "处理结果：", "等待用户选择候选题", "判断荷载形式",
+            "处理结果：", "等待用户选择候选题", "识别题图", "判断荷载形式",
             "按字母荷载题检索", "按数值荷载题检索", "humanLoads(summary.loads)",
             "识别为“${summary.structure_type}”", "复筛未完成，已回退使用粗筛排序",
             "if (event.event_type === 'tool_completed') return humanToolResult(payload)",
             "payload.tool_name === 'coarse_search' || payload.tool_name === 'global_search'",
             "payload.code === 'STRUCTURE_FILTER_NOT_APPLICABLE'",
             "从“${beforeText}”进入“${afterText}”",
-            "回答生成", "回答方式：", "使用“${kind}”固定回复",
-            "模型在安全边界内自由回答", "根据工具结果组织回答",
             "${TOOL_OUTCOME_TEXT[outcome]}：${detail}", "正常未命中", "需要补充信息",
             "部分完成", "工具故障", "可以重试",
             "评审信息暂时没有加载出来，请稍后重试。",
@@ -230,7 +228,7 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertNotIn("变化：${changed}", script)
         self.assertIn("payload.phase_before !== payload.phase_after", script)
         self.assertIn("Boolean(PHASE_TEXT[payload.phase_after])", script)
-        self.assertIn("event.event_type === 'turn_completed') return true", script)
+        self.assertNotIn("event.event_type === 'turn_completed') return true", script)
         self.assertIn("if (!response.ok)", script)
         self.assertIn("保存失败，请重试", script)
         self.assertIn("文字可能包含本地路径、敏感信息或内容过长", script)
