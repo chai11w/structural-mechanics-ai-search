@@ -88,7 +88,7 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertIn("回答结果", observed.text)
         self.assertIn("可能出错的步骤", observed.text)
         self.assertIn("技术详情（开发排查用）", observed.text)
-        self.assertIn("observer.js?v=20260729-five-state-concise-v10", observed.text)
+        self.assertIn("observer.js?v=20260729-user-language-loads-v11", observed.text)
         for asset in ("demo.css", "demo.js"):
             self.assertEqual(self.base_client.get(f"/assets/{asset}").content, self.observed_client.get(f"/assets/{asset}").content)
         script = self.observed_client.get("/assets/demo.js").text
@@ -198,7 +198,8 @@ class MainlineWebParityTest(unittest.TestCase):
             "已取消，本轮现在是未评审状态", "withdraw-review", "判断结果：",
             "需要你补充章节", "renderCausalChain", "查看原始 JSON",
             "isUsefulCausalEvent", "本轮没有可继续定位的步骤", "open ? '关闭' : '评审'",
-            "处理结果：", "等待用户选择候选题", "选择${summary.route === 'symbolic' ? '字母库' : '主库'}",
+            "处理结果：", "等待用户选择候选题", "判断荷载形式",
+            "按字母荷载题检索", "按数值荷载题检索", "humanLoads(summary.loads)",
             "识别为“${summary.structure_type}”", "复筛未完成，已回退使用粗筛排序",
             "if (event.event_type === 'tool_completed') return humanToolResult(payload)",
             "payload.tool_name === 'coarse_search' || payload.tool_name === 'global_search'",

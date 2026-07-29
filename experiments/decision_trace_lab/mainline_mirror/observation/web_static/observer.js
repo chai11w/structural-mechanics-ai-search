@@ -8,7 +8,7 @@ const EVENT_LABELS = {
 };
 const TOOL_LABELS = {
   analyze_multi_image: '判断单题或多题', prepare_question_units: '拆分多道题',
-  analyze_image: '识别题图信息', route_bank: '选择题库', classify_structure: '识别结构类型',
+  analyze_image: '识别题图信息', route_bank: '判断荷载形式', classify_structure: '识别结构类型',
   coarse_search: '搜索相似题', global_search: '全章节搜索',
   rerank_candidates: '复筛候选题', answer_candidate: '查找答案'
 };
@@ -325,6 +325,15 @@ function normalizedToolOutcome(payload) {
   return payload.ok ? 'SUCCESS' : 'TOOL_ERROR';
 }
 
+function humanLoads(loads) {
+  if (!Array.isArray(loads) || !loads.length) return '';
+  return loads.map(load => {
+    const type = String(load?.type || '荷载');
+    const value = String(load?.value || '').trim();
+    return value ? `${type}荷载：${value}` : `${type}荷载`;
+  }).join('，');
+}
+
 function toolResultDetail(name, summary, outcome, code) {
   if (outcome === 'TOOL_ERROR') return `${toolLabel(name)}执行失败`;
   if (outcome === 'NEEDS_INPUT') return `${toolLabel(name)}需要用户补充信息`;
@@ -334,15 +343,23 @@ function toolResultDetail(name, summary, outcome, code) {
     if (name === 'coarse_search' || name === 'global_search') return '没有找到可靠候选题';
     return `${toolLabel(name)}已完成，但没有得到结果`;
   }
-  if (name === 'analyze_multi_image') return `判断结果：${summary.is_multi ? '多题' : '单题'}`;
+  if (name === 'analyze_multi_image') {
+    const parts = [summary.is_multi ? '识别为多道题' : '识别为一道题'];
+    const loads = humanLoads(summary.loads);
+    if (loads) parts.push(loads);
+    if (summary.chapter) parts.push(`章节：${summary.chapter}`);
+    return parts.join('；');
+  }
   if (name === 'prepare_question_units') return `识别出 ${summary.questions_count ?? 0} 道题`;
   if (name === 'analyze_image') {
     const parts = [];
-    if (summary.chapter) parts.push(`章节为“${summary.chapter}”`);
-    if (summary.loads_count != null) parts.push(`识别到 ${summary.loads_count} 个荷载`);
+    const loads = humanLoads(summary.loads);
+    if (loads) parts.push(loads);
+    else if (summary.loads_count != null) parts.push(`识别到 ${summary.loads_count} 个荷载`);
+    if (summary.chapter) parts.push(`章节：${summary.chapter}`);
     return parts.length ? parts.join('，') : '题图信息识别完成';
   }
-  if (name === 'route_bank') return `选择${summary.route === 'symbolic' ? '字母库' : '主库'}`;
+  if (name === 'route_bank') return summary.route === 'symbolic' ? '按字母荷载题检索' : '按数值荷载题检索';
   if (name === 'classify_structure') return summary.structure_type ? `识别为“${summary.structure_type}”` : '本次不需要结构类型筛选';
   if (name === 'coarse_search' || name === 'global_search') return `找到 ${summary.candidates_count ?? 0} 个候选题`;
   if (name === 'rerank_candidates') {

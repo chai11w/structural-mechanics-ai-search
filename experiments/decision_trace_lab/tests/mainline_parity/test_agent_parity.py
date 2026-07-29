@@ -12,7 +12,7 @@ activate_verified_source()
 
 from mainline_mirror.observation.core import (  # noqa: E402
     HookManager, ObservedAgent, ObservedToolbox, _authorization_summary, _decision_summary,
-    _reply_summary, _tool_result_payload,
+    _reply_summary, _tool_output_summary, _tool_result_payload,
 )
 from mainline_mirror.observation.storage import ObservationStore  # noqa: E402
 from tiku_agent.agent import AgentResponse, AgentToolbox, TikuSearchAgent  # noqa: E402
@@ -182,6 +182,27 @@ SCENARIOS = {
 
 
 class MainlineAgentParityTest(unittest.TestCase):
+
+    def test_tool_summary_keeps_user_visible_loads_from_reused_single_analysis(self):
+        result = ToolResult.success(
+            code="SINGLE_QUESTION_DETECTED",
+            data={
+                "is_multi": False,
+                "single_analysis": {
+                    "loads": [{"type": "均布", "raw": "20"}],
+                    "chapter_hint": "3静定结构位移",
+                },
+            },
+        )
+        self.assertEqual(
+            _tool_output_summary(result),
+            {
+                "is_multi": False,
+                "loads": [{"type": "均布", "value": "20"}],
+                "loads_count": 1,
+                "chapter": "3静定结构位移",
+            },
+        )
     def test_safe_answer_reply_source_is_visible_without_recording_text(self):
         model_reply = AgentResponse(
             text="private generated text",

@@ -132,6 +132,22 @@ def _tool_output_summary(result: Any) -> dict[str, Any]:
     for key in ("questions", "loads", "candidates", "visible_candidates", "copied_paths", "answer_paths"):
         if key in data:
             summary[f"{key}_count"] = len(data.get(key) or [])
+    analysis = data.get("single_analysis") if isinstance(data.get("single_analysis"), dict) else data
+    loads = analysis.get("loads") if isinstance(analysis, dict) else None
+    if isinstance(loads, list):
+        summary["loads"] = [
+            {
+                "type": str(item.get("type") or "")[:16],
+                "value": str(item.get("raw") or "")[:48],
+            }
+            for item in loads
+            if isinstance(item, dict)
+        ][:12]
+        summary["loads_count"] = len(summary["loads"])
+    if "chapter" not in summary and isinstance(analysis, dict):
+        chapter = str(analysis.get("chapter") or analysis.get("chapter_hint") or "").strip()
+        if chapter and chapter.lower() != "unknown":
+            summary["chapter"] = chapter[:32]
     return summary
 
 
