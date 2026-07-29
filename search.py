@@ -62,7 +62,7 @@ DISPLAY_MAX_RESULTS = 3
 RERANK_LOAD_WEIGHT = 0.5
 RERANK_VISION_WEIGHT = 0.5
 LENGTH_TIE_FINAL_FLOOR = 0.9
-DEFAULT_ZHIPU_RERANK_MODEL = "GLM-5V-Turbo"
+DEFAULT_ZHIPU_RERANK_MODEL = cfg.get("zhipu_rerank_model", "glm-4.6v")
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 _PATH_REPAIR_BACKUPS = set()
 _PATH_REPAIR_BACKUP_DIR = None
@@ -894,7 +894,7 @@ def extract_loads(client, image_path):
     for attempt in range(3):
         try:
             resp = client.chat.completions.create(
-                model="GLM-5V-Turbo",
+                model=DEFAULT_ZHIPU_RERANK_MODEL,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": [
