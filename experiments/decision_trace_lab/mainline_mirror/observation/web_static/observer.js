@@ -3,7 +3,7 @@
 
 const EVENT_LABELS = {
   turn_started: '开始处理', intent_decided: '意图判断', authorization_checked: '处理规则',
-  tool_started: '开始执行', tool_completed: '执行结果', state_transition: '状态变化',
+  tool_started: '开始执行', tool_completed: '工具调用', state_transition: '状态变化',
   turn_completed: '回答生成'
 };
 const TOOL_LABELS = {
@@ -46,14 +46,6 @@ const PHASE_TEXT = {
 const TOOL_OUTCOME_TEXT = {
   SUCCESS: '成功', NO_MATCH: '正常未命中', NEEDS_INPUT: '需要补充信息',
   PARTIAL: '部分完成', TOOL_ERROR: '工具故障'
-};
-const TOOL_NEXT_STATE_TEXT = {
-  READY_FOR_SINGLE_ANALYSIS: '继续单题识别', READY_FOR_MULTI_DETAILS: '继续多题识别',
-  READY_TO_ROUTE: '准备选择题库', READY_FOR_STRUCTURE: '准备识别结构类型',
-  READY_FOR_COARSE_SEARCH: '准备搜索相似题', READY_FOR_RERANK: '准备复筛候选题',
-  WAIT_INPUT: '等待补充信息', WAIT_IMAGE: '等待重新上传题图', WAIT_CHAPTER: '等待补充章节',
-  WAIT_QUESTION_CHOICE: '等待选择题目', WAIT_CANDIDATE_CHOICE: '等待选择候选题',
-  NO_MATCH: '本次检索正常结束', ERROR: '等待重试', DONE: '本次任务完成'
 };
 const REPLY_KIND_TEXT = {
   greeting: '问候', small_talk: '日常交流', capability_help: '能力说明',
@@ -321,7 +313,7 @@ function humanReplyResult(payload) {
   const kind = REPLY_KIND_TEXT[payload.reply_kind] || '当前任务';
   if (mode === 'fixed_shell') return `使用“${kind}”固定回复`;
   if (mode === 'llm_safe_reply') return '模型在安全边界内自由回答';
-  if (mode === 'tool_result') return '根据工具执行结果组织回答';
+  if (mode === 'tool_result') return '根据工具结果组织回答';
   if (mode === 'error_reply') return '使用错误或异常提示';
   if (mode === 'business_renderer') return '根据当前任务状态组织业务回复';
   return '回答方式未记录';
@@ -333,7 +325,7 @@ function normalizedToolOutcome(payload) {
   return payload.ok ? 'SUCCESS' : 'TOOL_ERROR';
 }
 
-function toolResultDetail(name, summary, outcome) {
+function toolResultDetail(name, summary, outcome, code) {
   if (outcome === 'TOOL_ERROR') return `${toolLabel(name)}执行失败`;
   if (outcome === 'NEEDS_INPUT') return `${toolLabel(name)}需要用户补充信息`;
   if (outcome === 'NO_MATCH') {
@@ -350,12 +342,16 @@ function toolResultDetail(name, summary, outcome) {
     if (summary.loads_count != null) parts.push(`识别到 ${summary.loads_count} 个荷载`);
     return parts.length ? parts.join('，') : '题图信息识别完成';
   }
-  if (name === 'route_bank') return `选择了${summary.route === 'symbolic' ? '字母库' : '主库'}`;
-  if (name === 'classify_structure') return summary.structure_type ? `结构类型为“${summary.structure_type}”` : '已跳过或完成结构类型识别';
+  if (name === 'route_bank') return `选择${summary.route === 'symbolic' ? '字母库' : '主库'}`;
+  if (name === 'classify_structure') return summary.structure_type ? `识别为“${summary.structure_type}”` : '本次不需要结构类型筛选';
   if (name === 'coarse_search' || name === 'global_search') return `找到 ${summary.candidates_count ?? 0} 个候选题`;
-  if (name === 'rerank_candidates') return outcome === 'PARTIAL' || summary.rerank_complete === false
-    ? `复筛未完整完成，保留 ${summary.visible_candidates_count ?? 0} 个可用候选题`
-    : '候选题复筛完成';
+  if (name === 'rerank_candidates') {
+    if (code === 'RERANK_SKIPPED_NO_IMAGE') return '缺少题图，已直接使用粗筛排序';
+    if (code === 'RERANK_INCOMPLETE_COARSE_FALLBACK' || code === 'RERANK_EMPTY_COARSE_FALLBACK') {
+      return '复筛未完成，已回退使用粗筛排序';
+    }
+    return outcome === 'PARTIAL' || summary.rerank_complete === false ? '复筛未完整完成' : '复筛完成';
+  }
   if (name === 'answer_candidate') return `找到 ${summary.answer_paths_count ?? summary.copied_paths_count ?? 0} 张答案`;
   return `${toolLabel(name)}完成`;
 }
@@ -364,14 +360,9 @@ function humanToolResult(payload) {
   const name = payload.tool_name || '';
   const summary = payload.output_summary || {};
   const outcome = normalizedToolOutcome(payload);
-  const parts = [
-    `状态：${TOOL_OUTCOME_TEXT[outcome]}`,
-    toolResultDetail(name, summary, outcome)
-  ];
-  if (payload.code) parts.push(`原因码：${payload.code}`);
-  if (payload.retryable) parts.push('可以重试');
-  if (payload.next_state) parts.push(`下一步：${TOOL_NEXT_STATE_TEXT[payload.next_state] || payload.next_state}`);
-  return parts.join('｜');
+  const detail = toolResultDetail(name, summary, outcome, String(payload.code || ''));
+  if (outcome === 'SUCCESS') return detail;
+  return `${TOOL_OUTCOME_TEXT[outcome]}：${detail}${payload.retryable ? '（可以重试）' : ''}`;
 }
 
 function conciseEvent(event) {
@@ -380,7 +371,7 @@ function conciseEvent(event) {
   if (event.event_type === 'authorization_checked') return payload.allowed
     ? `当前条件允许继续执行“${INTENT_TEXT[payload.requested_action] || '这个操作'}”`
     : `原本理解为“${INTENT_TEXT[payload.requested_action] || '这个操作'}”，但当前条件不满足，已改为追问`;
-  if (event.event_type === 'tool_completed') return `执行结果：${humanToolResult(payload)}`;
+  if (event.event_type === 'tool_completed') return humanToolResult(payload);
   if (event.event_type === 'state_transition') return `处理结果：${humanStateResult(payload)}`;
   if (event.event_type === 'turn_started') return `开始处理${payload.kind === 'image' ? '题目图片' : '文字消息'}`;
   if (event.event_type === 'tool_started') return `开始${toolLabel(payload.tool_name)}`;
@@ -395,7 +386,14 @@ function eventIssues(event) {
 function isUsefulCausalEvent(event) {
   if (eventIssues(event).length || getLabel(event.event_id, 'causal_suspicion')) return true;
   const payload = event.payload || {};
-  if (event.event_type === 'intent_decided' || event.event_type === 'tool_completed') return true;
+  if (event.event_type === 'intent_decided') return true;
+  if (event.event_type === 'tool_completed') {
+    const outcome = normalizedToolOutcome(payload);
+    if (outcome !== 'SUCCESS') return true;
+    if (payload.tool_name === 'coarse_search' || payload.tool_name === 'global_search') return false;
+    if (payload.tool_name === 'classify_structure' && payload.code === 'STRUCTURE_FILTER_NOT_APPLICABLE') return false;
+    return true;
+  }
   if (event.event_type === 'turn_completed') return true;
   if (event.event_type === 'authorization_checked') return payload.allowed === false;
   if (event.event_type === 'state_transition') {
@@ -437,7 +435,9 @@ function causalNode(event, displayIndex) {
   const checkbox = document.createElement('input');
   checkbox.type = 'checkbox';
   checkbox.checked = selected;
-  const title = `${displayIndex}. ${eventLabel(event.event_type)}${event.payload?.tool_name ? ` · ${toolLabel(event.payload.tool_name)}` : ''}`;
+  const title = event.event_type === 'tool_completed'
+    ? `${displayIndex}. ${toolLabel(event.payload?.tool_name || '')}`
+    : `${displayIndex}. ${eventLabel(event.event_type)}${event.payload?.tool_name ? ` · ${toolLabel(event.payload.tool_name)}` : ''}`;
   header.append(checkbox, textNode('span', '', title));
   node.append(header, textNode('p', 'observer-node-summary', conciseEvent(event)));
   for (const issue of issues) node.append(textNode('p', 'observer-node-issue', `系统发现：${ISSUE_TEXT[issue.code] || '这一步的记录异常'}`));

@@ -88,6 +88,7 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertIn("回答结果", observed.text)
         self.assertIn("可能出错的步骤", observed.text)
         self.assertIn("技术详情（开发排查用）", observed.text)
+        self.assertIn("observer.js?v=20260729-five-state-concise-v10", observed.text)
         for asset in ("demo.css", "demo.js"):
             self.assertEqual(self.base_client.get(f"/assets/{asset}").content, self.observed_client.get(f"/assets/{asset}").content)
         script = self.observed_client.get("/assets/demo.js").text
@@ -197,13 +198,16 @@ class MainlineWebParityTest(unittest.TestCase):
             "已取消，本轮现在是未评审状态", "withdraw-review", "判断结果：",
             "需要你补充章节", "renderCausalChain", "查看原始 JSON",
             "isUsefulCausalEvent", "本轮没有可继续定位的步骤", "open ? '关闭' : '评审'",
-            "执行结果：", "处理结果：", "等待用户选择候选题",
+            "处理结果：", "等待用户选择候选题", "选择${summary.route === 'symbolic' ? '字母库' : '主库'}",
+            "识别为“${summary.structure_type}”", "复筛未完成，已回退使用粗筛排序",
+            "if (event.event_type === 'tool_completed') return humanToolResult(payload)",
+            "payload.tool_name === 'coarse_search' || payload.tool_name === 'global_search'",
+            "payload.code === 'STRUCTURE_FILTER_NOT_APPLICABLE'",
             "从“${beforeText}”进入“${afterText}”",
             "回答生成", "回答方式：", "使用“${kind}”固定回复",
-            "模型在安全边界内自由回答", "根据工具执行结果组织回答",
-            "状态：${TOOL_OUTCOME_TEXT[outcome]}", "正常未命中", "需要补充信息",
-            "部分完成", "工具故障", "原因码：${payload.code}", "可以重试",
-            "下一步：${TOOL_NEXT_STATE_TEXT[payload.next_state] || payload.next_state}",
+            "模型在安全边界内自由回答", "根据工具结果组织回答",
+            "${TOOL_OUTCOME_TEXT[outcome]}：${detail}", "正常未命中", "需要补充信息",
+            "部分完成", "工具故障", "可以重试",
             "评审信息暂时没有加载出来，请稍后重试。",
         ):
             self.assertIn(required, script)
@@ -215,6 +219,7 @@ class MainlineWebParityTest(unittest.TestCase):
             "正文未记录", "内容未记录", "章节：未记录", "结束状态：",
             "自动检查：未发现异常", "决定动作：", "来源：${payload.source}",
             "NODE_VERDICTS", "错误类别（可选）", "期望结果（可选",
+            "执行结果",
         ):
             self.assertNotIn(removed, script)
         self.assertNotIn("人工复核队列", script)
