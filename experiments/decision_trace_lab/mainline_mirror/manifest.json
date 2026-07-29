@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "source_repository": "F:/cc/7-题库检索",
-  "source_branch": "codex/8794-candidate-v1",
-  "source_commit": "0baa1438b7aff3f933c8a9f47eae2cfbc8d8fdab",
-  "created_at": "2026-07-29T10:02:05.967293+00:00",
+  "source_branch": "codex/mainline-bounded-autonomy-v1",
+  "source_commit": "544bf179808f4b98bf51fceaae2138c44208d49b",
+  "created_at": "2026-07-29T10:21:48.321549+00:00",
   "snapshot_scope": "tracked mainline code, tests, fixtures and safe documentation; excludes .git, local config/secrets, xlsx question-bank assets, runtime/logs/caches, project-agent metadata, review data, and special_unindexed_questions.json",
   "files": [
     {
@@ -16,7 +16,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "f379db6485ed907b4ffbff9362a79c018cf02c0cea035e11ce559ed2892e7be1"
+      "sha256": "3102ff8dd3ff9fcaf676e5b2fd2e685c22d768677c3a64c03b673a8b24d0cf6a"
     },
     {
       "path": "SKILL.md",
