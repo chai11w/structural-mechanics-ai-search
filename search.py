@@ -62,6 +62,7 @@ DISPLAY_MAX_RESULTS = 3
 RERANK_LOAD_WEIGHT = 0.5
 RERANK_VISION_WEIGHT = 0.5
 LENGTH_TIE_FINAL_FLOOR = 0.9
+DEFAULT_ZHIPU_RERANK_MODEL = "GLM-5V-Turbo"
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 _PATH_REPAIR_BACKUPS = set()
 _PATH_REPAIR_BACKUP_DIR = None
@@ -475,7 +476,14 @@ LENGTH_TIE_PROMPT = """你是结构力学搜题结果打平复核器。候选题
 {"score":0.95,"reason":"理由不超过20字"}"""
 
 
-def score_candidate_pair(client, query_image_path, candidate_path, prompt=RERANK_PROMPT, timeout_seconds=None):
+def score_candidate_pair(
+    client,
+    query_image_path,
+    candidate_path,
+    prompt=RERANK_PROMPT,
+    timeout_seconds=None,
+    model=DEFAULT_ZHIPU_RERANK_MODEL,
+):
     content = [
         {"type": "text", "text": prompt},
         {"type": "text", "text": "查询题图片："},
@@ -491,7 +499,7 @@ def score_candidate_pair(client, query_image_path, candidate_path, prompt=RERANK
     ]
 
     request = {
-        "model": "GLM-5V-Turbo",
+        "model": model or DEFAULT_ZHIPU_RERANK_MODEL,
         "messages": [
             {"role": "system", "content": "你只输出JSON。"},
             {"role": "user", "content": content},
@@ -519,7 +527,13 @@ def compute_final_rerank_score(load_score, rerank_score):
     return load_score * RERANK_LOAD_WEIGHT + rerank_score * RERANK_VISION_WEIGHT
 
 
-def apply_length_tie_break(client, query_image_path, scored, timeout_seconds=None):
+def apply_length_tie_break(
+    client,
+    query_image_path,
+    scored,
+    timeout_seconds=None,
+    model=DEFAULT_ZHIPU_RERANK_MODEL,
+):
     perfect = [item for item in scored if float(item.get("final_score") or 0) >= 0.999]
     if len(perfect) <= 1:
         return scored
@@ -533,6 +547,7 @@ def apply_length_tie_break(client, query_image_path, scored, timeout_seconds=Non
                 str(path),
                 prompt=LENGTH_TIE_PROMPT,
                 timeout_seconds=timeout_seconds,
+                model=model,
             )
         except Exception as exc:  # noqa: BLE001
             print(f"WARNING: 候选 {item['rank']} 杆长复核失败: {exc}")
@@ -576,6 +591,7 @@ def score_rerank_candidate(
     client=None,
     timeout_seconds=None,
     collect_timing=False,
+    model=DEFAULT_ZHIPU_RERANK_MODEL,
 ):
     # The SDK retries by default. For an explicit per-candidate deadline, retries
     # would turn a 1s timeout into several delayed attempts, so disable them.
@@ -592,6 +608,7 @@ def score_rerank_candidate(
             query_image_path,
             str(path),
             timeout_seconds=timeout_seconds,
+            model=model,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"WARNING: 候选 {candidate['rank']} 复筛失败: {exc}")
@@ -615,8 +632,21 @@ def score_rerank_candidate(
     return item
 
 
-def finalize_rerank_results(client, query_image_path, scored, top_n=DISPLAY_MAX_RESULTS, timeout_seconds=None):
-    scored = apply_length_tie_break(client, query_image_path, scored, timeout_seconds=timeout_seconds)
+def finalize_rerank_results(
+    client,
+    query_image_path,
+    scored,
+    top_n=DISPLAY_MAX_RESULTS,
+    timeout_seconds=None,
+    model=DEFAULT_ZHIPU_RERANK_MODEL,
+):
+    scored = apply_length_tie_break(
+        client,
+        query_image_path,
+        scored,
+        timeout_seconds=timeout_seconds,
+        model=model,
+    )
     scored.sort(
         key=lambda x: (
             x.get("final_score", 0),
@@ -629,16 +659,23 @@ def finalize_rerank_results(client, query_image_path, scored, top_n=DISPLAY_MAX_
     return select_display_results(scored)
 
 
-def rerank_candidates(query_image_path, candidates, top_n=DISPLAY_MAX_RESULTS):
+def rerank_candidates(
+    query_image_path,
+    candidates,
+    top_n=DISPLAY_MAX_RESULTS,
+    model=DEFAULT_ZHIPU_RERANK_MODEL,
+    max_workers=None,
+):
     """Rerank candidates with the shared bounded-concurrency policy."""
     return rerank_candidates_concurrent(
         query_image_path,
         candidates,
         top_n=top_n,
-        max_workers=RERANK_CONCURRENT_MAX_WORKERS,
+        max_workers=max_workers or RERANK_CONCURRENT_MAX_WORKERS,
         candidate_timeout_seconds=RERANK_PRIMARY_TIMEOUT_SECONDS,
         retry_timeout_seconds=RERANK_RETRY_TIMEOUT_SECONDS,
         retry_max_candidates=RERANK_RETRY_MAX_CANDIDATES,
+        model=model,
     )
 
 
@@ -677,6 +714,7 @@ def rerank_candidates_concurrent(
     retry_timeout_seconds=None,
     retry_max_candidates=0,
     on_candidate_scored=None,
+    model=DEFAULT_ZHIPU_RERANK_MODEL,
 ):
     """Concurrent rerank with bounded timeouts and a selective retry.
 
@@ -701,6 +739,7 @@ def rerank_candidates_concurrent(
                 candidate,
                 timeout_seconds=candidate_timeout_seconds,
                 collect_timing=on_candidate_scored is not None,
+                model=model,
             )
             for candidate in usable
         ]
@@ -715,6 +754,7 @@ def rerank_candidates_concurrent(
             first_attempt,
             timeout_seconds=retry_timeout_seconds,
             collect_timing=on_candidate_scored is not None,
+            model=model,
         )
         initial_seconds = float(first_attempt.get("rerank_seconds") or 0)
         retry_seconds = float(retried.get("rerank_seconds") or 0)
@@ -751,6 +791,7 @@ def rerank_candidates_concurrent(
         scored,
         top_n=top_n,
         timeout_seconds=candidate_timeout_seconds,
+        model=model,
     )
 
 
