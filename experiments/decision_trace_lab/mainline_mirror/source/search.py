@@ -16,6 +16,8 @@ search.py - 结构力学题目荷载检索与储存
 """
 
 import os
+import base64
+import io
 import json
 import re
 import sys
@@ -34,6 +36,7 @@ os.environ['NO_PROXY'] = '*'
 from collections import Counter
 
 import pandas as pd
+from PIL import Image, ImageOps
 from zhipuai import ZhipuAI
 
 # ============================================================
@@ -489,12 +492,12 @@ def score_candidate_pair(
         {"type": "text", "text": "查询题图片："},
         {
             "type": "image_url",
-            "image_url": {"url": encode_image_base64(query_image_path)},
+            "image_url": {"url": encode_rerank_image_base64(query_image_path)},
         },
         {"type": "text", "text": "候选题图片："},
         {
             "type": "image_url",
-            "image_url": {"url": encode_image_base64(candidate_path)},
+            "image_url": {"url": encode_rerank_image_base64(candidate_path)},
         },
     ]
 
@@ -883,8 +886,39 @@ def encode_image_base64(image_path):
     mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
     mime = mime_map.get(ext, "image/jpeg")
     with open(image_path, "rb") as f:
-        import base64
         data = base64.b64encode(f.read()).decode("utf-8")
+    return f"data:{mime};base64,{data}"
+
+
+def encode_rerank_image_base64(image_path):
+    """Return a visually upright image for rerank without changing source files.
+
+    Most bank images have no EXIF rotation and keep the existing byte-for-byte
+    path. Only images carrying an orientation other than 1 are decoded,
+    transposed, and encoded without the stale orientation metadata. If the
+    metadata cannot be inspected, rerank safely falls back to the old encoder.
+    """
+    path = Path(image_path)
+    try:
+        with Image.open(path) as image:
+            orientation = int(image.getexif().get(274, 1) or 1)
+            if orientation == 1:
+                return encode_image_base64(path)
+
+            normalized = ImageOps.exif_transpose(image)
+            output = io.BytesIO()
+            if path.suffix.lower() in {".jpg", ".jpeg"}:
+                if normalized.mode not in {"RGB", "L", "CMYK"}:
+                    normalized = normalized.convert("RGB")
+                normalized.save(output, format="JPEG", quality=95)
+                mime = "image/jpeg"
+            else:
+                normalized.save(output, format="PNG")
+                mime = "image/png"
+    except (OSError, TypeError, ValueError):
+        return encode_image_base64(path)
+
+    data = base64.b64encode(output.getvalue()).decode("utf-8")
     return f"data:{mime};base64,{data}"
 
 

@@ -2,8 +2,8 @@
   "schema_version": 1,
   "source_repository": "F:/cc/7-题库检索",
   "source_branch": "codex/8794-candidate-v1",
-  "source_commit": "7288614454ae1cfda7ed121c6b97d1d2e97174ba",
-  "created_at": "2026-07-29T08:11:55.457527+00:00",
+  "source_commit": "0baa1438b7aff3f933c8a9f47eae2cfbc8d8fdab",
+  "created_at": "2026-07-29T10:02:05.967293+00:00",
   "snapshot_scope": "tracked mainline code, tests, fixtures and safe documentation; excludes .git, local config/secrets, xlsx question-bank assets, runtime/logs/caches, project-agent metadata, review data, and special_unindexed_questions.json",
   "files": [
     {
@@ -156,7 +156,7 @@
     },
     {
       "path": "search.py",
-      "sha256": "3ca8f7f5318297cd729ca234a951b41d0692e0798ad5293923f040142f5dfe1b"
+      "sha256": "2f563ea7c6122db67e1d0d2453033bfb11d75c2a4b8447dc6869f8045533ec78"
     },
     {
       "path": "tests/fixtures/intent_v2_blind_01.json",
@@ -216,7 +216,7 @@
     },
     {
       "path": "tests/test_rerank_prompt.py",
-      "sha256": "3072f0e0f37634ca510154ac5131c8025eefa6baf9190d35cc38b5b219f39136"
+      "sha256": "8cc31bba3d6ab9fd5a30b6ca82508d25e1d32b22f541d36faeef2c738f8bae00"
     },
     {
       "path": "tests/test_tiku_agent_8794_baseline.py",
