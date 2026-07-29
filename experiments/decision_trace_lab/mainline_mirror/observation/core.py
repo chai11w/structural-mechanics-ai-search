@@ -135,6 +135,36 @@ def _tool_output_summary(result: Any) -> dict[str, Any]:
     return summary
 
 
+def _enum_value(value: Any) -> str:
+    return str(getattr(value, "value", value) or "")
+
+
+def _tool_result_payload(name: str, result: Any, call_index: int) -> dict[str, Any]:
+    """Serialize the five-state contract without exposing raw tool errors."""
+
+    ok = bool(getattr(result, "ok", False))
+    outcome = _enum_value(getattr(result, "outcome", ""))
+    if outcome not in {"SUCCESS", "NO_MATCH", "NEEDS_INPUT", "PARTIAL", "TOOL_ERROR"}:
+        outcome = "SUCCESS" if ok else "TOOL_ERROR"
+    completed = getattr(result, "completed", None)
+    if completed is None:
+        completed = outcome in {"SUCCESS", "NO_MATCH"}
+    error_category = str(getattr(result, "error_category", "") or "")
+    return {
+        "tool_name": str(getattr(result, "tool", "") or name),
+        "call_index": call_index,
+        "ok": ok,
+        "outcome": outcome,
+        "code": str(getattr(result, "code", "") or ""),
+        "completed": bool(completed),
+        "retryable": bool(getattr(result, "retryable", False)),
+        "next_state": str(getattr(result, "next_state", "") or ""),
+        "output_summary": _tool_output_summary(result),
+        "error_category": error_category,
+        "error_kind": error_category or ("tool_result_error" if outcome == "TOOL_ERROR" else ""),
+    }
+
+
 class ObservedToolbox:
     """Wrap the nine real mainline callables without changing their results."""
 
@@ -163,14 +193,11 @@ class ObservedToolbox:
                 result = original(*args, **kwargs)
             except Exception:
                 raise
-            _safe_emit("tool_completed", lambda: {
-                "tool_name": name,
-                "call_index": call_index,
-                "ok": bool(getattr(result, "ok", False)),
-                "next_state": str(getattr(result, "next_state", "")),
-                "output_summary": _tool_output_summary(result),
-                "error_kind": "" if bool(getattr(result, "ok", False)) else "tool_result_error",
-            }, duration_ms=round((time.perf_counter() - started) * 1000))
+            _safe_emit(
+                "tool_completed",
+                lambda: _tool_result_payload(name, result, call_index),
+                duration_ms=round((time.perf_counter() - started) * 1000),
+            )
             return result
         return wrapped
 

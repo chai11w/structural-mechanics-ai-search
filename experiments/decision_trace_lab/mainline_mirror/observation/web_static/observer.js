@@ -43,6 +43,18 @@ const PHASE_TEXT = {
   ERROR: '处理失败，等待用户重试',
   CANCELLED: '当前任务已经取消'
 };
+const TOOL_OUTCOME_TEXT = {
+  SUCCESS: '成功', NO_MATCH: '正常未命中', NEEDS_INPUT: '需要补充信息',
+  PARTIAL: '部分完成', TOOL_ERROR: '工具故障'
+};
+const TOOL_NEXT_STATE_TEXT = {
+  READY_FOR_SINGLE_ANALYSIS: '继续单题识别', READY_FOR_MULTI_DETAILS: '继续多题识别',
+  READY_TO_ROUTE: '准备选择题库', READY_FOR_STRUCTURE: '准备识别结构类型',
+  READY_FOR_COARSE_SEARCH: '准备搜索相似题', READY_FOR_RERANK: '准备复筛候选题',
+  WAIT_INPUT: '等待补充信息', WAIT_IMAGE: '等待重新上传题图', WAIT_CHAPTER: '等待补充章节',
+  WAIT_QUESTION_CHOICE: '等待选择题目', WAIT_CANDIDATE_CHOICE: '等待选择候选题',
+  NO_MATCH: '本次检索正常结束', ERROR: '等待重试', DONE: '本次任务完成'
+};
 const REPLY_KIND_TEXT = {
   greeting: '问候', small_talk: '日常交流', capability_help: '能力说明',
   out_of_scope: '范围说明', clarification: '追问确认', reject: '安全拒绝',
@@ -296,8 +308,12 @@ function humanIntent(payload) {
 }
 
 function humanStateResult(payload) {
-  const phase = String(payload.phase_after || '');
-  return PHASE_TEXT[phase] || '当前对话进度已更新';
+  const before = String(payload.phase_before || '');
+  const after = String(payload.phase_after || '');
+  const beforeText = PHASE_TEXT[before] || '';
+  const afterText = PHASE_TEXT[after] || '当前对话进度已更新';
+  if (before !== after && beforeText) return `从“${beforeText}”进入“${afterText}”`;
+  return afterText;
 }
 
 function humanReplyResult(payload) {
@@ -311,10 +327,21 @@ function humanReplyResult(payload) {
   return '回答方式未记录';
 }
 
-function humanToolResult(payload) {
-  const name = payload.tool_name || '';
-  const summary = payload.output_summary || {};
-  if (!payload.ok) return `${toolLabel(name)}失败`;
+function normalizedToolOutcome(payload) {
+  const value = String(payload.outcome || '');
+  if (TOOL_OUTCOME_TEXT[value]) return value;
+  return payload.ok ? 'SUCCESS' : 'TOOL_ERROR';
+}
+
+function toolResultDetail(name, summary, outcome) {
+  if (outcome === 'TOOL_ERROR') return `${toolLabel(name)}执行失败`;
+  if (outcome === 'NEEDS_INPUT') return `${toolLabel(name)}需要用户补充信息`;
+  if (outcome === 'NO_MATCH') {
+    if (name === 'answer_candidate') return '没有找到所选候选题的答案文件';
+    if (name === 'rerank_candidates') return '没有候选题可以复筛';
+    if (name === 'coarse_search' || name === 'global_search') return '没有找到可靠候选题';
+    return `${toolLabel(name)}已完成，但没有得到结果`;
+  }
   if (name === 'analyze_multi_image') return `判断结果：${summary.is_multi ? '多题' : '单题'}`;
   if (name === 'prepare_question_units') return `识别出 ${summary.questions_count ?? 0} 道题`;
   if (name === 'analyze_image') {
@@ -323,12 +350,28 @@ function humanToolResult(payload) {
     if (summary.loads_count != null) parts.push(`识别到 ${summary.loads_count} 个荷载`);
     return parts.length ? parts.join('，') : '题图信息识别完成';
   }
-  if (name === 'route_bank') return `选择了${summary.route === 'letter' ? '字母库' : '主库'}`;
-  if (name === 'classify_structure') return summary.structure_type ? `结构类型为“${summary.structure_type}”` : '结构类型识别完成';
+  if (name === 'route_bank') return `选择了${summary.route === 'symbolic' ? '字母库' : '主库'}`;
+  if (name === 'classify_structure') return summary.structure_type ? `结构类型为“${summary.structure_type}”` : '已跳过或完成结构类型识别';
   if (name === 'coarse_search' || name === 'global_search') return `找到 ${summary.candidates_count ?? 0} 个候选题`;
-  if (name === 'rerank_candidates') return summary.rerank_complete === false ? '候选题复筛未完成' : '候选题复筛完成';
+  if (name === 'rerank_candidates') return outcome === 'PARTIAL' || summary.rerank_complete === false
+    ? `复筛未完整完成，保留 ${summary.visible_candidates_count ?? 0} 个可用候选题`
+    : '候选题复筛完成';
   if (name === 'answer_candidate') return `找到 ${summary.answer_paths_count ?? summary.copied_paths_count ?? 0} 张答案`;
   return `${toolLabel(name)}完成`;
+}
+
+function humanToolResult(payload) {
+  const name = payload.tool_name || '';
+  const summary = payload.output_summary || {};
+  const outcome = normalizedToolOutcome(payload);
+  const parts = [
+    `状态：${TOOL_OUTCOME_TEXT[outcome]}`,
+    toolResultDetail(name, summary, outcome)
+  ];
+  if (payload.code) parts.push(`原因码：${payload.code}`);
+  if (payload.retryable) parts.push('可以重试');
+  if (payload.next_state) parts.push(`下一步：${TOOL_NEXT_STATE_TEXT[payload.next_state] || payload.next_state}`);
+  return parts.join('｜');
 }
 
 function conciseEvent(event) {

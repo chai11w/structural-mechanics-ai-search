@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "source_repository": "F:/cc/7-题库检索",
-  "source_branch": "codex/mainline-bounded-autonomy-v1",
-  "source_commit": "a771758b08a81e75ffbbb6576dec8a0996a788e1",
-  "created_at": "2026-07-29T06:17:07.803714+00:00",
+  "source_branch": "codex/8794-candidate-v1",
+  "source_commit": "7288614454ae1cfda7ed121c6b97d1d2e97174ba",
+  "created_at": "2026-07-29T08:11:55.457527+00:00",
   "snapshot_scope": "tracked mainline code, tests, fixtures and safe documentation; excludes .git, local config/secrets, xlsx question-bank assets, runtime/logs/caches, project-agent metadata, review data, and special_unindexed_questions.json",
   "files": [
     {
@@ -16,7 +16,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "91e1b072d65a4546d03a92559889e177a673a2ac9f2d7243f3e0578fe475ae1a"
+      "sha256": "f379db6485ed907b4ffbff9362a79c018cf02c0cea035e11ce559ed2892e7be1"
     },
     {
       "path": "SKILL.md",
@@ -232,7 +232,7 @@
     },
     {
       "path": "tests/test_tiku_agent_agent.py",
-      "sha256": "0ab7861d482965b82a2744732d1eaa3b57792a2e17074a3f517431d73f3acdf7"
+      "sha256": "42a52373862168016d28b893ce0283d91aea519e4aab44b5845f45a22e3e2f8e"
     },
     {
       "path": "tests/test_tiku_agent_conversation_context_v2.py",
@@ -303,8 +303,12 @@
       "sha256": "dc67ba8ebd1613ad855e20688127d60e92651b0e43077039bfe5108772b6579c"
     },
     {
+      "path": "tests/test_tiku_agent_tool_result.py",
+      "sha256": "726924dbe4b96ee58620609eca97fc17650ff241c42a6f6794e45423dc33fc3b"
+    },
+    {
       "path": "tests/test_tiku_agent_tools.py",
-      "sha256": "a1ac3c15cdc731ceeb82656984d8d25d1307ce56b27d2db77f01745710a5e95b"
+      "sha256": "93b7e27ebba0d6979235d1eb2fb0bcbbbd02223bb1473bee5d4d9db87899b0dd"
     },
     {
       "path": "tiku_agent/__init__.py",
@@ -320,7 +324,7 @@
     },
     {
       "path": "tiku_agent/agent.py",
-      "sha256": "ac3484b39319b0ff6ee4a8fc47d5b46302678d807fd24e2d665a6807ecf4f1c8"
+      "sha256": "69206005408b1d9f7b3bd54f4eea5e989eb87be1375103da8d15eca2254006a7"
     },
     {
       "path": "tiku_agent/conversation_context_v2.py",
@@ -407,8 +411,12 @@
       "sha256": "461320da4055adc32fd563e80126b4e29246cb61773da9194a6783cac1a830aa"
     },
     {
+      "path": "tiku_agent/tool_result.py",
+      "sha256": "d91d009fcd778d9afabb9a200fa85fda67ff037588242df18a3a96f2f0a9169e"
+    },
+    {
       "path": "tiku_agent/tools.py",
-      "sha256": "e7e8cf9a75b6ce12eb4d3217c4656d7725f76efce3cbe9433f1033d5f26d899b"
+      "sha256": "41a651e6d8bf8db200fc3f0c23dfb07777600f5ab06e7abca5ca53b8856bdacd"
     },
     {
       "path": "tiku_shared/__init__.py",

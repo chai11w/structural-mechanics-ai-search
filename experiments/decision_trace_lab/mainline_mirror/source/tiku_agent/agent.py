@@ -31,6 +31,7 @@ from tiku_agent.state import (
 )
 from tiku_agent.tools import (
     AgentToolConfig,
+    ToolOutcome,
     ToolResult,
     analyze_image_tool,
     analyze_multi_image_tool,
@@ -234,14 +235,18 @@ class TikuSearchAgent:
         if pending_chapter:
             self.state.set_pending_chapter(pending_chapter)
         multi = self.tools.analyze_multi_image(image_path, config=self.config)
+        stopped = self._stop_for_tool_result(multi, allow_partial=True)
+        if stopped is not None:
+            return stopped
         if multi.ok and multi.data.get("is_multi"):
             prepared = self.tools.prepare_question_units(
                 image_path,
                 list(multi.data.get("questions") or []),
                 config=self.config,
             )
-            if not prepared.ok:
-                return self._fail(prepared.error)
+            stopped = self._stop_for_tool_result(prepared, allow_partial=True)
+            if stopped is not None:
+                return stopped
             self.state.set_questions(list(prepared.data.get("questions") or []))
             return self._response(render.render_multi_question_list(self.state), IntentResult("search_image"))
         scope_analysis = multi.data.get("single_analysis") if multi.ok else None
@@ -252,8 +257,9 @@ class TikuSearchAgent:
             # fictional `unknown.xlsx` file.
             if chapter_hint.lower() == "unknown":
                 chapter_hint = ""
-            analyzed = ToolResult(
-                ok=True,
+            analyzed = ToolResult.success(
+                tool="analyze_image",
+                code="SCOPE_ANALYSIS_REUSED",
                 data={
                     "image_path": image_path,
                     "loads": scope_analysis.get("loads", []),
@@ -262,8 +268,9 @@ class TikuSearchAgent:
             )
         else:
             analyzed = self.tools.analyze_image(image_path, chapter="auto", config=self.config)
-            if not analyzed.ok:
-                return self._fail(analyzed.error)
+        stopped = self._stop_for_tool_result(analyzed, allow_needs_input=True)
+        if stopped is not None:
+            return stopped
         self.state.set_analysis(
             loads=analyzed.data.get("loads", []),
             chapter=pending_chapter or analyzed.data.get("chapter") or "",
@@ -331,8 +338,9 @@ class TikuSearchAgent:
             structure_type = self.state.current_structure_type
         else:
             routed = self.tools.route_bank(self.state.current_loads)
-            if not routed.ok:
-                return self._fail(routed.error or routed.data.get("reason", "无法确定检索库"))
+            stopped = self._stop_for_tool_result(routed)
+            if stopped is not None:
+                return stopped
             route = str(routed.data.get("route") or "")
             self.state.set_route(route)
 
@@ -342,8 +350,9 @@ class TikuSearchAgent:
                 classified=classified,
                 config=self.config,
             )
-            if not structured.ok:
-                return self._fail(structured.error)
+            stopped = self._stop_for_tool_result(structured, allow_partial=True)
+            if stopped is not None:
+                return stopped
             structure_type = str(structured.data.get("structure_type") or "")
             self.state.set_route(route, structure_type=structure_type)
 
@@ -356,8 +365,9 @@ class TikuSearchAgent:
         if continuing:
             coarse_kwargs["exclude_candidate_keys"] = list(self.state.attempted_candidate_keys)
         coarse = self.tools.coarse_search(self.state.current_loads, **coarse_kwargs)
-        if not coarse.ok:
-            return self._fail(coarse.error)
+        stopped = self._stop_for_tool_result(coarse)
+        if stopped is not None:
+            return stopped
         candidates = list(coarse.data.get("candidates") or [])
         self.state.record_search_batch(candidates, has_more=bool(coarse.data.get("has_more")))
         if not candidates:
@@ -371,8 +381,9 @@ class TikuSearchAgent:
             route=route,
             rerank_top=self.config.rerank_top,
         )
-        if not reranked.ok:
-            return self._fail(reranked.error)
+        stopped = self._stop_for_tool_result(reranked, allow_partial=True)
+        if stopped is not None:
+            return stopped
         visible = list(reranked.data.get("visible_candidates") or candidates)
         self.state.set_candidates(visible)
         text = render.render_candidates(
@@ -389,8 +400,9 @@ class TikuSearchAgent:
         self._report_progress("global_searching", "正在全局搜索题目，可能需要一点时间…")
 
         routed = self.tools.route_bank(self.state.current_loads)
-        if not routed.ok:
-            return self._fail(routed.error or routed.data.get("reason", "无法确定检索库"))
+        stopped = self._stop_for_tool_result(routed)
+        if stopped is not None:
+            return stopped
         route = str(routed.data.get("route") or "")
         self.state.set_route(route)
 
@@ -400,8 +412,9 @@ class TikuSearchAgent:
             classified=self._selected_question(),
             config=self.config,
         )
-        if not structured.ok:
-            return self._fail(structured.error)
+        stopped = self._stop_for_tool_result(structured, allow_partial=True)
+        if stopped is not None:
+            return stopped
         structure_type = str(structured.data.get("structure_type") or "")
         self.state.set_route(route, structure_type=structure_type)
 
@@ -412,8 +425,9 @@ class TikuSearchAgent:
             structure_type=structure_type,
             config=self.config,
         )
-        if not searched.ok:
-            return self._fail(searched.error)
+        stopped = self._stop_for_tool_result(searched)
+        if stopped is not None:
+            return stopped
         candidates = list(searched.data.get("candidates") or [])
         self.state.set_candidates(candidates)
         if not candidates:
@@ -442,8 +456,14 @@ class TikuSearchAgent:
             return self._response(render.render_unsupported(str(exc)), intent)
 
         answered = self.tools.answer_candidate(self.state.candidates, rank=rank, config=self.config)
-        if not answered.ok:
-            return self._fail(answered.error)
+        stopped = self._stop_for_tool_result(answered)
+        if stopped is not None:
+            return stopped
+        if answered.outcome is ToolOutcome.NO_MATCH:
+            return self._response(
+                answered.error or "未找到该候选题对应的答案文件。",
+                intent,
+            )
         paths = list(answered.data.get("copied_paths") or answered.data.get("answer_paths") or [])
         self.state.set_answer_paths([str(path) for path in paths])
         return self._response(render.render_answer(self.state), intent, images=self.state.last_answer_paths)
@@ -451,6 +471,24 @@ class TikuSearchAgent:
     def _fail(self, error: str) -> AgentResponse:
         self.state.fail(error)
         return self._response(render.render_error(error), IntentResult("unsupported", ok=False, error=error))
+
+    def _stop_for_tool_result(
+        self,
+        result: ToolResult,
+        *,
+        allow_partial: bool = False,
+        allow_needs_input: bool = False,
+    ) -> AgentResponse | None:
+        """Apply the five-state contract before consuming tool data."""
+
+        if result.outcome is ToolOutcome.TOOL_ERROR:
+            return self._fail(result.error or "工具执行失败，请稍后重试。")
+        if result.outcome is ToolOutcome.NEEDS_INPUT and not allow_needs_input:
+            message = result.error or "需要补充信息后才能继续。"
+            return self._response(message, IntentResult("clarification"))
+        if result.outcome is ToolOutcome.PARTIAL and not allow_partial:
+            return self._fail(result.error or "工具只完成了部分处理，请稍后重试。")
+        return None
 
     def _response(self, text: str, intent: IntentResult, *, images: list[str] | None = None) -> AgentResponse:
         return AgentResponse(text=text, images=list(images or []), state=self.state.to_dict(), intent=intent.intent)

@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -7,7 +8,10 @@ import pandas as pd
 
 from tiku_agent.tools import (
     AgentToolConfig,
+    ToolOutcome,
+    analyze_image_tool,
     analyze_multi_image_tool,
+    answer_candidate_tool,
     classify_structure_tool,
     coarse_search_tool,
     global_search_tool,
@@ -111,6 +115,7 @@ class TikuAgentToolsTest(unittest.TestCase):
             )
 
         self.assertTrue(result.ok, result.error)
+        self.assertEqual(result.tool, "global_search")
         self.assertEqual(result.data["coarse_candidate_count"], 2)
         self.assertEqual(result.data["model_calls"], 2)
         self.assertEqual(result.data["retry_model_calls"], 0)
@@ -147,7 +152,11 @@ class TikuAgentToolsTest(unittest.TestCase):
         ) as scorer:
             result = global_search_tool(loads, query, route="main")
 
-        self.assertFalse(result.ok, result.to_dict())
+        self.assertTrue(result.ok, result.to_dict())
+        self.assertEqual(result.outcome, ToolOutcome.PARTIAL)
+        self.assertEqual(result.code, "GLOBAL_RERANK_INCOMPLETE")
+        self.assertFalse(result.completed)
+        self.assertTrue(result.retryable)
         self.assertEqual(result.data["unfinished_candidates"], 1)
         self.assertEqual(result.data["model_calls"], 2)
         self.assertEqual(result.data["retry_model_calls"], 1)
@@ -207,8 +216,39 @@ class TikuAgentToolsTest(unittest.TestCase):
     def test_route_bank_symbolic_load(self):
         result = route_bank_tool([{"type": "集中", "raw": "P"}])
         self.assertTrue(result.ok)
+        self.assertEqual(result.tool, "route_bank")
+        self.assertEqual(result.outcome, ToolOutcome.SUCCESS)
+        self.assertEqual(result.code, "BANK_ROUTE_SELECTED")
         self.assertEqual(result.data["route"], "symbolic")
         self.assertEqual(result.next_state, "READY_FOR_STRUCTURE")
+
+    def test_route_bank_marks_ambiguous_loads_as_needs_input(self):
+        result = route_bank_tool([
+            {"type": "集中", "raw": "P"},
+            {"type": "均布", "raw": "10"},
+        ])
+
+        self.assertEqual(result.outcome, ToolOutcome.NEEDS_INPUT)
+        self.assertEqual(result.tool, "route_bank")
+        self.assertEqual(result.code, "LOAD_ROUTE_NEEDS_REVIEW")
+        self.assertFalse(result.completed)
+
+    def test_analyze_image_marks_unknown_chapter_as_needs_input(self):
+        class FakeQwen:
+            def classify_image(self, _image_path):
+                return {
+                    "chapter_hint": "unknown",
+                    "chapter_confidence": 0.0,
+                    "loads": [{"type": "集中", "raw": "P"}],
+                }
+
+        with patch("tiku_agent.tools._make_qwen", return_value=FakeQwen()):
+            result = analyze_image_tool("q.jpg", chapter="auto")
+
+        self.assertEqual(result.outcome, ToolOutcome.NEEDS_INPUT)
+        self.assertEqual(result.tool, "analyze_image")
+        self.assertEqual(result.code, "CHAPTER_REQUIRED")
+        self.assertEqual(result.next_state, "WAIT_CHAPTER")
 
     def test_multi_image_tool_only_confirms_multi_without_detail_work(self):
         class FakeQwen:
@@ -221,6 +261,9 @@ class TikuAgentToolsTest(unittest.TestCase):
             result = analyze_multi_image_tool("multi.jpg", config=AgentToolConfig())
 
         self.assertTrue(result.ok)
+        self.assertEqual(result.tool, "analyze_multi_image")
+        self.assertEqual(result.outcome, ToolOutcome.SUCCESS)
+        self.assertEqual(result.code, "MULTI_QUESTION_DETECTED")
         self.assertTrue(result.data["is_multi"])
         self.assertEqual(result.next_state, "READY_FOR_MULTI_DETAILS")
         self.assertEqual(result.data["questions"], [])
@@ -234,6 +277,8 @@ class TikuAgentToolsTest(unittest.TestCase):
             result = analyze_multi_image_tool("single.jpg", config=AgentToolConfig())
 
         self.assertTrue(result.ok)
+        self.assertEqual(result.tool, "analyze_multi_image")
+        self.assertEqual(result.code, "SINGLE_QUESTION_DETECTED")
         self.assertFalse(result.data["is_multi"])
         self.assertEqual(result.data["single_analysis"]["loads"][0]["raw"], "P")
         self.assertEqual(result.next_state, "READY_FOR_SINGLE_ANALYSIS")
@@ -254,13 +299,36 @@ class TikuAgentToolsTest(unittest.TestCase):
             result = prepare_question_units_tool("multi.jpg", questions, config=AgentToolConfig())
 
         self.assertTrue(result.ok)
+        self.assertEqual(result.tool, "prepare_question_units")
         self.assertEqual(result.data["questions"][0]["question_image_path"], "runtime/multi_diagrams/q4.jpg")
         self.assertEqual(result.data["questions"][1]["question_image_path"], "")
         self.assertTrue(result.data["has_reliable_crops"])
 
+    def test_prepare_question_units_marks_crop_fallback_as_partial(self):
+        questions = [
+            {"label": "1", "loads": [{"type": "集中", "raw": "P"}], "chapter": "4力法"},
+            {"label": "2", "loads": [{"type": "均布", "raw": "q"}], "chapter": "4力法"},
+        ]
+
+        class FakeQwen:
+            def analyze_layout(self, _image_path):
+                return {"question_layout": "multi", "questions": questions}
+
+        with patch("tiku_agent.tools._make_qwen", return_value=FakeQwen()), patch(
+            "tiku_agent.tools.prepare_multi_diagram_crops",
+            side_effect=OSError("crop failed"),
+        ):
+            result = prepare_question_units_tool("multi.jpg", questions)
+
+        self.assertEqual(result.outcome, ToolOutcome.PARTIAL)
+        self.assertEqual(result.code, "MULTI_CROPS_UNAVAILABLE")
+        self.assertEqual(len(result.data["questions"]), 2)
+
     def test_structure_tool_skips_non_symbolic_routes(self):
         result = classify_structure_tool(None, route="main")
         self.assertTrue(result.ok)
+        self.assertEqual(result.tool, "classify_structure")
+        self.assertEqual(result.code, "STRUCTURE_FILTER_NOT_APPLICABLE")
         self.assertEqual(result.data["structure_type"], "")
         self.assertFalse(result.data["filter_applicable"])
 
@@ -274,6 +342,24 @@ class TikuAgentToolsTest(unittest.TestCase):
             {"action": "delete_candidate", "rank": 2},
         )
         self.assertEqual(parse_candidate_action_tool("0", candidate_count=3).data, {"action": "cancel"})
+        invalid = parse_candidate_action_tool("x", candidate_count=3)
+        self.assertEqual(invalid.tool, "parse_candidate_action")
+        self.assertEqual(invalid.outcome, ToolOutcome.NEEDS_INPUT)
+        self.assertEqual(invalid.code, "CANDIDATE_NUMBER_REQUIRED")
+
+    def test_coarse_search_empty_result_is_no_match(self):
+        scan = SimpleNamespace(scored=[], structure_filter_applied=False)
+        with patch("tiku_agent.tools.search.scan_chapter_candidates", return_value=scan):
+            result = coarse_search_tool(
+                [{"type": "集中", "raw": "P"}],
+                chapter="4力法",
+                route="main",
+            )
+
+        self.assertEqual(result.outcome, ToolOutcome.NO_MATCH)
+        self.assertEqual(result.tool, "coarse_search")
+        self.assertEqual(result.code, "NO_COARSE_CANDIDATES")
+        self.assertTrue(result.completed)
 
     def test_agent_rerank_runs_even_when_candidate_count_does_not_exceed_top(self):
         candidates = [
@@ -302,6 +388,7 @@ class TikuAgentToolsTest(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertTrue(result.data["reranked"])
+        self.assertEqual(result.code, "RERANK_COMPLETED")
         self.assertEqual(rerank.call_count, 1)
         self.assertEqual(result.data["visible_candidates"][0]["final_score"], 0.75)
 
@@ -315,7 +402,10 @@ class TikuAgentToolsTest(unittest.TestCase):
             result = rerank_candidates_tool("query.jpg", candidates, route="main", rerank_top=3)
 
         self.assertTrue(result.ok)
+        self.assertEqual(result.tool, "rerank_candidates")
         self.assertFalse(result.data["reranked"])
+        self.assertEqual(result.outcome, ToolOutcome.SUCCESS)
+        self.assertEqual(result.code, "RERANK_NOT_REQUIRED")
         self.assertEqual(rerank.call_count, 0)
         self.assertEqual([item["path"] for item in result.data["visible_candidates"]], ["q1.jpg"])
         self.assertIn("粗筛", result.data["rerank_note"])
@@ -339,10 +429,23 @@ class TikuAgentToolsTest(unittest.TestCase):
             result = rerank_candidates_tool("query.jpg", candidates, route="main", rerank_top=3)
 
         self.assertTrue(result.ok)
+        self.assertEqual(result.outcome, ToolOutcome.PARTIAL)
+        self.assertEqual(result.code, "RERANK_INCOMPLETE_COARSE_FALLBACK")
         self.assertFalse(result.data["reranked"])
         self.assertEqual([item["path"] for item in result.data["visible_candidates"]], ["q1.jpg"])
         self.assertTrue(all(item["rerank_status"] == "incomplete" for item in result.data["visible_candidates"]))
         self.assertIn("回退粗筛", result.data["rerank_note"])
+
+    def test_answer_lookup_without_files_is_no_match(self):
+        candidates = [{"rank": 1, "path": "q1.jpg"}]
+        with patch("tiku_agent.tools.search.find_answer_files", return_value=[]):
+            result = answer_candidate_tool(candidates, rank=1, copy_to_output=False)
+
+        self.assertEqual(result.outcome, ToolOutcome.NO_MATCH)
+        self.assertEqual(result.tool, "answer_candidate")
+        self.assertEqual(result.code, "ANSWER_FILES_NOT_FOUND")
+        self.assertEqual(result.next_state, "WAIT_CANDIDATE_CHOICE")
+        self.assertTrue(result.completed)
 
     def test_agent_without_query_image_uses_coarse_display_policy(self):
         candidates = [
@@ -354,6 +457,8 @@ class TikuAgentToolsTest(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertFalse(result.data["reranked"])
+        self.assertEqual(result.outcome, ToolOutcome.PARTIAL)
+        self.assertEqual(result.code, "RERANK_SKIPPED_NO_IMAGE")
         self.assertEqual([item["path"] for item in result.data["visible_candidates"]], ["q1.jpg"])
 
 

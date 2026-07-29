@@ -42,13 +42,13 @@ Agent 现在只有 Intent V2，不再提供 V1 运行开关。线上 8790 由隐
 python -B scripts/run_tiku_agent_demo.py --port 8790 --disable-safe-answer-v0
 ```
 
-下一版主线候选使用独立 worktree、分支和 8794 入口，并隔离源码、端口、Cookie 和全部可写运行状态：
+下一阶段“自主做事”开发继续使用独立 worktree、分支和 8794 入口，并隔离源码、端口、Cookie 和全部可写运行状态：
 
 ```powershell
 python -B scripts/run_tiku_agent_8794.py
 ```
 
-默认访问 `http://127.0.0.1:8794`，会话数据库、上传/媒体文件、临时 incoming 文件和任务日志统一位于 `.tmp_tiku_agent_v2_candidate_8794/`。8794 使用独立 Cookie `tiku_agent_8794_session`，不会与同一浏览器中的 8790 会话标识混用。候选启动器默认启用安全回答 V0：无需工具的边界内对话由模型自然回答，业务请求继续走原 Intent V2。该入口目前不包含自主规划或 LangGraph。
+默认访问 `http://127.0.0.1:8794`，会话数据库、上传/媒体文件、临时 incoming 文件和任务日志统一位于 `.tmp_tiku_agent_v2_candidate_8794/`。8794 使用独立 Cookie `tiku_agent_8794_session`，不会与同一浏览器中的 8790 会话标识混用。8794 保留已验收的安全回答 V0，并已统一工具结果为 `SUCCESS / NO_MATCH / NEEDS_INPUT / PARTIAL / TOOL_ERROR`；每个结果同时包含工具名、稳定原因码、完成状态、可重试性和安全错误类别，固定状态机据此决定继续、澄清、回退或失败。当前仍不包含自主规划执行或 LangGraph，下一阶段是只记录不执行的影子规划。
 
 需要临时回退原固定对话回复时，可显式关闭安全回答：
 

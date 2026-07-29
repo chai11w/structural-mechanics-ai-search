@@ -12,7 +12,7 @@ activate_verified_source()
 
 from mainline_mirror.observation.core import (  # noqa: E402
     HookManager, ObservedAgent, ObservedToolbox, _authorization_summary, _decision_summary,
-    _reply_summary,
+    _reply_summary, _tool_result_payload,
 )
 from mainline_mirror.observation.storage import ObservationStore  # noqa: E402
 from tiku_agent.agent import AgentResponse, AgentToolbox, TikuSearchAgent  # noqa: E402
@@ -40,6 +40,10 @@ class DeterministicTools:
         self.calls.append({"name": name, "params": copy.deepcopy(params or {}), "result": copy.deepcopy(result.to_dict())})
         return result
 
+    @staticmethod
+    def _success(name: str, code: str, data: dict, next_state: str = "") -> ToolResult:
+        return ToolResult.success(tool=name, code=code, data=data, next_state=next_state)
+
     def toolbox(self) -> AgentToolbox:
         return AgentToolbox(**{name: getattr(self, name) for name in (
             "analyze_multi_image", "prepare_question_units", "analyze_image", "route_bank",
@@ -52,19 +56,38 @@ class DeterministicTools:
             {"label": "2", "loads": [{"type": "均布", "raw": "q"}], "chapter": "4力法", "question_image_path": "q2.jpg"},
         ]
         single = {"loads": [{"type": "集中", "raw": "P"}], "chapter_hint": self.chapter}
-        return self._result("analyze_multi_image", ToolResult(True, {"is_multi": self.multi, "questions": questions if self.multi else [], "single_analysis": single}, next_state="READY_FOR_MULTI_DETAILS" if self.multi else "READY_FOR_SINGLE_ANALYSIS"))
+        return self._result("analyze_multi_image", self._success(
+            "analyze_multi_image",
+            "MULTI_QUESTION_DETECTED" if self.multi else "SINGLE_QUESTION_DETECTED",
+            {"is_multi": self.multi, "questions": questions if self.multi else [], "single_analysis": single},
+            "READY_FOR_MULTI_DETAILS" if self.multi else "READY_FOR_SINGLE_ANALYSIS",
+        ))
 
     def prepare_question_units(self, image_path, questions, *, config=None):
-        return self._result("prepare_question_units", ToolResult(True, {"questions": list(questions), "diagram_crops": {"1": "q1.jpg", "2": "q2.jpg"}}), {"question_count": len(questions)})
+        return self._result("prepare_question_units", self._success(
+            "prepare_question_units",
+            "QUESTION_UNITS_PREPARED",
+            {"questions": list(questions), "diagram_crops": {"1": "q1.jpg", "2": "q2.jpg"}},
+            "WAIT_QUESTION_CHOICE",
+        ), {"question_count": len(questions)})
 
     def analyze_image(self, image_path, *, chapter="auto", include_layout=False, config=None):
-        return self._result("analyze_image", ToolResult(True, {"image_path": str(image_path), "loads": [{"type": "集中", "raw": "P"}], "chapter": self.chapter}))
+        return self._result("analyze_image", self._success(
+            "analyze_image",
+            "IMAGE_ANALYZED",
+            {"image_path": str(image_path), "loads": [{"type": "集中", "raw": "P"}], "chapter": self.chapter},
+            "READY_TO_ROUTE",
+        ))
 
     def route_bank(self, loads):
-        return self._result("route_bank", ToolResult(True, {"route": "main"}), {"load_count": len(loads)})
+        return self._result("route_bank", self._success(
+            "route_bank", "BANK_ROUTE_SELECTED", {"route": "main"}, "READY_FOR_COARSE_SEARCH"
+        ), {"load_count": len(loads)})
 
     def classify_structure(self, image_path, *, route, classified=None, config=None):
-        return self._result("classify_structure", ToolResult(True, {"structure_type": "梁"}), {"route": route})
+        return self._result("classify_structure", self._success(
+            "classify_structure", "STRUCTURE_FILTER_NOT_APPLICABLE", {"structure_type": "梁"}, "READY_FOR_COARSE_SEARCH"
+        ), {"route": route})
 
     def coarse_search(self, loads, *, chapter, route, structure_type="", top_k=None, exclude_candidate_keys=None):
         self.batch += 1
@@ -73,11 +96,30 @@ class DeterministicTools:
             {"path": f"candidate-{self.batch}-1.jpg", "name": "one.jpg", "score": .9, "candidate_key": f"batch-{self.batch}-1"},
             {"path": f"candidate-{self.batch}-2.jpg", "name": "two.jpg", "score": .8, "candidate_key": f"batch-{self.batch}-2"},
         ]
-        return self._result("coarse_search", ToolResult(True, {"candidates": candidates, "has_more": self.batch == 1}), {"chapter": chapter, "route": route, "structure_type": structure_type, "excluded": excluded})
+        result = (
+            ToolResult.no_match(
+                tool="coarse_search",
+                code="NO_COARSE_CANDIDATES",
+                data={"candidates": candidates, "has_more": self.batch == 1},
+            )
+            if not candidates
+            else self._success(
+                "coarse_search",
+                "COARSE_CANDIDATES_FOUND",
+                {"candidates": candidates, "has_more": self.batch == 1},
+                "READY_FOR_RERANK",
+            )
+        )
+        return self._result("coarse_search", result, {"chapter": chapter, "route": route, "structure_type": structure_type, "excluded": excluded})
 
     def global_search(self, loads, query_image_path, *, route, structure_type="", config=None):
         candidates = [] if self.no_match else [{"path": "global.jpg", "name": "global.jpg", "chapter": "4力法", "score": 1.0}]
-        return self._result("global_search", ToolResult(True, {"candidates": candidates}, next_state="WAIT_CANDIDATE_CHOICE" if candidates else "NO_MATCH"), {"route": route})
+        result = (
+            self._success("global_search", "GLOBAL_CANDIDATES_FOUND", {"candidates": candidates}, "WAIT_CANDIDATE_CHOICE")
+            if candidates
+            else ToolResult.no_match(tool="global_search", code="NO_GLOBAL_RELIABLE_CANDIDATES", data={"candidates": []})
+        )
+        return self._result("global_search", result, {"route": route})
 
     def rerank_candidates(self, query_image_path, candidates, *, route, rerank_top=3, force_rerank=False):
         payload = {
@@ -86,10 +128,25 @@ class DeterministicTools:
             "rerank_complete": not self.rerank_incomplete,
             "rerank_note": "incomplete" if self.rerank_incomplete else "",
         }
-        return self._result("rerank_candidates", ToolResult(True, payload), {"route": route, "candidate_count": len(candidates)})
+        result = (
+            ToolResult.partial(
+                tool="rerank_candidates",
+                code="RERANK_INCOMPLETE_COARSE_FALLBACK",
+                data=payload,
+                error="复筛未完成，已回退粗筛排序。",
+                next_state="WAIT_CANDIDATE_CHOICE",
+                retryable=True,
+                error_category="external_model",
+            )
+            if self.rerank_incomplete
+            else self._success("rerank_candidates", "RERANK_COMPLETED", payload, "WAIT_CANDIDATE_CHOICE")
+        )
+        return self._result("rerank_candidates", result, {"route": route, "candidate_count": len(candidates)})
 
     def answer_candidate(self, candidates, *, rank, copy_to_output=True, config=None):
-        return self._result("answer_candidate", ToolResult(True, {"rank": rank, "copied_paths": [f"answer-{rank}.jpg"]}), {"rank": rank, "candidate_count": len(candidates)})
+        return self._result("answer_candidate", self._success(
+            "answer_candidate", "ANSWER_FILES_FOUND", {"rank": rank, "copied_paths": [f"answer-{rank}.jpg"]}, "DONE"
+        ), {"rank": rank, "candidate_count": len(candidates)})
 
 
 class RaisingStore(ObservationStore):
@@ -149,9 +206,56 @@ class MainlineAgentParityTest(unittest.TestCase):
     def test_manifest_verifies_required_mainline_files(self):
         manifest = verify_snapshot()
         paths = {row["path"] for row in manifest["files"]}
-        self.assertEqual(manifest["source_commit"], "a771758b08a81e75ffbbb6576dec8a0996a788e1")
-        for required in ("tiku_agent/agent.py", "tiku_agent/intent_v2.py", "tiku_agent/action_permissions_v2.py", "tiku_agent/fastapi_demo.py", "tiku_agent/safe_answer_policy_v0.py", "tiku_agent/demo_web/demo.js", "search.py", "multi_agent_pipeline.py"):
+        self.assertEqual(manifest["source_commit"], "7288614454ae1cfda7ed121c6b97d1d2e97174ba")
+        for required in ("tiku_agent/agent.py", "tiku_agent/tool_result.py", "tiku_agent/intent_v2.py", "tiku_agent/action_permissions_v2.py", "tiku_agent/fastapi_demo.py", "tiku_agent/safe_answer_policy_v0.py", "tiku_agent/demo_web/demo.js", "search.py", "multi_agent_pipeline.py"):
             self.assertIn(required, paths)
+
+    def test_five_state_tool_payload_is_complete_and_legacy_records_stay_compatible(self):
+        results = [
+            ToolResult.success(tool="example", code="DONE"),
+            ToolResult.no_match(tool="example", code="EMPTY"),
+            ToolResult.needs_input(
+                tool="example", code="MISSING", error="safe summary", next_state="WAIT_INPUT"
+            ),
+            ToolResult.partial(
+                tool="rerank_candidates",
+                code="RERANK_INCOMPLETE_COARSE_FALLBACK",
+                data={"visible_candidates": [{"rank": 1}], "reranked": False},
+                error="safe summary",
+                next_state="WAIT_CANDIDATE_CHOICE",
+                retryable=True,
+                error_category="external_model",
+            ),
+            ToolResult.tool_error(
+                tool="example",
+                code="FAILED",
+                error="safe summary",
+                retryable=True,
+                error_category="external_service",
+            ),
+        ]
+        payloads = [_tool_result_payload("fallback", result, index) for index, result in enumerate(results, 1)]
+        self.assertEqual(
+            [payload["outcome"] for payload in payloads],
+            ["SUCCESS", "NO_MATCH", "NEEDS_INPUT", "PARTIAL", "TOOL_ERROR"],
+        )
+        self.assertTrue(all("error" not in payload for payload in payloads))
+
+        partial = results[3]
+        payload = _tool_result_payload("rerank_candidates", partial, 2)
+        self.assertEqual(payload["tool_name"], "rerank_candidates")
+        self.assertEqual(payload["outcome"], "PARTIAL")
+        self.assertEqual(payload["code"], "RERANK_INCOMPLETE_COARSE_FALLBACK")
+        self.assertEqual(payload["next_state"], "WAIT_CANDIDATE_CHOICE")
+        self.assertFalse(payload["completed"])
+        self.assertTrue(payload["retryable"])
+        self.assertEqual(payload["error_category"], "external_model")
+        self.assertNotIn("error", payload)
+
+        legacy = type("LegacyResult", (), {"ok": False, "data": {}, "next_state": "ERROR"})()
+        legacy_payload = _tool_result_payload("coarse_search", legacy, 1)
+        self.assertEqual(legacy_payload["outcome"], "TOOL_ERROR")
+        self.assertEqual(legacy_payload["tool_name"], "coarse_search")
 
     def test_default_entry_uses_mirror_and_legacy_launchers_are_omitted(self):
         lab = Path(__file__).resolve().parents[2]

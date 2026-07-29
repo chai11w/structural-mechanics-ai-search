@@ -10,7 +10,8 @@ from __future__ import annotations
 import hashlib
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Any, Literal
 
@@ -35,6 +36,7 @@ from tiku_shared.multi_question import (
     prepare_multi_diagram_crops,
 )
 from tiku_agent.intent_contract import CHAPTERS
+from tiku_agent.tool_result import ToolOutcome, ToolResult
 
 
 BASE = Path(__file__).resolve().parent.parent
@@ -75,17 +77,6 @@ class AgentToolConfig:
         return (self.session_dir or self.runtime_dir) / "multi_diagrams"
 
 
-@dataclass
-class ToolResult:
-    ok: bool
-    data: dict[str, Any] = field(default_factory=dict)
-    error: str = ""
-    next_state: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
 def _make_qwen(config: AgentToolConfig) -> QwenClassifier:
     return QwenClassifier(
         cache_path=config.qwen_cache_path,
@@ -93,6 +84,20 @@ def _make_qwen(config: AgentToolConfig) -> QwenClassifier:
     )
 
 
+def _named_tool(name: str):
+    """Guarantee that every return path identifies its tool boundary."""
+
+    def decorate(function):
+        @wraps(function)
+        def wrapped(*args, **kwargs):
+            return function(*args, **kwargs).with_tool(name)
+
+        return wrapped
+
+    return decorate
+
+
+@_named_tool("analyze_image")
 def analyze_image_tool(
     image_path: str | Path,
     *,
@@ -114,9 +119,7 @@ def analyze_image_tool(
         classified = qwen.classify_image(path)
         effective_chapter = resolve_effective_chapter(chapter, classified)
         needs_manual_chapter = effective_chapter is None
-        return ToolResult(
-            ok=True,
-            data={
+        data = {
                 "image_path": str(path),
                 "layout": layout,
                 "classified": classified,
@@ -128,13 +131,30 @@ def analyze_image_tool(
                 "needs_manual_chapter": needs_manual_chapter,
                 "loads": classified.get("loads", []),
                 "load_details": classified.get("load_details", []),
-            },
-            next_state="WAIT_CHAPTER" if needs_manual_chapter else "READY_TO_ROUTE",
+            }
+        if needs_manual_chapter:
+            return ToolResult.needs_input(
+                code="CHAPTER_REQUIRED",
+                error="无法可靠判断章节，请选择第2至第8章。",
+                data=data,
+                next_state="WAIT_CHAPTER",
+            )
+        return ToolResult.success(
+            code="IMAGE_ANALYZED",
+            data=data,
+            next_state="READY_TO_ROUTE",
         )
     except Exception as exc:  # noqa: BLE001 - tool boundary returns structured errors.
-        return ToolResult(ok=False, error=str(exc), next_state="ERROR")
+        del exc
+        return ToolResult.tool_error(
+            code="IMAGE_ANALYSIS_FAILED",
+            error="题图识别暂时失败，请稍后重试。",
+            retryable=True,
+            error_category="external_model",
+        )
 
 
+@_named_tool("analyze_multi_image")
 def analyze_multi_image_tool(
     image_path: str | Path,
     *,
@@ -146,21 +166,30 @@ def analyze_multi_image_tool(
     try:
         layout = _make_qwen(config).analyze_image_scope(path)
         if layout.get("question_layout") != "multi":
-            return ToolResult(
-                ok=True,
+            return ToolResult.success(
+                code="SINGLE_QUESTION_DETECTED",
                 data={"is_multi": False, "layout": layout, "single_analysis": layout.get("single_analysis"), "questions": []},
                 next_state="READY_FOR_SINGLE_ANALYSIS",
             )
 
-        return ToolResult(
-            ok=True,
+        return ToolResult.success(
+            code="MULTI_QUESTION_DETECTED",
             data={"is_multi": True, "layout": layout, "questions": []},
             next_state="READY_FOR_MULTI_DETAILS",
         )
     except Exception as exc:  # noqa: BLE001 - keep the single-question flow usable.
-        return ToolResult(ok=True, data={"is_multi": False, "questions": []}, error=str(exc), next_state="READY_FOR_SINGLE_ANALYSIS")
+        del exc
+        return ToolResult.partial(
+            code="MULTI_DETECTION_FALLBACK",
+            data={"is_multi": False, "questions": []},
+            error="多题判断未完成，已按单题流程继续。",
+            next_state="READY_FOR_SINGLE_ANALYSIS",
+            retryable=False,
+            error_category="external_model",
+        )
 
 
+@_named_tool("prepare_question_units")
 def prepare_question_units_tool(
     image_path: str | Path,
     questions: list[dict[str, Any]],
@@ -174,9 +203,20 @@ def prepare_question_units_tool(
         layout = _make_qwen(config).analyze_layout(path)
         questions = normalize_multi_questions(layout.get("questions", []))
         if layout.get("question_layout") != "multi" or len(questions) < 2:
-            return ToolResult(ok=False, error="多题详细识别未得到至少两道题。", next_state="ERROR")
+            return ToolResult.tool_error(
+                code="MULTI_DETAIL_INVALID",
+                error="多题详细识别未得到至少两道题。",
+                retryable=True,
+                error_category="external_model",
+            )
     except Exception as exc:  # noqa: BLE001
-        return ToolResult(ok=False, error=str(exc), next_state="ERROR")
+        del exc
+        return ToolResult.tool_error(
+            code="MULTI_DETAIL_FAILED",
+            error="多题详细识别暂时失败，请稍后重试。",
+            retryable=True,
+            error_category="external_model",
+        )
     analyzed_questions = []
     for index, question in enumerate(questions, 1):
         item = dict(question)
@@ -199,35 +239,67 @@ def prepare_question_units_tool(
         item["question_image_path"] = crops.get(normalize_question_key(item.get("label")), "")
         item["chapter"] = str(item.get("chapter") or effective_question_chapter(item, CHAPTERS) or "")
         prepared.append(item)
-    return ToolResult(
-        ok=True,
-        data={"questions": prepared, "diagram_crops": crops, "has_reliable_crops": bool(crops)},
-        error=crop_error,
+    data = {
+        "questions": prepared,
+        "diagram_crops": crops,
+        "has_reliable_crops": bool(crops),
+    }
+    if crop_error:
+        return ToolResult.partial(
+            code="MULTI_CROPS_UNAVAILABLE",
+            data=data,
+            error="部分题图裁剪未完成，仍可按题号继续。",
+            next_state="WAIT_QUESTION_CHOICE",
+            retryable=True,
+            error_category="image_processing",
+        )
+    return ToolResult.success(
+        code="QUESTION_UNITS_PREPARED",
+        data=data,
         next_state="WAIT_QUESTION_CHOICE",
     )
 
 
+@_named_tool("route_bank")
 def route_bank_tool(loads: list[dict[str, Any]]) -> ToolResult:
     """Decide whether to search the main bank, symbolic bank, or review lane."""
 
     try:
         route, load_details = RuleRouter().route(loads)
-        return ToolResult(
-            ok=route.route != "needs_review",
-            data={
+        data = {
                 "route": route.route,
                 "category": route.category,
                 "reason": route.reason,
                 "excel_root": str(route.excel_root) if route.excel_root else "",
                 "load_details": load_details,
-            },
-            error="" if route.route != "needs_review" else route.reason,
-            next_state="READY_FOR_STRUCTURE" if route.route == "symbolic" else "READY_FOR_COARSE_SEARCH",
+            }
+        if route.route == "needs_review":
+            return ToolResult.needs_input(
+                code="LOAD_ROUTE_NEEDS_REVIEW",
+                error=route.reason or "荷载信息不足，无法安全选择题库。",
+                data=data,
+                next_state="WAIT_INPUT",
+            )
+        return ToolResult.success(
+            code="BANK_ROUTE_SELECTED",
+            data=data,
+            next_state=(
+                "READY_FOR_STRUCTURE"
+                if route.route == "symbolic"
+                else "READY_FOR_COARSE_SEARCH"
+            ),
         )
     except Exception as exc:  # noqa: BLE001
-        return ToolResult(ok=False, error=str(exc), next_state="ERROR")
+        del exc
+        return ToolResult.tool_error(
+            code="BANK_ROUTE_FAILED",
+            error="题库路由暂时失败，请稍后重试。",
+            retryable=False,
+            error_category="internal_logic",
+        )
 
 
+@_named_tool("classify_structure")
 def classify_structure_tool(
     image_path: str | Path | None,
     *,
@@ -242,16 +314,16 @@ def classify_structure_tool(
     """
 
     if route != "symbolic":
-        return ToolResult(
-            ok=True,
+        return ToolResult.success(
+            code="STRUCTURE_FILTER_NOT_APPLICABLE",
             data={"structure_type": "", "source": "not_applicable", "filter_applicable": False},
             next_state="READY_FOR_COARSE_SEARCH",
         )
 
     text_structure = infer_structure_type_from_text(classified)
     if text_structure:
-        return ToolResult(
-            ok=True,
+        return ToolResult.success(
+            code="STRUCTURE_CLASSIFIED_FROM_TEXT",
             data={
                 "structure_type": text_structure,
                 "confidence": 1.0,
@@ -263,9 +335,10 @@ def classify_structure_tool(
         )
 
     if not image_path:
-        return ToolResult(
-            ok=True,
+        return ToolResult.partial(
+            code="STRUCTURE_FILTER_SKIPPED_NO_IMAGE",
             data={"structure_type": "", "source": "missing_image", "filter_applicable": False},
+            error="缺少题图，已跳过结构类型筛选。",
             next_state="READY_FOR_COARSE_SEARCH",
         )
 
@@ -273,26 +346,39 @@ def classify_structure_tool(
     try:
         structure = _make_qwen(config).classify_structure_type(image_path)
         structure_type = normalize_structure_type(structure.get("structure_type"))
-        return ToolResult(
-            ok=True,
-            data={
+        data = {
                 "structure_type": structure_type,
                 "confidence": structure.get("confidence", 0.0),
                 "reason": structure.get("reason", ""),
                 "source": "vision",
                 "filter_applicable": bool(structure_type),
-            },
+            }
+        if not structure_type:
+            return ToolResult.partial(
+                code="STRUCTURE_TYPE_UNCERTAIN",
+                data=data,
+                error="结构类型无法可靠确定，已跳过该筛选。",
+                next_state="READY_FOR_COARSE_SEARCH",
+                error_category="model_uncertain",
+            )
+        return ToolResult.success(
+            code="STRUCTURE_CLASSIFIED_FROM_IMAGE",
+            data=data,
             next_state="READY_FOR_COARSE_SEARCH",
         )
     except Exception as exc:  # noqa: BLE001 - optional speed-up; search can continue.
-        return ToolResult(
-            ok=True,
+        del exc
+        return ToolResult.partial(
+            code="STRUCTURE_CLASSIFICATION_FALLBACK",
             data={"structure_type": "", "source": "vision_failed", "filter_applicable": False},
-            error=str(exc),
+            error="结构类型识别未完成，已跳过该筛选。",
             next_state="READY_FOR_COARSE_SEARCH",
+            retryable=True,
+            error_category="external_model",
         )
 
 
+@_named_tool("coarse_search")
 def coarse_search_tool(
     loads: list[dict[str, Any]],
     *,
@@ -320,7 +406,12 @@ def coarse_search_tool(
             load_excel=load_bank_excel,
         )
         if scan is None:
-            return ToolResult(ok=False, error=f"Chapter not found: {chapter}", next_state="ERROR")
+            return ToolResult.needs_input(
+                code="UNKNOWN_CHAPTER",
+                error="指定章节不存在，请选择第2至第8章。",
+                data={"chapter": chapter, "route": route},
+                next_state="WAIT_CHAPTER",
+            )
         excluded = {str(key).strip() for key in (exclude_candidate_keys or []) if str(key).strip()}
         scored: list[tuple[float, str, str]] = []
         for score, name in scan.scored:
@@ -353,9 +444,7 @@ def coarse_search_tool(
                 }
             )
 
-        return ToolResult(
-            ok=True,
-            data={
+        data = {
                 "chapter": chapter,
                 "route": route,
                 "structure_type": filter_type,
@@ -363,11 +452,25 @@ def coarse_search_tool(
                 "candidates": candidates,
                 "has_more": has_more,
                 "remaining_candidate_count": max(0, len(scored) - len(top)),
-            },
-            next_state="READY_FOR_RERANK" if candidates else "NO_MATCH",
+            }
+        if not candidates:
+            return ToolResult.no_match(
+                code="NO_COARSE_CANDIDATES",
+                data=data,
+            )
+        return ToolResult.success(
+            code="COARSE_CANDIDATES_FOUND",
+            data=data,
+            next_state="READY_FOR_RERANK",
         )
     except Exception as exc:  # noqa: BLE001
-        return ToolResult(ok=False, error=str(exc), next_state="ERROR")
+        del exc
+        return ToolResult.tool_error(
+            code="COARSE_SEARCH_FAILED",
+            error="题库粗筛暂时失败，请稍后重试。",
+            retryable=True,
+            error_category="local_data",
+        )
 
 
 def _candidate_key(chapter: str, route: str, name: str) -> str:
@@ -375,6 +478,7 @@ def _candidate_key(chapter: str, route: str, name: str) -> str:
     return f"{chapter}|{route}|{normalized_name}"
 
 
+@_named_tool("global_search")
 def global_search_tool(
     loads: list[dict[str, Any]],
     query_image_path: str | Path | None,
@@ -392,9 +496,19 @@ def global_search_tool(
 
     config = config or AgentToolConfig()
     if not query_image_path or not Path(query_image_path).is_file():
-        return ToolResult(ok=False, error="全局搜索缺少可用题图。", next_state="ERROR")
+        return ToolResult.needs_input(
+            code="GLOBAL_SEARCH_IMAGE_REQUIRED",
+            error="全局搜索需要当前题图，请重新上传题目。",
+            next_state="WAIT_IMAGE",
+        )
     if route not in {"main", "symbolic"}:
-        return ToolResult(ok=False, error=f"全局搜索不支持当前题库路由：{route}", next_state="ERROR")
+        return ToolResult.tool_error(
+            code="GLOBAL_SEARCH_UNSUPPORTED_ROUTE",
+            error="当前题库路由不支持全局搜索。",
+            data={"route": route},
+            retryable=False,
+            error_category="invalid_tool_input",
+        )
 
     try:
         candidates = _collect_global_perfect_candidates(
@@ -404,15 +518,14 @@ def global_search_tool(
             threshold=config.global_coarse_threshold,
         )
         if not candidates:
-            return ToolResult(
-                ok=True,
+            return ToolResult.no_match(
+                code="NO_GLOBAL_COARSE_CANDIDATES",
                 data={
                     "candidates": [],
                     "coarse_candidate_count": 0,
                     "model_calls": 0,
                     "retry_model_calls": 0,
                 },
-                next_state="NO_MATCH",
             )
 
         scored = _score_global_candidates(query_image_path, candidates, config=config)
@@ -443,8 +556,8 @@ def global_search_tool(
             item for item in scored if item.get("rerank_status") != "completed"
         ]
         if unfinished:
-            return ToolResult(
-                ok=False,
+            return ToolResult.partial(
+                code="GLOBAL_RERANK_INCOMPLETE",
                 data={
                     "coarse_candidate_count": len(candidates),
                     "model_calls": len(candidates) + retry_model_calls,
@@ -453,6 +566,8 @@ def global_search_tool(
                 },
                 error="部分全局候选复筛未完成，请稍后重试。",
                 next_state="ERROR",
+                retryable=True,
+                error_category="external_model",
             )
 
         visible = [
@@ -470,19 +585,31 @@ def global_search_tool(
             reverse=True,
         )
         visible = _renumber(visible)
-        return ToolResult(
-            ok=True,
-            data={
+        data = {
                 "candidates": visible,
                 "coarse_candidate_count": len(candidates),
                 "model_calls": len(candidates) + retry_model_calls,
                 "retry_model_calls": retry_model_calls,
                 "unfinished_candidates": 0,
-            },
-            next_state="WAIT_CANDIDATE_CHOICE" if visible else "NO_MATCH",
+            }
+        if not visible:
+            return ToolResult.no_match(
+                code="NO_GLOBAL_RELIABLE_CANDIDATES",
+                data=data,
+            )
+        return ToolResult.success(
+            code="GLOBAL_CANDIDATES_FOUND",
+            data=data,
+            next_state="WAIT_CANDIDATE_CHOICE",
         )
     except Exception as exc:  # noqa: BLE001 - tool boundary returns a safe error.
-        return ToolResult(ok=False, error=str(exc), next_state="ERROR")
+        del exc
+        return ToolResult.tool_error(
+            code="GLOBAL_SEARCH_FAILED",
+            error="全局搜索暂时失败，请稍后重试。",
+            retryable=True,
+            error_category="search_pipeline",
+        )
 
 
 def _score_global_candidates(
@@ -583,6 +710,7 @@ def _file_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+@_named_tool("rerank_candidates")
 def rerank_candidates_tool(
     query_image_path: str | Path | None,
     candidates: list[dict[str, Any]],
@@ -598,20 +726,25 @@ def rerank_candidates_tool(
     """
 
     if not candidates:
-        return ToolResult(ok=True, data={"reranked": False, "visible_candidates": []}, next_state="NO_MATCH")
+        return ToolResult.no_match(
+            code="NO_CANDIDATES_TO_RERANK",
+            data={"reranked": False, "visible_candidates": []},
+        )
     coarse_candidates = search.select_coarse_results(candidates)
     if not query_image_path:
-        return ToolResult(
-            ok=True,
+        return ToolResult.partial(
+            code="RERANK_SKIPPED_NO_IMAGE",
             data={"reranked": False, "visible_candidates": _renumber(coarse_candidates), "rerank_note": "无查询图，跳过复筛"},
+            error="缺少查询题图，已显示粗筛结果。",
             next_state="WAIT_CANDIDATE_CHOICE",
+            error_category="missing_optional_input",
         )
 
     try:
         rerank_input = select_rerank_candidates(coarse_candidates, route)
         if not rerank_input:
-            return ToolResult(
-                ok=True,
+            return ToolResult.success(
+                code="RERANK_NOT_REQUIRED",
                 data={"reranked": False, "visible_candidates": _renumber(coarse_candidates), "rerank_note": "候选未达到复筛阈值，已显示粗筛结果。"},
                 next_state="WAIT_CANDIDATE_CHOICE",
             )
@@ -619,25 +752,48 @@ def rerank_candidates_tool(
         if reranked and search.rerank_results_complete(reranked):
             visible = normalize_rerank_results(reranked)
             rerank_note = ""
+            outcome = ToolOutcome.SUCCESS
+            code = "RERANK_COMPLETED"
         elif reranked:
             rerank_note = search.rerank_incomplete_note(reranked)
             visible = _renumber(search.mark_rerank_incomplete(coarse_candidates, rerank_note))
+            outcome = ToolOutcome.PARTIAL
+            code = "RERANK_INCOMPLETE_COARSE_FALLBACK"
         else:
             visible = _renumber(coarse_candidates)
-            rerank_note = ""
-        return ToolResult(
-            ok=True,
-            data={
+            rerank_note = "视觉复筛未返回结果，已显示粗筛结果。"
+            outcome = ToolOutcome.PARTIAL
+            code = "RERANK_EMPTY_COARSE_FALLBACK"
+        data = {
                 "reranked": bool(reranked) and search.rerank_results_complete(reranked),
                 "visible_candidates": visible,
                 "rerank_note": rerank_note,
-            },
+            }
+        if outcome is ToolOutcome.PARTIAL:
+            return ToolResult.partial(
+                code=code,
+                data=data,
+                error=rerank_note,
+                next_state="WAIT_CANDIDATE_CHOICE",
+                retryable=True,
+                error_category="external_model",
+            )
+        return ToolResult.success(
+            code=code,
+            data=data,
             next_state="WAIT_CANDIDATE_CHOICE",
         )
     except Exception as exc:  # noqa: BLE001
-        return ToolResult(ok=False, error=str(exc), next_state="ERROR")
+        del exc
+        return ToolResult.tool_error(
+            code="RERANK_FAILED",
+            error="候选视觉复筛暂时失败，请稍后重试。",
+            retryable=True,
+            error_category="external_model",
+        )
 
 
+@_named_tool("parse_candidate_action")
 def parse_candidate_action_tool(
     text: str,
     *,
@@ -652,30 +808,60 @@ def parse_candidate_action_tool(
 
     value = str(text).strip()
     if state != "WAIT_CANDIDATE_CHOICE":
-        return ToolResult(ok=False, error=f"Unsupported state for candidate action: {state}", next_state=state)
+        return ToolResult.tool_error(
+            code="CANDIDATE_ACTION_INVALID_STATE",
+            error="当前状态不能处理候选操作。",
+            data={"state": state},
+            next_state=state,
+            retryable=False,
+            error_category="invalid_tool_state",
+        )
     if value == "0":
-        return ToolResult(ok=True, data={"action": "cancel"}, next_state="CANCELLED")
+        return ToolResult.success(
+            code="CANDIDATE_ACTION_CANCEL",
+            data={"action": "cancel"},
+            next_state="CANCELLED",
+        )
 
     try:
         rank = int(value)
     except ValueError:
-        return ToolResult(ok=False, error="请回复候选编号，例如 1，或回复 0 取消。", next_state=state)
+        return ToolResult.needs_input(
+            code="CANDIDATE_NUMBER_REQUIRED",
+            error="请回复候选编号，例如 1，或回复 0 取消。",
+            next_state=state,
+        )
 
     if rank < 0:
         delete_rank = abs(rank)
         if 1 <= delete_rank <= candidate_count:
-            return ToolResult(
-                ok=True,
+            return ToolResult.success(
+                code="CANDIDATE_DELETE_SELECTED",
                 data={"action": "delete_candidate", "rank": delete_rank},
                 next_state="PLAN_DELETE",
             )
-        return ToolResult(ok=False, error=f"删除编号超出范围：{delete_rank}", next_state=state)
+        return ToolResult.needs_input(
+            code="CANDIDATE_DELETE_RANK_OUT_OF_RANGE",
+            error=f"删除编号超出范围：{delete_rank}",
+            data={"rank": delete_rank, "candidate_count": candidate_count},
+            next_state=state,
+        )
 
     if 1 <= rank <= candidate_count:
-        return ToolResult(ok=True, data={"action": "answer", "rank": rank}, next_state="ANSWER")
-    return ToolResult(ok=False, error=f"候选编号超出范围：{rank}", next_state=state)
+        return ToolResult.success(
+            code="CANDIDATE_ANSWER_SELECTED",
+            data={"action": "answer", "rank": rank},
+            next_state="ANSWER",
+        )
+    return ToolResult.needs_input(
+        code="CANDIDATE_RANK_OUT_OF_RANGE",
+        error=f"候选编号超出范围：{rank}",
+        data={"rank": rank, "candidate_count": candidate_count},
+        next_state=state,
+    )
 
 
+@_named_tool("answer_candidate")
 def answer_candidate_tool(
     candidates: list[dict[str, Any]],
     *,
@@ -693,31 +879,53 @@ def answer_candidate_tool(
     config = config or AgentToolConfig()
     target = next((item for item in candidates if int(item.get("rank", -1)) == rank), None)
     if target is None:
-        return ToolResult(ok=False, error=f"候选编号不存在：{rank}", next_state="WAIT_CANDIDATE_CHOICE")
+        return ToolResult.needs_input(
+            code="CANDIDATE_RANK_INVALID",
+            error=f"候选编号不存在：{rank}",
+            data={"rank": rank, "candidate_count": len(candidates)},
+            next_state="WAIT_CANDIDATE_CHOICE",
+        )
 
-    answers = search.find_answer_files(target["path"])
-    copied = []
-    if copy_to_output:
-        output_dir = config.answer_output_dir
-        if output_dir.exists():
-            shutil.rmtree(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for src in answers:
-            dst = output_dir / src.name
-            shutil.copy2(src, dst)
-            copied.append(str(dst))
+    try:
+        answers = search.find_answer_files(target["path"])
+        copied = []
+        if copy_to_output:
+            output_dir = config.answer_output_dir
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            for src in answers:
+                dst = output_dir / src.name
+                shutil.copy2(src, dst)
+                copied.append(str(dst))
+    except Exception as exc:  # noqa: BLE001 - isolate file-system failures.
+        del exc
+        return ToolResult.tool_error(
+            code="ANSWER_LOOKUP_FAILED",
+            error="答案文件读取暂时失败，请稍后重试。",
+            data={"rank": rank},
+            retryable=True,
+            error_category="local_filesystem",
+        )
 
-    return ToolResult(
-        ok=bool(answers),
-        data={
+    data = {
             "rank": rank,
             "candidate": target,
             "answer_paths": [str(path) for path in answers],
             "copied_paths": copied,
             "answer_output_dir": str(config.answer_output_dir) if copy_to_output else "",
-        },
-        error="" if answers else f"未找到答案文件：{target.get('path')}",
-        next_state="DONE" if answers else "WAIT_CANDIDATE_CHOICE",
+        }
+    if not answers:
+        return ToolResult.no_match(
+            code="ANSWER_FILES_NOT_FOUND",
+            data=data,
+            error="未找到该候选题对应的答案文件，请返回候选后选择其他题。",
+            next_state="WAIT_CANDIDATE_CHOICE",
+        )
+    return ToolResult.success(
+        code="ANSWER_FILES_FOUND",
+        data=data,
+        next_state="DONE",
     )
 
 

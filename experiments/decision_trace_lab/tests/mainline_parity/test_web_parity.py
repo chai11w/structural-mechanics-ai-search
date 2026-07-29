@@ -99,9 +99,9 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertIn(EXTERNAL_COOKIE, response.headers.get("set-cookie", ""))
         self.assertNotIn("tiku_agent_session=", response.headers.get("set-cookie", ""))
         source = self.observed_client.get("/api/observation/source").json()
-        self.assertEqual(source["source_commit"], "a771758b08a81e75ffbbb6576dec8a0996a788e1")
+        self.assertEqual(source["source_commit"], "7288614454ae1cfda7ed121c6b97d1d2e97174ba")
         self.assertEqual(source["runtime_namespace"], "decision-trace-dev")
-        self.assertEqual(source["verified_files"], 103)
+        self.assertEqual(source["verified_files"], 105)
 
     def test_default_8793_runtime_uses_mainline_safe_answers_and_records_reply_mode(self):
         root = TEST_TMP / uuid4().hex[:6]
@@ -198,8 +198,12 @@ class MainlineWebParityTest(unittest.TestCase):
             "需要你补充章节", "renderCausalChain", "查看原始 JSON",
             "isUsefulCausalEvent", "本轮没有可继续定位的步骤", "open ? '关闭' : '评审'",
             "执行结果：", "处理结果：", "等待用户选择候选题",
+            "从“${beforeText}”进入“${afterText}”",
             "回答生成", "回答方式：", "使用“${kind}”固定回复",
             "模型在安全边界内自由回答", "根据工具执行结果组织回答",
+            "状态：${TOOL_OUTCOME_TEXT[outcome]}", "正常未命中", "需要补充信息",
+            "部分完成", "工具故障", "原因码：${payload.code}", "可以重试",
+            "下一步：${TOOL_NEXT_STATE_TEXT[payload.next_state] || payload.next_state}",
             "评审信息暂时没有加载出来，请稍后重试。",
         ):
             self.assertIn(required, script)
