@@ -34,15 +34,27 @@ python -B scripts/run_tiku_agent_demo.py --port 8790
 
 会话、上传题图、候选图、裁图和答案输出默认位于 `.tmp_tiku_agent_v2/`，媒体地址与当前 Cookie 会话绑定。上传原图、候选图和答案图在刷新或 Demo 重启后仍可显示，最后一次检索或对话操作 2 小时后统一过期；“新对话”会取消当前请求并清理前后端临时状态。前端会在上传前检查图片类型和 15MB 大小限制，并把服务端异常转换为可理解的中文提示。该入口会记录不含用户原话、图片路径或模型原文的结构化任务日志。
 
-Agent 现在只有 Intent V2，不再提供 V1 运行开关。线上 8790 由隐藏计划任务启动，并使用独立生产目录 `.tmp_tiku_agent_v2_prod_8790/`。
+Agent 现在只有 Intent V2，不再提供 V1 运行开关。线上 8790 由隐藏计划任务启动，并使用独立生产目录 `.tmp_tiku_agent_v2_prod_8790/`。8790 默认启用安全回答 V0：无需工具的边界内对话由模型自然回答，业务请求继续走原 Intent V2；模型异常或回答不合规时自动使用安全固定回复，不改变业务状态。
 
-下一版主线候选使用独立的 8794 入口；当前基线与 8790 共用同一套 Agent 行为，仅隔离端口、Cookie 和全部可写运行状态：
+如需临时回退到原固定对话回复，可在手动启动 8790 时显式关闭安全回答：
+
+```powershell
+python -B scripts/run_tiku_agent_demo.py --port 8790 --disable-safe-answer-v0
+```
+
+下一版主线候选使用独立 worktree、分支和 8794 入口，并隔离源码、端口、Cookie 和全部可写运行状态：
 
 ```powershell
 python -B scripts/run_tiku_agent_8794.py
 ```
 
-默认访问 `http://127.0.0.1:8794`，会话数据库、上传/媒体文件、临时 incoming 文件和任务日志统一位于 `.tmp_tiku_agent_v2_candidate_8794/`。8794 使用独立 Cookie `tiku_agent_8794_session`，不会与同一浏览器中的 8790 会话标识混用。该入口目前不包含自主规划或 LangGraph，只用于建立可验证的行为等价基线。
+默认访问 `http://127.0.0.1:8794`，会话数据库、上传/媒体文件、临时 incoming 文件和任务日志统一位于 `.tmp_tiku_agent_v2_candidate_8794/`。8794 使用独立 Cookie `tiku_agent_8794_session`，不会与同一浏览器中的 8790 会话标识混用。候选启动器默认启用安全回答 V0：无需工具的边界内对话由模型自然回答，业务请求继续走原 Intent V2。该入口目前不包含自主规划或 LangGraph。
+
+需要临时回退原固定对话回复时，可显式关闭安全回答：
+
+```powershell
+python -B scripts/run_tiku_agent_8794.py --disable-safe-answer-v0
+```
 
 Intent V2 还提供受限的全局搜索兜底：只有章节判断失败、Agent 已明确提供该选项且用户明确同意时才会执行。它跨第 2–8 章收集粗筛分数 `>= 0.999` 的内容去重候选，以最多 10 路并发完成全部视觉复筛，只展示 `rerank_score > 0.95` 的结果并标注来源章节；结果仍是候选，必须由用户选择 `candidate_rank` 后才会读取答案。普通章节检索和现有飞书机器人不走该流程。
 

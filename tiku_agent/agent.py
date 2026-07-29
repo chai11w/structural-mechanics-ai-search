@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from tiku_agent import render
-from tiku_agent.action_decision_v2 import ActionDecisionV2
+from tiku_agent.action_decision_v2 import (
+    SAFETY_ACTIONS,
+    TASK_ACTIONS,
+    ActionDecisionV2,
+)
 from tiku_agent.conversation_context_v2 import ConversationContextV2
 from tiku_agent.intent_contract import IntentResult
 from tiku_agent.intent_runtime_v2 import (
@@ -16,6 +20,9 @@ from tiku_agent.intent_runtime_v2 import (
 )
 from tiku_agent.intent_v2 import call_qwen_decision_v2, decide_intent_v2
 from tiku_agent.reply_shell_v2 import is_reply_shell_action, render_reply_shell_v2
+from tiku_agent.safe_answer_generator_v0 import SafeAnswerGeneratorV0
+from tiku_agent.safe_answer_policy_v0 import evaluate_safe_answer_policy
+from tiku_agent.safe_answer_reply_v0 import render_safe_answer_v0
 from tiku_agent.state import (
     PHASE_ANSWERED,
     PHASE_ERROR,
@@ -43,6 +50,8 @@ class AgentResponse:
     images: list[str] = field(default_factory=list)
     state: dict[str, Any] = field(default_factory=dict)
     intent: str = ""
+    reply_source: str = ""
+    fallback_reason: str = ""
 
 
 @dataclass
@@ -70,6 +79,8 @@ class TikuSearchAgent:
         use_llm_intent: bool = True,
         llm_client: Callable[[str], dict[str, Any]] | None = None,
         progress_reporter: Callable[[str, str], None] | None = None,
+        enable_safe_answer_v0: bool = False,
+        safe_answer_generator_v0: SafeAnswerGeneratorV0 | None = None,
     ) -> None:
         self.state = state or AgentState()
         self.tools = tools or AgentToolbox()
@@ -77,6 +88,8 @@ class TikuSearchAgent:
         self.use_llm_intent = use_llm_intent
         self.llm_client = llm_client
         self.progress_reporter = progress_reporter
+        self.enable_safe_answer_v0 = enable_safe_answer_v0
+        self.safe_answer_generator_v0 = safe_answer_generator_v0
 
     def handle_image(self, image_path: str | Path) -> AgentResponse:
         context = build_runtime_context_v2(self.state, trusted_image_event=True)
@@ -89,6 +102,19 @@ class TikuSearchAgent:
         return self._dispatch_v2(decision, context, image_path=image_path)
 
     def handle_text(self, text: str) -> AgentResponse:
+        if self.enable_safe_answer_v0:
+            safe_decision = evaluate_safe_answer_policy(text)
+            if safe_decision.eligible:
+                if safe_decision.category == "general":
+                    context = build_runtime_context_v2(self.state)
+                    decision = decide_intent_v2(
+                        text,
+                        context,
+                        llm_client=self._v2_llm_client(),
+                    )
+                    if decision.action in TASK_ACTIONS | SAFETY_ACTIONS:
+                        return self._dispatch_v2(decision, context)
+                return self._safe_answer_response(text, safe_decision.category)
         context = build_runtime_context_v2(self.state)
         decision = decide_intent_v2(
             text,
@@ -96,6 +122,30 @@ class TikuSearchAgent:
             llm_client=self._v2_llm_client(),
         )
         return self._dispatch_v2(decision, context)
+
+    def _safe_answer_response(self, text: str, category: str) -> AgentResponse:
+        if self.safe_answer_generator_v0 is not None:
+            try:
+                generated = self.safe_answer_generator_v0.generate(text)
+            except Exception:  # noqa: BLE001 - preserve the reviewed fixed fallback.
+                generated = None
+            if generated is not None and generated.source != "not_called":
+                return AgentResponse(
+                    text=generated.text,
+                    state=self.state.to_dict(),
+                    intent="safe_answer",
+                    reply_source=generated.source,
+                    fallback_reason=generated.fallback_reason,
+                )
+        return AgentResponse(
+            text=render_safe_answer_v0(category),
+            state=self.state.to_dict(),
+            intent="safe_answer",
+            reply_source="fixed_fallback",
+            fallback_reason=(
+                "generator_error" if self.safe_answer_generator_v0 is not None else ""
+            ),
+        )
 
     def _dispatch_v2(
         self,
