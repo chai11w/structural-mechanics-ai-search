@@ -228,6 +228,8 @@ class MultiAgentCoordinator:
         *,
         rerank: bool = True,
         rerank_top: int = search.DISPLAY_MAX_RESULTS,
+        rerank_model: str = search.DEFAULT_ZHIPU_RERANK_MODEL,
+        rerank_workers: int | None = None,
         classified: dict[str, Any] | None = None,
     ) -> PipelineResult:
         classified = classified or self.qwen.classify_image(image_path)
@@ -237,6 +239,8 @@ class MultiAgentCoordinator:
             query_image_path=str(image_path),
             rerank=rerank,
             rerank_top=rerank_top,
+            rerank_model=rerank_model,
+            rerank_workers=rerank_workers,
             classified=classified,
         )
 
@@ -254,6 +258,8 @@ class MultiAgentCoordinator:
         query_image_path: str | None = None,
         rerank: bool = False,
         rerank_top: int = search.DISPLAY_MAX_RESULTS,
+        rerank_model: str = search.DEFAULT_ZHIPU_RERANK_MODEL,
+        rerank_workers: int | None = None,
         force_rerank: bool = False,
         status_callback=None,
         classified: dict[str, Any] | None = None,
@@ -313,7 +319,13 @@ class MultiAgentCoordinator:
             if status_callback and rerank_input:
                 status_callback("Zhipu复筛中...")
             if rerank_input:
-                zhipu_results = search.rerank_candidates(query_image_path, rerank_input, top_n=rerank_top)
+                zhipu_results = search.rerank_candidates(
+                    query_image_path,
+                    rerank_input,
+                    top_n=rerank_top,
+                    model=rerank_model,
+                    max_workers=rerank_workers,
+                )
                 if zhipu_results and search.rerank_results_complete(zhipu_results):
                     results = normalize_rerank_results(zhipu_results)
                     reranked = True
