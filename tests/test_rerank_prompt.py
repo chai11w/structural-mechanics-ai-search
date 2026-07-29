@@ -1,10 +1,107 @@
+import base64
+import io
 import search
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from PIL import Image, ImageChops
+
 
 class RerankPromptTest(unittest.TestCase):
+    TEST_TEMP_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
+
+    @staticmethod
+    def _decode_data_url(data_url):
+        header, encoded = data_url.split(",", 1)
+        return header, base64.b64decode(encoded)
+
+    def test_rerank_encoder_keeps_default_orientation_bytes(self):
+        self.TEST_TEMP_ROOT.mkdir(exist_ok=True)
+        path = self.TEST_TEMP_ROOT / "rerank-orientation-plain.jpg"
+        try:
+            Image.new("RGB", (7, 5), "white").save(path, format="JPEG")
+
+            self.assertEqual(
+                search.encode_rerank_image_base64(path),
+                search.encode_image_base64(path),
+            )
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_rerank_encoder_normalizes_all_exif_orientations(self):
+        canonical = Image.new("RGB", (11, 7), "white")
+        for x in range(4):
+            for y in range(3):
+                canonical.putpixel((x, y), (220, 20, 20))
+
+        inverse_transpose = {
+            2: Image.Transpose.FLIP_LEFT_RIGHT,
+            3: Image.Transpose.ROTATE_180,
+            4: Image.Transpose.FLIP_TOP_BOTTOM,
+            5: Image.Transpose.TRANSPOSE,
+            6: Image.Transpose.ROTATE_90,
+            7: Image.Transpose.TRANSVERSE,
+            8: Image.Transpose.ROTATE_270,
+        }
+
+        paths = []
+        try:
+            for orientation, inverse in inverse_transpose.items():
+                with self.subTest(orientation=orientation):
+                    path = self.TEST_TEMP_ROOT / f"rerank-orientation-{orientation}.png"
+                    paths.append(path)
+                    stored = canonical.transpose(inverse)
+                    exif = Image.Exif()
+                    exif[274] = orientation
+                    stored.save(path, format="PNG", exif=exif)
+
+                    header, payload = self._decode_data_url(
+                        search.encode_rerank_image_base64(path)
+                    )
+                    with Image.open(io.BytesIO(payload)) as decoded:
+                        decoded.load()
+                        self.assertEqual(header, "data:image/png;base64")
+                        self.assertEqual(decoded.size, canonical.size)
+                        self.assertIsNone(decoded.getexif().get(274))
+                        self.assertIsNone(ImageChops.difference(decoded, canonical).getbbox())
+        finally:
+            for path in paths:
+                path.unlink(missing_ok=True)
+
+    def test_score_candidate_pair_uses_orientation_aware_encoder(self):
+        response = type(
+            "Response",
+            (),
+            {
+                "choices": [
+                    type(
+                        "Choice",
+                        (),
+                        {"message": type("Message", (), {"content": '{"score":0.95,"reason":"一致"}'})()},
+                    )()
+                ]
+            },
+        )()
+        completions = type("Completions", (), {"create": lambda self, **kwargs: response})()
+        client = type(
+            "Client",
+            (),
+            {"chat": type("Chat", (), {"completions": completions})()},
+        )()
+
+        with patch(
+            "search.encode_rerank_image_base64",
+            side_effect=["data:image/png;base64,query", "data:image/jpeg;base64,candidate"],
+        ) as encoder:
+            score, reason = search.score_candidate_pair(client, "query.png", "candidate.jpg")
+
+        self.assertEqual((score, reason), (0.95, "一致"))
+        self.assertEqual(
+            [call.args[0] for call in encoder.call_args_list],
+            ["query.png", "candidate.jpg"],
+        )
+
     def test_default_rerank_prompt_is_shape_only(self):
         self.assertEqual(search.RERANK_PROMPT, search.SHAPE_RERANK_PROMPT)
         self.assertIn("只看主杆件骨架", search.RERANK_PROMPT)
