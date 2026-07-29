@@ -34,7 +34,7 @@ python -B scripts/run_tiku_agent_demo.py --port 8790
 
 会话、上传题图、候选图、裁图和答案输出默认位于 `.tmp_tiku_agent_v2/`，媒体地址与当前 Cookie 会话绑定。上传原图、候选图和答案图在刷新或 Demo 重启后仍可显示，最后一次检索或对话操作 2 小时后统一过期；“新对话”会取消当前请求并清理前后端临时状态。前端会在上传前检查图片类型和 15MB 大小限制，并把服务端异常转换为可理解的中文提示。该入口会记录不含用户原话、图片路径或模型原文的结构化任务日志。
 
-Agent 现在只有 Intent V2，不再提供 V1 运行开关。线上 8790 由隐藏计划任务启动，并使用独立生产目录 `.tmp_tiku_agent_v2_prod_8790/`。8790 默认启用安全回答 V0：无需工具的边界内对话由模型自然回答，业务请求继续走原 Intent V2；模型异常或回答不合规时自动使用安全固定回复，不改变业务状态。
+Agent 现在只有 Intent V2，不再提供 V1 运行开关。线上 8790 由隐藏进程启动，并使用独立生产目录 `.tmp_tiku_agent_v2_prod_8790/`。8790 默认启用安全回答 V0；业务工具使用 `SUCCESS / NO_MATCH / NEEDS_INPUT / PARTIAL / TOOL_ERROR` 五态结果，固定状态机据此决定继续、澄清、回退或失败。视觉复筛会校正带EXIF旋转标记的输入图，但不修改题库源文件；普通图片仍发送原始字节。
 
 如需临时回退到原固定对话回复，可在手动启动 8790 时显式关闭安全回答：
 
@@ -48,7 +48,7 @@ python -B scripts/run_tiku_agent_demo.py --port 8790 --disable-safe-answer-v0
 python -B scripts/run_tiku_agent_8794.py
 ```
 
-默认访问 `http://127.0.0.1:8794`，会话数据库、上传/媒体文件、临时 incoming 文件和任务日志统一位于 `.tmp_tiku_agent_v2_candidate_8794/`。8794 使用独立 Cookie `tiku_agent_8794_session`，不会与同一浏览器中的 8790 会话标识混用。8794 保留已验收的安全回答 V0，并已统一工具结果为 `SUCCESS / NO_MATCH / NEEDS_INPUT / PARTIAL / TOOL_ERROR`；每个结果同时包含工具名、稳定原因码、完成状态、可重试性和安全错误类别，固定状态机据此决定继续、澄清、回退或失败。当前仍不包含自主规划执行或 LangGraph，下一阶段是只记录不执行的影子规划。
+默认访问 `http://127.0.0.1:8794`，会话数据库、上传/媒体文件、临时 incoming 文件和任务日志统一位于 `.tmp_tiku_agent_v2_candidate_8794/`。8794 使用独立 Cookie `tiku_agent_8794_session`，不会与同一浏览器中的 8790 会话标识混用。安全回答、五态工具结果与视觉方向校准已经验收并提升到8790；8794继续承载下一阶段只记录、不执行的影子规划，当前仍不包含自主规划执行或LangGraph。
 
 需要临时回退原固定对话回复时，可显式关闭安全回答：
 
