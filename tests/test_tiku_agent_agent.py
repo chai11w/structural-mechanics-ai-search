@@ -533,6 +533,98 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.current_image_path, "saved-question.jpg")
         self.assertIn("比较像", retried.text)
 
+    def test_explicit_tool_error_enters_error_phase(self):
+        fake = FakeTools(chapter="4力法")
+        fake.analyze_multi_image = lambda image_path, *, config=None: ToolResult.tool_error(
+            error="图片分析暂时不可用。",
+            code="MULTI_DETECTION_FAILED",
+            retryable=True,
+            error_category="upstream",
+        )
+        agent = self.make_agent(fake)
+
+        response = agent.handle_image("q.jpg")
+
+        self.assertEqual(agent.state.phase, PHASE_ERROR)
+        self.assertEqual(agent.state.last_error, "图片分析暂时不可用。")
+        self.assertIn("重试", response.text)
+
+    def test_route_needs_input_clarifies_without_entering_error_phase(self):
+        fake = FakeTools(chapter="4力法")
+        fake.route_bank = lambda loads: ToolResult.needs_input(
+            error="请确认荷载是字母还是数值。",
+            code="LOAD_ROUTE_NEEDS_REVIEW",
+            next_state="WAIT_LOAD_CONFIRMATION",
+        )
+        agent = self.make_agent(fake)
+
+        response = agent.handle_image("q.jpg")
+
+        self.assertEqual(response.intent, "clarification")
+        self.assertNotEqual(agent.state.phase, PHASE_ERROR)
+        self.assertIn("请确认荷载", response.text)
+
+    def test_partial_rerank_is_consumed_and_candidates_remain_available(self):
+        fake = FakeTools(chapter="4力法")
+
+        def partial_rerank(query_image_path, candidates, **kwargs):
+            return ToolResult.partial(
+                data={
+                    "reranked": False,
+                    "visible_candidates": candidates,
+                    "rerank_note": "复筛未完成，已回退粗筛排序。",
+                },
+                code="RERANK_INCOMPLETE_COARSE_FALLBACK",
+                next_state="WAIT_CANDIDATE_CHOICE",
+                retryable=True,
+                error_category="model_incomplete",
+            )
+
+        fake.rerank_candidates = partial_rerank
+        agent = self.make_agent(fake)
+
+        response = agent.handle_image("q.jpg")
+
+        self.assertEqual(agent.state.phase, STATE_WAIT_CANDIDATE_CHOICE)
+        self.assertEqual(agent.state.candidate_count, 2)
+        self.assertEqual(response.images, ["4力法/q1.jpg", "4力法/q2.jpg"])
+
+    def test_partial_global_search_enters_retryable_error_phase(self):
+        fake = FakeTools(chapter="")
+        fake.global_search = lambda *args, **kwargs: ToolResult.partial(
+            data={"candidates": []},
+            error="全局复筛只完成了部分候选。",
+            code="GLOBAL_RERANK_INCOMPLETE",
+            next_state="GLOBAL_SEARCH_RETRY",
+            retryable=True,
+            error_category="model_incomplete",
+        )
+        agent = self.make_v2_agent(fake)
+        agent.handle_image("q.jpg")
+
+        response = agent.handle_text("可以全局搜")
+
+        self.assertEqual(agent.state.phase, PHASE_ERROR)
+        self.assertEqual(agent.state.last_error, "全局复筛只完成了部分候选。")
+        self.assertIn("重试", response.text)
+
+    def test_answer_no_match_keeps_candidate_choice_state(self):
+        fake = FakeTools(chapter="4力法")
+        fake.answer_candidate = lambda candidates, **kwargs: ToolResult.no_match(
+            data={"rank": kwargs["rank"], "candidate": candidates[kwargs["rank"] - 1]},
+            error="未找到该候选题对应的答案文件。",
+            code="ANSWER_FILES_NOT_FOUND",
+            next_state="WAIT_CANDIDATE_CHOICE",
+        )
+        agent = self.make_agent(fake)
+        agent.handle_image("q.jpg")
+
+        response = agent.handle_text("1")
+
+        self.assertEqual(agent.state.phase, STATE_WAIT_CANDIDATE_CHOICE)
+        self.assertEqual(agent.state.last_answer_paths, [])
+        self.assertIn("未找到", response.text)
+
     def test_select_answer_and_resend_answer(self):
         fake = FakeTools(chapter="4力法")
         agent = self.make_agent(fake)

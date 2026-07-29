@@ -28,13 +28,15 @@
 - 已用“你是谁”、能力询问、自然寒暄与告别等真实样本验收，并保留原业务编排回归测试。
 - 已提升到8790生产主线；8794不关闭，继续承载后续自主做事开发。
 
-### 3. Structured Tool Outcomes — Next
+### 3. Structured Tool Outcomes — Completed
 
 - 工具统一返回 `SUCCESS / NO_MATCH / NEEDS_INPUT / PARTIAL / TOOL_ERROR`。
-- 同时返回候选数、是否完成、可重试性和安全错误类别。
-- 编排代码据此确定未命中、失败和下一步，不让AI猜。
+- 同时返回工具名、稳定原因码、业务数据、下一状态、是否完成、可重试性和安全错误类别。
+- 固定编排已经按五态确定未命中、补充输入、可用降级和真实失败，不再依赖单一 `true/false` 猜原因。
+- 九个业务工具及候选动作解析器均由统一边界绑定工具名，保留旧 `ok` 构造器作为临时测试兼容层。
+- 聚焦测试65项、全量测试260项通过；安全回答和现有业务编排未改为自主执行。
 
-### 4. Shadow Planning and Permission Contract
+### 4. Shadow Planning and Permission Contract — Next
 
 - Planner只输出结构化目标、步骤、参数和停止条件。
 - 权限层按phase、题目版本、候选批次、章节授权、参数范围和副作用审核。
