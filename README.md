@@ -36,24 +36,18 @@ python -B scripts/run_tiku_agent_demo.py --port 8790
 
 Agent 现在只有 Intent V2，不再提供 V1 运行开关。线上 8790 由隐藏计划任务启动，并使用独立生产目录 `.tmp_tiku_agent_v2_prod_8790/`。
 
-下一版主线候选使用独立 worktree、分支和 8794 入口。默认运行行为仍与 8790 等价，并隔离源码、端口、Cookie 和全部可写运行状态：
+下一版主线候选使用独立 worktree、分支和 8794 入口，并隔离源码、端口、Cookie 和全部可写运行状态：
 
 ```powershell
 python -B scripts/run_tiku_agent_8794.py
 ```
 
-默认访问 `http://127.0.0.1:8794`，会话数据库、上传/媒体文件、临时 incoming 文件和任务日志统一位于 `.tmp_tiku_agent_v2_candidate_8794/`。8794 使用独立 Cookie `tiku_agent_8794_session`，不会与同一浏览器中的 8790 会话标识混用。候选 Agent 已加入默认关闭的安全回答 V0 路由和可选模型生成接线；不带启用参数时不注入生成器，仍走原 Intent V2。该入口目前不包含自主规划或 LangGraph。
+默认访问 `http://127.0.0.1:8794`，会话数据库、上传/媒体文件、临时 incoming 文件和任务日志统一位于 `.tmp_tiku_agent_v2_candidate_8794/`。8794 使用独立 Cookie `tiku_agent_8794_session`，不会与同一浏览器中的 8790 会话标识混用。候选启动器默认启用安全回答 V0：无需工具的边界内对话由模型自然回答，业务请求继续走原 Intent V2。该入口目前不包含自主规划或 LangGraph。
 
-只在隔离候选验收时，可显式开启安全回答；未提供参数时行为保持关闭：
-
-```powershell
-python -B scripts/run_tiku_agent_8794.py --enable-safe-answer-v0
-```
-
-只在隔离候选验收时，可显式开启安全回答；未提供参数时行为保持关闭：
+需要临时回退原固定对话回复时，可显式关闭安全回答：
 
 ```powershell
-python -B scripts/run_tiku_agent_8794.py --enable-safe-answer-v0
+python -B scripts/run_tiku_agent_8794.py --disable-safe-answer-v0
 ```
 
 Intent V2 还提供受限的全局搜索兜底：只有章节判断失败、Agent 已明确提供该选项且用户明确同意时才会执行。它跨第 2–8 章收集粗筛分数 `>= 0.999` 的内容去重候选，以最多 10 路并发完成全部视觉复筛，只展示 `rerank_score > 0.95` 的结果并标注来源章节；结果仍是候选，必须由用户选择 `candidate_rank` 后才会读取答案。普通章节检索和现有飞书机器人不走该流程。

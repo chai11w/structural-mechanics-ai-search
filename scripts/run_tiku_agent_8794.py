@@ -89,17 +89,36 @@ def build_app(
     )
 
 
-def main() -> int:
+def build_argument_parser() -> argparse.ArgumentParser:
+    """Build the dedicated 8794 launcher arguments.
+
+    Safe answers are part of the accepted 8794 candidate behavior, so the
+    launcher keeps them enabled across restarts.  The library builders remain
+    opt-in to preserve isolated tests and explicit embedding behavior.
+    """
     parser = argparse.ArgumentParser(description="Run the isolated 8794 Agent candidate baseline")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--runtime-dir", type=Path, default=DEFAULT_RUNTIME_DIR)
-    parser.add_argument(
+    safe_answer_group = parser.add_mutually_exclusive_group()
+    safe_answer_group.add_argument(
         "--enable-safe-answer-v0",
+        dest="enable_safe_answer_v0",
         action="store_true",
-        help="Enable bounded Qwen answers only for reviewed pure conversations",
+        help="Enable bounded Qwen answers for safe zero-tool conversations (default)",
     )
-    args = parser.parse_args()
+    safe_answer_group.add_argument(
+        "--disable-safe-answer-v0",
+        dest="enable_safe_answer_v0",
+        action="store_false",
+        help="Temporarily disable safe answers and use the original Intent V2 replies",
+    )
+    parser.set_defaults(enable_safe_answer_v0=True)
+    return parser
+
+
+def main() -> int:
+    args = build_argument_parser().parse_args()
     uvicorn.run(
         build_app(
             args.runtime_dir,

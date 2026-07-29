@@ -9,6 +9,7 @@ from scripts.run_tiku_agent_8794 import (
     DEFAULT_PORT,
     DEFAULT_RUNTIME_DIR,
     SESSION_COOKIE as CANDIDATE_SESSION_COOKIE,
+    build_argument_parser,
     build_app as build_8794_app,
     build_runtime,
 )
@@ -52,6 +53,17 @@ class RecordingRuntime:
 
 
 class Candidate8794BaselineTest(unittest.TestCase):
+    def test_launcher_enables_safe_answers_by_default_with_explicit_rollback(self):
+        parser = build_argument_parser()
+
+        self.assertTrue(parser.parse_args([]).enable_safe_answer_v0)
+        self.assertTrue(
+            parser.parse_args(["--enable-safe-answer-v0"]).enable_safe_answer_v0
+        )
+        self.assertFalse(
+            parser.parse_args(["--disable-safe-answer-v0"]).enable_safe_answer_v0
+        )
+
     def test_runtime_uses_only_the_candidate_root(self):
         root = Path(__file__).resolve().parents[1] / f".tmp_test_8794_{uuid4().hex}"
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
