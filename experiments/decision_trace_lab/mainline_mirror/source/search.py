@@ -61,6 +61,7 @@ ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY") or cfg.get("zhipuai_api_key"
 TOP_K = cfg.get("top_k", 3)
 RERANK_MIN_LOAD_SCORE = 0.5
 DISPLAY_ALL_SCORE = 0.9
+DISPLAY_RELIABLE_MIN_SCORE = 0.8
 DISPLAY_MAX_RESULTS = 3
 RERANK_LOAD_WEIGHT = 0.5
 RERANK_VISION_WEIGHT = 0.5
@@ -659,7 +660,7 @@ def finalize_rerank_results(
         ),
         reverse=True,
     )
-    return select_display_results(scored)
+    return scored
 
 
 def rerank_candidates(
@@ -820,13 +821,15 @@ def select_coarse_results(results):
 def select_display_results(
     results,
     all_score=DISPLAY_ALL_SCORE,
+    reliable_min_score=DISPLAY_RELIABLE_MIN_SCORE,
 ):
-    """Show all results at or above 90%; otherwise show only the best result."""
+    """Show all >=90% results, one best >=80% result, or no unreliable result."""
     if not results:
         return []
 
     very_high = [item for item in results if display_similarity_score(item) >= all_score]
-    selected = very_high or [max(results, key=display_similarity_score)]
+    reliable = [item for item in results if display_similarity_score(item) >= reliable_min_score]
+    selected = very_high or ([max(reliable, key=display_similarity_score)] if reliable else [])
 
     renumbered = []
     for rank, item in enumerate(selected, 1):
@@ -1273,6 +1276,13 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
         reranked = rerank_candidates(rerank_image_path, filtered_rerank_paths, rerank_top)
         if reranked and rerank_results_complete(reranked):
             reranked = select_display_results(reranked)
+            if not reranked:
+                no_match_text = "未找到可靠相似题。"
+                output_path.write_text(no_match_text, encoding="utf-8")
+                LAST_SEARCH_FILE.write_text("[]", encoding="utf-8")
+                print(f"\n{no_match_text}")
+                print(f"\n复筛结果已保存: {output_path}")
+                return
             rerank_lines = []
             rerank_paths = []
             for rank, item in enumerate(reranked, 1):

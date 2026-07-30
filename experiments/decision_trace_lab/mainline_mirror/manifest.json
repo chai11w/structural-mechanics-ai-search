@@ -2,8 +2,8 @@
   "schema_version": 1,
   "source_repository": "F:/cc/7-题库检索",
   "source_branch": "codex/mainline-bounded-autonomy-v1",
-  "source_commit": "544bf179808f4b98bf51fceaae2138c44208d49b",
-  "created_at": "2026-07-29T10:21:48.321549+00:00",
+  "source_commit": "8151267dd76d8299f723d83927d4a6c06798725c",
+  "created_at": "2026-07-30T04:30:36.999070+00:00",
   "snapshot_scope": "tracked mainline code, tests, fixtures and safe documentation; excludes .git, local config/secrets, xlsx question-bank assets, runtime/logs/caches, project-agent metadata, review data, and special_unindexed_questions.json",
   "files": [
     {
@@ -16,11 +16,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "3102ff8dd3ff9fcaf676e5b2fd2e685c22d768677c3a64c03b673a8b24d0cf6a"
+      "sha256": "1cdbfac8a701140bacd4309ff75a49ef6d82b365e9b8912d175af5e466fc0944"
     },
     {
       "path": "SKILL.md",
-      "sha256": "5dd0c654623284ea76e4807910734fde8bcbdd9ab8049e762bba3f72c7790aaf"
+      "sha256": "b4287522d443f54e270dbad67b976c77b3ca575e7d1cdd9d85ec61415500ac65"
     },
     {
       "path": "build_index.py",
@@ -32,7 +32,7 @@
     },
     {
       "path": "multi_agent_pipeline.py",
-      "sha256": "3202eed587ea1570bb67348fc5d570f026b90fafbd63f07c5e0a7a89a3e36bec"
+      "sha256": "5a54132d06220fb175d4cd28c4cafb6b1e8bb76e943bbeb8875a0006db8f9412"
     },
     {
       "path": "requirements.txt",
@@ -104,7 +104,7 @@
     },
     {
       "path": "scripts/feishu_tiku_bot.py",
-      "sha256": "fb78fb1b0432308a44dd694cbe05370b856c95bf0085fa810329158a4c469af7"
+      "sha256": "d91b1c99d3bf2f249a696f15912a20f13a22480298cb79b442f754d77b4db95d"
     },
     {
       "path": "scripts/multi_agent_search.py",
@@ -132,7 +132,7 @@
     },
     {
       "path": "scripts/smoke_test.py",
-      "sha256": "38c7b0b7aed6776df6aafeb8e681767f07c630815fda5e26376e9a89e6702c7f"
+      "sha256": "f69bfd56d3917d4a7d98524e10d831206ecdb23cdf9a80dd743cfc030dac491b"
     },
     {
       "path": "scripts/start_tiku_bot.ps1",
@@ -156,7 +156,7 @@
     },
     {
       "path": "search.py",
-      "sha256": "2f563ea7c6122db67e1d0d2453033bfb11d75c2a4b8447dc6869f8045533ec78"
+      "sha256": "c5fb958094905a54152adacd8260f1c930fc3c4d2099fa34b4a03ba4774a7816"
     },
     {
       "path": "tests/fixtures/intent_v2_blind_01.json",
@@ -196,7 +196,7 @@
     },
     {
       "path": "tests/test_display_policy.py",
-      "sha256": "b0298b80abee6689e9865ccb0047efc1f5b3452cf97ab1ec3a67a82da76685d2"
+      "sha256": "47046305cf4eff8553216489905f2854ef8c2c816ff0429c8d06d473944c9f98"
     },
     {
       "path": "tests/test_feishu_event_dedupe.py",
@@ -232,7 +232,7 @@
     },
     {
       "path": "tests/test_tiku_agent_agent.py",
-      "sha256": "42a52373862168016d28b893ce0283d91aea519e4aab44b5845f45a22e3e2f8e"
+      "sha256": "9c65f28efed0864659ad8a440678bd6cdc877d140a5750ee16a84e94688c30c9"
     },
     {
       "path": "tests/test_tiku_agent_conversation_context_v2.py",
@@ -308,7 +308,7 @@
     },
     {
       "path": "tests/test_tiku_agent_tools.py",
-      "sha256": "93b7e27ebba0d6979235d1eb2fb0bcbbbd02223bb1473bee5d4d9db87899b0dd"
+      "sha256": "ac80fd86b87c9cfc14b8e62bd1bc29f0f070ee8a7decdf603e7a85fea71bd18e"
     },
     {
       "path": "tiku_agent/__init__.py",
@@ -324,7 +324,7 @@
     },
     {
       "path": "tiku_agent/agent.py",
-      "sha256": "69206005408b1d9f7b3bd54f4eea5e989eb87be1375103da8d15eca2254006a7"
+      "sha256": "c43ec3ff619d5807e5b1a767f71223e3a8056a9e3523b03e503a6a1e77b578cb"
     },
     {
       "path": "tiku_agent/conversation_context_v2.py",
@@ -416,7 +416,7 @@
     },
     {
       "path": "tiku_agent/tools.py",
-      "sha256": "41a651e6d8bf8db200fc3f0c23dfb07777600f5ab06e7abca5ca53b8856bdacd"
+      "sha256": "4d154cc0ef3a03a163ee2ff55500b3d02facf21049e3e11f9afd2e10b5b507f4"
     },
     {
       "path": "tiku_shared/__init__.py",
