@@ -294,7 +294,7 @@ def _observer_markup() -> str:
   <details id="observer-technical"><summary>技术详情（开发排查用）</summary><p id="observer-source">正在校验镜像…</p><div id="observer-technical-alerts"></div><p id="observer-event-count">事件 0 条</p><div id="observer-events"></div></details>
 </aside>
 <link rel="stylesheet" href="/observer-assets/observer.css?v=20260729-session-chip-v9">
-<script src="/observer-assets/observer.js?v=20260730-rerank-reason-v13" defer></script>
+<script src="/observer-assets/observer.js?v=20260730-rerank-reason-v14" defer></script>
 {INJECT_MARKER_END}
 """
 

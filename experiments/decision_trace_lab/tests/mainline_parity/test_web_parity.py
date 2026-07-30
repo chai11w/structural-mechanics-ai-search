@@ -88,7 +88,7 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertIn("回答结果", observed.text)
         self.assertIn("可能出错的步骤", observed.text)
         self.assertIn("技术详情（开发排查用）", observed.text)
-        self.assertIn("observer.js?v=20260730-rerank-reason-v13", observed.text)
+        self.assertIn("observer.js?v=20260730-rerank-reason-v14", observed.text)
         for asset in ("demo.css", "demo.js"):
             self.assertEqual(self.base_client.get(f"/assets/{asset}").content, self.observed_client.get(f"/assets/{asset}").content)
         script = self.observed_client.get("/assets/demo.js").text
@@ -209,6 +209,8 @@ class MainlineWebParityTest(unittest.TestCase):
             "部分完成", "工具故障", "可以重试",
             "评审信息暂时没有加载出来，请稍后重试。",
             "道候选进入复筛，最高最终相似度 ${score}%，低于 80%，不予展示",
+            "道候选进入复筛，最终相似度低于 80%，不予展示",
+            "started?.payload?.input_summary?.candidate_count",
         ):
             self.assertIn(required, script)
         self.assertIn(

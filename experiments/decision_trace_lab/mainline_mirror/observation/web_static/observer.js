@@ -304,7 +304,10 @@ function toolResultDetail(name, summary, outcome, code) {
     if (name === 'rerank_candidates') {
       if (code === 'NO_RELIABLE_RERANK_CANDIDATES') {
         const count = Math.max(0, Number(summary.rerank_candidate_count || 0));
-        const score = Math.round(Math.max(0, Math.min(1, Number(summary.best_final_score || 0))) * 100);
+        if (summary.best_final_score == null) {
+          return `${count} 道候选进入复筛，最终相似度低于 80%，不予展示`;
+        }
+        const score = Math.round(Math.max(0, Math.min(1, Number(summary.best_final_score))) * 100);
         return `${count} 道候选进入复筛，最高最终相似度 ${score}%，低于 80%，不予展示`;
       }
       return '没有候选题可以复筛';
@@ -344,7 +347,16 @@ function toolResultDetail(name, summary, outcome, code) {
 
 function humanToolResult(payload) {
   const name = payload.tool_name || '';
-  const summary = payload.output_summary || {};
+  let summary = payload.output_summary || {};
+  if (name === 'rerank_candidates' && summary.rerank_candidate_count == null) {
+    const started = currentEvents.find(event =>
+      event.event_type === 'tool_started'
+      && event.payload?.tool_name === name
+      && Number(event.payload?.call_index || 0) === Number(payload.call_index || 0)
+    );
+    const candidateCount = started?.payload?.input_summary?.candidate_count;
+    if (candidateCount != null) summary = {...summary, rerank_candidate_count: candidateCount};
+  }
   const outcome = normalizedToolOutcome(payload);
   const detail = toolResultDetail(name, summary, outcome, String(payload.code || ''));
   if (outcome === 'SUCCESS') return detail;
