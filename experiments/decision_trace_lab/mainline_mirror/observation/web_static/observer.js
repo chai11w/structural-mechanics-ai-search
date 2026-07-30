@@ -339,7 +339,11 @@ function toolResultDetail(name, summary, outcome, code) {
   if (outcome === 'NEEDS_INPUT') return `${toolLabel(name)}需要用户补充信息`;
   if (outcome === 'NO_MATCH') {
     if (name === 'answer_candidate') return '没有找到所选候选题的答案文件';
-    if (name === 'rerank_candidates') return '没有候选题可以复筛';
+    if (name === 'rerank_candidates') {
+      return code === 'NO_RELIABLE_RERANK_CANDIDATES'
+        ? '复筛完成，但没有候选达到80%的可靠门槛'
+        : '没有候选题可以复筛';
+    }
     if (name === 'coarse_search' || name === 'global_search') return '没有找到可靠候选题';
     return `${toolLabel(name)}已完成，但没有得到结果`;
   }

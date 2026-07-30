@@ -384,6 +384,12 @@ class TikuSearchAgent:
         stopped = self._stop_for_tool_result(reranked, allow_partial=True)
         if stopped is not None:
             return stopped
+        if reranked.outcome is ToolOutcome.NO_MATCH:
+            self.state.set_candidates([])
+            return self._response(
+                reranked.error or "未找到可靠相似题。",
+                intent or IntentResult("search_image"),
+            )
         visible = list(reranked.data.get("visible_candidates") or candidates)
         self.state.set_candidates(visible)
         text = render.render_candidates(

@@ -379,7 +379,8 @@ class TikuAgentToolsTest(unittest.TestCase):
                     "name": "q1.jpg",
                     "score": 0.75,
                     "rerank_score": 0.95,
-                    "final_score": 0.75,
+                    "final_score": 0.85,
+                    "rerank_status": "completed",
                 }
             ]
 
@@ -390,7 +391,30 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertTrue(result.data["reranked"])
         self.assertEqual(result.code, "RERANK_COMPLETED")
         self.assertEqual(rerank.call_count, 1)
-        self.assertEqual(result.data["visible_candidates"][0]["final_score"], 0.75)
+        self.assertEqual(result.data["visible_candidates"][0]["final_score"], 0.85)
+
+    def test_agent_rerank_returns_no_match_when_best_final_score_is_below_eighty_percent(self):
+        candidates = [
+            {"rank": 1, "path": "q1.jpg", "score": 0.75, "name": "q1.jpg"},
+        ]
+        low_result = [{
+            "rank": 1,
+            "path": "q1.jpg",
+            "name": "q1.jpg",
+            "score": 0.75,
+            "rerank_score": 0.0,
+            "final_score": 0.375,
+            "rerank_status": "completed",
+        }]
+
+        with patch("tiku_agent.tools.search.rerank_candidates", return_value=low_result):
+            result = rerank_candidates_tool("query.jpg", candidates, route="main")
+
+        self.assertEqual(result.outcome, ToolOutcome.NO_MATCH)
+        self.assertEqual(result.code, "NO_RELIABLE_RERANK_CANDIDATES")
+        self.assertEqual(result.data["visible_candidates"], [])
+        self.assertEqual(result.data["best_final_score"], 0.375)
+        self.assertIn("可靠相似题", result.error)
 
     def test_agent_rerank_skips_model_when_no_candidate_reaches_threshold(self):
         candidates = [
