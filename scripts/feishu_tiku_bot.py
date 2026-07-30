@@ -1149,8 +1149,9 @@ def format_no_match_reply(result: Any, question_label: str | None = None) -> str
     prefix = f"第{question_label}题：" if question_label else ""
     chapter = getattr(result, "chapter", None) or getattr(result, "chapter_hint", None) or "未知"
     loads = getattr(result, "loads", []) or []
+    reranked = bool(getattr(result, "reranked", False))
     lines = [
-        f"{prefix}没有找到匹配题目。",
+        f"{prefix}{'未找到可靠相似题。' if reranked else '没有找到匹配题目。'}",
         f"识别章节：{chapter}",
         f"识别荷载：{format_loads(loads)}",
     ]

@@ -327,9 +327,10 @@ class MultiAgentCoordinator:
                     max_workers=rerank_workers,
                 )
                 if zhipu_results and search.rerank_results_complete(zhipu_results):
-                    results = normalize_rerank_results(zhipu_results)
+                    displayed = search.select_display_results(zhipu_results)
+                    results = normalize_rerank_results(displayed)
                     reranked = True
-                    rerank_note = ""
+                    rerank_note = "" if displayed else "复筛完成，但没有候选达到80%的可靠相似度门槛。"
                 elif zhipu_results:
                     rerank_note = search.rerank_incomplete_note(zhipu_results)
                     results = search.mark_rerank_incomplete(results, rerank_note)

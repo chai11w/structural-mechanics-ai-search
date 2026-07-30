@@ -589,6 +589,23 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.candidate_count, 2)
         self.assertEqual(response.images, ["4力法/q1.jpg", "4力法/q2.jpg"])
 
+    def test_low_reliability_rerank_enters_no_match_without_showing_candidates(self):
+        fake = FakeTools(chapter="4力法")
+        def no_reliable_rerank(query_image_path, candidates, **kwargs):
+            return ToolResult.no_match(
+                data={"reranked": True, "visible_candidates": [], "best_final_score": 0.79},
+                error="未找到可靠相似题。",
+                code="NO_RELIABLE_RERANK_CANDIDATES",
+                next_state="NO_MATCH",
+            )
+        fake.rerank_candidates = no_reliable_rerank
+        agent = self.make_agent(fake)
+        response = agent.handle_image("q.jpg")
+        self.assertEqual(agent.state.phase, "NO_MATCH")
+        self.assertEqual(agent.state.candidate_count, 0)
+        self.assertEqual(response.images, [])
+        self.assertEqual(response.text, "未找到可靠相似题。")
+
     def test_partial_global_search_enters_retryable_error_phase(self):
         fake = FakeTools(chapter="")
         fake.global_search = lambda *args, **kwargs: ToolResult.partial(

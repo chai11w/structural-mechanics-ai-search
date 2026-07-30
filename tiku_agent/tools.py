@@ -750,7 +750,23 @@ def rerank_candidates_tool(
             )
         reranked = search.rerank_candidates(query_image_path, rerank_input, top_n=rerank_top)
         if reranked and search.rerank_results_complete(reranked):
-            visible = normalize_rerank_results(reranked)
+            displayed = search.select_display_results(reranked)
+            visible = normalize_rerank_results(displayed)
+            if not visible:
+                return ToolResult.no_match(
+                    code="NO_RELIABLE_RERANK_CANDIDATES",
+                    data={
+                        "reranked": True,
+                        "visible_candidates": [],
+                        "rerank_note": "复筛完成，但没有候选达到80%的可靠相似度门槛。",
+                        "best_final_score": max(
+                            (float(item.get("final_score") or 0) for item in reranked),
+                            default=0.0,
+                        ),
+                    },
+                    error="未找到可靠相似题。",
+                    next_state="NO_MATCH",
+                )
             rerank_note = ""
             outcome = ToolOutcome.SUCCESS
             code = "RERANK_COMPLETED"

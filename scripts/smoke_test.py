@@ -338,8 +338,8 @@ def check_multi_agent_routing() -> list[str]:
         {"rank": 1, "path": "a.jpg", "score": 0.70},
         {"rank": 2, "path": "b.jpg", "score": 0.40},
     ])
-    if [item["path"] for item in display_low] != ["a.jpg"]:
-        failures.append(f"rerank display should fall back to the best result, got {display_low}")
+    if display_low:
+        failures.append(f"rerank display should reject results below 80%, got {display_low}")
 
     classified = {
         "chapter_hint": "5位移法",
