@@ -52,6 +52,14 @@ python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter
 python scripts/multi_agent_search.py --types "均布" --raws "q" --chapter "2静定结构" --no-rerank
 ```
 
+启动从 Git 历史恢复的独立桌面 GUI（不替代网页 Agent 或飞书服务）：
+
+```powershell
+python legacy_gui.py
+```
+
+桌面 GUI 的单题入库遵守 plan -> confirm -> execute，并在仓库外备份；“漏存审查”只生成只读计划和报告，不直接批量写入 live 题库。
+
 按上一次检索排名取答案：
 
 ```powershell

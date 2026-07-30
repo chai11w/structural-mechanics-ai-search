@@ -168,6 +168,16 @@ python scripts/search_by_loads.py loads-search --types "均布" --raws "20" --ch
 python scripts/search_by_loads.py answer 1
 ```
 
+### 恢复的桌面 GUI
+
+历史桌面端已作为独立兼容入口恢复，不替代 8790 网页 Agent，也不影响 8788 飞书服务：
+
+```powershell
+python legacy_gui.py
+```
+
+桌面端支持图片或手动荷载检索、候选预览、答案打开与复制。单题入库会先生成主库/字母库路由计划，用户确认后才备份并写入；备份保存到仓库外的 `F:\cc\_backups\7-题库检索\<日期>`。漏存审查按钮仅生成只读计划和报告，不直接批量写入 live 题库。`tkinterdnd2` 用于拖放图片；缺少它时仍可通过文件选择器使用 GUI。
+
 ## 飞书机器人
 
 启动本地服务和临时公网隧道：
