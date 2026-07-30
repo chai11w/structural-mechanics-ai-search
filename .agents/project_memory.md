@@ -6,7 +6,7 @@
 - 8788 是现有题库飞书机器人；8790 是当前稳定网页主线，生产状态位于 `.tmp_tiku_agent_v2_prod_8790`。8790已启用安全回答V0、五态工具结果和视觉复筛EXIF方向校准，业务请求仍走Intent V2固定编排。
 - 8793 是长期复用的观测与人工评审层，镜像当前8790的105文件哈希快照，独立状态位于 `.tmp_review_tiku_prod_8793`，运行身份为 `review-8793-prod`，评审侧栏与标签数据均保留。
 - 稳定工作区使用 `codex/mainline-bounded-autonomy-v1`；8794已迁入 `F:\cc\7-题库检索-8794` 独立 worktree 和 `codex/8794-candidate-v1` 分支，源码、端口、Cookie、运行状态和答案输出均与8790/8793/8788隔离。
-- 五态工具结果和视觉复筛EXIF方向校准已从8794经8793验收后提升到8790；8794当前Python PID 37644，下一阶段先补状态感知安全回答，再进入影子规划。
+- 五态工具结果和视觉复筛EXIF方向校准已从8794经8793验收后提升到8790；8794候选服务当前未运行，下一阶段先恢复独立服务并补状态感知安全回答，再进入影子规划。
 - LangGraph不与8794同时引入，待有限自主行为稳定后再单独评估迁移。
 
 ## Implemented
@@ -72,7 +72,7 @@
 
 ## Next Best Step
 
-1. 检查`safe_answer_*`、`TikuSearchAgent`、`AgentState`和会话恢复链路，定义最小`SafeConversationContext`及phase映射。
+1. 用独立启动入口恢复8794并确认健康，再检查`safe_answer_*`、`TikuSearchAgent`、`AgentState`和会话恢复链路，定义最小`SafeConversationContext`及phase映射。
 2. 在8794接入白名单状态摘要、状态相关提示/兜底和输出校验，保证业务路由与状态完全不变。
 3. 覆盖候选阶段寒暄、等待章节致谢、答案后寒暄、业务操作不误入、跨重启恢复和跨用户隔离，再同步8793评审。
 
