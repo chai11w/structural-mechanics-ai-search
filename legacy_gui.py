@@ -173,7 +173,7 @@ class App:
         self.btn_audit_store = tk.Button(
             mode_frame,
             text="漏存审查（只读）",
-            width=9,
+            width=16,
             bg="#F5A623",
             fg="white",
             font=("", 9, "bold"),
