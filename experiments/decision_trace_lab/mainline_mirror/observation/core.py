@@ -155,9 +155,17 @@ def _enum_value(value: Any) -> str:
     return str(getattr(value, "value", value) or "")
 
 
-def _tool_result_payload(name: str, result: Any, call_index: int) -> dict[str, Any]:
+def _tool_result_payload(
+    name: str,
+    result: Any,
+    call_index: int,
+    *,
+    input_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Serialize the five-state contract without exposing raw tool errors."""
 
+    data = getattr(result, "data", {}) if result is not None else {}
+    data = data if isinstance(data, dict) else {}
     ok = bool(getattr(result, "ok", False))
     outcome = _enum_value(getattr(result, "outcome", ""))
     if outcome not in {"SUCCESS", "NO_MATCH", "NEEDS_INPUT", "PARTIAL", "TOOL_ERROR"}:
@@ -166,6 +174,19 @@ def _tool_result_payload(name: str, result: Any, call_index: int) -> dict[str, A
     if completed is None:
         completed = outcome in {"SUCCESS", "NO_MATCH"}
     error_category = str(getattr(result, "error_category", "") or "")
+    output_summary = _tool_output_summary(result)
+    if name == "rerank_candidates":
+        candidate_count = (input_summary or {}).get("candidate_count")
+        if candidate_count is not None:
+            output_summary["rerank_candidate_count"] = max(0, int(candidate_count))
+        if "best_final_score" in data:
+            try:
+                output_summary["best_final_score"] = max(
+                    0.0,
+                    min(1.0, float(data.get("best_final_score") or 0)),
+                )
+            except (TypeError, ValueError):
+                pass
     return {
         "tool_name": str(getattr(result, "tool", "") or name),
         "call_index": call_index,
@@ -175,7 +196,7 @@ def _tool_result_payload(name: str, result: Any, call_index: int) -> dict[str, A
         "completed": bool(completed),
         "retryable": bool(getattr(result, "retryable", False)),
         "next_state": str(getattr(result, "next_state", "") or ""),
-        "output_summary": _tool_output_summary(result),
+        "output_summary": output_summary,
         "error_category": error_category,
         "error_kind": error_category or ("tool_result_error" if outcome == "TOOL_ERROR" else ""),
     }
@@ -200,10 +221,11 @@ class ObservedToolbox:
             call_index = counts.get(name, 0) + 1
             counts[name] = call_index
             started = time.perf_counter()
+            input_summary = _args_summary(name, args, kwargs)
             _safe_emit("tool_started", lambda: {
                 "tool_name": name,
                 "call_index": call_index,
-                "input_summary": _args_summary(name, args, kwargs),
+                "input_summary": input_summary,
             })
             try:
                 result = original(*args, **kwargs)
@@ -211,7 +233,12 @@ class ObservedToolbox:
                 raise
             _safe_emit(
                 "tool_completed",
-                lambda: _tool_result_payload(name, result, call_index),
+                lambda: _tool_result_payload(
+                    name,
+                    result,
+                    call_index,
+                    input_summary=input_summary,
+                ),
                 duration_ms=round((time.perf_counter() - started) * 1000),
             )
             return result

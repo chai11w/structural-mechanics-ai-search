@@ -273,6 +273,31 @@ class MainlineAgentParityTest(unittest.TestCase):
         self.assertEqual(payload["error_category"], "external_model")
         self.assertNotIn("error", payload)
 
+        no_reliable = ToolResult.no_match(
+            tool="rerank_candidates",
+            code="NO_RELIABLE_RERANK_CANDIDATES",
+            data={
+                "reranked": True,
+                "visible_candidates": [],
+                "best_final_score": 0.4166666667,
+            },
+        )
+        payload = _tool_result_payload(
+            "rerank_candidates",
+            no_reliable,
+            1,
+            input_summary={"candidate_count": 1},
+        )
+        self.assertEqual(
+            payload["output_summary"],
+            {
+                "reranked": True,
+                "visible_candidates_count": 0,
+                "rerank_candidate_count": 1,
+                "best_final_score": 0.4166666667,
+            },
+        )
+
         legacy = type("LegacyResult", (), {"ok": False, "data": {}, "next_state": "ERROR"})()
         legacy_payload = _tool_result_payload("coarse_search", legacy, 1)
         self.assertEqual(legacy_payload["outcome"], "TOOL_ERROR")

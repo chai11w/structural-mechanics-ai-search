@@ -18,11 +18,6 @@ const RESULT_OPTIONS = [
   ['uncertain', 'partial_correct', '部分正确'],
   ['uncertain', 'insufficient_evidence', '无法判断']
 ];
-const NO_MATCH = [
-  ['reasonable_no_match', '合理无结果'],
-  ['false_no_match', '错误无结果'],
-  ['uncertain_no_match', '暂时无法判断']
-];
 const INTENT_TEXT = {
   greeting: '用户正在问候', small_talk: '用户想进行日常交流', capability_help: '用户在询问 Agent 能做什么',
   out_of_scope: '用户提出了题库范围外的问题', search_image: '用户想搜索当前题图', global_search: '用户想搜索全部章节',
@@ -169,7 +164,7 @@ function resultLabelPayload(verdict, category, details = {}) {
   const hasReason = Object.prototype.hasOwnProperty.call(details, 'reason');
   return {
     target_type: 'turn', target_id: currentTurnId, dimension: 'result_interpretation', verdict,
-    error_category: category || '', no_match_classification: current?.no_match_classification || '',
+    error_category: category || '', no_match_classification: '',
     reason: hasReason ? details.reason : (current?.reason || '')
   };
 }
@@ -228,7 +223,6 @@ function renderResultCard() {
   }
   card.append(controls, saveStatus);
   if (label && status !== 'correct') card.append(optionalResultDetails(label));
-  if (currentSummary.is_no_match) card.append(noMatchControls(label));
   host.replaceChildren(card);
   document.querySelector('#observer-causal-section').hidden = !label || status === 'correct';
 }
@@ -256,38 +250,6 @@ function optionalResultDetails(label) {
   });
   details.append(reason, save, saveStatus);
   return details;
-}
-
-function noMatchControls(label) {
-  const group = document.createElement('fieldset');
-  group.className = 'observer-no-match';
-  group.append(textNode('legend', '', '这次“没有结果”是否合理？'));
-  const saveStatus = textNode('p', 'observer-save-status', '');
-  for (const [value, title] of NO_MATCH) {
-    const button = textNode('button', '', title);
-    button.type = 'button';
-    button.disabled = !label;
-    const selected = label?.no_match_classification === value;
-    button.classList.toggle('is-selected', selected);
-    button.setAttribute('aria-pressed', String(selected));
-    button.addEventListener('click', async () => {
-      const active = getLabel(currentTurnId, 'result_interpretation');
-      if (!active) return;
-      button.disabled = true;
-      try {
-        await postLabel({
-          target_type: 'turn', target_id: currentTurnId, dimension: 'result_interpretation',
-          verdict: active.verdict, error_category: active.error_category || '', reason: active.reason || '',
-          no_match_classification: selected ? '' : value
-        }, saveStatus);
-        renderResultCard();
-      } catch (_error) { button.disabled = false; }
-    });
-    group.append(button);
-  }
-  if (!label) group.append(textNode('p', 'observer-hint', '请先判断本轮回答。'));
-  group.append(saveStatus);
-  return group;
 }
 
 function humanIntent(payload) {
@@ -340,9 +302,12 @@ function toolResultDetail(name, summary, outcome, code) {
   if (outcome === 'NO_MATCH') {
     if (name === 'answer_candidate') return '没有找到所选候选题的答案文件';
     if (name === 'rerank_candidates') {
-      return code === 'NO_RELIABLE_RERANK_CANDIDATES'
-        ? '复筛完成，但没有候选达到80%的可靠门槛'
-        : '没有候选题可以复筛';
+      if (code === 'NO_RELIABLE_RERANK_CANDIDATES') {
+        const count = Math.max(0, Number(summary.rerank_candidate_count || 0));
+        const score = Math.round(Math.max(0, Math.min(1, Number(summary.best_final_score || 0))) * 100);
+        return `${count} 道候选进入复筛，最高最终相似度 ${score}%，低于 80%，不予展示`;
+      }
+      return '没有候选题可以复筛';
     }
     if (name === 'coarse_search' || name === 'global_search') return '没有找到可靠候选题';
     return `${toolLabel(name)}已完成，但没有得到结果`;

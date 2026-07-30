@@ -37,9 +37,6 @@
 .observer-optional-details summary, #observer-technical > summary { min-height: 44px; cursor: pointer; font-weight: 650; }
 .observer-optional-details textarea, .observer-optional-details input { margin-top: 7px; }
 .observer-secondary-button { width: 100%; margin-top: 7px; }
-.observer-no-match { display: flex; flex-wrap: wrap; gap: 7px; margin: 13px 0 0; padding: 10px 0 0; border: 0; border-top: 1px dashed #deded8; }
-.observer-no-match legend { width: 100%; margin-bottom: 6px; font-weight: 650; }
-.observer-no-match button { flex: 1 1 120px; }
 .observer-guide { margin: 0 0 10px; color: #5f5f59; }
 .observer-causal-node { margin: 9px 0; padding: 11px; border: 1px solid #e2e2dd; border-radius: 10px; background: #fff; }
 .observer-causal-node.is-selected { border-color: #15803d; background: #f0fdf4; box-shadow: inset 3px 0 #15803d; }
