@@ -9,7 +9,10 @@ from tiku_agent.safe_answer_contract_v0 import (
     build_safe_answer_prompt_v0,
     validate_safe_answer_output_v0,
 )
-from tiku_agent.safe_answer_context_v0 import SafeConversationContext
+from tiku_agent.safe_answer_context_v0 import (
+    SafeAnswerValidationFacts,
+    SafeConversationContext,
+)
 from tiku_agent.safe_answer_reply_v0 import (
     _PHASE_REPLY_BUILDERS,
     render_safe_answer_v0,
@@ -103,12 +106,11 @@ class SafeAnswerContractV0Test(unittest.TestCase):
         # exact (category, phase) pair; every other combination falls back.
         candidates = SafeConversationContext(
             phase=STATE_WAIT_CANDIDATE_CHOICE,
-            current_chapter="4力法",
+            chapter="4力法",
             candidate_count=3,
             allowed_actions=("选择候选题",),
             waiting_for="候选选择",
             last_completed_step="候选已就绪",
-            has_active_image=True,
         )
         idle = SafeConversationContext(
             phase=STATE_IDLE,
@@ -141,11 +143,10 @@ class SafeAnswerContractV0Test(unittest.TestCase):
     def test_phase_builder_violating_the_contract_falls_back_to_generic(self):
         candidates = SafeConversationContext(
             phase=STATE_WAIT_CANDIDATE_CHOICE,
-            current_chapter="4力法",
+            chapter="4力法",
             candidate_count=3,
             waiting_for="候选选择",
             last_completed_step="候选已就绪",
-            has_active_image=True,
         )
         original = dict(_PHASE_REPLY_BUILDERS)
         try:
@@ -187,49 +188,49 @@ class SafeAnswerContractV0Test(unittest.TestCase):
             phase=STATE_WAIT_CHAPTER,
             waiting_for="章节",
             last_completed_step="已识别题图",
-            has_active_image=True,
         )
         wait_question = SafeConversationContext(
             phase=STATE_WAIT_QUESTION_CHOICE,
-            question_count=2,
             waiting_for="题目选择",
             last_completed_step="已识别多道题",
-            has_active_image=True,
         )
         no_match = SafeConversationContext(
             phase=PHASE_NO_MATCH,
-            current_chapter="4力法",
+            chapter="4力法",
             waiting_for="换章节或新题图",
             last_completed_step="无匹配题目",
-            has_active_image=True,
         )
         error = SafeConversationContext(
             phase=PHASE_ERROR,
             waiting_for="重试或新题图",
             last_completed_step="查询失败",
-            has_active_image=True,
         )
         candidates = SafeConversationContext(
             phase=STATE_WAIT_CANDIDATE_CHOICE,
-            current_chapter="4力法",
+            chapter="4力法",
             candidate_count=3,
             waiting_for="候选选择",
             last_completed_step="候选已就绪",
-            has_active_image=True,
         )
+        image_without_answer = SafeAnswerValidationFacts(has_active_image=True)
         cases = (
-            (wait_chapter, "请重新发送题图。", "image_state_conflict"),
-            (wait_question, "现有3个候选题，请选择一个。", "candidate_count_conflict"),
-            (no_match, "请告诉我当前题目所属的章节。", "chapter_state_conflict"),
-            (no_match, "系统未识别出章节，请指定以便检索。", "chapter_state_conflict"),
-            (error, "系统刚才判断章节失败，请补充章节。", "fabricated_error_cause"),
-            (candidates, "现有2个候选题，请选择一个。", "candidate_count_conflict"),
-            (candidates, "答案已返回。", "answer_state_conflict"),
-            (candidates, "当前阶段是WAIT_CHAPTER，可以select_candidate。", "internal_state_token"),
+            (wait_chapter, image_without_answer, "请重新发送题图。", "image_state_conflict"),
+            (wait_question, image_without_answer, "现有3个候选题，请选择一个。", "candidate_count_conflict"),
+            (no_match, image_without_answer, "请告诉我当前题目所属的章节。", "chapter_state_conflict"),
+            (no_match, image_without_answer, "系统未识别出章节，请指定以便检索。", "chapter_state_conflict"),
+            (error, image_without_answer, "系统刚才判断章节失败，请补充章节。", "fabricated_error_cause"),
+            (candidates, image_without_answer, "现有2个候选题，请选择一个。", "candidate_count_conflict"),
+            (candidates, image_without_answer, "答案已返回。", "answer_state_conflict"),
+            (candidates, image_without_answer, "当前阶段是WAIT_CHAPTER，可以select_candidate。", "internal_state_token"),
         )
-        for context, text, reason in cases:
+        for context, facts, text, reason in cases:
             with self.subTest(reason=reason):
-                validation = validate_safe_answer_output_v0(text, "greeting", context)
+                validation = validate_safe_answer_output_v0(
+                    text,
+                    "greeting",
+                    context,
+                    facts,
+                )
                 self.assertFalse(validation.accepted)
                 self.assertEqual(validation.reason, reason)
 
@@ -239,33 +240,40 @@ class SafeAnswerContractV0Test(unittest.TestCase):
             candidate_count=3,
             waiting_for="候选选择",
             last_completed_step="候选已就绪",
-            has_active_image=True,
         )
         answered = SafeConversationContext(
             phase=PHASE_ANSWERED,
+            chapter="4力法",
             candidate_count=3,
             waiting_for=None,
             last_completed_step="答案已返回",
+        )
+        image_without_answer = SafeAnswerValidationFacts(has_active_image=True)
+        image_with_answer = SafeAnswerValidationFacts(
             has_active_image=True,
             has_answer=True,
         )
-        for context, text in (
-            (candidates, "你好，现有3个候选题，请选择一个。"),
-            (answered, "你好，答案已返回。"),
-            (answered, "系统已判为4力法，无需提供章节。"),
+        for context, facts, text in (
+            (candidates, image_without_answer, "你好，现有3个候选题，请选择一个。"),
+            (answered, image_with_answer, "你好，答案已返回。"),
+            (answered, image_with_answer, "系统已判为4力法，无需提供章节。"),
             (
                 SafeConversationContext(
                     phase=STATE_WAIT_QUESTION_CHOICE,
-                    question_count=2,
                     waiting_for="题目选择",
                     last_completed_step="已识别多道题",
-                    has_active_image=True,
                 ),
+                image_without_answer,
                 "请从识别出的两道候选题目中选择一道。",
             ),
         ):
             with self.subTest(phase=context.phase):
-                validation = validate_safe_answer_output_v0(text, "greeting", context)
+                validation = validate_safe_answer_output_v0(
+                    text,
+                    "greeting",
+                    context,
+                    facts,
+                )
                 self.assertTrue(validation.accepted, validation.reason)
 
     def test_semantically_valid_concise_variants_are_not_exact_template_matches(self):
@@ -310,16 +318,11 @@ class SafeAnswerContractV0Test(unittest.TestCase):
     def test_prompt_with_context_contains_only_whitelisted_fields(self):
         context = SafeConversationContext(
             phase=STATE_WAIT_CANDIDATE_CHOICE,
-            current_chapter="4力法",
-            question_count=1,
+            chapter="4力法",
             candidate_count=3,
             allowed_actions=("选择候选题", "查看下一批候选"),
             waiting_for="候选选择",
             last_completed_step="候选已就绪",
-            has_active_image=True,
-            has_answer=False,
-            global_search_offered=False,
-            continuation_available=True,
         )
         prompt = build_safe_answer_prompt_v0("greeting", "你好", context)
         self.assertEqual(prompt.user_prompt, "你好")

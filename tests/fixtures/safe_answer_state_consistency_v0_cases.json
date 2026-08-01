@@ -8,10 +8,9 @@
         "phase": "IDLE",
         "candidate_count": 0,
         "waiting_for": "新题图",
-        "last_completed_step": "",
-        "has_active_image": false,
-        "has_answer": false
+        "last_completed_step": ""
       },
+      "validation_facts": {"has_active_image": false, "has_answer": false},
       "accept": [
         "你好。",
         "在的，请发送题图。",
@@ -39,10 +38,9 @@
         "phase": "WAIT_CHAPTER",
         "candidate_count": 0,
         "waiting_for": "章节",
-        "last_completed_step": "已识别题图",
-        "has_active_image": true,
-        "has_answer": false
+        "last_completed_step": "已识别题图"
       },
+      "validation_facts": {"has_active_image": true, "has_answer": false},
       "accept": [
         "你好，请告诉我题目所属章节。",
         "在的，请告知本题章节。",
@@ -68,14 +66,12 @@
       "phase": "WAIT_QUESTION_CHOICE",
       "context": {
         "phase": "WAIT_QUESTION_CHOICE",
-        "current_chapter": "4力法",
-        "question_count": 2,
+        "chapter": "4力法",
         "candidate_count": 0,
         "waiting_for": "题目选择",
-        "last_completed_step": "已识别多道题",
-        "has_active_image": true,
-        "has_answer": false
+        "last_completed_step": "已识别多道题"
       },
+      "validation_facts": {"has_active_image": true, "has_answer": false},
       "accept": [
         "你好，请从两道题中选择一道。",
         "请从识别出的候选题目中选择一道。",
@@ -101,13 +97,12 @@
       "phase": "WAIT_CANDIDATE_CHOICE",
       "context": {
         "phase": "WAIT_CANDIDATE_CHOICE",
-        "current_chapter": "4力法",
+        "chapter": "4力法",
         "candidate_count": 3,
         "waiting_for": "候选选择",
-        "last_completed_step": "候选已就绪",
-        "has_active_image": true,
-        "has_answer": false
+        "last_completed_step": "候选已就绪"
       },
+      "validation_facts": {"has_active_image": true, "has_answer": false},
       "accept": [
         "你好，现有3个候选题，请选择一个。",
         "在的，请从三个候选中选择一项。",
@@ -133,13 +128,12 @@
       "phase": "ANSWERED",
       "context": {
         "phase": "ANSWERED",
-        "current_chapter": "4力法",
+        "chapter": "4力法",
         "candidate_count": 2,
         "waiting_for": null,
-        "last_completed_step": "答案已返回",
-        "has_active_image": true,
-        "has_answer": true
+        "last_completed_step": "答案已返回"
       },
+      "validation_facts": {"has_active_image": true, "has_answer": true},
       "accept": [
         "你好，答案已返回，请查看。",
         "在的，可以看看答案是否合适。",
@@ -165,13 +159,12 @@
       "phase": "NO_MATCH",
       "context": {
         "phase": "NO_MATCH",
-        "current_chapter": "4力法",
+        "chapter": "4力法",
         "candidate_count": 0,
         "waiting_for": "换章节或新题图",
-        "last_completed_step": "无匹配题目",
-        "has_active_image": true,
-        "has_answer": false
+        "last_completed_step": "无匹配题目"
       },
+      "validation_facts": {"has_active_image": true, "has_answer": false},
       "accept": [
         "你好，当前没有匹配题目。",
         "可以更换章节后再试。",
@@ -199,10 +192,9 @@
         "phase": "ERROR",
         "candidate_count": 0,
         "waiting_for": "重试或新题图",
-        "last_completed_step": "查询失败",
-        "has_active_image": true,
-        "has_answer": false
+        "last_completed_step": "查询失败"
       },
+      "validation_facts": {"has_active_image": true, "has_answer": false},
       "accept": [
         "你好，刚才处理失败，可以重试。",
         "查询出错，请重试或发送新题图。",

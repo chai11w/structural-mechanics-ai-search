@@ -3,7 +3,10 @@ from pathlib import Path
 import unittest
 from unittest.mock import Mock
 
-from tiku_agent.safe_answer_context_v0 import SafeConversationContext
+from tiku_agent.safe_answer_context_v0 import (
+    SafeAnswerValidationFacts,
+    SafeConversationContext,
+)
 from tiku_agent.safe_answer_generator_v0 import SafeAnswerGeneratorV0
 from tiku_agent.safe_answer_reply_v0 import render_safe_answer_v0
 from tiku_agent.state import (
@@ -140,13 +143,11 @@ class SafeAnswerGeneratorV0Test(unittest.TestCase):
     def test_generate_passes_whitelisted_context_into_the_prompt(self):
         context = SafeConversationContext(
             phase=STATE_WAIT_CANDIDATE_CHOICE,
-            current_chapter="4力法",
-            question_count=1,
+            chapter="4力法",
             candidate_count=3,
             allowed_actions=("选择候选题",),
             waiting_for="候选选择",
             last_completed_step="候选已就绪",
-            has_active_image=True,
         )
         seen = []
         client = lambda request: (seen.append(request), "你好。")[1]
@@ -179,8 +180,8 @@ class SafeAnswerGeneratorV0Test(unittest.TestCase):
     def test_generate_fallback_with_context_passes_context_to_render(self):
         seen = []
 
-        def render_spy(category, context=None):
-            seen.append((category, context))
+        def render_spy(category, context=None, validation_facts=None):
+            seen.append((category, context, validation_facts))
             return "你好。"
 
         original_render = render_safe_answer_v0
@@ -193,13 +194,19 @@ class SafeAnswerGeneratorV0Test(unittest.TestCase):
                 waiting_for="章节",
                 last_completed_step="已识别题图",
             )
+            validation_facts = SafeAnswerValidationFacts(has_active_image=True)
             client = Mock(side_effect=TimeoutError("slow"))
-            result = SafeAnswerGeneratorV0(client).generate("你好", context)
+            result = SafeAnswerGeneratorV0(client).generate(
+                "你好",
+                context,
+                validation_facts,
+            )
             self.assertEqual(result.source, "fixed_fallback")
             self.assertEqual(result.fallback_reason, "model_timeout")
             self.assertEqual(len(seen), 1)
             self.assertEqual(seen[0][0], "greeting")
             self.assertIs(seen[0][1], context)
+            self.assertIs(seen[0][2], validation_facts)
         finally:
             generator_module.render_safe_answer_v0 = original_render
 

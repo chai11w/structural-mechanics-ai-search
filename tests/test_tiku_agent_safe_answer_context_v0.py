@@ -1,3 +1,4 @@
+from dataclasses import fields
 import re
 import unittest
 
@@ -6,6 +7,7 @@ from tiku_agent.safe_answer_context_v0 import (
     SAFE_ACTION_LABELS,
     SafeConversationContext,
     build_safe_answer_context,
+    build_safe_answer_validation_facts,
     render_state_section,
 )
 from tiku_agent.state import (
@@ -41,14 +43,11 @@ class SafeAnswerContextV0Test(unittest.TestCase):
     def test_build_from_idle_state(self):
         ctx = build_safe_answer_context(AgentState())
         self.assertEqual(ctx.phase, STATE_IDLE)
-        self.assertEqual(ctx.question_count, 0)
         self.assertEqual(ctx.candidate_count, 0)
         self.assertEqual(ctx.allowed_actions, ())
         self.assertEqual(ctx.waiting_for, "新题图")
         self.assertEqual(ctx.last_completed_step, "")
-        self.assertFalse(ctx.has_active_image)
-        self.assertFalse(ctx.has_answer)
-        self.assertIsNone(ctx.current_chapter)
+        self.assertIsNone(ctx.chapter)
 
     def test_idle_renders_empty_state_section(self):
         ctx = build_safe_answer_context(AgentState())
@@ -70,7 +69,7 @@ class SafeAnswerContextV0Test(unittest.TestCase):
         self.assertIn("补充或更换章节", ctx.allowed_actions)
         self.assertNotIn("确认后查找全部章节", ctx.allowed_actions)
         self.assertEqual(ctx.candidate_count, 3)
-        self.assertEqual(ctx.current_chapter, "4力法")
+        self.assertEqual(ctx.chapter, "4力法")
 
     def test_continue_search_only_when_continuation_available(self):
         base = dict(
@@ -119,7 +118,8 @@ class SafeAnswerContextV0Test(unittest.TestCase):
             last_answer_paths=["D:/answers/4/q1.png"],
         )
         ctx = build_safe_answer_context(state)
-        self.assertTrue(ctx.has_answer)
+        facts = build_safe_answer_validation_facts(state)
+        self.assertTrue(facts.has_answer)
         self.assertIn("重新查看刚才的答案", ctx.allowed_actions)
         self.assertIn("选择候选题", ctx.allowed_actions)
         self.assertIn("补充或更换章节", ctx.allowed_actions)
@@ -171,22 +171,34 @@ class SafeAnswerContextV0Test(unittest.TestCase):
     def test_payload_keys_are_exactly_the_whitelist(self):
         ctx = build_safe_answer_context(AgentState())
         payload = ctx.to_prompt_payload()
+        expected = {
+            "phase",
+            "chapter",
+            "candidate_count",
+            "allowed_actions",
+            "waiting_for",
+            "last_completed_step",
+        }
         self.assertEqual(
             set(payload),
-            {
-                "phase",
-                "current_chapter",
-                "question_count",
-                "candidate_count",
-                "allowed_actions",
-                "waiting_for",
-                "last_completed_step",
-                "has_active_image",
-                "has_answer",
-                "global_search_offered",
-                "continuation_available",
-            },
+            expected,
         )
+        self.assertEqual({item.name for item in fields(SafeConversationContext)}, expected)
+
+    def test_validation_facts_are_code_only_and_not_in_prompt_payload(self):
+        state = _candidate_state(
+            phase=PHASE_ANSWERED,
+            current_image_path="D:/bank/4/q1.jpg",
+            last_answer_paths=["D:/answers/4/q1.png"],
+        )
+        context = build_safe_answer_context(state)
+        facts = build_safe_answer_validation_facts(state)
+
+        self.assertTrue(facts.has_active_image)
+        self.assertTrue(facts.has_answer)
+        self.assertNotIn("has_active_image", context.to_prompt_payload())
+        self.assertNotIn("has_answer", context.to_prompt_payload())
+        self.assertNotIn("question_count", context.to_prompt_payload())
 
     def test_context_never_exposes_sensitive_fields(self):
         state = _candidate_state(

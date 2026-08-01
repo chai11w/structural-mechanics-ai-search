@@ -13,7 +13,10 @@ from tiku_agent.safe_answer_contract_v0 import (
     MAX_SAFE_ANSWER_CHARS,
     validate_safe_answer_output_v0,
 )
-from tiku_agent.safe_answer_context_v0 import SafeConversationContext
+from tiku_agent.safe_answer_context_v0 import (
+    SafeAnswerValidationFacts,
+    SafeConversationContext,
+)
 
 _SAFE_REPLIES = {
     "greeting": "你好。",
@@ -41,6 +44,7 @@ _PHASE_REPLY_BUILDERS: dict[
 def render_safe_answer_v0(
     category: str,
     context: SafeConversationContext | None = None,
+    validation_facts: SafeAnswerValidationFacts | None = None,
 ) -> str:
     """Return one reviewed, concise reply for an eligible pure conversation.
 
@@ -54,7 +58,12 @@ def render_safe_answer_v0(
         builder = _PHASE_REPLY_BUILDERS.get((category, context.phase))
         if builder is not None:
             reply = builder(context)
-            validation = validate_safe_answer_output_v0(reply, category, context)
+            validation = validate_safe_answer_output_v0(
+                reply,
+                category,
+                context,
+                validation_facts,
+            )
             if validation.accepted:
                 return validation.normalized_text
     try:

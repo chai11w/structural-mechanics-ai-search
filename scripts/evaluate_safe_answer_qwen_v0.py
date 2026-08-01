@@ -22,6 +22,7 @@ from tiku_agent.safe_answer_context_v0 import (
     SAFE_ACTION_LABELS,
     SafeConversationContext,
     build_safe_answer_context,
+    build_safe_answer_validation_facts,
 )
 from tiku_agent.safe_answer_generator_v0 import (
     SafeAnswerGeneratorV0,
@@ -232,6 +233,7 @@ def evaluate_matrix(
     for phase in MATRIX_PHASES:
         state = build_phase_state(phase)
         context = build_safe_answer_context(state)
+        validation_facts = build_safe_answer_validation_facts(state)
         for text, category in MATRIX_UTTERANCES:
             captured_output = ""
 
@@ -240,7 +242,11 @@ def evaluate_matrix(
                 captured_output = model_client(request)
                 return captured_output
 
-            result = SafeAnswerGeneratorV0(recording_client).generate(text, context)
+            result = SafeAnswerGeneratorV0(recording_client).generate(
+                text,
+                context,
+                validation_facts,
+            )
             records.append(
                 {
                     "phase": phase,
@@ -289,6 +295,7 @@ def evaluate_action_label_comparison(
     for phase in MATRIX_PHASES:
         state = build_phase_state(phase)
         context = build_safe_answer_context(state)
+        validation_facts = build_safe_answer_validation_facts(state)
         for utterance, category in MATRIX_UTTERANCES:
             pair_index += 1
             # Alternate call order to reduce a simple time/order bias in one live run.
@@ -309,6 +316,7 @@ def evaluate_action_label_comparison(
                 result = SafeAnswerGeneratorV0(comparison_client).generate(
                     utterance,
                     context,
+                    validation_facts,
                 )
                 records.append(
                     {
@@ -443,8 +451,8 @@ def _mentions_state(record: dict) -> bool:
     answer = record["final_answer"]
     context = record.get("context", {})
     facts = []
-    if context.get("current_chapter"):
-        facts.append(context["current_chapter"])
+    if context.get("chapter"):
+        facts.append(context["chapter"])
     if context.get("candidate_count"):
         facts.append(str(context["candidate_count"]))
     if phase == STATE_WAIT_CHAPTER:

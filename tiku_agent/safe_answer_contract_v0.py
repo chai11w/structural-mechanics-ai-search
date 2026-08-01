@@ -12,6 +12,7 @@ import re
 
 from tiku_agent.action_decision_v2 import TASK_ACTIONS
 from tiku_agent.safe_answer_context_v0 import (
+    SafeAnswerValidationFacts,
     SafeConversationContext,
     render_state_section,
 )
@@ -223,6 +224,7 @@ def validate_safe_answer_output_v0(
     text: str | None,
     category: str,
     context: SafeConversationContext | None = None,
+    validation_facts: SafeAnswerValidationFacts | None = None,
 ) -> SafeAnswerValidationV0:
     """Validate one generated answer against format, safety, and safe state."""
 
@@ -247,7 +249,11 @@ def validate_safe_answer_output_v0(
         return _reject("fabricated_execution_claim")
     if _UNSUPPORTED_CAPABILITY_PATTERN.search(normalized):
         return _reject("unsupported_capability_claim")
-    state_reason = _state_consistency_rejection(normalized, context)
+    state_reason = _state_consistency_rejection(
+        normalized,
+        context,
+        validation_facts,
+    )
     if state_reason:
         return _reject(state_reason)
     if not _meets_category_semantics(normalized, category):
@@ -258,6 +264,7 @@ def validate_safe_answer_output_v0(
 def _state_consistency_rejection(
     text: str,
     context: SafeConversationContext | None,
+    validation_facts: SafeAnswerValidationFacts | None,
 ) -> str:
     """Return a high-confidence contradiction reason for one safe context."""
 
@@ -283,12 +290,14 @@ def _state_consistency_rejection(
         return "candidate_state_conflict"
     if context.candidate_count > 0 and _NO_CANDIDATE_PATTERN.search(text):
         return "candidate_state_conflict"
-    if not context.has_answer and _ANSWER_AVAILABLE_PATTERN.search(text):
-        return "answer_state_conflict"
-    if context.has_answer and _ANSWER_MISSING_PATTERN.search(text):
-        return "answer_state_conflict"
+    if validation_facts is not None:
+        if not validation_facts.has_answer and _ANSWER_AVAILABLE_PATTERN.search(text):
+            return "answer_state_conflict"
+        if validation_facts.has_answer and _ANSWER_MISSING_PATTERN.search(text):
+            return "answer_state_conflict"
     if (
-        context.has_active_image
+        validation_facts is not None
+        and validation_facts.has_active_image
         and context.phase in {STATE_WAIT_CHAPTER, STATE_WAIT_QUESTION_CHOICE}
         and (
             _IMAGE_REQUEST_PATTERN.search(text)
@@ -297,7 +306,7 @@ def _state_consistency_rejection(
     ):
         return "image_state_conflict"
     if (
-        context.current_chapter
+        context.chapter
         and context.phase != STATE_WAIT_CHAPTER
         and (
             _CHAPTER_UNKNOWN_CLAIM_PATTERN.search(text)

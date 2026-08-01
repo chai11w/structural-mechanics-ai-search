@@ -7,12 +7,41 @@
 
 - **目标**：8794 状态感知安全回答（roadmap Stage 4）——让安全回答能感知当前业务阶段（等待章节/候选选择/答案展示），业务操作仍走固定状态机。
 - **总计划**：M1 状态摘要模块 → M2 prompt 契约 → M4 generator+agent 接线 → M3 接线后按需兜底文案 → M5 runtime 验收测试 → M6 离线状态感知矩阵评估 + 反射指令强化。
-- **已完成**：M1–M6 全部完成；Codex 复核完成 R1 状态矛盾输出校验与 R2 内部 action 中文翻译。状态感知安全回答已具备白名单摘要、真实模型生成、代码级高置信度矛盾拦截和用户语义下一步。
-- **下一步**：继续按 Codex 审查项逐个讨论，下一项是模型失败时阶段兜底为空的取舍；问题收敛后再交 8793 评审并提升 8790。
+- **已完成**：M1–M6 全部完成；Codex 复核完成 R1 状态矛盾输出校验、R2 内部 action 中文翻译与 R3 模型白名单/代码校验事实拆分。状态感知安全回答已具备严格六字段摘要、真实模型生成、代码级高置信度矛盾拦截和用户语义下一步。
+- **下一步**：继续讨论剩余审查建议；问题收敛后再交 8793 评审并提升 8790。阶段专用安全寒暄兜底经讨论暂不增加，沿用现有业务阶段提示与通用安全兜底。
 
 ---
 
 ## 已完成步骤
+
+### R3 严格模型白名单与代码校验事实拆分（Codex 复核修复）
+`SafeConversationContext`现在严格只含六项模型可见字段：`phase/chapter/candidate_count/allowed_actions/last_completed_step/waiting_for`。原先混在同一对象中的`question_count/has_active_image/has_answer/global_search_offered/continuation_available`不再进入模型上下文或`to_prompt_payload()`；动作权限仍直接从`AgentState`经权限矩阵计算，题图和答案存在性则进入独立的`SafeAnswerValidationFacts`，只供代码矛盾校验使用。Agent、generator、固定兜底和评估脚本已分别传递模型上下文与校验事实，业务状态机和工具未改。
+
+7阶段逐项检查均只有相同六个白名单键；112条状态一致性护栏继续全部通过，相关78项与全量316项测试通过。严格白名单后的真实Qwen矩阵为62/70直接通过；等待题目选择阶段8/10直接结合阶段回答，另2条重新索要题图的输出被代码按`image_state_conflict`拦截，说明校验事实拆出后保护仍有效。评测产物位于忽略目录`.tmp_safe_answer_eval_8794/20260801_145756/`，不提交。
+
+改动文件：
+- `tiku_agent/safe_answer_context_v0.py`
+- `tiku_agent/safe_answer_contract_v0.py`
+- `tiku_agent/safe_answer_generator_v0.py`
+- `tiku_agent/safe_answer_reply_v0.py`
+- `tiku_agent/agent.py`
+- `scripts/evaluate_safe_answer_qwen_v0.py`
+- `tests/fixtures/safe_answer_state_consistency_v0_cases.json`
+- `tests/test_tiku_agent_safe_answer_context_v0.py`
+- `tests/test_tiku_agent_safe_answer_contract_v0.py`
+- `tests/test_tiku_agent_safe_answer_generator_v0.py`
+- `tests/test_tiku_agent_safe_answer_state_aware.py`
+- `tests/test_tiku_agent_safe_answer_state_consistency_v0.py`
+
+验证命令：
+```powershell
+python -B -m unittest tests.test_tiku_agent_safe_answer_context_v0 tests.test_tiku_agent_safe_answer_contract_v0 tests.test_tiku_agent_safe_answer_generator_v0 tests.test_tiku_agent_safe_answer_route_v0 tests.test_tiku_agent_safe_answer_state_aware tests.test_tiku_agent_safe_answer_state_consistency_v0 tests.test_tiku_agent_safe_answer_qwen_v0
+python -B -m unittest discover -s tests -p "test_*.py"
+$env:PYTHONIOENCODING='utf-8'; python -B scripts/evaluate_safe_answer_qwen_v0.py --matrix
+```
+
+### 已接受取舍：不增加阶段专用安全寒暄兜底
+业务状态机已经在等待章节、候选展示、错误重试等节点给出完整业务提示，且安全回答失败不会改变或丢失业务状态。经讨论，暂不为每个寒暄类别×阶段铺设固定文案；模型失败时继续使用按类别的通用安全兜底，后续业务输入仍正常进入状态机。这是明确接受的轻微体验取舍，不再视为待修复缺口。
 
 ### R2 内部 action 中文翻译（Codex 复核修复）
 业务权限矩阵仍以原始 action 判断合法性，但 `SafeConversationContext.allowed_actions` 不再保存或展示 `select_candidate`、`retry_search` 等执行器标识。新增11项完整固定映射，把所有可暴露动作翻译为“选择候选题”“查看下一批候选”“重试刚才的操作”等用户语言；`cancel`和`search_image`继续不进入安全回答面。上下文构造会拒绝未经审查的标签，测试保证映射键完整覆盖允许宇宙、prompt 与业务 action 集合不相交。

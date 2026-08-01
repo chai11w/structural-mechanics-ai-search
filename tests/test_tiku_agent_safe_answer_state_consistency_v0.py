@@ -2,7 +2,10 @@ import json
 from pathlib import Path
 import unittest
 
-from tiku_agent.safe_answer_context_v0 import SafeConversationContext
+from tiku_agent.safe_answer_context_v0 import (
+    SafeAnswerValidationFacts,
+    SafeConversationContext,
+)
 from tiku_agent.safe_answer_contract_v0 import validate_safe_answer_output_v0
 
 
@@ -41,12 +44,14 @@ class SafeAnswerStateConsistencyDatasetV0Test(unittest.TestCase):
         category = self.dataset["category"]
         for group in self.dataset["groups"]:
             context = SafeConversationContext(**group["context"])
+            validation_facts = SafeAnswerValidationFacts(**group["validation_facts"])
             for text in group["accept"]:
                 with self.subTest(phase=group["phase"], text=text):
                     validation = validate_safe_answer_output_v0(
                         text,
                         category,
                         context,
+                        validation_facts,
                     )
                     self.assertTrue(validation.accepted, validation.reason)
 
@@ -54,12 +59,14 @@ class SafeAnswerStateConsistencyDatasetV0Test(unittest.TestCase):
         category = self.dataset["category"]
         for group in self.dataset["groups"]:
             context = SafeConversationContext(**group["context"])
+            validation_facts = SafeAnswerValidationFacts(**group["validation_facts"])
             for case in group["reject"]:
                 with self.subTest(phase=group["phase"], text=case["text"]):
                     validation = validate_safe_answer_output_v0(
                         case["text"],
                         category,
                         context,
+                        validation_facts,
                     )
                     self.assertFalse(validation.accepted)
                     self.assertEqual(validation.reason, case["reason"])

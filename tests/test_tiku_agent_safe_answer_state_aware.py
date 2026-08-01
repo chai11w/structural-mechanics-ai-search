@@ -161,6 +161,21 @@ class SafeAnswerStateAwareAcceptanceTest(unittest.TestCase):
                     seen[0].user_prompt,
                 )
 
+    def test_code_only_validation_facts_never_enter_model_prompt(self):
+        state = _state_for_phase(PHASE_ANSWERED)
+        agent, seen, _ = _capturing_agent(state)
+        agent.handle_text("你好")
+
+        for hidden_field in (
+            "question_count",
+            "题目数量",
+            "has_active_image",
+            "has_answer",
+            "global_search_offered",
+            "continuation_available",
+        ):
+            self.assertNotIn(hidden_field, seen[0].system_prompt)
+
     def test_candidate_phase_greeting_mentions_candidate_count(self):
         state = _state_for_phase(STATE_WAIT_CANDIDATE_CHOICE)
         before = deepcopy(state.to_dict())

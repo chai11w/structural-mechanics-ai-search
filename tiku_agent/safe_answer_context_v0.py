@@ -75,29 +75,20 @@ _LAST_COMPLETED_STEP = {
 
 @dataclass(frozen=True)
 class SafeConversationContext:
-    """Only the sanitized, scalar state a safe-answer model may see.
-
-    Absolute paths, candidate records, raw model output, credentials, error
-    strings, and user-selected indexes are intentionally absent.
-    """
+    """The exact sanitized state whitelist a safe-answer model may see."""
 
     phase: str
-    current_chapter: str | None = None
-    question_count: int = 0
+    chapter: str | None = None
     candidate_count: int = 0
     allowed_actions: tuple[str, ...] = field(default_factory=tuple)
-    waiting_for: str | None = None
     last_completed_step: str = ""
-    has_active_image: bool = False
-    has_answer: bool = False
-    global_search_offered: bool = False
-    continuation_available: bool = False
+    waiting_for: str | None = None
 
     def __post_init__(self) -> None:
         if self.phase not in KNOWN_PHASES:
             raise ValueError(f"unknown safe-answer phase: {self.phase}")
-        if self.question_count < 0 or self.candidate_count < 0:
-            raise ValueError("question_count and candidate_count must not be negative")
+        if self.candidate_count < 0:
+            raise ValueError("candidate_count must not be negative")
         unknown = set(self.allowed_actions) - set(SAFE_ACTION_LABELS.values())
         if unknown:
             raise ValueError(f"non-whitelisted user actions: {sorted(unknown)}")
@@ -106,33 +97,39 @@ class SafeConversationContext:
         """Return the exact whitelisted summary the model may be shown."""
         return {
             "phase": self.phase,
-            "current_chapter": self.current_chapter,
-            "question_count": self.question_count,
+            "chapter": self.chapter,
             "candidate_count": self.candidate_count,
             "allowed_actions": list(self.allowed_actions),
-            "waiting_for": self.waiting_for,
             "last_completed_step": self.last_completed_step,
-            "has_active_image": self.has_active_image,
-            "has_answer": self.has_answer,
-            "global_search_offered": self.global_search_offered,
-            "continuation_available": self.continuation_available,
+            "waiting_for": self.waiting_for,
         }
+
+
+@dataclass(frozen=True)
+class SafeAnswerValidationFacts:
+    """Code-only facts used to reject contradictions; never rendered to a model."""
+
+    has_active_image: bool = False
+    has_answer: bool = False
 
 
 def build_safe_answer_context(state: AgentState) -> SafeConversationContext:
     """Derive the whitelisted summary a model may see for this agent state."""
     return SafeConversationContext(
         phase=state.phase,
-        current_chapter=_clean_optional_text(state.current_chapter),
-        question_count=state.question_count,
+        chapter=_clean_optional_text(state.current_chapter),
         candidate_count=state.candidate_count,
         allowed_actions=_authorized_user_actions(state),
         waiting_for=_WAITING_FOR.get(state.phase),
         last_completed_step=_LAST_COMPLETED_STEP.get(state.phase, ""),
+    )
+
+
+def build_safe_answer_validation_facts(state: AgentState) -> SafeAnswerValidationFacts:
+    """Derive code-only consistency facts without exposing them to the model."""
+    return SafeAnswerValidationFacts(
         has_active_image=bool(state.active_image_path),
         has_answer=bool(state.last_answer_paths),
-        global_search_offered=state.global_search_offered,
-        continuation_available=state.continuation_available,
     )
 
 
@@ -148,9 +145,8 @@ def render_state_section(context: SafeConversationContext) -> str:
         "当前状态（脱敏摘要，只用于组织措辞，不得复述或推断列表之外的信息）：",
         f"- 阶段：{context.phase}",
     ]
-    if context.current_chapter:
-        lines.append(f"- 章节：{context.current_chapter}")
-    lines.append(f"- 题目数量：{context.question_count}")
+    if context.chapter:
+        lines.append(f"- 章节：{context.chapter}")
     lines.append(f"- 候选数量：{context.candidate_count}")
     if context.last_completed_step:
         lines.append(f"- 上一步：{context.last_completed_step}")
