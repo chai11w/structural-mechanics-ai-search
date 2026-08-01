@@ -4,7 +4,9 @@ import unittest
 
 from tiku_agent.action_permissions_v2 import OUTCOME_REJECT
 from tiku_agent.shadow_plan_v0 import (
+    ACTION_TOOL_COST,
     MAX_PLAN_STEPS,
+    MAX_TOOLS_PER_PLAN,
     PLAN_ACTION_UNIVERSE,
     REVIEW_ALLOW,
     REVIEW_REJECT,
@@ -284,6 +286,45 @@ class ReviewShadowPlanTest(unittest.TestCase):
         plan = _plan(_step("retry_search"))
         review = review_shadow_plan(plan, facts)
         self.assertEqual(review.outcome, REVIEW_REJECT)
+
+    def test_plan_tools_budget_exceeded_is_rejected(self) -> None:
+        # A four-step select_question plan would trigger 4*4 = 16 tool calls in
+        # the real dispatch, far over the tool-level budget of 8.
+        facts = build_permission_review_facts(_candidate_state())
+        plan = _plan(
+            *(_step("select_question", question_index=i) for i in (1, 2, 1, 2))
+        )
+        review = review_shadow_plan(plan, facts)
+        self.assertEqual(review.outcome, REVIEW_REJECT)
+        self.assertEqual(review.code, "plan_tools_budget_exceeded")
+        self.assertIn("plan_tools_budget_exceeded", review.violations)
+
+    def test_plan_within_tools_budget_is_allowed(self) -> None:
+        # continue_search (2 tools) + select_candidate (1 tool) = 3 <= 8.
+        # continuation_available must be true for the matrix to allow the step.
+        facts = PermissionReviewFacts(
+            phase=STATE_WAIT_CANDIDATE_CHOICE,
+            candidate_count=3,
+            current_chapter="4力法",
+            has_active_image=True,
+            continuation_available=True,
+        )
+        plan = _plan(
+            _step("continue_search"),
+            _step("select_candidate", candidate_rank=1),
+        )
+        review = review_shadow_plan(plan, facts)
+        self.assertEqual(review.outcome, REVIEW_ALLOW)
+
+    def test_tool_cost_map_covers_entire_plan_universe(self) -> None:
+        # The budget is only sound if every planner action has a cost entry;
+        # an unknown action must never silently fall through as free.
+        missing = set(PLAN_ACTION_UNIVERSE) - set(ACTION_TOOL_COST)
+        self.assertEqual(missing, set())
+
+    def test_tool_cost_map_values_are_non_negative(self) -> None:
+        for action, cost in ACTION_TOOL_COST.items():
+            self.assertGreaterEqual(cost, 0, f"{action} has a negative tool cost")
 
 
 if __name__ == "__main__":

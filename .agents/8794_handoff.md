@@ -460,3 +460,39 @@ PYTHONIOENCODING=utf-8 python -B scripts/evaluate_shadow_plan_qwen_v0.py   # 重
 ### 下一步候选
 - 迭代 `SHADOW_PLAN_PROMPT` 修正 WAIT_CHAPTER 动作选择（对照 Stage 4 反射指令三版迭代的成熟做法）。
 - 或在交接后交 Codex 审查当前结果，再决定是否继续调。
+
+### 修复：预算下沉到工具级（Stage 6 工具硬上限预演）
+Codex 审查意见（用户转达）指出：规划器的一步动作在真实状态机里展开成多个工具调用，影子规划的 `MAX_PLAN_STEPS=4` 是**动作级**预算，与 Stage 6"工具总数硬上限"（**工具级**）语义错位——一个 4 步 `select_question` 计划实际触发 4×4=16 次工具调用，预算失效。
+
+审查核实的动作→工具展开（agent.py dispatch 链）：
+- `retry_search`=7（复用已存图重跑全链）
+- `set_chapter`/`select_question`=4（route→classify→coarse→rerank）
+- `global_search`=3、`continue_search`=2、`select_candidate`=1、其余状态类动作=0
+
+修复（`shadow_plan_v0.py`）：
+- 新增 `ACTION_TOOL_COST` 常量：动作→保守工具数上界，注释显式指向 agent.py dispatch 链，改链必须同步。
+- 新增 `MAX_TOOLS_PER_PLAN=8` 与 `PermissionReviewFacts.max_tools`。
+- `review_shadow_plan` 在步数检查后新增工具预算检查：累加各 step 工具数超上限 → `plan_tools_budget_exceeded`。
+- `_plan_tool_cost` 对未知动作按 0 计（不误伤），由测试强制补全映射。
+
+新增 4 条测试：4 步 select_question（16 工具）被拒、continue_search+select_candidate（3 工具）放行、映射覆盖全部 PLAN_ACTION_UNIVERSE、映射值非负。相关测试 25 条、全量 368 条通过。
+
+改动文件：
+- `tiku_agent/shadow_plan_v0.py`
+- `tests/test_tiku_agent_shadow_plan_v0.py`
+
+验证命令：
+```powershell
+python -B -m unittest tests.test_tiku_agent_shadow_plan_v0   # 25/25
+python -B -m unittest discover -s tests -p "test_*.py"        # 368 全量
+PYTHONIOENCODING=utf-8 python -B scripts/evaluate_shadow_plan_qwen_v0.py   # 重跑矩阵对比
+```
+
+### 工具预算修复后真实矩阵重跑（`.tmp_shadow_plan_eval_8794/20260801_184352/`）
+- 总通过率 **59/105 (56.19%)**，与修复前持平；结构合法率 100%。
+- **`plan_tools_budget_exceeded` 未出现**：105 个真实计划工具成本分布 {0:71, 1:5, 2:2, 3:14, 4:11, 7:2}，**0 个超 8 工具预算**。结论：真实规划器天然不提议重计划，工具预算是**对抗性防御**（测试锁定：模型若提出 16 工具计划会被拦），对真实输出零误拦、零副作用。
+- 核验脚本确认：无"超预算却 allow"的漏放行。
+
+### 剩余待解问题（沿用上轮，未改）
+1. **WAIT_CHAPTER 规划器动作选择偏差**（`explainable_failure_required` 仍 25 次）：规划器把"有没有更接近的/后面那几道也看看"误判为 explain_failure，应提 continue_search/show_candidates。属 prompt 引导不足，非审核 bug。
+2. **审核把 clarify 当 reject**：缺信息可引导的动作被统一记为拒绝。纯记录阶段无危险，是否细化留 Codex 决定。

@@ -33,6 +33,38 @@ PLAN_ACTION_UNIVERSE = tuple(sorted(TASK_ACTIONS - {"cancel", "search_image"}))
 MAX_PLAN_STEPS = 4
 MAX_PLANS_PER_TURN = 1
 
+# Tool-cost budget, in real tool calls.  A plan step is an *action*, but in the
+# fixed state machine one action expands into several tool calls (see
+# ``agent.py`` dispatch chains).  Budgeting at the step count would let a four
+# step plan trigger up to 28 tool calls, so the permission review also sums the
+# conservative per-action tool upper bound and rejects plans over this cap.
+# Each value mirrors the longest tool chain for that action in ``agent.py``;
+# changing a dispatch chain MUST update this map (guarded by a test).
+MAX_TOOLS_PER_PLAN = 8
+
+ACTION_TOOL_COST: dict[str, int] = {
+    # Full image-analysis + search chain: analyze_multi_image → (multi)
+    # prepare_question_units → analyze_image → route_bank → classify_structure
+    # → coarse_search → rerank_candidates.  ``search_image`` is not in the
+    # planner universe but retry_search re-runs the same saved-image chain.
+    "retry_search": 7,
+    # Route + classify + coarse + rerank.
+    "set_chapter": 4,
+    "select_question": 4,
+    # Route + classify + global search.
+    "global_search": 3,
+    # Coarse + rerank (reuses the stored route).
+    "continue_search": 2,
+    # Single answer lookup.
+    "select_candidate": 1,
+    # State-only actions trigger no tools.
+    "reject_candidates": 0,
+    "show_candidates": 0,
+    "report_answer_mismatch": 0,
+    "resend_answer": 0,
+    "explain_failure": 0,
+}
+
 REVIEW_ALLOW = "allow"
 REVIEW_REJECT = "reject"
 
@@ -106,6 +138,7 @@ class PermissionReviewFacts:
     continuation_available: bool = False
     read_only_actions: frozenset[str] = frozenset(PLAN_ACTION_UNIVERSE)
     max_steps: int = MAX_PLAN_STEPS
+    max_tools: int = MAX_TOOLS_PER_PLAN
     max_plans_per_turn: int = MAX_PLANS_PER_TURN
 
     def __post_init__(self) -> None:
@@ -176,6 +209,14 @@ def review_shadow_plan(
             ("plan_too_long",),
         )
 
+    total_tools = _plan_tool_cost(plan)
+    if total_tools > facts.max_tools:
+        return _reject(
+            "plan_tools_budget_exceeded",
+            f"计划预计触发 {total_tools} 次工具调用，超过上限 {facts.max_tools}。",
+            ("plan_tools_budget_exceeded",),
+        )
+
     for step in plan.steps:
         violation = _review_step(step, facts)
         if violation is not None:
@@ -187,6 +228,16 @@ def review_shadow_plan(
         reason="计划在只读、阶段、版本、批次、章节与参数范围内。",
         plan=plan,
     )
+
+
+def _plan_tool_cost(plan: ShadowPlan) -> int:
+    """Sum the conservative per-action tool upper bound for every step.
+
+    Unknown actions are treated as free (cost 0) so a future action added to
+    ``PLAN_ACTION_UNIVERSE`` without a map entry never accidentally over-budgets;
+    the coverage test forces the map to be completed instead.
+    """
+    return sum(ACTION_TOOL_COST.get(step.action, 0) for step in plan.steps)
 
 
 def _review_step(
