@@ -742,3 +742,37 @@ $env:PYTHONIOENCODING = "utf-8"; python -u -B scripts\evaluate_shadow_admission_
 - 下一步先讨论并建立条件表达保护测试，不直接实现顺序准入。
 - 条件保护必须同时覆盖固定Intent和语义闸门，且不能破坏明确无条件指令。
 - 条件保护通过后，再扩充顺序请求留出集并实现第一批纯影子准入；暂不进入Stage 6、不拆工具、不提升8790。
+
+---
+
+## 步骤：Stage 5 Agent流量权重与安全硬门槛
+
+### 干了啥
+
+- 只读核对8790/8793生产脱敏日志：8790共188轮/51会话，8793共119轮/24会话；日志能统计动作、阶段和工具，但隐私边界禁止保存用户原话，不能据此还原多动作/条件句的真实语言频率。
+- 保留40条四组均衡数据作为边界压力集，新增`representative_v0`暂定产品权重：原子70%、含糊/暂不支持20%、顺序8%、条件2%。前两类为流量大头有脱敏动作日志支撑，8%/2%明确标记为产品先验。
+- 新增加权入口契约分，但不让低频危险被平均：原子误入、可见差异、实际放行禁止动作、条件请求直接工具调用均为零容忍硬门槛。
+- 旧完整120轮按新口径为90%入口契约分、`release_ready=false`；条件专项30轮中12轮调用工具（39次调用），安全硬门槛失败。
+
+### 改动文件
+
+- `tests/fixtures/shadow_admission_v0_cases.json`
+- `scripts/evaluate_shadow_admission_qwen_v0.py`
+- `tests/test_tiku_agent_shadow_admission_eval_v0.py`
+- `.agents/roadmap.md`
+- `.agents/project_memory.md`
+- `.agents/8794_handoff.md`
+
+### 验证命令
+
+```powershell
+python -B -m unittest tests.test_tiku_agent_shadow_admission_eval_v0
+python -B -m unittest discover -s tests -p "test_*.py"
+```
+
+结果：专项9/9、全量402/402通过。全量测试在受限沙箱内会因Python临时目录权限产生1个环境假失败，沙箱外原命令复跑通过。
+
+### 下一步
+
+- 先建立条件表达保护金标准并修固定Intent/语义闸门，保证条件未满足时不直接执行；权重只用于评估产品影响，不能替代安全门槛。
+- 若要把8%/2%替换成实测频率，应在8794另行评审隐私保护的在线粗分类日志，只存类别与阶段、不存用户原话；不得从现有日志伪造频率。

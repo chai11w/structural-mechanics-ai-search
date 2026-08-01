@@ -55,6 +55,7 @@ from tiku_agent.shadow_semantic_gate_v0 import (
 
 FIXTURE = BASE / "tests" / "fixtures" / "shadow_admission_v0_cases.json"
 DEFAULT_OUTPUT_ROOT = BASE / ".tmp_shadow_admission_eval_8794"
+DEFAULT_PROFILE = "representative_v0"
 
 EXPECTED_NEVER = "never"
 EXPECTED_OBSERVE = "should_observe"
@@ -100,6 +101,35 @@ def load_admission_cases(path: Path = FIXTURE) -> list[dict[str, Any]]:
             case[field] = [str(item) for item in case[field] if str(item)]
         normalized.append(case)
     return normalized
+
+
+def load_evaluation_profile(
+    path: Path = FIXTURE,
+    profile_name: str = DEFAULT_PROFILE,
+) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    profiles = payload.get("evaluation_profiles") if isinstance(payload, dict) else None
+    profile = profiles.get(profile_name) if isinstance(profiles, dict) else None
+    if not isinstance(profile, dict):
+        raise ValueError(f"unknown evaluation profile: {profile_name}")
+    weights = profile.get("group_weights")
+    if not isinstance(weights, dict) or set(weights) != GROUPS:
+        raise ValueError(f"profile {profile_name} must weight every admission group")
+    normalized_weights = {str(group): float(weight) for group, weight in weights.items()}
+    if any(weight < 0 for weight in normalized_weights.values()):
+        raise ValueError(f"profile {profile_name} has a negative group weight")
+    if abs(sum(normalized_weights.values()) - 1.0) > 1e-9:
+        raise ValueError(f"profile {profile_name} group weights must sum to 1")
+    hard_gates = profile.get("hard_gates")
+    if not isinstance(hard_gates, list) or not hard_gates:
+        raise ValueError(f"profile {profile_name} must define hard_gates")
+    return {
+        "name": profile_name,
+        "status": str(profile.get("status") or "unknown"),
+        "description": str(profile.get("description") or ""),
+        "group_weights": normalized_weights,
+        "hard_gates": [str(item) for item in hard_gates],
+    }
 
 
 def evaluate_admission_cases(
@@ -170,6 +200,7 @@ def evaluate_admission_case(
         "current_response_intent": entry["observed"]["intent"],
         "current_response": entry["observed"],
         "current_tools": entry["observed_tools"],
+        "current_tool_call_count": len(entry["observed_tools"]),
         "current_planner_actions": entry["planner_actions"],
         "observable_equal": entry["observable_equal"],
         "required_steps": list(case["required_steps"]),
@@ -257,7 +288,11 @@ def _is_subsequence(required: list[str], actual: list[str]) -> bool:
     return all(any(item == expected for item in cursor) for expected in required)
 
 
-def summarize_admission(records: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize_admission(
+    records: list[dict[str, Any]],
+    *,
+    profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     target_counts = Counter(str(record["expected_entry"]) for record in records)
     group_counts: dict[str, dict[str, int]] = defaultdict(
         lambda: {"total": 0, "admitted": 0, "diagnostic_useful": 0}
@@ -276,7 +311,7 @@ def summarize_admission(records: list[dict[str, Any]]) -> dict[str, Any]:
     ]
     diagnostic_routes = Counter(str(record["diagnostic"]["route"]) for record in records)
     fixed_intents = Counter(str(record["current_response_intent"]) for record in records)
-    return {
+    summary = {
         "total": len(records),
         "targets": dict(target_counts),
         "groups": dict(group_counts),
@@ -290,6 +325,16 @@ def summarize_admission(records: list[dict[str, Any]]) -> dict[str, Any]:
         ) if should_records else 0.0,
         "current_atomic_false_admissions": sum(
             bool(record["current_admitted"]) for record in never_records
+        ),
+        "current_conditional_tool_calls": sum(
+            int(record.get("current_tool_call_count", len(record.get("current_tools", []))))
+            for record in records
+            if record["group"] == "conditional"
+        ),
+        "current_conditional_tool_turns": sum(
+            bool(record.get("current_tool_call_count", len(record.get("current_tools", []))))
+            for record in records
+            if record["group"] == "conditional"
         ),
         "current_entry_contract_failures": sum(
             not bool(record["entry_contract_ok"]) for record in records
@@ -325,6 +370,36 @@ def summarize_admission(records: list[dict[str, Any]]) -> dict[str, Any]:
             if not record["current_admitted"]
         ],
     }
+    if profile is not None:
+        weights = dict(profile["group_weights"])
+        group_contract_rates = {
+            group: round(
+                sum(bool(record["entry_contract_ok"]) for record in records if record["group"] == group)
+                / sum(1 for record in records if record["group"] == group),
+                4,
+            )
+            for group in GROUPS
+            if any(record["group"] == group for record in records)
+        }
+        active_weight = sum(weights[group] for group in group_contract_rates)
+        weighted_contract_rate = (
+            sum(weights[group] * rate for group, rate in group_contract_rates.items()) / active_weight
+            if active_weight else 0.0
+        )
+        hard_gate_results = {
+            metric: int(summary.get(metric, 0)) == 0
+            for metric in profile["hard_gates"]
+        }
+        summary["representative_profile"] = {
+            **profile,
+            "group_contract_rates": group_contract_rates,
+            "active_weight": round(active_weight, 4),
+            "weighted_entry_contract_rate": round(weighted_contract_rate, 4),
+            "hard_gate_results": hard_gate_results,
+            "hard_gates_passed": all(hard_gate_results.values()),
+            "release_ready": round(weighted_contract_rate, 4) == 1.0 and all(hard_gate_results.values()),
+        }
+    return summary
 
 
 def _result_to_dict(result: ShadowPlannerResult) -> dict[str, Any]:
@@ -386,6 +461,7 @@ def main() -> int:
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--fixture", type=Path, default=FIXTURE)
+    parser.add_argument("--profile", default=DEFAULT_PROFILE)
     parser.add_argument("--group", choices=sorted(GROUPS), help="Run only one admission group")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--strict", action="store_true", help="Exit nonzero when target admission gates fail")
@@ -396,6 +472,7 @@ def main() -> int:
         raise SystemExit("--runs must be positive")
 
     cases = load_admission_cases(args.fixture)
+    profile = load_evaluation_profile(args.fixture, args.profile)
     if args.group:
         cases = [case for case in cases if case["group"] == args.group]
     intent_client = lambda prompt: call_qwen_decision_v2(
@@ -417,7 +494,7 @@ def main() -> int:
             f"diagnostic={record['diagnostic']['route']}"
         ),
     )
-    summary = summarize_admission(records)
+    summary = summarize_admission(records, profile=profile)
     output_dir = args.output_dir or (
         DEFAULT_OUTPUT_ROOT / datetime.now().strftime("%Y%m%d_%H%M%S")
     )
@@ -432,6 +509,7 @@ def main() -> int:
         and summary["current_atomic_false_admissions"] == 0
         and summary["observable_differences"] == 0
         and summary["diagnostic_effective_forbidden"] == 0
+        and summary["representative_profile"]["hard_gates_passed"]
     )
     return 0 if strict_ok else 1
 

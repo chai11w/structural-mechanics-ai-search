@@ -10,6 +10,7 @@ from scripts.evaluate_shadow_admission_qwen_v0 import (
     diagnose_candidate_plan,
     evaluate_admission_case,
     load_admission_cases,
+    load_evaluation_profile,
     summarize_admission,
 )
 from tiku_agent.shadow_plan_v0 import ShadowPlan, ShadowPlanStep, ShadowPlannerResult
@@ -56,6 +57,14 @@ class AdmissionFixtureTest(unittest.TestCase):
         self.assertTrue(any(case["expected_entry"] == EXPECTED_NEVER for case in cases))
         self.assertTrue(any(case["expected_entry"] == EXPECTED_OBSERVE for case in cases))
         self.assertTrue(any(case["forbidden_actions"] for case in cases))
+
+    def test_representative_profile_is_explicitly_provisional_and_normalized(self):
+        profile = load_evaluation_profile(FIXTURE)
+        self.assertEqual(profile["status"], "provisional_product_prior")
+        self.assertAlmostEqual(sum(profile["group_weights"].values()), 1.0)
+        self.assertGreater(profile["group_weights"]["atomic"], profile["group_weights"]["sequential"])
+        self.assertGreater(profile["group_weights"]["sequential"], profile["group_weights"]["conditional"])
+        self.assertIn("current_conditional_tool_turns", profile["hard_gates"])
 
     def test_required_steps_are_order_sensitive(self):
         self.assertTrue(_is_subsequence(["show_candidates", "select_candidate"], ["show_candidates", "select_candidate"]))
@@ -139,6 +148,7 @@ class AdmissionDiagnosticTest(unittest.TestCase):
                     "effective_forbidden_actions": [],
                 },
                 "current_response_intent": "select_candidate",
+                "current_tools": [],
                 "case_id": "missed",
                 "run": 1,
             },
@@ -156,6 +166,7 @@ class AdmissionDiagnosticTest(unittest.TestCase):
                     "effective_forbidden_actions": [],
                 },
                 "current_response_intent": "continue_search",
+                "current_tools": [],
                 "case_id": "false",
                 "run": 1,
             },
@@ -165,6 +176,39 @@ class AdmissionDiagnosticTest(unittest.TestCase):
         self.assertEqual(summary["current_should_observe_admitted"], 0)
         self.assertEqual(summary["current_atomic_false_admissions"], 1)
         self.assertEqual(summary["diagnostic_useful_plans"], 1)
+
+    def test_weighting_does_not_hide_a_rare_group_hard_gate_failure(self):
+        profile = load_evaluation_profile(FIXTURE)
+        records = []
+        for group, expected in (
+            ("atomic", EXPECTED_NEVER),
+            ("clarify_or_unsupported", "optional"),
+            ("sequential", EXPECTED_OBSERVE),
+            ("conditional", EXPECTED_OBSERVE),
+        ):
+            records.append({
+                "expected_entry": expected,
+                "group": group,
+                "current_admitted": expected == EXPECTED_OBSERVE,
+                "entry_contract_ok": True,
+                "observable_equal": True,
+                "diagnostic": {
+                    "route": "shadow_actionable",
+                    "required_steps_covered": True,
+                    "useful": True,
+                    "forbidden_actions_seen": [],
+                    "effective_forbidden_actions": [],
+                },
+                "current_response_intent": "retry_search",
+                "current_tools": ["coarse_search"] if group == "conditional" else [],
+                "case_id": group,
+                "run": 1,
+            })
+        summary = summarize_admission(records, profile=profile)
+        representative = summary["representative_profile"]
+        self.assertEqual(representative["weighted_entry_contract_rate"], 1.0)
+        self.assertFalse(representative["hard_gate_results"]["current_conditional_tool_turns"])
+        self.assertFalse(representative["release_ready"])
 
 
 if __name__ == "__main__":

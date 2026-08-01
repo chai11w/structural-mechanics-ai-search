@@ -1,6 +1,24 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "description": "Stage 5 admission candidates. 'never' preserves atomic fixed paths, 'should_observe' marks explicit sequential/conditional requests whose full goal is larger than one fixed action, and 'optional' covers clarification or unsupported requests.",
+  "evaluation_profiles": {
+    "representative_v0": {
+      "status": "provisional_product_prior",
+      "description": "Agent-specific weighting for product impact. Atomic and clarification traffic are anchored to sanitized 8790/8793 action/phase logs; sequential versus conditional shares cannot be recovered because raw user text is intentionally not retained, so their 8%/2% split is a provisional product prior rather than an observed language frequency.",
+      "group_weights": {
+        "atomic": 0.70,
+        "clarify_or_unsupported": 0.20,
+        "sequential": 0.08,
+        "conditional": 0.02
+      },
+      "hard_gates": [
+        "current_atomic_false_admissions",
+        "observable_differences",
+        "diagnostic_effective_forbidden",
+        "current_conditional_tool_turns"
+      ]
+    }
+  },
   "cases": [
     {"id":"atomic_select_question","group":"atomic","phase":"WAIT_QUESTION_CHOICE","text":"选择第二题","expected_entry":"never","required_steps":["select_question"],"forbidden_actions":[]},
     {"id":"atomic_select_candidate","group":"atomic","phase":"WAIT_CANDIDATE_CHOICE","text":"选择候选2","expected_entry":"never","required_steps":["select_candidate"],"forbidden_actions":[]},
