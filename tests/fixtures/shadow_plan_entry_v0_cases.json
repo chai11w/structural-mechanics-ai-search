@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "description": "Gold routes for Stage 5 evaluation through Agent.handle_text. Ambiguous cases define forbidden inferred actions even when several conservative routes are acceptable.",
+  "cases": [
+    {"id":"hello_idle","phase":"IDLE","text":"你好","planner":"never","allowed_routes":["safe_answer"],"forbidden_actions":[]},
+    {"id":"thanks_candidates","phase":"WAIT_CANDIDATE_CHOICE","text":"谢谢","planner":"never","allowed_routes":["safe_answer"],"forbidden_actions":[]},
+    {"id":"are_you_there_answered","phase":"ANSWERED","text":"在吗","planner":"never","allowed_routes":["safe_answer"],"forbidden_actions":[]},
+    {"id":"hard_work_chapter","phase":"WAIT_CHAPTER","text":"辛苦了","planner":"never","allowed_routes":["safe_answer"],"forbidden_actions":[]},
+    {"id":"identity_idle","phase":"IDLE","text":"你是谁","planner":"never","allowed_routes":["safe_answer"],"forbidden_actions":[]},
+    {"id":"capability_answered","phase":"ANSWERED","text":"你能做什么","planner":"never","allowed_routes":["safe_answer"],"forbidden_actions":[]},
+
+    {"id":"select_second_question","phase":"WAIT_QUESTION_CHOICE","text":"选择第二题","planner":"never","allowed_routes":["fixed_business"],"forbidden_actions":[]},
+    {"id":"select_second_candidate","phase":"WAIT_CANDIDATE_CHOICE","text":"选择候选2","planner":"never","allowed_routes":["fixed_business"],"forbidden_actions":[]},
+    {"id":"continue_search","phase":"WAIT_CANDIDATE_CHOICE","text":"继续搜","planner":"never","allowed_routes":["fixed_business"],"forbidden_actions":[]},
+    {"id":"resend_answer","phase":"ANSWERED","text":"刚才答案再发我","planner":"never","allowed_routes":["fixed_business"],"forbidden_actions":[]},
+    {"id":"answer_mismatch","phase":"ANSWERED","text":"这个答案不对","planner":"never","allowed_routes":["fixed_business"],"forbidden_actions":[]},
+    {"id":"show_candidates","phase":"ANSWERED","text":"回到候选","planner":"never","allowed_routes":["fixed_business"],"forbidden_actions":[]},
+    {"id":"set_force_chapter","phase":"WAIT_CHAPTER","text":"按力法搜","planner":"never","allowed_routes":["fixed_business"],"forbidden_actions":[]},
+    {"id":"retry_error","phase":"ERROR","text":"重试","planner":"never","allowed_routes":["fixed_business"],"forbidden_actions":[]},
+    {"id":"confirm_global_search","phase":"WAIT_CHAPTER","text":"可以全局搜","planner":"never","allowed_routes":["fixed_business"],"forbidden_actions":[]},
+    {"id":"cancel_candidates","phase":"WAIT_CANDIDATE_CHOICE","text":"取消","planner":"never","allowed_routes":["fixed_business"],"forbidden_actions":[]},
+
+    {"id":"look_at_this_candidate","phase":"WAIT_CANDIDATE_CHOICE","text":"这个你帮我看看","planner":"optional","allowed_routes":["safe_answer","fixed_clarification","needs_confirmation","unplannable","shadow_actionable"],"forbidden_actions":["select_candidate"]},
+    {"id":"leave_it_candidates","phase":"WAIT_CANDIDATE_CHOICE","text":"就这样吧","planner":"optional","allowed_routes":["safe_answer","fixed_business","fixed_clarification","needs_confirmation","unplannable"],"forbidden_actions":["select_candidate"]},
+    {"id":"leave_it_questions","phase":"WAIT_QUESTION_CHOICE","text":"就这样吧","planner":"optional","allowed_routes":["safe_answer","fixed_business","fixed_clarification","needs_confirmation","unplannable"],"forbidden_actions":["select_question"]},
+    {"id":"which_chapter","phase":"WAIT_CHAPTER","text":"帮我看看这题哪一章的","planner":"optional","allowed_routes":["fixed_clarification","needs_confirmation","unplannable","shadow_actionable"],"forbidden_actions":["reject","global_search"]},
+    {"id":"look_at_this_chapter","phase":"WAIT_CHAPTER","text":"这个题你帮我看看","planner":"optional","allowed_routes":["safe_answer","fixed_clarification","needs_confirmation","unplannable","shadow_actionable"],"forbidden_actions":["global_search"]},
+    {"id":"the_other_one_candidate","phase":"WAIT_CANDIDATE_CHOICE","text":"别的那个也行","planner":"optional","allowed_routes":["safe_answer","fixed_clarification","needs_confirmation","unplannable"],"forbidden_actions":["select_candidate"]},
+    {"id":"later_questions","phase":"WAIT_QUESTION_CHOICE","text":"后面那些也看看","planner":"optional","allowed_routes":["fixed_clarification","needs_confirmation","unplannable","shadow_actionable"],"forbidden_actions":[]},
+    {"id":"that_answer_wrong","phase":"ANSWERED","text":"刚才那个是不是不对","planner":"optional","allowed_routes":["fixed_business","fixed_clarification","needs_confirmation","unplannable","shadow_actionable"],"forbidden_actions":["select_candidate"]},
+    {"id":"look_at_this_idle","phase":"IDLE","text":"这个题你帮我看看","planner":"optional","allowed_routes":["safe_answer","fixed_clarification","needs_confirmation","unplannable"],"forbidden_actions":["select_question","select_candidate","global_search"]},
+    {"id":"different_approach_no_match","phase":"NO_MATCH","text":"换个思路试试","planner":"optional","allowed_routes":["safe_answer","fixed_business","fixed_clarification","needs_confirmation","unplannable","shadow_actionable"],"forbidden_actions":["global_search"]},
+    {"id":"try_again_error","phase":"ERROR","text":"再试试看","planner":"optional","allowed_routes":["fixed_business","fixed_clarification","needs_confirmation","unplannable","shadow_actionable"],"forbidden_actions":[]},
+    {"id":"which_is_reliable_candidates","phase":"WAIT_CANDIDATE_CHOICE","text":"你说哪个靠谱","planner":"optional","allowed_routes":["safe_answer","fixed_clarification","needs_confirmation","unplannable"],"forbidden_actions":["select_candidate"]},
+    {"id":"which_is_reliable_questions","phase":"WAIT_QUESTION_CHOICE","text":"你说哪个靠谱","planner":"optional","allowed_routes":["safe_answer","fixed_clarification","needs_confirmation","unplannable"],"forbidden_actions":["select_question"]},
+    {"id":"closer_after_answer","phase":"ANSWERED","text":"有没有更接近的","planner":"optional","allowed_routes":["safe_answer","fixed_clarification","needs_confirmation","unplannable","shadow_actionable"],"forbidden_actions":["select_candidate","reject_candidates"]},
+    {"id":"was_that_wrong_before_answer","phase":"WAIT_CANDIDATE_CHOICE","text":"刚才那个是不是不对","planner":"optional","allowed_routes":["safe_answer","fixed_clarification","needs_confirmation","unplannable","permission_rejected"],"forbidden_actions":["report_answer_mismatch"]},
+    {"id":"what_did_it_say_no_match","phase":"NO_MATCH","text":"它怎么说的来着","planner":"optional","allowed_routes":["safe_answer","fixed_business","fixed_clarification","needs_confirmation","unplannable","shadow_actionable"],"forbidden_actions":[]},
+    {"id":"why_failed_error","phase":"ERROR","text":"为什么失败","planner":"optional","allowed_routes":["fixed_business","fixed_clarification","needs_confirmation","unplannable","shadow_actionable"],"forbidden_actions":[]},
+    {"id":"change_condition_chapter","phase":"WAIT_CHAPTER","text":"那要是换个条件呢","planner":"optional","allowed_routes":["safe_answer","fixed_clarification","needs_confirmation","unplannable"],"forbidden_actions":["set_chapter","global_search"]},
+    {"id":"give_up_idle","phase":"IDLE","text":"算了不看了","planner":"optional","allowed_routes":["safe_answer","fixed_business","fixed_clarification","needs_confirmation","unplannable"],"forbidden_actions":["select_question","select_candidate","global_search"]}
+  ]
+}

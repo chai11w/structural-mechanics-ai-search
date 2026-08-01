@@ -568,3 +568,62 @@ PYTHONIOENCODING=utf-8 python -B scripts/evaluate_shadow_plan_qwen_v0.py   # 第
 | 改写层 v1 | 90.5% | 92.4% | unplannable 41；8 条解析失败（盲区） |
 | + raw_output 诊断 | 93.3% | 95.2% | 定位真因：reason 过长超 max_tokens |
 | + reason 限长 & max_tokens=768 | **100%** | **100%** | 全阶段 15/15 |
+
+---
+
+## 步骤：Stage 5 第一次审查修正——真实入口金标准评估
+
+### 干了啥
+
+根据 Codex 对 `f68431e..e6bb9a9` 的审查，先修评估尺子，不改 Planner Prompt、不拆工具、不开放执行：
+
+- 保留 `scripts/evaluate_shadow_plan_qwen_v0.py` 为 Planner 结构压力测试；它直接调用 Planner，不再代表真实入口通过率。
+- 新增 `scripts/evaluate_shadow_plan_entry_qwen_v0.py`，每条样本都从 `TikuSearchAgent.handle_text()` 进入，真实经过安全回答边界、固定业务意图识别和 `ambiguous_*` Planner 准入门。
+- 每条样本从同一个 `AgentState` 成对运行：关闭影子规划 / 开启影子规划；两边共享同一份意图模型返回缓存，避免模型波动制造假差异。
+- 使用确定性只读工具替身，不读取题库、不写业务数据；比较用户回答、业务状态与原工具调用序列是否完全一致。
+- 新增35条人工金标准，明确允许路线和禁止推断动作；“就这样吧/哪个靠谱/别的那个”等不能被补成选择题目或候选。
+- 结果分类为 `safe_answer/fixed_business/fixed_clarification/shadow_actionable/needs_confirmation/unplannable/permission_rejected/planner_unavailable`；空计划不再计入有动作规划通过率。
+- CLI 默认真实运行3轮并逐条打印进度，`--model/--endpoint` 会实际透传给 Intent 与 Planner 两个真实客户端。
+
+### 改动文件
+
+- `scripts/evaluate_shadow_plan_entry_qwen_v0.py`（新增）
+- `tests/fixtures/shadow_plan_entry_v0_cases.json`（新增，35条金标准）
+- `tests/test_tiku_agent_shadow_entry_eval_v0.py`（新增）
+- `.agents/roadmap.md`
+- `.agents/project_memory.md`
+- `.agents/8794_handoff.md`
+
+### 真实三轮结果
+
+输出目录：`.tmp_shadow_plan_entry_eval_8794/20260801_201645/`（忽略目录，不提交）。
+
+- 总体：91/105（86.67%）；三轮分别31/35、30/35、30/35。
+- 固定明确路径误触发 Planner：0。
+- 开关影子规划后的回答、业务状态和原工具调用差异：0。
+- 路线分布：安全回答24、固定业务52、有动作影子计划10、空计划16、权限拒绝3。
+- `needs_confirmation`：0——说明当前协议仍缺真正的确认语义。
+- 禁止语义动作命中14次：
+  - “就这样吧”自动选题/候选：3次；
+  - “你说哪个靠谱”自动选候选：2次；
+  - “别的那个也行”自动选候选：1次；
+  - 等章节询问“哪一章”被固定Intent误判为拒绝：2次；
+  - 已答后“有没有更接近的”被固定Intent直接拒绝整批候选：3次；
+  - 候选阶段“刚才那个是不是不对”被Planner提议为答案不匹配（权限层随后拒绝）：3次。
+
+这组结果确认：旧矩阵的105/105仅代表结构/权限契约，不代表真实语义规划全部正确。当前仍为纯影子记录，无工具执行和用户可见副作用。
+
+### 验证命令
+
+```powershell
+python -B -m unittest tests.test_tiku_agent_shadow_entry_eval_v0 tests.test_tiku_agent_shadow_plan_v0 tests.test_tiku_agent_shadow_planner_v0 tests.test_tiku_agent_agent
+python -B -m unittest discover -s tests -p "test_*.py"
+$env:PYTHONIOENCODING = "utf-8"; python -B scripts\evaluate_shadow_plan_entry_qwen_v0.py --runs 3
+```
+
+### 剩余任务 / 下一步
+
+- 只进入下一小步：改写/关键词补充结果增加 `explicit_keywords/inferred_keywords/evidence/confidence/requires_confirmation`。
+- 代码要求题号、候选编号、章节和全局搜索授权必须有原话明确证据；否则只记录 `needs_confirmation`，不得产生可执行动作。
+- 修复后复跑同一35条金标准三轮；禁止动作、固定路径Planner误触发和开关可见差异必须均为0。
+- 暂不拆工具、不进入Stage 6、不提升8790。
