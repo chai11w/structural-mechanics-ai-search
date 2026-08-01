@@ -646,16 +646,24 @@ class TikuSearchAgentTest(unittest.TestCase):
 
     def test_low_reliability_rerank_enters_no_match_without_showing_candidates(self):
         fake = FakeTools(chapter="4力法")
+
         def no_reliable_rerank(query_image_path, candidates, **kwargs):
             return ToolResult.no_match(
-                data={"reranked": True, "visible_candidates": [], "best_final_score": 0.79},
+                data={
+                    "reranked": True,
+                    "visible_candidates": [],
+                    "best_final_score": 0.79,
+                },
                 error="未找到可靠相似题。",
                 code="NO_RELIABLE_RERANK_CANDIDATES",
                 next_state="NO_MATCH",
             )
+
         fake.rerank_candidates = no_reliable_rerank
         agent = self.make_agent(fake)
+
         response = agent.handle_image("q.jpg")
+
         self.assertEqual(agent.state.phase, "NO_MATCH")
         self.assertEqual(agent.state.candidate_count, 0)
         self.assertEqual(response.images, [])

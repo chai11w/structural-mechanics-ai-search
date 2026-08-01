@@ -100,7 +100,7 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertIn(EXTERNAL_COOKIE, response.headers.get("set-cookie", ""))
         self.assertNotIn("tiku_agent_session=", response.headers.get("set-cookie", ""))
         source = self.observed_client.get("/api/observation/source").json()
-        self.assertEqual(source["source_commit"], "455da39fb889ceed1b70d48d7bd230aeb463e085")
+        self.assertEqual(source["source_commit"], "de66e35a5bbfaa608488d0e8bea4b083c5f0f0ef")
         self.assertEqual(source["runtime_namespace"], "decision-trace-dev")
         self.assertEqual(source["verified_files"], 110)
 
