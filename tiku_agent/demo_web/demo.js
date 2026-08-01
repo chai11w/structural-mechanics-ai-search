@@ -165,7 +165,7 @@ function createMediaCard(url, index, item) {
       candidate_generation: String(item.candidateGeneration || ''),
     };
     const isCurrent = sessionContext.session_valid
-      && sessionContext.phase === 'WAIT_CANDIDATE_CHOICE'
+      && ['WAIT_CANDIDATE_CHOICE', 'ANSWERED'].includes(sessionContext.phase)
       && actionContext.task_revision === Number(sessionContext.task_revision || 0)
       && actionContext.candidate_generation
       && actionContext.candidate_generation === String(sessionContext.candidate_generation || '');

@@ -26,6 +26,7 @@
 - 8794模型可见`SafeConversationContext`已严格收敛为`phase/chapter/candidate_count/allowed_actions/last_completed_step/waiting_for`六项；题目数量、题图/答案存在性、全局搜索和续搜标记不再混入模型payload。题图与答案存在性改由独立`SafeAnswerValidationFacts`只供代码校验，112条状态护栏、相关78项、全量316项和真实Qwen 70组矩阵通过验证。
 - 唯一候选确认已补固定规则：`WAIT_CANDIDATE_CHOICE`且只有1个候选时，“是/是的/对/没错/确认/可以/好的”等整句短肯定直接选择候选1；多个候选、已显示答案和复合表达不自动选择。该业务动作在安全回答前被Intent V2接管，不调用安全回答模型；相关79项与全量318项测试通过。
 - 8794真实Qwen 62/70矩阵中的8条兜底已逐条复核：6条为明确或保守的状态保护，2条为校验误杀。现仅允许等待章节阶段的单个末尾所属章节问句，并收窄无候选时的当前候选选择信号，工作流程中的泛指候选不再误杀；其他问号、重复索图、章节/候选/答案矛盾和内部字段拦截保持不变。原112条护栏、相关54项与全量320项测试通过。
+- 候选按钮版本保护已区分“答案已返回”和“候选已过期”：同一`task_revision + candidate_generation`在`WAIT_CANDIDATE_CHOICE/ANSWERED`均可改选其他候选；新题或新候选批次仍拒绝旧按钮。被网页安全门允许后会正常进入Agent并形成8793新评审回合；相关67项、JS语法与全量323项通过。
 - 题库检索的 Zhipu 视觉复筛默认模型已切换为 `glm-4.6v`，默认 10 路候选并发；`config.local.json` 可用 `zhipu_rerank_model` 临时回退或切换模型。切换前已用单题 3 候选、10 候选并发和三题多题链路验证过可用性与速度。
 - 飞书事件去重已改为30分钟TTL、20,000条上限和加锁的缓存，避免长跑时事件ID无界增长；8788现已从主线工作区重新启动并加载当前代码。
 - 8790与8794九个业务工具及候选动作解析器已统一返回带 `tool`、`outcome`、`code`、`data`、`next_state`、`completed`、`retryable`、`error_category` 的结果；五态为 `SUCCESS / NO_MATCH / NEEDS_INPUT / PARTIAL / TOOL_ERROR`，旧 `ok` 仅作临时兼容。

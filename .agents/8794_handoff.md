@@ -14,6 +14,25 @@
 
 ## 已完成步骤
 
+### R6 同题答案返回后允许改选候选（真实评审修复）
+8793真实评审发现：首次选择候选并返回答案后，业务阶段进入`ANSWERED`，网页候选安全门却只允许`WAIT_CANDIDATE_CHOICE`，导致同一道题、同一候选批次的其他候选被误判为上一题旧候选。请求在进入Agent前即被拒绝，因此8793右侧也没有新回合，停留在上一次答案评审。
+
+前后端现都允许`WAIT_CANDIDATE_CHOICE/ANSWERED`两阶段使用候选按钮，但仍必须同时满足会话有效、`task_revision`一致、`candidate_generation`一致且排名有效。上传新题或生成新候选批次后，旧按钮仍严格拒绝。新增后端同批次改选、旧批次拒绝和Agent已回答后改选完整链路测试，更新前端资产版本避免浏览器旧缓存；相关67项、JS语法与全量323项通过。
+
+改动文件：
+- `tiku_agent/fastapi_demo.py`
+- `tiku_agent/demo_web/demo.js`
+- `tiku_agent/demo_web/index.html`
+- `tests/test_tiku_agent_fastapi_demo.py`
+- `tests/test_tiku_agent_agent.py`
+
+验证命令：
+```powershell
+python -B -m unittest tests.test_tiku_agent_fastapi_demo tests.test_tiku_agent_agent tests.test_tiku_agent_action_permissions_v2
+node --check tiku_agent\demo_web\demo.js
+python -B -m unittest discover -s tests -p "test_*.py"
+```
+
 ### R5 真实矩阵两项误杀精修（Codex 复核修复）
 复查严格白名单后的真实Qwen 62/70矩阵，确认8条兜底中有2条属于误杀：`WAIT_CHAPTER`中模型正确询问“属于哪个章节？”仅因问号被全局拒绝；`NO_MATCH`中模型先介绍一般工作流程再明确“当前无匹配，建议换章节或重发”，因宽泛候选正则误判为当前已有候选。
 

@@ -413,7 +413,7 @@ def _validate_action_context(
     generation = str(raw_context.get("candidate_generation") or "")
     valid = (
         snapshot.get("session_valid") is True
-        and snapshot.get("phase") == "WAIT_CANDIDATE_CHOICE"
+        and snapshot.get("phase") in {"WAIT_CANDIDATE_CHOICE", "ANSWERED"}
         and task_revision == snapshot.get("task_revision")
         and generation
         and generation == snapshot.get("candidate_generation")
