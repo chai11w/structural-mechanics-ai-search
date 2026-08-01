@@ -1,6 +1,7 @@
 import unittest
 
 from tiku_agent.agent import AgentToolbox, TikuSearchAgent
+from tiku_agent.safe_answer_generator_v0 import SafeAnswerGeneratorV0
 from tiku_agent.state import AgentState, PHASE_ANSWERED, PHASE_ERROR, STATE_WAIT_CANDIDATE_CHOICE, STATE_WAIT_CHAPTER
 from tiku_agent.tools import AgentToolConfig, ToolResult
 
@@ -397,6 +398,43 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.selected_rank, 2)
         self.assertEqual(agent.state.last_answer_paths, ["out/answer2.jpg"])
         self.assertEqual(fake.search_chapters, searches_before)
+
+    def test_v2_safe_answer_route_treats_yes_as_the_unique_candidate_confirmation(self):
+        fake = FakeTools(chapter="4力法")
+        candidate = {
+            "rank": 1,
+            "path": "4力法/q1.jpg",
+            "name": "q1.jpg",
+            "score": 0.99,
+            "candidate_key": "4力法|main|q1.jpg",
+        }
+        state = AgentState(
+            phase=STATE_WAIT_CANDIDATE_CHOICE,
+            current_image_path="q.jpg",
+            current_question_image_path="q.jpg",
+            current_loads=[{"type": "集中", "raw": "P"}],
+            current_chapter="4力法",
+            candidates=[candidate],
+        )
+        model_calls = []
+        agent = TikuSearchAgent(
+            state=state,
+            tools=fake.toolbox(),
+            config=AgentToolConfig(top_k=3, rerank_top=3),
+            use_llm_intent=False,
+            enable_safe_answer_v0=True,
+            safe_answer_generator_v0=SafeAnswerGeneratorV0(
+                lambda request: model_calls.append(request) or "不应调用模型。"
+            ),
+        )
+
+        response = agent.handle_text("是")
+
+        self.assertEqual(response.intent, "select_candidate")
+        self.assertEqual(agent.state.phase, PHASE_ANSWERED)
+        self.assertEqual(agent.state.selected_rank, 1)
+        self.assertEqual(agent.state.last_answer_paths, ["out/answer1.jpg"])
+        self.assertEqual(model_calls, [])
 
     def test_v2_explicit_candidate_selection_does_not_reselect_multi_question(self):
         fake = FakeTools(chapter="")

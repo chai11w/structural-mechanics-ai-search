@@ -2,8 +2,8 @@
   "schema_version": 1,
   "source_repository": "F:/cc/7-题库检索",
   "source_branch": "codex/mainline-bounded-autonomy-v1",
-  "source_commit": "04d3a86ddc9c83e29b0dd841193425ec1c2c6847",
-  "created_at": "2026-08-01T06:23:02.372164+00:00",
+  "source_commit": "90349bc6aa597c1f13e057ec9b1e6bafb3774b62",
+  "created_at": "2026-08-01T07:23:49.705105+00:00",
   "snapshot_scope": "tracked mainline code, tests, fixtures and safe documentation; excludes .git, local config/secrets, xlsx question-bank assets, runtime/logs/caches, project-agent metadata, review data, and special_unindexed_questions.json",
   "files": [
     {
@@ -232,7 +232,7 @@
     },
     {
       "path": "tests/test_tiku_agent_agent.py",
-      "sha256": "9c65f28efed0864659ad8a440678bd6cdc877d140a5750ee16a84e94688c30c9"
+      "sha256": "3777e83775ff96050c5a4101994de043a2cfcbba77c3e0ffed7ab45821213772"
     },
     {
       "path": "tests/test_tiku_agent_conversation_context_v2.py",
@@ -248,7 +248,7 @@
     },
     {
       "path": "tests/test_tiku_agent_intent_v2.py",
-      "sha256": "f85c27f87e5875f3b5e28a1c6dcd4f406284ffa9468a3ec1f028a84622a559b2"
+      "sha256": "a09986e28eb4b22300ef085f9d1858ae77195222291cd1b235f6826821c5a6e0"
     },
     {
       "path": "tests/test_tiku_agent_intent_v2_blind_contract.py",
@@ -360,7 +360,7 @@
     },
     {
       "path": "tiku_agent/intent_v2.py",
-      "sha256": "683cd7aee1c1e6b58e050244049a959267c81ba4a48f7662d6226df522478519"
+      "sha256": "ece0670c7745dcdf05444e42805fa36855511460ce99f8f89bbb416691e0fef3"
     },
     {
       "path": "tiku_agent/render.py",
