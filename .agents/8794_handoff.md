@@ -7,18 +7,61 @@
 
 - **目标**：8794 状态感知安全回答（roadmap Stage 4）——让安全回答能感知当前业务阶段（等待章节/候选选择/答案展示），业务操作仍走固定状态机。
 - **总计划**：M1 状态摘要模块 → M2 prompt 契约 → M4 generator+agent 接线 → M3 接线后按需兜底文案 → M5 runtime 验收测试。
-- **已完成**：M1 状态摘要模块、M2 prompt 契约扩展、M4 generator+agent 接线、M3 接线后按需兜底文案（机制落地 + 空表）。
-- **下一步**：M5 runtime 级验收测试（候选阶段寒暄、等待章节致谢、答案后寒暄、业务不误入、跨重启恢复、跨用户隔离）。
+- **已完成**：M1–M5 全部完成。状态感知安全回答（roadmap Stage 4）实现与验收完成。
+- **下一步**：可交 8793 评审（review）后再提升 8790；也可先做离线状态感知评估（`scripts/evaluate_safe_answer_qwen_v0.py` 现以 context=None 调用，暂不改）。
 
 ---
 
 ## 已完成步骤
+
+### M5 runtime 级验收测试
+新增 `tests/test_tiku_agent_safe_answer_state_aware.py`，把 `TikuSearchAgent` 当黑盒：构造 state → 发寒暄/业务句 → 断言模型收到的 prompt、用户回复、状态是否变更、业务工具是否被调。11 条测试覆盖：全 11 阶段寒暄 prompt 含 phase 标识、敏感字段不泄露（session_id/路径/.jpg/score/stack）、候选寒暄含候选数量、章节致谢含 global_search、答案后不泄露路径、8 种业务句不误入、模型超时/报错/输出违规回落通用兜底、allowed_actions 与权限矩阵一致、跨重启（to_dict/from_dict 重建后仍状态感知）、跨用户隔离。全部注入假 model / 构造假 state，不连真实模型与题库。
 
 ### M3 接线后按需兜底文案（空表机制）
 `render_safe_answer_v0` 增加 `_PHASE_REPLY_BUILDERS[(category, phase)]` 查询：命中 builder 则用过输出契约的 phase 文案；否则回落 `_SAFE_REPLIES` 通用兜底。表**有意保持为空**——各阶段业务引导已由 render.py 状态机承担（章节提示/全局搜索/错误重试/候选列表），纯寒暄兜底不需要 phase 专用文案；模型失败时永远回落合法单行回答，不会无回答。新增 3 条边界测试：空表逐 phase 回落、命中仅覆盖本 (category, phase)、builder 违反契约回落。
 
 ### M1 状态摘要模块（commit `82634dd`）
 新增纯模块 `safe_answer_context_v0.py`，从 `AgentState` 派生脱敏白名单摘要 `SafeConversationContext`。allowed_actions 动态权限矩阵派生；phase 英文常量、waiting_for/last_completed_step 中文；路径/分数/错误/session_id 不入白名单；IDLE 无状态小节。18 个单测 + 全量通过。
+
+---
+
+## 步骤：M5 runtime 级验收测试
+
+### 干了啥
+把 `TikuSearchAgent` 当黑盒验收：构造合法 `AgentState` → 发寒暄/业务句 → 断言模型收到的 prompt、用户回复、状态是否变更、业务工具是否被调。全部注入假 model（capturing `SafeAnswerGeneratorV0`）、构造假 state，不连真实模型与题库。11 条测试覆盖 roadmap Stage 4 全部验收点：
+- 全 11 阶段寒暄均到达模型，prompt 含 `阶段：{phase}`（IDLE 无状态小节、不声称阶段）；
+- 任何 phase 的 prompt 不泄露敏感字段（session_id/路径/.jpg/score/stack）；
+- 候选阶段寒暄含候选数量与「等待：候选选择」；
+- 等待章节致谢含全局搜索提示（global_search_offered）；
+- 答案后寒暄不泄露答案路径（answer.png）；
+- 8 种业务句（选1/继续搜/换第五章/全局搜索/取消/重发答案/第2题/把答案发给我）不误入安全回答、不调 generator；
+- 模型超时/报错/输出违规（4 类）回落通用固定兜底且单行≤90 字；
+- allowed_actions 与权限矩阵一致（WAIT_CANDIDATE_CHOICE/ANSWERED/NO_MATCH）；
+- 跨重启：`state.to_dict()` → `AgentState.from_dict` 重建后仍状态感知；
+- 跨用户：user-a/user-b 会话各自隔离，prompt 不含对方信息。
+
+### 改动文件
+- `tests/test_tiku_agent_safe_answer_state_aware.py` → 新增（仅此一个文件，本轮零生产代码改动）。
+
+### 验证命令与结果
+```
+python -B -m unittest tests.test_tiku_agent_safe_answer_state_aware -v   # 11/11 通过
+python -B -m unittest discover -s tests -p "test_*.py"                   # 306 全量 OK，无回归
+```
+
+### 审查关注点
+- 是否真零工具调用：`_toolbox_that_must_not_run` 的 mock 一旦被调即断言失败。
+- 业务句不误入：`test_business_text_never_enters_safe_answer_in_candidate_phase` 用 Mock generator 断言 generate 未被调。
+- 状态零改动：每个用例前后 `state.to_dict()` 相等。
+- prompt 脱敏：`_assert_sensitive_fields_absent` 同时覆盖 system_prompt 与 user_prompt。
+- 跨重启/跨用户为真重建（from_dict）与真独立实例，非共享状态。
+
+### 剩余任务 / 已知风险
+- 无。M1–M5 全部完成，状态感知安全回答（roadmap Stage 4）验收通过。
+- 可交 8793 评审后再提升 8790；离线状态感知评估（`scripts/evaluate_safe_answer_qwen_v0.py` 现以 context=None 调用）留作后续独立小步。
+
+### 建议下一步命令
+- 8793 评审：读本交接文档 → 按 M1→M5 顺序逐个 `git show <commit>` + 跑上述验证命令。
 
 ---
 
