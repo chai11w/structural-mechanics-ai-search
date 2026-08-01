@@ -7,12 +7,27 @@
 
 - **目标**：8794 状态感知安全回答（roadmap Stage 4）——让安全回答能感知当前业务阶段（等待章节/候选选择/答案展示），业务操作仍走固定状态机。
 - **总计划**：M1 状态摘要模块 → M2 prompt 契约 → M4 generator+agent 接线 → M3 接线后按需兜底文案 → M5 runtime 验收测试 → M6 离线状态感知矩阵评估 + 反射指令强化。
-- **已完成**：M1–M6 全部完成；Codex 复核完成 R1 状态矛盾输出校验、R2 内部 action 中文翻译与 R3 模型白名单/代码校验事实拆分。状态感知安全回答已具备严格六字段摘要、真实模型生成、代码级高置信度矛盾拦截和用户语义下一步。
+- **已完成**：M1–M6 全部完成；Codex 复核完成 R1 状态矛盾输出校验、R2 内部 action 中文翻译、R3 模型白名单/代码校验事实拆分与 R5 两项误杀精修。状态感知安全回答已具备严格六字段摘要、真实模型生成、代码级高置信度矛盾拦截和用户语义下一步。
 - **下一步**：继续讨论剩余审查建议；问题收敛后再交 8793 评审并提升 8790。阶段专用安全寒暄兜底经讨论暂不增加，沿用现有业务阶段提示与通用安全兜底。
 
 ---
 
 ## 已完成步骤
+
+### R5 真实矩阵两项误杀精修（Codex 复核修复）
+复查严格白名单后的真实Qwen 62/70矩阵，确认8条兜底中有2条属于误杀：`WAIT_CHAPTER`中模型正确询问“属于哪个章节？”仅因问号被全局拒绝；`NO_MATCH`中模型先介绍一般工作流程再明确“当前无匹配，建议换章节或重发”，因宽泛候选正则误判为当前已有候选。
+
+修复保持最小范围：只有`greeting + WAIT_CHAPTER + waiting_for=章节`、整句仅一个末尾问号且确实在询问所属章节时允许问号；其他类别、阶段、普通自问、多个问号继续拒绝。候选规则只把“请从/在/于候选中选择”或“请选择候选”等当前选择指令视为正面候选信号，不再把“请发题图→检索候选→选定答案”的一般流程说明当成当前候选。原112条护栏全部原样通过，新增测试同时锁定两条放行和原候选/问号拦截，相关54项与全量320项测试通过；路由、工具、状态与模型上下文均未修改。
+
+改动文件：
+- `tiku_agent/safe_answer_contract_v0.py`
+- `tests/test_tiku_agent_safe_answer_contract_v0.py`
+
+验证命令：
+```powershell
+python -B -m unittest tests.test_tiku_agent_safe_answer_contract_v0 tests.test_tiku_agent_safe_answer_state_consistency_v0 tests.test_tiku_agent_safe_answer_generator_v0 tests.test_tiku_agent_safe_answer_route_v0 tests.test_tiku_agent_safe_answer_state_aware
+python -B -m unittest discover -s tests -p "test_*.py"
+```
 
 ### R4 唯一候选的简短确认规则（体验修复）
 当状态为`WAIT_CANDIDATE_CHOICE`、当前命名空间是候选且恰好只有1个候选时，用户整句回复“是/是的/对/没错/确认/确定/可以/行/好/好的”等简短肯定词，会由固定Intent V2规则直接解析为`select_candidate(rank=1)`，不进入安全回答模型，也不需要自主Planner。原有“就这个/就它/选这个”继续支持。规则使用整句精确匹配；多个候选、答案已经显示或包含其他意图时不会自动选择，等待章节时“可以”仍只接受已明确提供的全局搜索兜底。

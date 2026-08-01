@@ -276,6 +276,69 @@ class SafeAnswerContractV0Test(unittest.TestCase):
                 )
                 self.assertTrue(validation.accepted, validation.reason)
 
+    def test_wait_chapter_allows_only_the_expected_chapter_question(self):
+        wait_chapter = SafeConversationContext(
+            phase=STATE_WAIT_CHAPTER,
+            waiting_for="章节",
+            last_completed_step="已识别题图",
+        )
+        facts = SafeAnswerValidationFacts(has_active_image=True)
+        accepted = validate_safe_answer_output_v0(
+            "在的，请告诉我这道题属于结构力学的哪个章节？",
+            "greeting",
+            wait_chapter,
+            facts,
+        )
+        self.assertTrue(accepted.accepted, accepted.reason)
+
+        for text, category, context in (
+            ("需要我介绍一下吗？", "greeting", wait_chapter),
+            ("请告诉我这道题属于哪个章节？", "identity", wait_chapter),
+            ("请告诉我这道题属于哪个章节？", "greeting", None),
+            ("请告诉我章节？还需要重新上传吗？", "greeting", wait_chapter),
+        ):
+            with self.subTest(text=text, category=category, context=context):
+                rejected = validate_safe_answer_output_v0(
+                    text,
+                    category,
+                    context,
+                    facts,
+                )
+                self.assertFalse(rejected.accepted)
+                self.assertEqual(rejected.reason, "unsolicited_question")
+
+    def test_workflow_description_does_not_invent_current_candidates(self):
+        no_match = SafeConversationContext(
+            phase=PHASE_NO_MATCH,
+            chapter="4力法",
+            candidate_count=0,
+            waiting_for="换章节或新题图",
+            last_completed_step="无匹配题目",
+        )
+        facts = SafeAnswerValidationFacts(has_active_image=True)
+        accepted = validate_safe_answer_output_v0(
+            "请发题图，我检索相似候选题；选定后返回库中答案。当前无匹配，建议换章节或重发。",
+            "workflow",
+            no_match,
+            facts,
+        )
+        self.assertTrue(accepted.accepted, accepted.reason)
+
+        for text, reason in (
+            ("请从候选结果中选择一项。", "candidate_state_conflict"),
+            ("请选择一个候选题。", "candidate_count_conflict"),
+            ("候选结果已经准备好。", "candidate_state_conflict"),
+        ):
+            with self.subTest(text=text):
+                rejected = validate_safe_answer_output_v0(
+                    text,
+                    "greeting",
+                    no_match,
+                    facts,
+                )
+                self.assertFalse(rejected.accepted)
+                self.assertEqual(rejected.reason, reason)
+
     def test_semantically_valid_concise_variants_are_not_exact_template_matches(self):
         variants = (
             ("你好。", "greeting"),

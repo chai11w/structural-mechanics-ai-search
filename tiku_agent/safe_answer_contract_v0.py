@@ -97,7 +97,8 @@ _IMAGE_MISSING_CLAIM_PATTERN = re.compile(
 _POSITIVE_CANDIDATE_PATTERN = re.compile(
     r"(?:现有|已有|当前有|共有|存在).{0,8}候选|"
     r"候选(?:题|项|结果)?(?:已经|已)?(?:准备好|就绪)|"
-    r"请.{0,10}候选.{0,5}(?:选|选择)"
+    r"请(?:从|在|于).{0,10}候选.{0,6}(?:选|选择|挑选)|"
+    r"请(?:选择|选|挑选|挑).{0,6}候选"
 )
 _EXPLICIT_SEARCH_CANDIDATE_PATTERN = re.compile(
     r"(?:现有|已有|当前有|共有|存在).{0,8}(?:检索|搜索|匹配|相似).{0,4}候选"
@@ -132,6 +133,9 @@ _ANSWER_MISSING_PATTERN = re.compile(
 )
 _CHAPTER_REQUEST_PATTERN = re.compile(
     r"(?:请|麻烦).{0,12}(?:告诉|告知|提供|补充|确认|指定).{0,10}章节"
+)
+_WAIT_CHAPTER_QUESTION_PATTERN = re.compile(
+    r"(?:请|麻烦).{0,4}(?:告诉|告知|确认).{0,24}(?:哪个|哪一|所属|属于).{0,6}章节"
 )
 _CHAPTER_CHANGE_PATTERN = re.compile(r"(?:更换|换个|换章节|改为|改成|重新选择)")
 _CHAPTER_NOT_REQUIRED_PATTERN = re.compile(
@@ -241,7 +245,10 @@ def validate_safe_answer_output_v0(
         return _reject("markdown_output")
     if _URL_PATTERN.search(normalized):
         return _reject("url_output")
-    if "?" in normalized or "？" in normalized:
+    if (
+        ("?" in normalized or "？" in normalized)
+        and not _is_allowed_wait_chapter_question(normalized, category, context)
+    ):
         return _reject("unsolicited_question")
     if _SENSITIVE_PATTERN.search(normalized):
         return _reject("sensitive_disclosure")
@@ -259,6 +266,25 @@ def validate_safe_answer_output_v0(
     if not _meets_category_semantics(normalized, category):
         return _reject("missing_category_semantics")
     return SafeAnswerValidationV0(True, "accepted", normalized)
+
+
+def _is_allowed_wait_chapter_question(
+    text: str,
+    category: str,
+    context: SafeConversationContext | None,
+) -> bool:
+    """Allow only the expected chapter question while chapter input is pending."""
+
+    if (
+        category != "greeting"
+        or context is None
+        or context.phase != STATE_WAIT_CHAPTER
+        or context.waiting_for != "章节"
+        or not text.endswith(("?", "？"))
+        or text.count("?") + text.count("？") != 1
+    ):
+        return False
+    return bool(_WAIT_CHAPTER_QUESTION_PATTERN.search(text))
 
 
 def _state_consistency_rejection(
