@@ -2,6 +2,7 @@ import unittest
 
 from scripts.evaluate_shadow_plan_entry_qwen_v0 import (
     FIXTURE,
+    ROUTE_NEEDS_CONFIRMATION,
     ROUTE_SHADOW_ACTIONABLE,
     ROUTE_UNPLANNABLE,
     evaluate_case,
@@ -117,7 +118,7 @@ class ShadowEntryEvaluationTest(unittest.TestCase):
         self.assertEqual(summary["unplannable"], 1)
         self.assertEqual(summary["actionable_plans"], 0)
 
-    def test_forbidden_inferred_selection_fails_gold_even_when_permission_allows(self):
+    def test_forbidden_inferred_selection_is_blocked_for_confirmation(self):
         case = next(
             case for case in load_gold_cases() if case["id"] == "look_at_this_candidate"
         )
@@ -129,10 +130,16 @@ class ShadowEntryEvaluationTest(unittest.TestCase):
                 _planner_result(ShadowPlanStep("select_candidate", {"candidate_rank": 1}))
             ),
         )
-        self.assertEqual(record["route"], ROUTE_SHADOW_ACTIONABLE)
-        self.assertEqual(record["forbidden_actions_seen"], ["select_candidate"])
+        self.assertEqual(record["route"], ROUTE_NEEDS_CONFIRMATION)
+        self.assertEqual(record["forbidden_actions_seen"], [])
+        self.assertEqual(record["raw_shadow_forbidden_actions_seen"], ["select_candidate"])
+        self.assertEqual(record["blocked_shadow_forbidden_actions"], ["select_candidate"])
         self.assertEqual(record["planner_actions"], ["select_candidate"])
-        self.assertFalse(record["passed"])
+        rewritten = record["shadow_entry"]["rewritten"]
+        self.assertTrue(rewritten["requires_confirmation"])
+        self.assertEqual(rewritten["confidence"], 0.0)
+        self.assertFalse(rewritten["evidence"][0]["authorized"])
+        self.assertTrue(record["passed"])
 
     def test_summary_reports_gate_and_observable_failures_separately(self):
         base = {
@@ -159,6 +166,8 @@ class ShadowEntryEvaluationTest(unittest.TestCase):
         self.assertEqual(summary["unplannable"], 1)
         self.assertEqual(summary["fixed_path_planner_violations"], 1)
         self.assertEqual(summary["forbidden_action_violations"], 1)
+        self.assertEqual(summary["fixed_forbidden_action_violations"], 0)
+        self.assertEqual(summary["effective_shadow_forbidden_action_violations"], 0)
         self.assertEqual(summary["observable_differences"], 1)
 
 

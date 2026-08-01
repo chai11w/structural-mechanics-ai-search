@@ -381,14 +381,28 @@ def evaluate_case(
         for step in ((entry or {}).get("plan") or {}).get("steps", [])
         if step.get("action")
     )
-    # Gold restrictions apply to both sides of the admission gate: an unsafe
-    # semantic action is still a failure when the fixed intent path chose it,
-    # and a shadow proposal is still worth surfacing even when permission review
-    # later rejected it.
-    evaluated_actions = tuple(sorted(set(planner_actions) | {observed_response.intent}))
-    forbidden = tuple(
-        sorted(set(evaluated_actions) & set(case.get("forbidden_actions") or []))
+    # Keep three different facts separate:
+    # 1) a fixed-path action already chosen by the existing business router;
+    # 2) a raw Planner proposal (useful for measuring over-eager inference);
+    # 3) an effective shadow action that passed both state and semantic gates.
+    # A proposal correctly stopped as ``needs_confirmation`` is not an
+    # authorization violation, but remains visible as a blocked inference.
+    forbidden_gold = set(case.get("forbidden_actions") or [])
+    fixed_forbidden = tuple(sorted({observed_response.intent} & forbidden_gold))
+    raw_shadow_forbidden = tuple(sorted(set(planner_actions) & forbidden_gold))
+    effective_planner_actions = (
+        planner_actions if route == ROUTE_SHADOW_ACTIONABLE else ()
     )
+    effective_shadow_forbidden = tuple(
+        sorted(set(effective_planner_actions) & forbidden_gold)
+    )
+    blocked_shadow_forbidden = tuple(
+        sorted(set(raw_shadow_forbidden) - set(effective_shadow_forbidden))
+    )
+    evaluated_actions = tuple(
+        sorted(set(effective_planner_actions) | {observed_response.intent})
+    )
+    forbidden = tuple(sorted(set(fixed_forbidden) | set(effective_shadow_forbidden)))
     observable_equal = (
         _response_signature(baseline_response) == _response_signature(observed_response)
         and baseline_agent.state.to_dict() == observed_agent.state.to_dict()
@@ -415,9 +429,14 @@ def evaluate_case(
         "planner_gate_ok": planner_gate_ok,
         "intent_model_calls": replay_intent.delegate_calls,
         "planner_actions": list(planner_actions),
+        "effective_planner_actions": list(effective_planner_actions),
         "evaluated_actions": list(evaluated_actions),
         "forbidden_actions": list(case.get("forbidden_actions") or []),
         "forbidden_actions_seen": list(forbidden),
+        "fixed_forbidden_actions_seen": list(fixed_forbidden),
+        "raw_shadow_forbidden_actions_seen": list(raw_shadow_forbidden),
+        "blocked_shadow_forbidden_actions": list(blocked_shadow_forbidden),
+        "effective_shadow_forbidden_actions_seen": list(effective_shadow_forbidden),
         "observable_equal": observable_equal,
         "baseline": _response_signature(baseline_response),
         "observed": _response_signature(observed_response),
@@ -507,6 +526,18 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "forbidden_action_violations": sum(
             bool(record["forbidden_actions_seen"]) for record in records
+        ),
+        "fixed_forbidden_action_violations": sum(
+            bool(record.get("fixed_forbidden_actions_seen")) for record in records
+        ),
+        "shadow_forbidden_action_proposals": sum(
+            bool(record.get("raw_shadow_forbidden_actions_seen")) for record in records
+        ),
+        "blocked_shadow_forbidden_actions": sum(
+            bool(record.get("blocked_shadow_forbidden_actions")) for record in records
+        ),
+        "effective_shadow_forbidden_action_violations": sum(
+            bool(record.get("effective_shadow_forbidden_actions_seen")) for record in records
         ),
         "observable_differences": sum(not bool(record["observable_equal"]) for record in records),
         "failed_case_runs": [

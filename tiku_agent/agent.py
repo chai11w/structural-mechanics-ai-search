@@ -41,6 +41,10 @@ from tiku_agent.shadow_plan_v0 import (
     review_shadow_plan,
 )
 from tiku_agent.shadow_planner_v0 import ShadowPlannerV0
+from tiku_agent.shadow_semantic_gate_v0 import (
+    SemanticAuthorizationResult,
+    review_shadow_plan_semantics,
+)
 from tiku_agent.state import (
     PHASE_ANSWERED,
     PHASE_ERROR,
@@ -177,6 +181,21 @@ class TikuSearchAgent:
             result = self.shadow_planner.plan(text, context.to_prompt_payload())
             plan = result.plan if result is not None else None
             review = review_shadow_plan(plan, facts) if plan is not None else None
+            semantic_review = (
+                review_shadow_plan_semantics(text, result, facts)
+                if result is not None
+                else None
+            )
+            # State/parameter permission remains the first hard boundary.  Only
+            # a state-legal plan reaches semantic authorization; a missing raw-
+            # text grant becomes a shadow-only confirmation record.
+            if (
+                review is not None
+                and review.code == "allow"
+                and semantic_review is not None
+                and semantic_review.requires_confirmation
+            ):
+                review = semantic_review.review
             self.shadow_logger.write(
                 ShadowPlanLogEntry(
                     task_id=uuid4().hex,
@@ -184,7 +203,7 @@ class TikuSearchAgent:
                     user_text=text,
                     trigger_reason=decision.clarification_reason,
                     phase_before=self.state.phase,
-                    rewritten=_result_to_log(result),
+                    rewritten=_result_to_log(result, semantic_review),
                     plan=_plan_to_log(plan),
                     review=_review_to_log(review),
                     planner_unavailable=result is None,
@@ -603,14 +622,28 @@ _SHADOW_TRIGGER_REASONS = frozenset(
 )
 
 
-def _result_to_log(result: ShadowPlannerResult | None) -> dict | None:
+def _result_to_log(
+    result: ShadowPlannerResult | None,
+    semantic_review: SemanticAuthorizationResult | None = None,
+) -> dict | None:
     if result is None:
         return None
-    return {
+    payload = {
         "rewritten_text": result.rewritten_text,
         "keywords": list(result.keywords),
         "reason": result.reason,
     }
+    if semantic_review is not None:
+        payload.update(
+            {
+                "explicit_keywords": list(semantic_review.explicit_keywords),
+                "inferred_keywords": list(semantic_review.inferred_keywords),
+                "evidence": [item.to_dict() for item in semantic_review.evidence],
+                "confidence": semantic_review.confidence,
+                "requires_confirmation": semantic_review.requires_confirmation,
+            }
+        )
+    return payload
 
 
 def _plan_to_log(plan: ShadowPlan | None) -> dict | None:

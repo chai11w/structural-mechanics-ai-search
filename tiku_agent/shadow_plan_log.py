@@ -18,7 +18,7 @@ from tiku_agent.session_artifacts import session_key
 from tiku_agent.tools import DEFAULT_RUNTIME_DIR
 
 
-SHADOW_LOG_SCHEMA_VERSION = 1
+SHADOW_LOG_SCHEMA_VERSION = 2
 DEFAULT_SHADOW_LOG_PATH = DEFAULT_RUNTIME_DIR / "shadow_plans.jsonl"
 
 

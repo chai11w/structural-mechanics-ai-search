@@ -627,3 +627,56 @@ $env:PYTHONIOENCODING = "utf-8"; python -B scripts\evaluate_shadow_plan_entry_qw
 - 代码要求题号、候选编号、章节和全局搜索授权必须有原话明确证据；否则只记录 `needs_confirmation`，不得产生可执行动作。
 - 修复后复跑同一35条金标准三轮；禁止动作、固定路径Planner误触发和开关可见差异必须均为0。
 - 暂不拆工具、不进入Stage 6、不提升8790。
+
+---
+
+## 步骤：Stage 5 影子语义授权闸门
+
+### 干了啥
+
+- 新增纯代码`shadow_semantic_gate_v0`：不调用模型、不调用工具、不修改状态；逐步骤核对Planner动作能否在用户原话中找到明确授权。
+- 覆盖全部11个Planner动作。选择题号/候选必须有一致编号和选择表达；章节必须明确命名且不能由相邻章节子串误授权；全局搜索、继续搜索、候选否定、答案不匹配、重试等均有各自正向证据。“不要选第二题/不要全局搜/先不要继续搜”等否定表达优先，动作词出现也不算授权。
+- “就这样吧/你说哪个靠谱/别的那个也行/这个你帮我看看/刚才那个是不是不对”等只能成为`needs_confirmation`或空计划，模型补出来的“选择/候选2”等关键词不能充当授权。
+- 影子日志schema升至v2；`rewritten`新增`explicit_keywords/inferred_keywords/evidence/confidence/requires_confirmation`。其中证据和确定性由代码派生，不信任模型自报。
+- 状态与参数权限仍是第一层硬边界；只有状态合法的计划才用语义闸门决定`allow`或`needs_confirmation`。用户可见回复、业务状态和原工具调用完全不变。
+- 真实入口评估拆开统计固定业务误判、Planner原始越权提议、已拦截提议和实际放行越权，避免把“模型想错但代码挡住”继续算成执行违规。
+
+### 改动文件
+
+- `tiku_agent/shadow_semantic_gate_v0.py`（新增）
+- `tiku_agent/agent.py`
+- `tiku_agent/shadow_plan_log.py`
+- `scripts/evaluate_shadow_plan_entry_qwen_v0.py`
+- `tests/test_tiku_agent_shadow_semantic_gate_v0.py`（新增）
+- `tests/test_tiku_agent_shadow_entry_eval_v0.py`
+- `.agents/roadmap.md`
+- `.agents/project_memory.md`
+- `.agents/8794_handoff.md`
+
+### 真实三轮结果
+
+最终输出目录：`.tmp_shadow_plan_entry_eval_8794/20260801_204300/`（忽略目录，不提交）。
+
+- 总体99/105（94.29%），三轮稳定为33/35。
+- 固定明确路径误触发Planner：0。
+- 开关影子后的回答、业务状态、原工具调用差异：0。
+- Planner原始禁止动作提议：10；闸门已拦截：10；实际放行越权：0。
+- `needs_confirmation`：11；空计划13；状态权限拒绝3；Planner不可用0。
+- 剩余6次失败全部来自既有固定业务路由，两条样本每轮稳定复现：
+  - `which_chapter`：“帮我看看这题哪一章的”被固定Intent拒绝；
+  - `closer_after_answer`：“有没有更接近的”在ANSWERED被固定Intent直接`reject_candidates`。
+- 额外6条明确组合动作探针全部走固定业务，没有进入Planner。当前真实入口可执行影子计划为0，说明下一步要讨论复杂请求准入，而不是放松语义闸门。
+
+### 验证命令
+
+```powershell
+python -B -m unittest tests.test_tiku_agent_shadow_semantic_gate_v0 tests.test_tiku_agent_shadow_entry_eval_v0 tests.test_tiku_agent_shadow_plan_v0 tests.test_tiku_agent_shadow_planner_v0 tests.test_tiku_agent_agent
+python -B -m unittest discover -s tests -p "test_*.py"
+$env:PYTHONIOENCODING = "utf-8"; python -B scripts\evaluate_shadow_plan_entry_qwen_v0.py --runs 3
+```
+
+### 剩余任务 / 下一步
+
+- 先讨论Planner准入范围：是否仅增加“原话明确包含两个及以上动作”的影子观察入口；固定业务仍照常响应和执行。
+- 为新准入增加可执行计划金标准，证明语义闸门不是全部拒绝，同时保持单动作快速路径不调用Planner。
+- 两条固定Intent误判单独处理；暂不拆工具、不进入Stage 6、不提升8790。
