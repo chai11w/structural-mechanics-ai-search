@@ -11,6 +11,7 @@ from tiku_agent.safe_answer_contract_v0 import (
     MAX_SAFE_ANSWER_CHARS,
     validate_safe_answer_output_v0,
 )
+from tiku_agent.safe_answer_context_v0 import SafeConversationContext
 
 _SAFE_REPLIES = {
     "greeting": "你好。",
@@ -23,9 +24,18 @@ _SAFE_REPLIES = {
 }
 
 
-def render_safe_answer_v0(category: str) -> str:
-    """Return one reviewed, concise reply for an eligible pure conversation."""
+def render_safe_answer_v0(
+    category: str,
+    context: SafeConversationContext | None = None,
+) -> str:
+    """Return one reviewed, concise reply for an eligible pure conversation.
 
+    ``context`` is accepted for the state-aware wiring (M4); the phase-aware
+    copy table is filled in by a later step (M3), until then the same fixed
+    replies are returned so existing callers stay byte-for-byte unchanged.
+    """
+
+    del context
     try:
         reply = _SAFE_REPLIES[category]
     except KeyError as exc:

@@ -20,6 +20,10 @@ from tiku_agent.intent_runtime_v2 import (
 )
 from tiku_agent.intent_v2 import call_qwen_decision_v2, decide_intent_v2
 from tiku_agent.reply_shell_v2 import is_reply_shell_action, render_reply_shell_v2
+from tiku_agent.safe_answer_context_v0 import (
+    SafeConversationContext,
+    build_safe_answer_context,
+)
 from tiku_agent.safe_answer_generator_v0 import SafeAnswerGeneratorV0
 from tiku_agent.safe_answer_policy_v0 import evaluate_safe_answer_policy
 from tiku_agent.safe_answer_reply_v0 import render_safe_answer_v0
@@ -125,9 +129,10 @@ class TikuSearchAgent:
         return self._dispatch_v2(decision, context)
 
     def _safe_answer_response(self, text: str, category: str) -> AgentResponse:
+        context = self._safe_answer_context()
         if self.safe_answer_generator_v0 is not None:
             try:
-                generated = self.safe_answer_generator_v0.generate(text)
+                generated = self.safe_answer_generator_v0.generate(text, context)
             except Exception:  # noqa: BLE001 - preserve the reviewed fixed fallback.
                 generated = None
             if generated is not None and generated.source != "not_called":
@@ -139,7 +144,7 @@ class TikuSearchAgent:
                     fallback_reason=generated.fallback_reason,
                 )
         return AgentResponse(
-            text=render_safe_answer_v0(category),
+            text=render_safe_answer_v0(category, context),
             state=self.state.to_dict(),
             intent="safe_answer",
             reply_source="fixed_fallback",
@@ -147,6 +152,18 @@ class TikuSearchAgent:
                 "generator_error" if self.safe_answer_generator_v0 is not None else ""
             ),
         )
+
+    def _safe_answer_context(self) -> SafeConversationContext | None:
+        """Build the whitelisted state summary, degrading to None on any failure.
+
+        A malformed AgentState must never break the safe-answer seam: when the
+        summary cannot be derived, generation and the fixed fallback both run
+        state-free (context=None), which is the pre-wiring behavior.
+        """
+        try:
+            return build_safe_answer_context(self.state)
+        except Exception:  # noqa: BLE001 - degraded fallback must stay safe.
+            return None
 
     def _dispatch_v2(
         self,

@@ -6,9 +6,9 @@
 ## 当前进度
 
 - **目标**：8794 状态感知安全回答（roadmap Stage 4）——让安全回答能感知当前业务阶段（等待章节/候选选择/答案展示），业务操作仍走固定状态机。
-- **总计划**：M1 状态摘要模块 → M2 prompt 契约 → M3 phase 兜底文案 → M4 generator+agent 接线 → M5 runtime 验收测试。
-- **已完成**：M1 状态摘要模块、M2 prompt 契约扩展。
-- **下一步**：M3 phase 感知兜底文案。
+- **总计划**：M1 状态摘要模块 → M2 prompt 契约 → M4 generator+agent 接线 → M3 接线后按需兜底文案 → M5 runtime 验收测试。
+- **已完成**：M1 状态摘要模块、M2 prompt 契约扩展、M4 generator+agent 接线。
+- **下一步**：M3 接线后按需兜底文案（M4 之后做，先看哪些 (category, phase) 真正需要兜底文案，默认回落 `_SAFE_REPLIES` 通用寒暄；业务话术已由 render.py 状态机承担，不重复）。
 
 ---
 
@@ -16,6 +16,44 @@
 
 ### M1 状态摘要模块（commit `82634dd`）
 新增纯模块 `safe_answer_context_v0.py`，从 `AgentState` 派生脱敏白名单摘要 `SafeConversationContext`。allowed_actions 动态权限矩阵派生；phase 英文常量、waiting_for/last_completed_step 中文；路径/分数/错误/session_id 不入白名单；IDLE 无状态小节。18 个单测 + 全量通过。
+
+---
+
+## 步骤：M4 generator 透传 + agent 接线
+
+### 干了啥
+让状态感知真正进入安全回答主路径：
+- `safe_answer_reply_v0.py` 的 `render_safe_answer_v0` 新增可选 `context: SafeConversationContext | None = None` 参数（`del context`，暂不感知，M3 填查询表；无 context 调用行为不变）。
+- `safe_answer_generator_v0.py` 的 `generate(user_text, context=None)` 把 context 传给 `build_safe_answer_prompt_v0`；`_fallback(category, reason, started, context=None)` 把 context 传给 `render_safe_answer_v0`。无 context 时行为不变。
+- `agent.py` 的 `_safe_answer_response` 先构建 `context = self._safe_answer_context()`，传给 `generate` 与兜底 `render_safe_answer_v0`。
+- 新增 `agent._safe_answer_context()`：`try: return build_safe_answer_context(self.state) except Exception: return None`——状态摘要派生失败时降级为 state-free，绝不破坏安全回答。
+- `handle_text`、general 保险网、`_stop_for_tool_result`、`_dispatch` 全部未动。
+
+### 改动文件
+- `tiku_agent/safe_answer_reply_v0.py` → `render_safe_answer_v0` 加 `context` 参数（del，行为不变）。
+- `tiku_agent/safe_answer_generator_v0.py` → `generate`/`_fallback` 加 `context` 参数并透传。
+- `tiku_agent/agent.py` → `_safe_answer_response` 接线；新增 `_safe_answer_context()`；新增 import `SafeConversationContext`/`build_safe_answer_context`。
+- `tests/test_tiku_agent_safe_answer_generator_v0.py` → 新增 `test_generate_passes_whitelisted_context_into_the_prompt`、`test_generate_without_context_remains_state_free`、`test_generate_fallback_with_context_passes_context_to_render`。
+- `tests/test_tiku_agent_safe_answer_route_v0.py` → 新增 `test_candidate_phase_greeting_is_phase_aware_zero_tool_zero_state`、`test_context_derivation_failure_degrades_to_state_free_fallback`。
+
+### 验证命令与结果
+```
+python -B -m unittest tests.test_tiku_agent_safe_answer_generator_v0 tests.test_tiku_agent_safe_answer_route_v0   # 22/22 通过
+python -B -m unittest discover -s tests -p "test_*.py"                                                          # 292 全量 OK，无回归
+```
+
+### 审查关注点
+- 无 context 调用路径是否保持原有行为（generator/agent 既有 38 条 route + 全量契约测试原样通过）。
+- `_safe_answer_context()` 异常降级是否真能触发（`test_context_derivation_failure_degrades_to_state_free_fallback` 用 patch 强制 `build_safe_answer_context` 抛错，确认回落固定兜底且不调工具）。
+- 注入 generator 是否收到白名单 context（`test_candidate_phase_greeting_is_phase_aware_zero_tool_zero_state` 断言 prompt 含 `WAIT_CANDIDATE_CHOICE`/`候选数量：3`，且状态零改动、零工具调用）。
+- `render_safe_answer_v0` 加了 `context` 参数但当前 `del context`，M3 之前无 phase 感知文案属预期。
+
+### 剩余任务 / 已知风险
+- 无已知风险。M3 将在本步之后实施（接线完再看哪些兜底真需要 phase 感知文案）。
+- 已知用户决策：业务回答与安全回答保持分离，业务话术（章节/全局搜索/重试/候选引导）不进入安全兜底，业务层 `render.py` 措辞不改。
+
+### 建议下一步命令
+- M3 实施前审查本步：`git show <m4-commit>`；运行上述两个验证命令。
 
 ---
 
