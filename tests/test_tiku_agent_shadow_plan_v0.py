@@ -97,9 +97,11 @@ class ShadowPlanDataTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ShadowPlanStep(action="cancel")
 
-    def test_plan_rejects_empty_steps(self) -> None:
+    def test_plan_rejects_empty_steps_unless_unplannable(self) -> None:
         with self.assertRaises(ValueError):
             ShadowPlan(goal="g", steps=())
+        unplannable = ShadowPlan(goal="g", steps=(), source="unplannable")
+        self.assertEqual(unplannable.steps, ())
 
     def test_plan_rejects_too_many_steps(self) -> None:
         with self.assertRaises(ValueError):
@@ -286,6 +288,16 @@ class ReviewShadowPlanTest(unittest.TestCase):
         plan = _plan(_step("retry_search"))
         review = review_shadow_plan(plan, facts)
         self.assertEqual(review.outcome, REVIEW_REJECT)
+
+    def test_unplannable_empty_plan_is_recorded_not_rejected(self) -> None:
+        # An empty plan is the planner's honest "no legal read-only action"
+        # conclusion.  It is recorded as a special allow (unplannable) rather
+        # than rejected, so the shadow log distinguishes it from a rejected plan.
+        facts = build_permission_review_facts(_candidate_state())
+        plan = ShadowPlan(goal="用户想放弃", steps=(), source="unplannable")
+        review = review_shadow_plan(plan, facts)
+        self.assertEqual(review.outcome, REVIEW_ALLOW)
+        self.assertEqual(review.code, "unplannable")
 
     def test_plan_tools_budget_exceeded_is_rejected(self) -> None:
         # A four-step select_question plan would trigger 4*4 = 16 tool calls in

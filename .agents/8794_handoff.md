@@ -496,3 +496,75 @@ PYTHONIOENCODING=utf-8 python -B scripts/evaluate_shadow_plan_qwen_v0.py   # 重
 ### 剩余待解问题（沿用上轮，未改）
 1. **WAIT_CHAPTER 规划器动作选择偏差**（`explainable_failure_required` 仍 25 次）：规划器把"有没有更接近的/后面那几道也看看"误判为 explain_failure，应提 continue_search/show_candidates。属 prompt 引导不足，非审核 bug。
 2. **审核把 clarify 当 reject**：缺信息可引导的动作被统一记为拒绝。纯记录阶段无危险，是否细化留 Codex 决定。
+
+### 决策：WAIT_CHAPTER 规划器误判的处理方向（先审后改）
+**现象**：WAIT_CHAPTER 15 条话术里 10 条被拒，`explainable_failure_required` 25 次。逐格核对模型的 step.reason 发现：**模型分析是对的**（它知道"应引导用户选章节/做全局搜索"），但**选错了动作名**——它想表达"我无法直接执行，需要解释/引导"，却把 `explain_failure` 当成了万能兜底。
+
+**根因**：`explain_failure` 业务语义是"解释上一次失败的原因"（合法条件 `has_explainable_failure`=有 last_error），不是"解释我为什么做不到"。模型没有动作语义边界，拿不准时硬塞 `explain_failure`。
+
+**决策：不改宇宙、不加 clarification。**
+- `clarification` 是对话层动作（CONVERSATION_ACTIONS），不是"可执行计划"。放进计划宇宙会让执行器（Stage 6）拿到一个不知该执行什么的步骤，语义混乱。
+- 保持"计划=可执行只读动作"的语义纯净。
+
+**改法（双管）**：
+1. **prompt 动作语义强化**：给每个动作边界定义。`explain_failure` 明确"只在确有失败可解释时用（错误/无匹配后询问原因）"；`continue_search`/`show_candidates`/`select_candidate` 明确"需要已有候选/答案"；`retry_search` 明确"只在 ERROR 时用"；并加"无法执行时不要硬选动作"。
+2. **允许"空计划"表达**：`ShadowPlan` 支持空 steps（source=`unplannable`），`review_shadow_plan` 对空计划返回特殊 allow（code=`unplannable`），日志记录"模型认为无合法动作"。这样模型有诚实出口，不必硬塞错误动作。
+
+**验证**：改后重跑矩阵，预期 WAIT_CHAPTER 的 `explainable_failure_required` 大幅下降，被拒的变成 `unplannable`（语义正确）或正确动作（如 set_chapter/global_search/continue_search）。
+
+### 实现：规划器加入改写层（一次调用，先改写再规划）
+用户指出根因：**用户意图模糊是本质，只改 prompt 教模型选动作是治标**。规划器在判断意图前先加一层"补齐"——LLM 先改写模糊请求（补省略、还原指代、加关键词、写明原因），再基于改写后的完整表述提计划。
+
+实现（一次模型调用，输出 JSON 同时含改写 + 计划）：
+- `shadow_plan_v0.py` 新增 `ShadowPlannerResult`（`rewritten_text`/`keywords`/`reason`/`plan`）。
+- `shadow_planner_v0.py` prompt 加"第一步改写、第二步规划"指令；`parse_shadow_plan_v0` 解析复合结构；`plan()` 返回 `ShadowPlannerResult | None`。
+- `agent.py` `_maybe_shadow_plan` 解包结果，日志新增 `rewritten` 字段（改写文本/关键词/理由）。
+- `shadow_plan_log.py` `ShadowPlanLogEntry` 加 `rewritten`。
+- `evaluate_shadow_plan_qwen_v0.py` 记录改写信息。
+- 保留"空计划 unplannable"：改写后仍判断无合法只读动作时，输出空 steps（source=unplannable），review 返回特殊 allow（code=unplannable），日志区分"无法规划"与"被拒"。
+
+测试：`test_tiku_agent_shadow_planner_v0.py` 重写覆盖复合解析/空步骤/缺 rewritten/脱敏；agent 测试 5 个 stub 改返回 `ShadowPlannerResult`；`shadow_plan_v0` 加 unplannable review 测试。相关 89 条、全量 372 条通过。
+
+验证命令：
+```powershell
+python -B -m unittest tests.test_tiku_agent_shadow_planner_v0 tests.test_tiku_agent_shadow_plan_v0 tests.test_tiku_agent_agent   # 89/89
+python -B -m unittest discover -s tests -p "test_*.py"   # 372 全量
+PYTHONIOENCODING=utf-8 python -B scripts/evaluate_shadow_plan_qwen_v0.py   # 重跑矩阵对比（关键：WAIT_CHAPTER explain_failure 应下降）
+```
+
+### 改写层两轮矩阵结果 + 诊断修复
+**首轮改写矩阵**（`.tmp_shadow_plan_eval_8794/20260801_191137/`）：总通过率 90.5%（95/105），但结构合法率降到 92.4%（8 条 planner_unavailable）、unplannable 41 条。逐格分析：
+- unplannable 41 条**大多合理**（IDLE 阶段 14 条几乎全 unplannable 正确；"算了不看了/就这样吧"放弃类正确），少数可疑（WAIT_CHAPTER"那换一道难一点的吧"其实可 global_search）。
+- planner_unavailable 8 条是**评估脚本盲区**——`plan()` 吞掉异常，解析失败原因丢失。
+
+**修复评估脚本盲区**：加 `_dashscope_raw`（直接调 API 拿原始文本）+ `_json_or_raw`，records.jsonl 新增 `raw_output` 字段，解析失败不再黑盒。
+
+**诊断出真因（第二轮矩阵，93.3% 通过率，5 条解析失败）**：查看 raw_output 发现**模型改写 reason 写得过长**（每条几百字推理），导致 JSON 超出 max_tokens=512 被截断，解析失败。这是改写 prompt 的副作用。
+**修复**：① prompt 明确"reason 只写一句话不超过 30 字，不要展开推理"；② max_tokens 512→768 兜底。相关测试全量 372 通过。
+
+改动文件：
+- `tiku_agent/shadow_planner_v0.py`（prompt reason 限长 + max_tokens）
+- `scripts/evaluate_shadow_plan_qwen_v0.py`（raw_output 诊断 + max_tokens）
+
+验证命令：
+```powershell
+python -B -m unittest discover -s tests -p "test_*.py"   # 372 全量
+PYTHONIOENCODING=utf-8 python -B scripts/evaluate_shadow_plan_qwen_v0.py   # 第三轮矩阵
+```
+
+### 第三轮改写矩阵：105/105 全通过（`.tmp_shadow_plan_eval_8794/20260801_193049/`）
+- **结构合法率 100%**（reason 限长 + max_tokens 修复后，解析失败归零）。
+- **review 全 allow：105/105**，无 reject，无 planner_unavailable。
+- unplannable 57 条 / 真计划 48 条。逐条核对：**绝大多数合理**——
+  - IDLE 15 条全 unplannable（无题图无任务，没有可执行只读动作，正确）。
+  - 所有阶段"算了不看了/就这样吧"（放弃）unplannable，正确。
+  - "有没有更接近的"在 WAIT_QUESTION_CHOICE 虽可换题，但 `select_question` 需用户指定题号——模型诚实标记"信息不足"，**是正确的谨慎，不是过度保守**。影子规划职责正是识别"信息不足不可执行"，而非替用户猜。
+- 结论：**不修改 unplannable 行为**。它与设计意图一致，比旧版硬塞 explain_failure 更诚实。
+
+### 改写层完整演进（供 Codex 复核全过程）
+| 版本 | 总通过率 | 结构合法 | 说明 |
+|---|---|---|---|
+| 无改写基线 | 56.2% | 100% | 动作级预算已修复 |
+| 改写层 v1 | 90.5% | 92.4% | unplannable 41；8 条解析失败（盲区） |
+| + raw_output 诊断 | 93.3% | 95.2% | 定位真因：reason 过长超 max_tokens |
+| + reason 限长 & max_tokens=768 | **100%** | **100%** | 全阶段 15/15 |

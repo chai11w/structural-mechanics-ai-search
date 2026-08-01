@@ -96,7 +96,15 @@ class ShadowPlanStep:
 
 @dataclass(frozen=True)
 class ShadowPlan:
-    """A structured multi-step plan the fixed state machine could not derive."""
+    """A structured multi-step plan the fixed state machine could not derive.
+
+    ``steps`` may be empty only when ``source`` is ``unplannable``: the planner
+    judged that the request has no legal executable read-only action (e.g. the
+    user wants to give up or the request is too vague to map).  An empty plan is
+    still recorded — with a ``unplannable`` review — so the shadow log shows the
+    planner reached that honest conclusion instead of being forced to invent a
+    wrong action.  A non-empty plan must stay within ``MAX_PLAN_STEPS``.
+    """
 
     goal: str
     steps: tuple[ShadowPlanStep, ...]
@@ -106,12 +114,41 @@ class ShadowPlan:
     def __post_init__(self) -> None:
         if not self.goal or not str(self.goal).strip():
             raise ValueError("goal must not be empty")
-        if not isinstance(self.steps, tuple) or len(self.steps) == 0:
-            raise ValueError("steps must be a non-empty tuple")
+        if not isinstance(self.steps, tuple):
+            raise ValueError("steps must be a tuple")
+        if len(self.steps) == 0:
+            if self.source != "unplannable":
+                raise ValueError("an empty plan must declare source=unplannable")
+            return
         if len(self.steps) > MAX_PLAN_STEPS:
             raise ValueError(f"a plan may contain at most {MAX_PLAN_STEPS} steps")
         if self.source not in {"planner", "stub"}:
             raise ValueError("source must be planner or stub")
+
+
+@dataclass(frozen=True)
+class ShadowPlannerResult:
+    """One planner turn: the rewritten request plus the derived plan.
+
+    The user's original long-tail utterance is often vague (ellipsis, dropped
+    subjects, ambiguous pronouns).  Before choosing actions the planner rewrites
+    it into a fuller request — injecting the keywords and intent the fixed rules
+    cannot see — and records why, so the shadow log shows *both* the rewrite and
+    the plan built on it.  This is one model call producing one result.
+    """
+
+    rewritten_text: str
+    keywords: tuple[str, ...]
+    reason: str
+    plan: ShadowPlan
+
+    def __post_init__(self) -> None:
+        if not self.rewritten_text or not str(self.rewritten_text).strip():
+            raise ValueError("rewritten_text must not be empty")
+        if not isinstance(self.keywords, tuple):
+            raise ValueError("keywords must be a tuple")
+        if not isinstance(self.reason, str):
+            raise ValueError("reason must be a string")
 
 
 @dataclass(frozen=True)
@@ -201,7 +238,15 @@ def review_shadow_plan(
     clear machine-readable ``code`` plus a human-readable ``reason``.
     """
     if not plan.steps:
-        return _reject("empty_plan", "计划没有任何步骤。")
+        # The planner honestly concluded there is no legal read-only action.
+        # Record it as a special allow so the log distinguishes "cannot plan"
+        # from "planned and rejected".  Zero tools, zero state changes.
+        return PermissionReview(
+            outcome=REVIEW_ALLOW,
+            code="unplannable",
+            reason="规划器判断当前请求没有可执行的只读动作。",
+            plan=plan,
+        )
     if len(plan.steps) > facts.max_steps:
         return _reject(
             "plan_too_long",

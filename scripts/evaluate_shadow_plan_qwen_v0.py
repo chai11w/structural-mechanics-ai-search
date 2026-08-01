@@ -33,13 +33,11 @@ from tiku_agent.intent_runtime_v2 import build_runtime_context_v2
 from tiku_agent.shadow_plan_v0 import (
     PermissionReview,
     ShadowPlan,
+    ShadowPlannerResult,
     build_permission_review_facts,
     review_shadow_plan,
 )
-from tiku_agent.shadow_planner_v0 import (
-    ShadowPlannerV0,
-    call_qwen_planner_v0,
-)
+from tiku_agent.shadow_planner_v0 import SHADOW_PLAN_PROMPT, ShadowPlannerV0
 from tiku_agent.state import (
     PHASE_ANSWERED,
     PHASE_ERROR,
@@ -131,10 +129,7 @@ def build_phase_state(phase: str) -> AgentState:
     return AgentState(phase=phase, **common)
 
 
-def evaluate_matrix(
-    *,
-    planner: ShadowPlannerV0,
-) -> list[dict]:
+def evaluate_matrix() -> list[dict]:
     """Run every (phase, utterance) pair through the real shadow-plan path."""
     records = []
     for phase in MATRIX_PHASES:
@@ -142,18 +137,31 @@ def evaluate_matrix(
         facts = build_permission_review_facts(state)
         context: ConversationContextV2 = build_runtime_context_v2(state)
         for text in MATRIX_UTTERANCES:
-            plan = planner.plan(text, context.to_prompt_payload())
+            captured_raw = ""
+
+            def recording_client(prompt: str) -> dict:
+                nonlocal captured_raw
+                captured_raw = _dashscope_raw(prompt)
+                return _json_or_raw(captured_raw)
+
+            planner = ShadowPlannerV0(model_client=recording_client)
+            result = planner.plan(text, context.to_prompt_payload())
+            plan = result.plan if result is not None else None
             review = review_shadow_plan(plan, facts) if plan is not None else None
             records.append(
                 {
                     "phase": phase,
                     "utterance": text,
+                    "rewritten": _result_to_record(result),
                     "plan_structurally_valid": plan is not None,
                     "plan": _plan_to_record(plan),
                     "review": _review_to_record(review),
                     "outcome": review.outcome if review else "no_plan",
                     "reject_code": review.code if review else ("planner_unavailable" if plan is None else ""),
                     "accepted": review.allowed if review else False,
+                    # Raw model text so a parse failure is diagnosable instead
+                    # of a silent planner_unavailable black box.
+                    "raw_output": captured_raw,
                 }
             )
     return records
@@ -215,6 +223,16 @@ def render_matrix_report(records: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _result_to_record(result: ShadowPlannerResult | None) -> dict | None:
+    if result is None:
+        return None
+    return {
+        "rewritten_text": result.rewritten_text,
+        "keywords": list(result.keywords),
+        "reason": result.reason,
+    }
+
+
 def _plan_to_record(plan: ShadowPlan | None) -> dict | None:
     if plan is None:
         return None
@@ -254,6 +272,56 @@ def _review_to_record(review: PermissionReview | None) -> dict | None:
     }
 
 
+def _dashscope_raw(prompt: str) -> str:
+    """Call DashScope directly and return the raw model text.
+
+    Unlike ``call_qwen_planner_v0`` (which already parsed to a dict), this keeps
+    the raw string so a parse failure inside the planner is diagnosable.
+    """
+    import json as _json
+    import os as _os
+    import urllib.request as _urlrequest
+
+    api_key = _os.environ.get("DASHSCOPE_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("DASHSCOPE_API_KEY is not set")
+    payload = {
+        "model": DEFAULT_MODEL,
+        "messages": [
+            {"role": "system", "content": SHADOW_PLAN_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0,
+        "max_tokens": 768,
+        "enable_thinking": False,
+    }
+    request = _urlrequest.Request(
+        DEFAULT_ENDPOINT,
+        data=_json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with _urlrequest.urlopen(request, timeout=60) as response:
+        data = _json.loads(response.read().decode("utf-8"))
+    content = data["choices"][0]["message"]["content"]
+    return content if isinstance(content, str) else str(content)
+
+
+def _json_or_raw(text: str) -> dict:
+    """Try to parse the model text; return a sentinel dict on failure.
+
+    The sentinel guarantees ``plan()`` degrades to ``None`` (recording
+    ``planner_unavailable``) while ``raw_output`` still holds the real text.
+    """
+    from scripts.classify_question_bank import parse_model_json
+
+    try:
+        parsed = parse_model_json(text)
+        return parsed if isinstance(parsed, dict) else {"raw": text}
+    except Exception:  # noqa: BLE001 - keep the raw text for diagnosis.
+        return {"raw": text}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate shadow planning with real Qwen")
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -263,8 +331,7 @@ def main() -> int:
     if not os.environ.get("DASHSCOPE_API_KEY", ""):
         raise SystemExit("DASHSCOPE_API_KEY is not set")
 
-    planner = ShadowPlannerV0(model_client=call_qwen_planner_v0)
-    records = evaluate_matrix(planner=planner)
+    records = evaluate_matrix()
     summary = summarize(records)
     report = render_matrix_report(records)
 

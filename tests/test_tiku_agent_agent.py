@@ -2,6 +2,7 @@ import unittest
 
 from tiku_agent.agent import AgentToolbox, TikuSearchAgent
 from tiku_agent.safe_answer_generator_v0 import SafeAnswerGeneratorV0
+from tiku_agent.shadow_plan_v0 import ShadowPlan, ShadowPlanStep, ShadowPlannerResult
 from tiku_agent.state import AgentState, PHASE_ANSWERED, PHASE_ERROR, STATE_WAIT_CANDIDATE_CHOICE, STATE_WAIT_CHAPTER
 from tiku_agent.tools import AgentToolConfig, ToolResult
 
@@ -9,6 +10,20 @@ from tiku_agent.tools import AgentToolConfig, ToolResult
 def _business_state(state: dict) -> dict:
     """Exclude the per-agent random session_id from state comparisons."""
     return {key: value for key, value in state.items() if key != "session_id"}
+
+
+def _result(*steps: ShadowPlanStep, goal: str = "g", source: str = "planner") -> ShadowPlannerResult:
+    """Build a planner result whose plan holds the given steps."""
+    return ShadowPlannerResult(
+        rewritten_text=f"改写：{goal}",
+        keywords=(),
+        reason="测试改写",
+        plan=ShadowPlan(goal=goal, steps=steps, source=source),
+    )
+
+
+def _plannable_step(action: str, **params) -> ShadowPlanStep:
+    return ShadowPlanStep(action=action, params=params)
 
 
 class FakeTools:
@@ -790,7 +805,6 @@ class TikuSearchAgentTest(unittest.TestCase):
 
     def test_shadow_planner_runs_once_for_ambiguous_long_tail(self):
         from tiku_agent.shadow_plan_log import ShadowPlanLogger
-        from tiku_agent.shadow_plan_v0 import ShadowPlan, ShadowPlanStep
 
         class RecordingPlanner:
             def __init__(self):
@@ -798,10 +812,7 @@ class TikuSearchAgentTest(unittest.TestCase):
 
             def plan(self, user_text, context_payload):
                 self.calls += 1
-                return ShadowPlan(
-                    goal="理解用户到底想做什么",
-                    steps=(ShadowPlanStep(action="show_candidates"),),
-                )
+                return _result(_plannable_step("show_candidates"), goal="理解用户到底想做什么")
 
         class RecordingLogger(ShadowPlanLogger):
             def __init__(self):
@@ -834,7 +845,6 @@ class TikuSearchAgentTest(unittest.TestCase):
 
     def test_shadow_planner_not_called_for_fixed_business_path(self):
         from tiku_agent.shadow_plan_log import ShadowPlanLogger
-        from tiku_agent.shadow_plan_v0 import ShadowPlan, ShadowPlanStep
 
         class RecordingPlanner:
             def __init__(self):
@@ -842,10 +852,7 @@ class TikuSearchAgentTest(unittest.TestCase):
 
             def plan(self, user_text, context_payload):
                 self.calls += 1
-                return ShadowPlan(
-                    goal="g",
-                    steps=(ShadowPlanStep(action="show_candidates"),),
-                )
+                return _result(_plannable_step("show_candidates"))
 
         class RecordingLogger(ShadowPlanLogger):
             def __init__(self):
@@ -874,7 +881,6 @@ class TikuSearchAgentTest(unittest.TestCase):
 
     def test_shadow_planner_never_changes_business_response(self):
         from tiku_agent.shadow_plan_log import ShadowPlanLogger
-        from tiku_agent.shadow_plan_v0 import ShadowPlan, ShadowPlanStep
 
         class RecordingPlanner:
             def __init__(self):
@@ -882,10 +888,7 @@ class TikuSearchAgentTest(unittest.TestCase):
 
             def plan(self, user_text, context_payload):
                 self.calls += 1
-                return ShadowPlan(
-                    goal="g",
-                    steps=(ShadowPlanStep(action="show_candidates"),),
-                )
+                return _result(_plannable_step("show_candidates"))
 
         class RecordingLogger(ShadowPlanLogger):
             def write(self, entry):
@@ -933,18 +936,15 @@ class TikuSearchAgentTest(unittest.TestCase):
 
     def test_shadow_planner_records_rejected_over_authority_plan(self):
         from tiku_agent.shadow_plan_log import ShadowPlanLogger
-        from tiku_agent.shadow_plan_v0 import ShadowPlan, ShadowPlanStep
 
         class OverAuthorityPlanner:
             def plan(self, user_text, context_payload):
-                return ShadowPlan(
-                    goal="强行改到旧版本候选",
-                    steps=(
-                        ShadowPlanStep(
-                            action="select_candidate",
-                            params={"candidate_rank": 1, "task_revision": 0},
-                        ),
+                return _result(
+                    ShadowPlanStep(
+                        action="select_candidate",
+                        params={"candidate_rank": 1, "task_revision": 0},
                     ),
+                    goal="强行改到旧版本候选",
                 )
 
         class RecordingLogger(ShadowPlanLogger):

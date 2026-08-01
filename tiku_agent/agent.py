@@ -36,6 +36,7 @@ from tiku_agent.shadow_plan_v0 import (
     MAX_PLANS_PER_TURN,
     PermissionReview,
     ShadowPlan,
+    ShadowPlannerResult,
     build_permission_review_facts,
     review_shadow_plan,
 )
@@ -173,7 +174,8 @@ class TikuSearchAgent:
         self._shadow_plan_count += 1
         try:
             facts = build_permission_review_facts(self.state)
-            plan = self.shadow_planner.plan(text, context.to_prompt_payload())
+            result = self.shadow_planner.plan(text, context.to_prompt_payload())
+            plan = result.plan if result is not None else None
             review = review_shadow_plan(plan, facts) if plan is not None else None
             self.shadow_logger.write(
                 ShadowPlanLogEntry(
@@ -182,9 +184,10 @@ class TikuSearchAgent:
                     user_text=text,
                     trigger_reason=decision.clarification_reason,
                     phase_before=self.state.phase,
+                    rewritten=_result_to_log(result),
                     plan=_plan_to_log(plan),
                     review=_review_to_log(review),
-                    planner_unavailable=plan is None,
+                    planner_unavailable=result is None,
                 )
             )
         except Exception:  # noqa: BLE001 - shadow observation must never break the response path.
@@ -598,6 +601,16 @@ class TikuSearchAgent:
 _SHADOW_TRIGGER_REASONS = frozenset(
     {"ambiguous_reference", "ambiguous_action", "ambiguous_number_namespace"}
 )
+
+
+def _result_to_log(result: ShadowPlannerResult | None) -> dict | None:
+    if result is None:
+        return None
+    return {
+        "rewritten_text": result.rewritten_text,
+        "keywords": list(result.keywords),
+        "reason": result.reason,
+    }
 
 
 def _plan_to_log(plan: ShadowPlan | None) -> dict | None:

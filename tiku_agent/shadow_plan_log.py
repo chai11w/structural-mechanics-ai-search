@@ -31,6 +31,7 @@ class ShadowPlanLogEntry:
     user_text: str
     trigger_reason: str
     phase_before: str
+    rewritten: dict | None = None
     plan: dict | None = None
     review: dict | None = None
     planner_unavailable: bool = False
