@@ -119,10 +119,50 @@ class IntentV2Test(unittest.TestCase):
             candidate_count=1,
             has_active_image=True,
         )
-        decision = decide_intent_v2("就这个", context)
-        self.assertEqual(decision.action, "select_candidate")
-        self.assertEqual(decision.candidate_rank, 1)
-        self.assertEqual(decision.source, "rule")
+        for text in (
+            "就这个",
+            "就这道",
+            "是",
+            "是的",
+            "对",
+            "没错",
+            "确认",
+            "可以",
+            "好的",
+        ):
+            with self.subTest(text=text):
+                decision = decide_intent_v2(text, context)
+                self.assertEqual(decision.action, "select_candidate")
+                self.assertEqual(decision.candidate_rank, 1)
+                self.assertEqual(decision.source, "rule")
+
+    def test_candidate_confirmation_never_guesses_with_multiple_or_after_answer(self):
+        multiple = ConversationContextV2(
+            phase="WAIT_CANDIDATE_CHOICE",
+            active_namespace="candidate",
+            candidate_count=2,
+            has_active_image=True,
+        )
+        answered = ConversationContextV2(
+            phase="ANSWERED",
+            active_namespace="candidate",
+            candidate_count=1,
+            has_active_image=True,
+            has_answer=True,
+        )
+        unique_with_more = ConversationContextV2(
+            phase="WAIT_CANDIDATE_CHOICE",
+            active_namespace="candidate",
+            candidate_count=1,
+            has_active_image=True,
+            continuation_available=True,
+        )
+        for context in (multiple, answered):
+            with self.subTest(phase=context.phase):
+                decision = decide_intent_v2("是", context)
+                self.assertNotEqual(decision.action, "select_candidate")
+        compound = decide_intent_v2("是可以，但我想继续搜", unique_with_more)
+        self.assertEqual(compound.action, "continue_search")
 
     def test_forbidden_and_conversation_rules_never_call_model(self):
         calls = []
