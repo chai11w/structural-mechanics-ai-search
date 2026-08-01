@@ -14,6 +14,22 @@
 
 ## 已完成步骤
 
+### R4 唯一候选的简短确认规则（体验修复）
+当状态为`WAIT_CANDIDATE_CHOICE`、当前命名空间是候选且恰好只有1个候选时，用户整句回复“是/是的/对/没错/确认/确定/可以/行/好/好的”等简短肯定词，会由固定Intent V2规则直接解析为`select_candidate(rank=1)`，不进入安全回答模型，也不需要自主Planner。原有“就这个/就它/选这个”继续支持。规则使用整句精确匹配；多个候选、答案已经显示或包含其他意图时不会自动选择，等待章节时“可以”仍只接受已明确提供的全局搜索兜底。
+
+新增意图边界测试和启用安全回答时的完整Agent链路测试，复现“系统询问是否选择唯一候选→用户回复‘是’→直接返回答案”；相关79项和全量318项测试通过。
+
+改动文件：
+- `tiku_agent/intent_v2.py`
+- `tests/test_tiku_agent_intent_v2.py`
+- `tests/test_tiku_agent_agent.py`
+
+验证命令：
+```powershell
+python -B -m unittest tests.test_tiku_agent_intent_v2 tests.test_tiku_agent_agent tests.test_tiku_agent_safe_answer_route_v0
+python -B -m unittest discover -s tests -p "test_*.py"
+```
+
 ### R3 严格模型白名单与代码校验事实拆分（Codex 复核修复）
 `SafeConversationContext`现在严格只含六项模型可见字段：`phase/chapter/candidate_count/allowed_actions/last_completed_step/waiting_for`。原先混在同一对象中的`question_count/has_active_image/has_answer/global_search_offered/continuation_available`不再进入模型上下文或`to_prompt_payload()`；动作权限仍直接从`AgentState`经权限矩阵计算，题图和答案存在性则进入独立的`SafeAnswerValidationFacts`，只供代码矛盾校验使用。Agent、generator、固定兜底和评估脚本已分别传递模型上下文与校验事实，业务状态机和工具未改。
 

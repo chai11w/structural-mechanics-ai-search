@@ -24,6 +24,7 @@
 - 8794状态感知安全回答已接入由`AgentState`纯代码派生的脱敏摘要、状态反射提示和真实Qwen矩阵评估；Codex首项复核已补代码级高置信度矛盾校验，并建立7阶段112条离线护栏集（56放行/56拒绝）。测试集首跑发现13个漏口、全量回归发现2个误杀，收窄修复后护栏112/112、相关53项与全量311项测试通过。
 - 8794安全回答的业务权限仍由原矩阵判断，但模型可见`allowed_actions`已全部翻译为11项固定中文用户语义；内部`select_candidate`、`retry_search`等action不再进入生产上下文或prompt。真实Qwen配对评测（7阶段×10话术×中英文两组，共140次）中，中文组整体通过率91.4%对英文组90.0%，含动作状态通过率90.0%对88.3%，阶段反映率78.3%对76.7%，均未在输出中复述内部action；差异很小但未见明显副作用。评测工具、相关测试与全量314项测试通过。
 - 8794模型可见`SafeConversationContext`已严格收敛为`phase/chapter/candidate_count/allowed_actions/last_completed_step/waiting_for`六项；题目数量、题图/答案存在性、全局搜索和续搜标记不再混入模型payload。题图与答案存在性改由独立`SafeAnswerValidationFacts`只供代码校验，112条状态护栏、相关78项、全量316项和真实Qwen 70组矩阵通过验证。
+- 唯一候选确认已补固定规则：`WAIT_CANDIDATE_CHOICE`且只有1个候选时，“是/是的/对/没错/确认/可以/好的”等整句短肯定直接选择候选1；多个候选、已显示答案和复合表达不自动选择。该业务动作在安全回答前被Intent V2接管，不调用安全回答模型；相关79项与全量318项测试通过。
 - 题库检索的 Zhipu 视觉复筛默认模型已切换为 `glm-4.6v`，默认 10 路候选并发；`config.local.json` 可用 `zhipu_rerank_model` 临时回退或切换模型。切换前已用单题 3 候选、10 候选并发和三题多题链路验证过可用性与速度。
 - 飞书事件去重已改为30分钟TTL、20,000条上限和加锁的缓存，避免长跑时事件ID无界增长；8788现已从主线工作区重新启动并加载当前代码。
 - 8790与8794九个业务工具及候选动作解析器已统一返回带 `tool`、`outcome`、`code`、`data`、`next_state`、`completed`、`retryable`、`error_category` 的结果；五态为 `SUCCESS / NO_MATCH / NEEDS_INPUT / PARTIAL / TOOL_ERROR`，旧 `ok` 仅作临时兼容。

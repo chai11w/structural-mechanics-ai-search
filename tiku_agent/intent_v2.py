@@ -166,6 +166,15 @@ def _rule_decision(
     if not text:
         return _clarification("ambiguous_action", source="rule")
 
+    if _is_unique_candidate_confirmation(text, context):
+        return ActionDecisionV2(
+            action="select_candidate",
+            candidate_rank=1,
+            source="rule",
+            confidence=1.0,
+            reason="唯一候选下的明确确认",
+        )
+
     global_search_reply = _global_search_reply(text, context)
     if global_search_reply is not None:
         return global_search_reply
@@ -211,18 +220,6 @@ def _rule_decision(
         return _simple("explain_failure")
     if _is_retry(text):
         return _simple("retry_search")
-    if (
-        context.active_namespace == NAMESPACE_CANDIDATE
-        and context.candidate_count == 1
-        and re.sub(r"[\s，。！？!?、,.]+", "", text) in {"就这个", "就它", "这个", "选这个"}
-    ):
-        return ActionDecisionV2(
-            action="select_candidate",
-            candidate_rank=1,
-            source="rule",
-            confidence=1.0,
-        )
-
     question_index = _explicit_question_index(text)
     if question_index is not None:
         return ActionDecisionV2(
@@ -450,6 +447,34 @@ def _is_cancel(text: str) -> bool:
     return text.lower() in {"0", "取消", "cancel", "退出", "算了", "不用了"} or bool(
         re.fullmatch(r"取消(?:这次|当前)?(?:搜题|检索|任务|操作)", text)
     )
+
+
+def _is_unique_candidate_confirmation(
+    text: str,
+    context: ConversationContextV2,
+) -> bool:
+    """Accept a short confirmation only when exactly one candidate is pending."""
+    if (
+        context.active_namespace != NAMESPACE_CANDIDATE
+        or context.candidate_count != 1
+    ):
+        return False
+    compact = re.sub(r"[\s，。！？!?、,.]+", "", text)
+    if compact in {"就这个", "就它", "这个", "选这个", "就这道", "选这道"}:
+        return True
+    return context.phase == "WAIT_CANDIDATE_CHOICE" and compact in {
+        "是",
+        "是的",
+        "对",
+        "对的",
+        "没错",
+        "确认",
+        "确定",
+        "可以",
+        "行",
+        "好",
+        "好的",
+    }
 
 
 def _is_resend(text: str) -> bool:
