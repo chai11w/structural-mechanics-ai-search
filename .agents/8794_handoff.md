@@ -19,17 +19,22 @@
 
 7阶段实际 prompt 抽样全部只显示中文，`RAW_ACTION_LEAKS=[]`；相关69项和全量311项测试通过，业务权限、路由、工具与状态均未改。
 
+随后新增 `--compare-action-labels` 真实 Qwen 配对评测，只在评测请求中把“允许的下一步”切换为内部英文名或中文标签，生产上下文始终保持中文。7阶段×10话术×2组共140次调用，调用顺序交替以减小简单的先后偏差。结果：中文组直接通过64/70（91.4%），英文组63/70（90.0%）；只看含动作提示的60组，中文54/60（90.0%），英文53/60（88.3%）；阶段反映率中文47/60（78.3%），英文46/60（76.7%）；两组实际输出均未复述内部action。配对结果为61组都通过、4组都兜底、中文改善3组、中文退步2组。结论是翻译未造成明显效果下降，略有正向信号，但单轮随机模型差异很小，主要收益仍是降低内部实现词汇暴露风险，而不是显著提升回答能力。评测产物位于忽略目录 `.tmp_safe_answer_eval_8794/20260801_142227/`，不提交。
+
 改动文件：
 - `tiku_agent/safe_answer_context_v0.py`
 - `tests/test_tiku_agent_safe_answer_context_v0.py`
 - `tests/test_tiku_agent_safe_answer_contract_v0.py`
 - `tests/test_tiku_agent_safe_answer_generator_v0.py`
 - `tests/test_tiku_agent_safe_answer_state_aware.py`
+- `scripts/evaluate_safe_answer_qwen_v0.py`（新增仅评测用的原始action/中文标签A/B开关）
+- `tests/test_tiku_agent_safe_answer_qwen_v0.py`
 
 验证命令：
 ```powershell
 python -B -m unittest tests.test_tiku_agent_safe_answer_state_consistency_v0 tests.test_tiku_agent_safe_answer_context_v0 tests.test_tiku_agent_safe_answer_contract_v0 tests.test_tiku_agent_safe_answer_generator_v0 tests.test_tiku_agent_safe_answer_route_v0 tests.test_tiku_agent_safe_answer_state_aware
 python -B -m unittest discover -s tests -p "test_*.py"
+$env:PYTHONIOENCODING='utf-8'; python -B scripts/evaluate_safe_answer_qwen_v0.py --compare-action-labels
 ```
 
 ### R1 状态矛盾输出校验（Codex 复核修复）

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
+from dataclasses import replace
 from datetime import datetime
 import json
 import os
@@ -17,7 +18,11 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from scripts.classify_question_bank import DEFAULT_ENDPOINT, DEFAULT_MODEL
-from tiku_agent.safe_answer_context_v0 import build_safe_answer_context
+from tiku_agent.safe_answer_context_v0 import (
+    SAFE_ACTION_LABELS,
+    SafeConversationContext,
+    build_safe_answer_context,
+)
 from tiku_agent.safe_answer_generator_v0 import (
     SafeAnswerGeneratorV0,
     SafeAnswerModelRequestV0,
@@ -254,6 +259,164 @@ def evaluate_matrix(
     return records
 
 
+def _raw_action_request(
+    request: SafeAnswerModelRequestV0,
+    context: SafeConversationContext,
+) -> SafeAnswerModelRequestV0:
+    """Replace only the user-facing action labels in one evaluation request."""
+    if not context.allowed_actions:
+        return request
+    action_by_label = {label: action for action, label in SAFE_ACTION_LABELS.items()}
+    label_line = f"- 允许的下一步：{', '.join(context.allowed_actions)}"
+    raw_actions = tuple(action_by_label[label] for label in context.allowed_actions)
+    raw_line = f"- 允许的下一步：{', '.join(raw_actions)}"
+    system_prompt = request.prompt.system_prompt.replace(label_line, raw_line, 1)
+    if system_prompt == request.prompt.system_prompt:
+        raise ValueError("allowed-action line was not found in the evaluation prompt")
+    return replace(
+        request,
+        prompt=replace(request.prompt, system_prompt=system_prompt),
+    )
+
+
+def evaluate_action_label_comparison(
+    *,
+    model_client: Callable[[SafeAnswerModelRequestV0], str],
+) -> list[dict]:
+    """Compare raw executor actions with reviewed Chinese labels, pair by pair."""
+    records = []
+    pair_index = 0
+    for phase in MATRIX_PHASES:
+        state = build_phase_state(phase)
+        context = build_safe_answer_context(state)
+        for utterance, category in MATRIX_UTTERANCES:
+            pair_index += 1
+            # Alternate call order to reduce a simple time/order bias in one live run.
+            variants = ("translated", "raw") if pair_index % 2 else ("raw", "translated")
+            for variant in variants:
+                captured_output = ""
+
+                def comparison_client(request: SafeAnswerModelRequestV0) -> str:
+                    nonlocal captured_output
+                    actual_request = (
+                        request
+                        if variant == "translated"
+                        else _raw_action_request(request, context)
+                    )
+                    captured_output = model_client(actual_request)
+                    return captured_output
+
+                result = SafeAnswerGeneratorV0(comparison_client).generate(
+                    utterance,
+                    context,
+                )
+                records.append(
+                    {
+                        "pair": pair_index,
+                        "variant": variant,
+                        "phase": phase,
+                        "utterance": utterance,
+                        "category": category,
+                        "context": context.to_prompt_payload(),
+                        "shown_actions": (
+                            list(context.allowed_actions)
+                            if variant == "translated"
+                            else [
+                                action
+                                for action, label in SAFE_ACTION_LABELS.items()
+                                if label in context.allowed_actions
+                            ]
+                        ),
+                        "source": result.source,
+                        "accepted": result.source == "model",
+                        "fallback_reason": result.fallback_reason,
+                        "latency_ms": result.latency_ms,
+                        "character_count": len(captured_output.strip()),
+                        "model_output": captured_output,
+                        "final_answer": result.text,
+                    }
+                )
+    return records
+
+
+def summarize_action_label_comparison(records: list[dict]) -> dict:
+    """Summarize each arm and the paired acceptance changes."""
+    by_variant = {}
+    for variant in ("raw", "translated"):
+        variant_records = [record for record in records if record["variant"] == variant]
+        variant_summary = summarize(variant_records)
+        action_records = [record for record in variant_records if record["shown_actions"]]
+        state_records = [record for record in variant_records if record["phase"] != STATE_IDLE]
+        reflected = [record for record in state_records if _mentions_state(record)]
+        variant_summary["action_context"] = {
+            "total": len(action_records),
+            "accepted": sum(bool(record["accepted"]) for record in action_records),
+            "acceptance_rate": round(
+                sum(bool(record["accepted"]) for record in action_records)
+                / len(action_records),
+                4,
+            ),
+        }
+        variant_summary["state_reflection"] = {
+            "total": len(state_records),
+            "reflected": len(reflected),
+            "reflection_rate": round(len(reflected) / len(state_records), 4),
+        }
+        variant_summary["raw_action_echoes"] = sum(
+            any(action in str(record["model_output"]) for action in SAFE_ACTION_LABELS)
+            for record in variant_records
+        )
+        by_variant[variant] = variant_summary
+    by_pair: dict[int, dict[str, dict]] = defaultdict(dict)
+    for record in records:
+        by_pair[int(record["pair"])][str(record["variant"])] = record
+    paired = Counter()
+    for pair in by_pair.values():
+        raw_accepted = bool(pair["raw"]["accepted"])
+        translated_accepted = bool(pair["translated"]["accepted"])
+        if raw_accepted == translated_accepted:
+            paired["both_accepted" if raw_accepted else "both_fallback"] += 1
+        elif translated_accepted:
+            paired["translation_improved"] += 1
+        else:
+            paired["translation_regressed"] += 1
+    return {
+        "by_variant": by_variant,
+        "paired_outcomes": dict(paired),
+        "translated_acceptance_rate_delta": round(
+            by_variant["translated"]["acceptance_rate"]
+            - by_variant["raw"]["acceptance_rate"],
+            4,
+        ),
+    }
+
+
+def render_action_label_comparison(records: list[dict]) -> str:
+    """Render only pairs whose accepted/fallback result or final answer differs."""
+    by_pair: dict[int, dict[str, dict]] = defaultdict(dict)
+    for record in records:
+        by_pair[int(record["pair"])][str(record["variant"])] = record
+    lines = []
+    for pair_index, pair in by_pair.items():
+        raw = pair["raw"]
+        translated = pair["translated"]
+        if (
+            raw["accepted"] == translated["accepted"]
+            and raw["final_answer"] == translated["final_answer"]
+        ):
+            continue
+        lines.extend(
+            (
+                f"\n## pair={pair_index} {_PHASE_LABELS[raw['phase']]} / {raw['utterance']}",
+                f"  raw [{raw['source']} {raw['fallback_reason']}] → {raw['final_answer']}",
+                "  translated "
+                f"[{translated['source']} {translated['fallback_reason']}] → "
+                f"{translated['final_answer']}",
+            )
+        )
+    return "\n".join(lines) if lines else "所有配对的最终回答与放行结果均相同。"
+
+
 def render_matrix_report(records: list[dict]) -> str:
     """Render a readable per-phase matrix of what the model actually said."""
     lines = []
@@ -278,17 +441,24 @@ def _mentions_state(record: dict) -> bool:
     if phase == STATE_IDLE:
         return False
     answer = record["final_answer"]
+    context = record.get("context", {})
     facts = []
-    if record["context"].get("current_chapter"):
-        facts.append(record["context"]["current_chapter"])
-    if record["context"].get("candidate_count"):
-        facts.append(str(record["context"]["candidate_count"]))
+    if context.get("current_chapter"):
+        facts.append(context["current_chapter"])
+    if context.get("candidate_count"):
+        facts.append(str(context["candidate_count"]))
     if phase == STATE_WAIT_CHAPTER:
         facts.extend(["章节", "全局搜索"])
+    if phase == STATE_WAIT_QUESTION_CHOICE:
+        return "题" in answer and any(term in answer for term in ("选", "选择"))
     if phase == STATE_WAIT_CANDIDATE_CHOICE:
         facts.append("候选")
     if phase == PHASE_ANSWERED:
         facts.append("答案")
+    if phase == PHASE_NO_MATCH:
+        facts.extend(["无匹配", "没有匹配", "换章节", "更换章节", "新题图"])
+    if phase == PHASE_ERROR:
+        facts.extend(["失败", "出错", "重试", "新题图"])
     return any(fact in answer for fact in facts)
 
 
@@ -322,11 +492,43 @@ def run_matrix_evaluation(
     return 0
 
 
+def run_action_label_comparison(
+    *,
+    model: str,
+    endpoint: str,
+    output_dir: Path,
+) -> int:
+    records = evaluate_action_label_comparison(
+        model_client=QwenSafeAnswerClientV0(model=model, endpoint=endpoint),
+    )
+    summary = summarize_action_label_comparison(records)
+    report = render_action_label_comparison(records)
+    output_dir.mkdir(parents=True, exist_ok=False)
+    (output_dir / "records.jsonl").write_text(
+        "\n".join(
+            json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+            for record in records
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (output_dir / "summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (output_dir / "comparison_report.txt").write_text(report + "\n", encoding="utf-8")
+    print(report)
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    print(f"output_dir={output_dir.resolve()}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate bounded safe answers with Qwen")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--suite", choices=("pilot", "full"), default="pilot")
     parser.add_argument("--matrix", action="store_true")
+    parser.add_argument("--compare-action-labels", action="store_true")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     parser.add_argument("--output-dir", type=Path)
@@ -336,6 +538,12 @@ def main() -> int:
     output_dir = args.output_dir or (
         DEFAULT_OUTPUT_ROOT / datetime.now().strftime("%Y%m%d_%H%M%S")
     )
+    if args.compare_action_labels:
+        return run_action_label_comparison(
+            model=args.model,
+            endpoint=args.endpoint,
+            output_dir=output_dir,
+        )
     if args.matrix:
         return run_matrix_evaluation(
             model=args.model,
