@@ -399,6 +399,23 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.last_answer_paths, ["out/answer2.jpg"])
         self.assertEqual(fake.search_chapters, searches_before)
 
+    def test_v2_answered_question_can_reselect_another_current_candidate(self):
+        fake = FakeTools(chapter="4力法")
+        agent = self.make_v2_agent(fake)
+        agent.handle_image("q.jpg")
+        generation = agent.state.candidate_generation
+
+        first_answer = agent.handle_text("第二个候选")
+        second_answer = agent.handle_text("第一个候选")
+
+        self.assertEqual(first_answer.intent, "select_candidate")
+        self.assertEqual(second_answer.intent, "select_candidate")
+        self.assertEqual(agent.state.phase, PHASE_ANSWERED)
+        self.assertEqual(agent.state.selected_rank, 1)
+        self.assertEqual(agent.state.last_answer_paths, ["out/answer1.jpg"])
+        self.assertEqual(agent.state.candidate_generation, generation)
+        self.assertEqual(fake.search_chapters, ["4力法"])
+
     def test_v2_safe_answer_route_treats_yes_as_the_unique_candidate_confirmation(self):
         fake = FakeTools(chapter="4力法")
         candidate = {
