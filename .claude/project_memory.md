@@ -3,6 +3,15 @@
 > 权威交接文档：`.agents/8794_handoff.md`（Claude Code 实现 → Codex 审查流程，逐步骤记录）。
 > 本文件是新对话快速接手的精简入口；与 handoff 冲突时以 handoff 为准。
 
+## 与 Codex 的协作规则（每步都必须遵守）
+
+- **分工**：Claude Code 负责实现，Codex 负责审查。二者都在 `F:\cc\7-题库检索-8794` 这个 worktree、`codex/8794-candidate-v1` 分支上工作。
+- **交接文档是唯一权威**：每完成一步，Claude Code 更新 `.agents/8794_handoff.md`（含干了啥/改动文件/验证命令与结果/审查关注点/剩余任务/建议下一步命令），并 commit + push 到 GitHub。
+- **审查流程**（Codex 侧）：读 handoff → 按"改动文件"清单逐个 `git diff` → 运行"验证命令"确认结果。
+- **审查提示要短**：Claude Code 给 Codex 的 review prompt 只指向 handoff 文档路径即可，不要长篇复述内容。
+- **换对话交接**：更新 project_memory + handoff，提交推送；不留未提交的脏改动。
+- 分支上可能已有 Codex 的额外提交（如收紧安全回答校验、候选重选支持等），动手前先 `git log --oneline -10` 看最新状态，别把别人的提交当自己的工作区改动覆盖。
+
 ## Current State
 
 - 分支：`codex/8794-candidate-v1`（8794 候选 worktree，与 8790 主线路隔离，端口 8794）。
