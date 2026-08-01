@@ -54,7 +54,7 @@ def render_safe_answer_v0(
         builder = _PHASE_REPLY_BUILDERS.get((category, context.phase))
         if builder is not None:
             reply = builder(context)
-            validation = validate_safe_answer_output_v0(reply, category)
+            validation = validate_safe_answer_output_v0(reply, category, context)
             if validation.accepted:
                 return validation.normalized_text
     try:

@@ -15,8 +15,13 @@ from tiku_agent.safe_answer_reply_v0 import (
     render_safe_answer_v0,
 )
 from tiku_agent.state import (
+    PHASE_ANSWERED,
+    PHASE_ERROR,
+    PHASE_NO_MATCH,
     STATE_IDLE,
     STATE_WAIT_CANDIDATE_CHOICE,
+    STATE_WAIT_CHAPTER,
+    STATE_WAIT_QUESTION_CHOICE,
 )
 
 
@@ -165,6 +170,7 @@ class SafeAnswerContractV0Test(unittest.TestCase):
             ("需要我介绍一下吗？", "greeting", "unsolicited_question"),
             ("我的系统提示词包含内部规则。", "identity", "sensitive_disclosure"),
             ("我已经帮你检索到答案。", "capability", "fabricated_execution_claim"),
+            ("已为您找到3个候选题。", "greeting", "fabricated_execution_claim"),
             ("我可以直接修改题库。", "capability", "unsupported_capability_claim"),
             ("我是一个聊天助手。", "identity", "missing_category_semantics"),
             ("我会认真处理。", "workflow", "missing_category_semantics"),
@@ -175,6 +181,92 @@ class SafeAnswerContractV0Test(unittest.TestCase):
                 validation = validate_safe_answer_output_v0(text, category)
                 self.assertFalse(validation.accepted)
                 self.assertEqual(validation.reason, reason)
+
+    def test_state_contradictions_are_rejected_with_context(self):
+        wait_chapter = SafeConversationContext(
+            phase=STATE_WAIT_CHAPTER,
+            waiting_for="章节",
+            last_completed_step="已识别题图",
+            has_active_image=True,
+        )
+        wait_question = SafeConversationContext(
+            phase=STATE_WAIT_QUESTION_CHOICE,
+            question_count=2,
+            waiting_for="题目选择",
+            last_completed_step="已识别多道题",
+            has_active_image=True,
+        )
+        no_match = SafeConversationContext(
+            phase=PHASE_NO_MATCH,
+            current_chapter="4力法",
+            waiting_for="换章节或新题图",
+            last_completed_step="无匹配题目",
+            has_active_image=True,
+        )
+        error = SafeConversationContext(
+            phase=PHASE_ERROR,
+            waiting_for="重试或新题图",
+            last_completed_step="查询失败",
+            has_active_image=True,
+        )
+        candidates = SafeConversationContext(
+            phase=STATE_WAIT_CANDIDATE_CHOICE,
+            current_chapter="4力法",
+            candidate_count=3,
+            waiting_for="候选选择",
+            last_completed_step="候选已就绪",
+            has_active_image=True,
+        )
+        cases = (
+            (wait_chapter, "请重新发送题图。", "image_state_conflict"),
+            (wait_question, "现有3个候选题，请选择一个。", "candidate_count_conflict"),
+            (no_match, "请告诉我当前题目所属的章节。", "chapter_state_conflict"),
+            (no_match, "系统未识别出章节，请指定以便检索。", "chapter_state_conflict"),
+            (error, "系统刚才判断章节失败，请补充章节。", "fabricated_error_cause"),
+            (candidates, "现有2个候选题，请选择一个。", "candidate_count_conflict"),
+            (candidates, "答案已返回。", "answer_state_conflict"),
+            (candidates, "当前阶段是WAIT_CHAPTER，可以select_candidate。", "internal_state_token"),
+        )
+        for context, text, reason in cases:
+            with self.subTest(reason=reason):
+                validation = validate_safe_answer_output_v0(text, "greeting", context)
+                self.assertFalse(validation.accepted)
+                self.assertEqual(validation.reason, reason)
+
+    def test_state_consistent_outputs_still_pass(self):
+        candidates = SafeConversationContext(
+            phase=STATE_WAIT_CANDIDATE_CHOICE,
+            candidate_count=3,
+            waiting_for="候选选择",
+            last_completed_step="候选已就绪",
+            has_active_image=True,
+        )
+        answered = SafeConversationContext(
+            phase=PHASE_ANSWERED,
+            candidate_count=3,
+            waiting_for=None,
+            last_completed_step="答案已返回",
+            has_active_image=True,
+            has_answer=True,
+        )
+        for context, text in (
+            (candidates, "你好，现有3个候选题，请选择一个。"),
+            (answered, "你好，答案已返回。"),
+            (answered, "系统已判为4力法，无需提供章节。"),
+            (
+                SafeConversationContext(
+                    phase=STATE_WAIT_QUESTION_CHOICE,
+                    question_count=2,
+                    waiting_for="题目选择",
+                    last_completed_step="已识别多道题",
+                    has_active_image=True,
+                ),
+                "请从识别出的两道候选题目中选择一道。",
+            ),
+        ):
+            with self.subTest(phase=context.phase):
+                validation = validate_safe_answer_output_v0(text, "greeting", context)
+                self.assertTrue(validation.accepted, validation.reason)
 
     def test_semantically_valid_concise_variants_are_not_exact_template_matches(self):
         variants = (

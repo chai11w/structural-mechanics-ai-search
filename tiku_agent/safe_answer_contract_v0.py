@@ -10,9 +10,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+from tiku_agent.action_decision_v2 import TASK_ACTIONS
 from tiku_agent.safe_answer_context_v0 import (
     SafeConversationContext,
     render_state_section,
+)
+from tiku_agent.state import (
+    PHASE_ERROR,
+    KNOWN_PHASES,
+    STATE_WAIT_CHAPTER,
+    STATE_WAIT_QUESTION_CHOICE,
 )
 
 
@@ -64,10 +71,49 @@ _SENSITIVE_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 _EXECUTION_CLAIM_PATTERN = re.compile(
-    r"(?:我|这边)?(?:已经|已)(?:帮你)?(?:搜索|搜题|检索|查找|找到|查到|读取|复制|修改|删除|入库|执行)"
+    r"(?:我|这边)?(?:已经|已)(?:(?:帮|为)(?:你|您))?"
+    r"(?:搜索|搜题|检索|查找|找到|查到|读取|复制|修改|删除|入库|执行)"
 )
 _UNSUPPORTED_CAPABILITY_PATTERN = re.compile(
     r"我(?:可以|能|会)(?:直接)?(?:解题|计算答案|推导过程|修改题库|删除题目|写入题库)"
+)
+_INTERNAL_STATE_TOKEN_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])(?:"
+    + "|".join(
+        re.escape(token)
+        for token in sorted(KNOWN_PHASES | TASK_ACTIONS, key=len, reverse=True)
+    )
+    + r")(?![A-Za-z0-9_])",
+    flags=re.IGNORECASE,
+)
+_IMAGE_REQUEST_PATTERN = re.compile(
+    r"(?:请|麻烦|可以|可)?(?:你|您)?(?:重新|再)?(?:发送|上传|提供|重发).{0,6}(?:题图|图片)"
+)
+_POSITIVE_CANDIDATE_PATTERN = re.compile(
+    r"(?:现有|已有|当前有|共有|存在).{0,8}候选|"
+    r"候选(?:题|项|结果)?(?:已经|已)?(?:准备好|就绪)|"
+    r"请.{0,10}候选.{0,5}(?:选|选择)"
+)
+_CANDIDATE_COUNT_PATTERN = re.compile(r"(\d{1,3})\s*个(?:相似)?候选")
+_ANSWER_AVAILABLE_PATTERN = re.compile(
+    r"答案(?:已经|已)?(?:返回|展示|显示|准备好|就绪)|"
+    r"(?:已经|已)(?:返回|展示|显示).{0,4}答案"
+)
+_CHAPTER_REQUEST_PATTERN = re.compile(
+    r"(?:请|麻烦).{0,12}(?:告诉|告知|提供|补充|确认|指定).{0,10}章节"
+)
+_CHAPTER_CHANGE_PATTERN = re.compile(r"(?:更换|换个|换章节|改为|改成|重新选择)")
+_CHAPTER_NOT_REQUIRED_PATTERN = re.compile(
+    r"(?:无需|不用|不必|不需要).{0,8}章节|"
+    r"章节.{0,8}(?:无需|不用|不必|不需要)"
+)
+_CHAPTER_UNKNOWN_CLAIM_PATTERN = re.compile(
+    r"(?:未|无法|没有|没).{0,6}(?:识别|确定|判断).{0,6}章节|"
+    r"章节.{0,6}(?:未识别|无法确定|未确定)"
+)
+_SPECIFIC_ERROR_CAUSE_PATTERN = re.compile(
+    r"(?:判断|识别).{0,4}章节.{0,4}(?:失败|出错|异常)|"
+    r"(?:章节|模型|网络|接口|api|文件).{0,8}(?:失败|出错|异常|超时)"
 )
 _SCOPE_ANCHORS = (
     "力答",
@@ -145,8 +191,9 @@ def build_safe_answer_prompt_v0(
 def validate_safe_answer_output_v0(
     text: str | None,
     category: str,
+    context: SafeConversationContext | None = None,
 ) -> SafeAnswerValidationV0:
-    """Validate one generated answer without consulting tools or Agent state."""
+    """Validate one generated answer against format, safety, and safe state."""
 
     if category not in CATEGORY_GUIDANCE_V0:
         return _reject("unsupported_category")
@@ -169,9 +216,57 @@ def validate_safe_answer_output_v0(
         return _reject("fabricated_execution_claim")
     if _UNSUPPORTED_CAPABILITY_PATTERN.search(normalized):
         return _reject("unsupported_capability_claim")
+    state_reason = _state_consistency_rejection(normalized, context)
+    if state_reason:
+        return _reject(state_reason)
     if not _meets_category_semantics(normalized, category):
         return _reject("missing_category_semantics")
     return SafeAnswerValidationV0(True, "accepted", normalized)
+
+
+def _state_consistency_rejection(
+    text: str,
+    context: SafeConversationContext | None,
+) -> str:
+    """Return a high-confidence contradiction reason for one safe context."""
+
+    if context is None:
+        return ""
+    if _INTERNAL_STATE_TOKEN_PATTERN.search(text):
+        return "internal_state_token"
+    if (
+        context.candidate_count == 0
+        and context.phase != STATE_WAIT_QUESTION_CHOICE
+        and _POSITIVE_CANDIDATE_PATTERN.search(text)
+    ):
+        return "candidate_state_conflict"
+    for match in _CANDIDATE_COUNT_PATTERN.finditer(text):
+        if int(match.group(1)) != context.candidate_count:
+            return "candidate_count_conflict"
+    if not context.has_answer and _ANSWER_AVAILABLE_PATTERN.search(text):
+        return "answer_state_conflict"
+    if (
+        context.has_active_image
+        and context.phase in {STATE_WAIT_CHAPTER, STATE_WAIT_QUESTION_CHOICE}
+        and _IMAGE_REQUEST_PATTERN.search(text)
+    ):
+        return "image_state_conflict"
+    if (
+        context.current_chapter
+        and context.phase != STATE_WAIT_CHAPTER
+        and (
+            _CHAPTER_UNKNOWN_CLAIM_PATTERN.search(text)
+            or (
+                _CHAPTER_REQUEST_PATTERN.search(text)
+                and not _CHAPTER_CHANGE_PATTERN.search(text)
+                and not _CHAPTER_NOT_REQUIRED_PATTERN.search(text)
+            )
+        )
+    ):
+        return "chapter_state_conflict"
+    if context.phase == PHASE_ERROR and _SPECIFIC_ERROR_CAUSE_PATTERN.search(text):
+        return "fabricated_error_cause"
+    return ""
 
 
 def _meets_category_semantics(text: str, category: str) -> bool:

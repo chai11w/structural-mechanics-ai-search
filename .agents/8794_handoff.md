@@ -7,12 +7,30 @@
 
 - **目标**：8794 状态感知安全回答（roadmap Stage 4）——让安全回答能感知当前业务阶段（等待章节/候选选择/答案展示），业务操作仍走固定状态机。
 - **总计划**：M1 状态摘要模块 → M2 prompt 契约 → M4 generator+agent 接线 → M3 接线后按需兜底文案 → M5 runtime 验收测试 → M6 离线状态感知矩阵评估 + 反射指令强化。
-- **已完成**：M1–M6 全部完成。状态感知安全回答（roadmap Stage 4）实现、验收与真实模型效果评估完成。
-- **下一步**：交 8793 评审（review）后再提升 8790。离线状态感知评估已随 M6 落地（`--matrix` 模式，连真实 Qwen，context 全程透传）。
+- **已完成**：M1–M6 全部完成；Codex 复核发现并完成 R1 状态矛盾输出校验。状态感知安全回答已具备白名单摘要、真实模型生成和代码级高置信度矛盾拦截。
+- **下一步**：继续按 Codex 审查项逐个讨论，下一项是白名单字段与内部 action 名称边界；问题收敛后再交 8793 评审并提升 8790。
 
 ---
 
 ## 已完成步骤
+
+### R1 状态矛盾输出校验（Codex 复核修复）
+真实 Qwen 矩阵确认 prompt 状态感知有效，但旧校验器只接收 `text + category`，会放行“等待章节时重新索要题图”“已有章节时再次询问章节”“ERROR 时编造章节判断失败”等矛盾回答。现已让输出校验器接收 `SafeConversationContext`，只拦截高确定性矛盾：内部 phase/action 标识、候选数量不一致、无候选/无答案时的正面声称、已有题图时重复索图、已有章节时声称未知或再次索要、ERROR 时编造具体错误原因。无 context 的 V0 调用保持兼容。
+
+首次真实复测发现 `WAIT_QUESTION_CHOICE` 中“候选题目”被误当成检索候选，规则已收窄；第二次复测发现“无需提供章节”被误判成索要章节，已增加否定句豁免。相关 48 项测试与全量 308 项测试通过；真实矩阵能够拦截原先三类实际矛盾，模型失败或拦截后仍走现有固定兜底。本步没有修改路由、工具或 `AgentState`。
+
+改动文件：
+- `tiku_agent/safe_answer_contract_v0.py`
+- `tiku_agent/safe_answer_generator_v0.py`
+- `tiku_agent/safe_answer_reply_v0.py`
+- `tests/test_tiku_agent_safe_answer_contract_v0.py`
+
+验证命令：
+```powershell
+python -B -m unittest tests.test_tiku_agent_safe_answer_contract_v0 tests.test_tiku_agent_safe_answer_generator_v0 tests.test_tiku_agent_safe_answer_route_v0 tests.test_tiku_agent_safe_answer_state_aware
+python -B -m unittest discover -s tests -p "test_*.py"
+$env:PYTHONIOENCODING='utf-8'; python -B scripts/evaluate_safe_answer_qwen_v0.py --matrix
+```
 
 ### M6 离线状态感知矩阵评估 + 寒暄反射指令强化
 `scripts/evaluate_safe_answer_qwen_v0.py` 新增 `--matrix` 模式：7 阶段 × 10 话术 = 70 组合，构造合法 `AgentState` → `build_safe_answer_context` → 真实 Qwen `generate(text, context)`。首轮发现缺口：内容性话术（致谢/身份/能力/流程）状态感知强，但**纯寒暄（你好/在吗）默认回"请发送题图"**，状态段被当可选参考。在 `safe_answer_contract_v0.py` 新增 `SAFE_ANSWER_STATE_REFLECT_V0`：按「等待」字段显式映射（等待章节→请告知章节；等待题目选择→请选题目；候选就绪→提及数量请选；无匹配→提示换章节/新题图；出错→提示重试；答案返回→提及可查看），并禁止"已找到/已检索"类完成时声称。三版迭代后：**70/70 契约通过**（第三版 66/70 accepted，4 条仅因模型自问句带问号被 `unsolicited_question` 拦截回落，属安全兜底正常工作），各阶段寒暄全部状态感知。契约测试补反射指令断言（有 context 在、IDLE 不在）。

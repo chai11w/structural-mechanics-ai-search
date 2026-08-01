@@ -108,7 +108,11 @@ class SafeAnswerGeneratorV0:
                 started,
                 context,
             )
-        validation = validate_safe_answer_output_v0(output, decision.category)
+        validation = validate_safe_answer_output_v0(
+            output,
+            decision.category,
+            context,
+        )
         if not validation.accepted:
             return self._fallback(
                 decision.category,
