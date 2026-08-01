@@ -5,6 +5,7 @@ import unittest
 from tiku_agent.safe_answer_contract_v0 import (
     CATEGORY_GUIDANCE_V0,
     MAX_SAFE_ANSWER_CHARS,
+    SAFE_ANSWER_STATE_REFLECT_V0,
     build_safe_answer_prompt_v0,
     validate_safe_answer_output_v0,
 )
@@ -236,6 +237,10 @@ class SafeAnswerContractV0Test(unittest.TestCase):
         self.assertIn("等待：候选选择", prompt.system_prompt)
         self.assertIn("select_candidate", prompt.system_prompt)
         self.assertIn("不得逐字复述", prompt.system_prompt)
+        # The phase-reflect directive must ride along with any state section so
+        # simple chitchat (greetings) also reflects the current phase instead of
+        # defaulting to a generic "send me an image" opening.
+        self.assertIn(SAFE_ANSWER_STATE_REFLECT_V0, prompt.system_prompt)
         for forbidden in (
             "session_id",
             "candidate_generation",
@@ -271,9 +276,10 @@ class SafeAnswerContractV0Test(unittest.TestCase):
         )
         prompt = build_safe_answer_prompt_v0("greeting", "你好", context)
         # IDLE has nothing meaningful to perceive: the guard stays but the
-        # state section itself is empty.
+        # state section itself is empty, so the reflect directive is also absent.
         self.assertIn("不得逐字复述", prompt.system_prompt)
         self.assertNotIn("当前状态", prompt.system_prompt)
+        self.assertNotIn(SAFE_ANSWER_STATE_REFLECT_V0, prompt.system_prompt)
 
 
 if __name__ == "__main__":

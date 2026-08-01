@@ -39,6 +39,14 @@ SAFE_ANSWER_STATE_GUARD_V0 = (
     "状态摘要里的信息只用于你组织措辞，不得逐字复述、不得据此声称已完成任何操作或编造题库结果。"
 )
 
+SAFE_ANSWER_STATE_REFLECT_V0 = (
+    "寒暄、致谢等简单对话也要围绕“等待”事项自然回应：等待章节→请用户告知章节；"
+    "等待题目选择→请用户选题目；等待候选选择→提及候选数量并请用户选；"
+    "无匹配→提示换章节或发新题图；出错→提示重试或发新题图；答案已返回→提及可查看答案。"
+    "题图已收到时不要再索要题图。"
+    "只能描述当前状态，不要用“已找到、已检索、已查到、已读取”等完成时声称已执行检索。"
+)
+
 CATEGORY_GUIDANCE_V0 = {
     "greeting": "自然简短地回应寒暄，不要求用户同时提供题图和章节。",
     "courtesy": "简短回应礼貌表达。",
@@ -119,6 +127,7 @@ def build_safe_answer_prompt_v0(
         section = render_state_section(context)
         if section:
             parts.append(section)
+            parts.append(SAFE_ANSWER_STATE_REFLECT_V0)
     parts.extend(
         (
             f"本次类别要求：{CATEGORY_GUIDANCE_V0[category]}",

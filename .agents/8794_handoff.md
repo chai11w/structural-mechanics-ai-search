@@ -6,13 +6,16 @@
 ## 当前进度
 
 - **目标**：8794 状态感知安全回答（roadmap Stage 4）——让安全回答能感知当前业务阶段（等待章节/候选选择/答案展示），业务操作仍走固定状态机。
-- **总计划**：M1 状态摘要模块 → M2 prompt 契约 → M4 generator+agent 接线 → M3 接线后按需兜底文案 → M5 runtime 验收测试。
-- **已完成**：M1–M5 全部完成。状态感知安全回答（roadmap Stage 4）实现与验收完成。
-- **下一步**：可交 8793 评审（review）后再提升 8790；也可先做离线状态感知评估（`scripts/evaluate_safe_answer_qwen_v0.py` 现以 context=None 调用，暂不改）。
+- **总计划**：M1 状态摘要模块 → M2 prompt 契约 → M4 generator+agent 接线 → M3 接线后按需兜底文案 → M5 runtime 验收测试 → M6 离线状态感知矩阵评估 + 反射指令强化。
+- **已完成**：M1–M6 全部完成。状态感知安全回答（roadmap Stage 4）实现、验收与真实模型效果评估完成。
+- **下一步**：交 8793 评审（review）后再提升 8790。离线状态感知评估已随 M6 落地（`--matrix` 模式，连真实 Qwen，context 全程透传）。
 
 ---
 
 ## 已完成步骤
+
+### M6 离线状态感知矩阵评估 + 寒暄反射指令强化
+`scripts/evaluate_safe_answer_qwen_v0.py` 新增 `--matrix` 模式：7 阶段 × 10 话术 = 70 组合，构造合法 `AgentState` → `build_safe_answer_context` → 真实 Qwen `generate(text, context)`。首轮发现缺口：内容性话术（致谢/身份/能力/流程）状态感知强，但**纯寒暄（你好/在吗）默认回"请发送题图"**，状态段被当可选参考。在 `safe_answer_contract_v0.py` 新增 `SAFE_ANSWER_STATE_REFLECT_V0`：按「等待」字段显式映射（等待章节→请告知章节；等待题目选择→请选题目；候选就绪→提及数量请选；无匹配→提示换章节/新题图；出错→提示重试；答案返回→提及可查看），并禁止"已找到/已检索"类完成时声称。三版迭代后：**70/70 契约通过**（第三版 66/70 accepted，4 条仅因模型自问句带问号被 `unsolicited_question` 拦截回落，属安全兜底正常工作），各阶段寒暄全部状态感知。契约测试补反射指令断言（有 context 在、IDLE 不在）。
 
 ### M5 runtime 级验收测试
 新增 `tests/test_tiku_agent_safe_answer_state_aware.py`，把 `TikuSearchAgent` 当黑盒：构造 state → 发寒暄/业务句 → 断言模型收到的 prompt、用户回复、状态是否变更、业务工具是否被调。11 条测试覆盖：全 11 阶段寒暄 prompt 含 phase 标识、敏感字段不泄露（session_id/路径/.jpg/score/stack）、候选寒暄含候选数量、章节致谢含 global_search、答案后不泄露路径、8 种业务句不误入、模型超时/报错/输出违规回落通用兜底、allowed_actions 与权限矩阵一致、跨重启（to_dict/from_dict 重建后仍状态感知）、跨用户隔离。全部注入假 model / 构造假 state，不连真实模型与题库。
@@ -22,6 +25,42 @@
 
 ### M1 状态摘要模块（commit `82634dd`）
 新增纯模块 `safe_answer_context_v0.py`，从 `AgentState` 派生脱敏白名单摘要 `SafeConversationContext`。allowed_actions 动态权限矩阵派生；phase 英文常量、waiting_for/last_completed_step 中文；路径/分数/错误/session_id 不入白名单；IDLE 无状态小节。18 个单测 + 全量通过。
+
+---
+
+## 步骤：M6 离线状态感知矩阵评估 + 寒暄反射指令强化
+
+### 干了啥
+1. **矩阵评估**：`scripts/evaluate_safe_answer_qwen_v0.py` 新增 `--matrix` 模式，7 阶段（IDLE/WAIT_CHAPTER/WAIT_QUESTION_CHOICE/WAIT_CANDIDATE_CHOICE/ANSWERED/NO_MATCH/ERROR）× 10 话术 = 70 组合，每组合构造合法 `AgentState` → `build_safe_answer_context` → 真实 Qwen `generate(text, context)`。输出 `matrix_report.txt`（每阶段每话术的模型真实回答）+ `records.jsonl` + `summary.json`。
+2. **发现缺口**：内容性话术（致谢/身份/能力/流程）状态感知强；但**纯寒暄（你好/在吗）默认回"请发送题图"**——状态段在 prompt 里存在，但 `SAFE_ANSWER_STATE_GUARD_V0` 把它定为"只用于组织措辞"（可选参考），模型寒暄时走通用开场。
+3. **修复**：`safe_answer_contract_v0.py` 新增 `SAFE_ANSWER_STATE_REFLECT_V0`，有状态段时（非 IDLE）插入。按「等待」字段显式映射：等待章节→请告知章节；等待题目选择→请选题目；候选就绪→提及候选数量请选；无匹配→提示换章节/新题图；出错→提示重试/新题图；答案已返回→提及可查看。并明确"不要用'已找到、已检索、已查到、已读取'等完成时声称已执行检索"（治掉首版 WAIT_CANDIDATE_CHOICE 用"已找到"被 `fabricated_execution_claim` 拦截的问题）。
+4. **迭代**：三版。V1（无反射指令）21/21 greeting 通过但寒暄不感知状态；V2（通用一句话反射指令）greeting 部分感知但 2 条踩执行声称/问号拦截；V3（按等待项显式映射）全阶段寒暄感知，66/70 accepted，回落全部为 `output_unsolicited_question`（模型自问句带问号），无执行声称问题。
+
+### 改动文件
+- `scripts/evaluate_safe_answer_qwen_v0.py` → 新增 `--matrix`、`MATRIX_PHASES`/`MATRIX_UTTERANCES`/`build_phase_state`/`evaluate_matrix`/`render_matrix_report`/`run_matrix_evaluation`；import `build_safe_answer_context`、AgentState 与阶段常量。
+- `tiku_agent/safe_answer_contract_v0.py` → 新增 `SAFE_ANSWER_STATE_REFLECT_V0` 常量；`build_safe_answer_prompt_v0` 有状态段时在其后插入反射指令。
+- `tests/test_tiku_agent_safe_answer_contract_v0.py` → 有 context 时断言反射指令存在、IDLE 时断言不存在。
+
+### 验证命令与结果
+```
+python -B -m unittest tests.test_tiku_agent_safe_answer_contract_v0 tests.test_tiku_agent_safe_answer_context_v0 tests.test_tiku_agent_safe_answer_state_aware   # 42/42 通过
+PYTHONIOENCODING=utf-8 python -B scripts/evaluate_safe_answer_qwen_v0.py --matrix   # 70/70 契约通过（第三版 66 accepted + 4 条问号拦截回落）；结果在 .tmp_safe_answer_eval_8794/
+```
+
+### 审查关注点
+- `SAFE_ANSWER_STATE_REFLECT_V0` 只在非 IDLE（有状态段）时插入；IDLE 保持 guard-only。
+- 反射指令是 prompt 层指引，不含被禁执行动词的**输出**，不会误伤 `validate_safe_answer_output_v0`（校验的是模型输出，prompt 内禁词列举是给模型看的指引）。
+- 反射指令里的完成时动词列举与校验器 `_EXECUTION_CLAIM_PATTERN` 一致（检索/找到/查到/读取），未列入"已返回"（状态段 `答案已返回` 是合法文案，非禁词）。
+- `--matrix` 用真实 Qwen 调用，每次约 1.5s，70 次 ≈ 2 分钟；需 `DASHSCOPE_API_KEY` 环境变量。
+- 4 条 `output_unsolicited_question` 回落是安全边界内正常拦截（prompt 已要求"不主动追问"，个别情况模型仍带问号），非状态感知失败。
+
+### 剩余任务 / 已知风险
+- 无。M6 为收官步骤，三版迭代已收敛：全阶段寒暄状态感知 + 70/70 契约通过 + 无执行声称泄漏。
+- 已知用户决策：`_PHASE_REPLY_BUILDERS` 保持为空（M3 结论）；业务层 render.py 措辞不改；`SAFE_ANSWER_STATE_REFLECT_V0` 迭代到此定版，不再继续调问号拦截率。
+
+### 建议下一步命令
+- 8793 评审：读本交接文档 → 按 M1→M6 顺序逐个 `git show <commit>` + 跑上述验证命令。
+- 试跑 8794 服务：`python -B scripts/run_tiku_agent_8794.py --port 8794`（默认启用安全回答，题库在 `config.local.json` 的 `root`）。
 
 ---
 
