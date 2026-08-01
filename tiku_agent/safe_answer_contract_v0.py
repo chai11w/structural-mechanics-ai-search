@@ -10,6 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+from tiku_agent.safe_answer_context_v0 import (
+    SafeConversationContext,
+    render_state_section,
+)
+
 
 MAX_SAFE_ANSWER_CHARS = 90
 
@@ -28,6 +33,10 @@ SAFE_ANSWER_BOUNDARY_V0 = (
 SAFE_ANSWER_STYLE_V0 = (
     "直接回答，不复述问题。使用自然、简洁、高效的中文，通常一至两句话，必须单行且不超过90个字符。"
     "不使用标题、列表、Markdown、网址、长篇免责声明或主动追问。"
+)
+
+SAFE_ANSWER_STATE_GUARD_V0 = (
+    "状态摘要里的信息只用于你组织措辞，不得逐字复述、不得据此声称已完成任何操作或编造题库结果。"
 )
 
 CATEGORY_GUIDANCE_V0 = {
@@ -82,23 +91,41 @@ class SafeAnswerValidationV0:
     normalized_text: str = ""
 
 
-def build_safe_answer_prompt_v0(category: str, user_text: str) -> SafeAnswerPromptV0:
-    """Build the complete state-free input contract for a future model call."""
+def build_safe_answer_prompt_v0(
+    category: str,
+    user_text: str,
+    context: SafeConversationContext | None = None,
+) -> SafeAnswerPromptV0:
+    """Build the complete input contract for a bounded safe-answer model call.
+
+    When ``context`` is provided, a sanitized state section and a guard line are
+    inserted so the model can organize phase-appropriate wording without
+    claiming execution.  Without ``context`` this is byte-for-byte the original
+    state-free contract.
+    """
 
     if category not in CATEGORY_GUIDANCE_V0:
         raise ValueError(f"unsupported safe-answer category: {category}")
     clean_text = str(user_text or "").strip()
     if not clean_text:
         raise ValueError("safe-answer user text is required")
-    system_prompt = "\n".join(
+    parts = [
+        SAFE_ANSWER_ROLE_V0,
+        SAFE_ANSWER_BOUNDARY_V0,
+        SAFE_ANSWER_STYLE_V0,
+    ]
+    if context is not None:
+        parts.append(SAFE_ANSWER_STATE_GUARD_V0)
+        section = render_state_section(context)
+        if section:
+            parts.append(section)
+    parts.extend(
         (
-            SAFE_ANSWER_ROLE_V0,
-            SAFE_ANSWER_BOUNDARY_V0,
-            SAFE_ANSWER_STYLE_V0,
             f"本次类别要求：{CATEGORY_GUIDANCE_V0[category]}",
             "只输出给用户的最终回答，不输出分析过程。",
         )
     )
+    system_prompt = "\n".join(parts)
     return SafeAnswerPromptV0(
         category=category,
         system_prompt=system_prompt,

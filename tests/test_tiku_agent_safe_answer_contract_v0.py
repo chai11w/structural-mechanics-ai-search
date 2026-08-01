@@ -8,7 +8,9 @@ from tiku_agent.safe_answer_contract_v0 import (
     build_safe_answer_prompt_v0,
     validate_safe_answer_output_v0,
 )
+from tiku_agent.safe_answer_context_v0 import SafeConversationContext
 from tiku_agent.safe_answer_reply_v0 import render_safe_answer_v0
+from tiku_agent.state import STATE_WAIT_CANDIDATE_CHOICE
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "safe_answer_v0_cases.json"
@@ -120,6 +122,67 @@ class SafeAnswerContractV0Test(unittest.TestCase):
         )
         self.assertFalse(rejected.accepted)
         self.assertEqual(rejected.reason, "fabricated_execution_claim")
+
+    def test_prompt_with_context_contains_only_whitelisted_fields(self):
+        context = SafeConversationContext(
+            phase=STATE_WAIT_CANDIDATE_CHOICE,
+            current_chapter="4力法",
+            question_count=1,
+            candidate_count=3,
+            allowed_actions=("select_candidate", "continue_search"),
+            waiting_for="候选选择",
+            last_completed_step="候选已就绪",
+            has_active_image=True,
+            has_answer=False,
+            global_search_offered=False,
+            continuation_available=True,
+        )
+        prompt = build_safe_answer_prompt_v0("greeting", "你好", context)
+        self.assertEqual(prompt.user_prompt, "你好")
+        self.assertIn("当前状态", prompt.system_prompt)
+        self.assertIn("WAIT_CANDIDATE_CHOICE", prompt.system_prompt)
+        self.assertIn("候选数量：3", prompt.system_prompt)
+        self.assertIn("等待：候选选择", prompt.system_prompt)
+        self.assertIn("select_candidate", prompt.system_prompt)
+        self.assertIn("不得逐字复述", prompt.system_prompt)
+        for forbidden in (
+            "session_id",
+            "candidate_generation",
+            "current_image_path",
+            "D:/",
+            ".jpg",
+            ".xlsx",
+            "score",
+            "stack",
+        ):
+            self.assertNotIn(forbidden, prompt.system_prompt)
+            self.assertNotIn(forbidden, prompt.user_prompt)
+
+    def test_prompt_without_context_remains_state_free(self):
+        # The original 38 eligible cases must still build a state-free prompt.
+        eligible_cases = [
+            case for case in self.suite["cases"] if case["expected"]["eligible"]
+        ]
+        for case in eligible_cases:
+            with self.subTest(case=case["id"]):
+                prompt = build_safe_answer_prompt_v0(
+                    case["expected"]["category"],
+                    case["text"],
+                )
+                self.assertNotIn("当前状态", prompt.system_prompt)
+                self.assertNotIn("不得逐字复述", prompt.system_prompt)
+
+    def test_prompt_with_idle_context_skips_state_section(self):
+        context = SafeConversationContext(
+            phase="IDLE",
+            waiting_for="新题图",
+            last_completed_step="",
+        )
+        prompt = build_safe_answer_prompt_v0("greeting", "你好", context)
+        # IDLE has nothing meaningful to perceive: the guard stays but the
+        # state section itself is empty.
+        self.assertIn("不得逐字复述", prompt.system_prompt)
+        self.assertNotIn("当前状态", prompt.system_prompt)
 
 
 if __name__ == "__main__":
