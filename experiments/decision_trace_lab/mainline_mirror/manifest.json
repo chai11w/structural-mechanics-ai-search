@@ -2,8 +2,8 @@
   "schema_version": 1,
   "source_repository": "F:/cc/7-题库检索",
   "source_branch": "codex/8794-candidate-v1",
-  "source_commit": "cd569f6a137a020ef47e4bf5f8f598db9853d1bc",
-  "created_at": "2026-08-01T07:41:24.056395+00:00",
+  "source_commit": "455da39fb889ceed1b70d48d7bd230aeb463e085",
+  "created_at": "2026-08-01T08:14:36.616794+00:00",
   "snapshot_scope": "tracked mainline code, tests, fixtures and safe documentation; excludes .git, local config/secrets, xlsx question-bank assets, runtime/logs/caches, project-agent metadata, review data, and special_unindexed_questions.json",
   "files": [
     {
@@ -236,7 +236,7 @@
     },
     {
       "path": "tests/test_tiku_agent_agent.py",
-      "sha256": "890c3c9ad2d50374bfff5bb70e7b4c055d3a692e2e6f220a6ed66ad5b0fa3653"
+      "sha256": "08e1c3bd65208c878c0dc305807aec31755c34ec11ec3fd0ada9a68bf81e5cd6"
     },
     {
       "path": "tests/test_tiku_agent_conversation_context_v2.py",
@@ -244,7 +244,7 @@
     },
     {
       "path": "tests/test_tiku_agent_fastapi_demo.py",
-      "sha256": "77aaf6925a05f5d97bd5a9205b11539ef8e5be44bb104a76b0d1dd04cbecf1bf"
+      "sha256": "1ac4d1ca89235e8b8be057c17289292b9fbfceb5477fc31a3cd8f497f25bf882"
     },
     {
       "path": "tests/test_tiku_agent_intent_eval_v2.py",
@@ -352,15 +352,15 @@
     },
     {
       "path": "tiku_agent/demo_web/demo.js",
-      "sha256": "e20a3811e4b12787ab8042009acac5d44dde5a43588838828980aa82a29c8fc2"
+      "sha256": "bf8e046e3775146cee543542c2827e0bd47e0a23cea3ddaabd250379ee1236ee"
     },
     {
       "path": "tiku_agent/demo_web/index.html",
-      "sha256": "081ed45a9dff1bf3ef34ae493a3bf567b22fb5a9c4bb99112b2508b1d961c8c8"
+      "sha256": "60785961740860026c40943cf1047fc3449e80c78f200018ddc572f9ee9b616b"
     },
     {
       "path": "tiku_agent/fastapi_demo.py",
-      "sha256": "cd963b4eb007213fd6e3bfb848f37b88b4351c95c4befe459fe2704394b745f2"
+      "sha256": "666c14dfdfa394937bcec62c88c1e4ed9317cbe4d45915001aca6b3672463673"
     },
     {
       "path": "tiku_agent/intent_contract.py",

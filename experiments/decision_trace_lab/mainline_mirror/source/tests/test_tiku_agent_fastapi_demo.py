@@ -109,7 +109,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260726-stale-candidate"', 'src="/assets/demo.js?v=20260726-stale-candidate"',
+            'href="/assets/demo.css?v=20260801-candidate-reselect"', 'src="/assets/demo.js?v=20260801-candidate-reselect"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -123,6 +123,7 @@ class FastApiDemoTest(unittest.TestCase):
             "new AbortController()", "activeController.abort('new-chat')", "function resetConversation",
             "function openDrawer", "function openLightbox", "className = 'select-candidate'",
             "action_context: actionContext", "function invalidateCandidateActions()",
+            "['WAIT_CANDIDATE_CHOICE', 'ANSWERED'].includes(sessionContext.phase)",
             "event.key === 'Enter'", "!event.shiftKey", "!event.isComposing", "event.keyCode !== 229",
             "HISTORY_TTL_MS = 2 * 60 * 60 * 1000", "HISTORY_LIMIT = 50", "repairUploadedImageHistory()",
             "data.uploaded_image", "Number.isFinite(savedAt)", "无法连接本地服务",
@@ -351,6 +352,70 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual([event["type"] for event in events], ["result"])
         self.assertIn("上一道题", events[0]["data"]["text"])
         self.assertEqual(events[0]["data"]["intent"], "stale_candidate")
+        self.assertEqual(runtime.calls, [])
+
+    def test_answered_question_can_select_another_candidate_from_same_generation(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"demo_reselect_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        runtime = FakeRuntime(image_path)
+        client = TestClient(create_app(runtime=runtime))
+        client.get("/")
+
+        runtime.snapshot.update({
+            "session_valid": True,
+            "phase": "ANSWERED",
+            "has_active_image": True,
+            "task_revision": 2,
+            "candidate_generation": "2:1",
+            "candidate_count": 3,
+        })
+        response = client.post("/api/message/stream", json={
+            "text": "选择候选 3",
+            "action_context": {
+                "type": "select_candidate",
+                "rank": 3,
+                "task_revision": 2,
+                "candidate_generation": "2:1",
+            },
+        })
+
+        events = [json.loads(line) for line in response.text.splitlines() if line]
+        self.assertEqual(events[-1]["type"], "result")
+        self.assertEqual(events[-1]["data"]["intent"], "select_candidate")
+        self.assertEqual(runtime.calls[0][0], "text")
+        self.assertEqual(runtime.calls[0][2], "选择候选 3")
+
+    def test_answered_question_still_rejects_an_older_candidate_generation(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"demo_reselect_stale_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        runtime = FakeRuntime(image_path)
+        client = TestClient(create_app(runtime=runtime))
+        client.get("/")
+
+        runtime.snapshot.update({
+            "session_valid": True,
+            "phase": "ANSWERED",
+            "has_active_image": True,
+            "task_revision": 2,
+            "candidate_generation": "2:2",
+            "candidate_count": 3,
+        })
+        response = client.post("/api/message/stream", json={
+            "text": "选择候选 3",
+            "action_context": {
+                "type": "select_candidate",
+                "rank": 3,
+                "task_revision": 2,
+                "candidate_generation": "2:1",
+            },
+        })
+
+        events = [json.loads(line) for line in response.text.splitlines() if line]
+        self.assertEqual(events[-1]["data"]["intent"], "stale_candidate")
         self.assertEqual(runtime.calls, [])
 
 
