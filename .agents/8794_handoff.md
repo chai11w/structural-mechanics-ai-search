@@ -776,3 +776,48 @@ python -B -m unittest discover -s tests -p "test_*.py"
 
 - 先建立条件表达保护金标准并修固定Intent/语义闸门，保证条件未满足时不直接执行；权重只用于评估产品影响，不能替代安全门槛。
 - 若要把8%/2%替换成实测频率，应在8794另行评审隐私保护的在线粗分类日志，只存类别与阶段、不存用户原话；不得从现有日志伪造频率。
+
+---
+
+## 步骤：Stage 5 条件表达保护
+
+### 干了啥
+
+- 新增纯代码`conditional_guard_v0`，固定Intent和影子语义闸门共用同一判断，不调用模型、不执行工具、不修改状态。
+- 代码可验证三类现有事实：错误是否可重试、是否还有下一批候选、当前是否确为未命中；条件成立时提取后件并保留原固定快速路径，未成立时不执行。
+- “候选1不对/答案不匹配/题目适合力法/第二题是目标”等需要用户或模型判断的前提一律视为未解决：Intent返回澄清并允许影子Planner观察，语义闸门返回`needs_confirmation`。
+- “方便的话/如果方便/可以的话”等纯礼貌表达不作为业务前提；普通无条件指令保持原路由。
+- 准入评估区分全部条件工具调用与“未解决条件工具调用”，并把状态可验证条件误进Planner加入硬门槛；只跑单组时不再声称整体`release_ready=true`。
+
+### 改动文件
+
+- `tiku_agent/conditional_guard_v0.py`（新增）
+- `tiku_agent/intent_v2.py`
+- `tiku_agent/shadow_semantic_gate_v0.py`
+- `scripts/evaluate_shadow_admission_qwen_v0.py`
+- `tests/fixtures/shadow_admission_v0_cases.json`
+- `tests/test_tiku_agent_conditional_guard_v0.py`（新增）
+- `tests/test_tiku_agent_shadow_admission_eval_v0.py`
+- `.agents/roadmap.md`
+- `.agents/project_memory.md`
+- `.agents/8794_handoff.md`
+
+### 真实验证
+
+- 输出：`.tmp_shadow_admission_eval_8794/20260801_224524/`（忽略目录，不提交）。
+- 30次条件矩阵：21/21未解决条件进入影子观察，9/9状态可验证条件不进Planner；未解决条件工具回合0、语义误放行0、可见差异0、入口契约失败0。
+- 使用未改三组旧基线与新条件组组合复算：完整四组入口契约分92%，硬门槛全过；顺序组仍为0%，所以整体`release_ready=false`。
+
+### 验证命令
+
+```powershell
+python -B -m unittest tests.test_tiku_agent_conditional_guard_v0 tests.test_tiku_agent_shadow_admission_eval_v0 tests.test_tiku_agent_shadow_entry_eval_v0 tests.test_tiku_agent_intent_v2 tests.test_tiku_agent_shadow_semantic_gate_v0
+$env:PYTHONIOENCODING='utf-8'; python -u -B scripts\evaluate_shadow_admission_qwen_v0.py --runs 3 --group conditional
+python -B -m unittest discover -s tests -p "test_*.py"
+```
+
+结果：专项68/68、全量412/412通过；真实条件矩阵30/30符合入口契约。
+
+### 下一步
+
+- 扩充6类稳定顺序请求的独立留出集；只在留出集证明稳定后实现纯影子准入，仍不执行Planner动作。

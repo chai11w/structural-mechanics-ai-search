@@ -17,6 +17,7 @@ from tiku_agent.action_permissions_v2 import (
     resolve_bare_index_namespace,
 )
 from tiku_agent.conversation_context_v2 import ConversationContextV2
+from tiku_agent.conditional_guard_v0 import assess_conditional_request
 from tiku_agent.intent_contract import chinese_number_to_int, parse_chapter
 from scripts.classify_question_bank import DEFAULT_ENDPOINT, DEFAULT_MODEL, parse_model_json
 
@@ -59,10 +60,23 @@ def decide_intent_v2(
     """Return exactly one authorized high-level action without executing it."""
 
     clean = _normalize(text)
-    rule_decision = _rule_decision(clean, context, event_type=event_type)
+    decision_text = clean
+    if event_type == "text":
+        condition = assess_conditional_request(
+            clean,
+            phase=context.phase,
+            retryable_error=context.retryable_error,
+            continuation_available=context.continuation_available,
+        )
+        if condition.blocks_execution:
+            return _clarification(condition.clarification_reason, source="validator")
+        if condition.is_conditional and condition.consequent_text:
+            decision_text = condition.consequent_text
+
+    rule_decision = _rule_decision(decision_text, context, event_type=event_type)
     if rule_decision is not None:
         return _authorize_or_clarify(
-            _guard_global_search_consent(clean, rule_decision),
+            _guard_global_search_consent(decision_text, rule_decision),
             context,
         )
 

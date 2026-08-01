@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+from tiku_agent.conditional_guard_v0 import assess_conditional_request
 from tiku_agent.intent_contract import CHAPTERS, chinese_number_to_int
 from tiku_agent.shadow_plan_v0 import (
     REVIEW_ALLOW,
@@ -84,6 +85,37 @@ def review_shadow_plan_semantics(
             inferred_keywords=inferred_keywords,
             confidence=0.0,
             requires_confirmation=False,
+        )
+
+    condition = assess_conditional_request(
+        raw_text,
+        phase=facts.phase,
+        retryable_error=facts.retryable_error,
+        continuation_available=facts.continuation_available,
+    )
+    if condition.blocks_execution:
+        code = (
+            "condition_not_met"
+            if condition.outcome == "unsatisfied"
+            else "condition_unresolved"
+        )
+        evidence = tuple(
+            ActionAuthorizationEvidence(step.action, False, code, (condition.matched_text,))
+            for step in plan.steps
+        )
+        return SemanticAuthorizationResult(
+            review=PermissionReview(
+                outcome=REVIEW_NEEDS_CONFIRMATION,
+                code="needs_confirmation",
+                reason="用户提出了尚未由当前状态确认的条件，不能视为立即执行授权。",
+                violations=tuple(item.code for item in evidence),
+                plan=plan,
+            ),
+            evidence=evidence,
+            explicit_keywords=explicit_keywords,
+            inferred_keywords=inferred_keywords,
+            confidence=0.0,
+            requires_confirmation=True,
         )
 
     evidence = tuple(_authorize_step(raw_text, step, facts) for step in plan.steps)

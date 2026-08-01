@@ -37,6 +37,7 @@ from scripts.evaluate_shadow_plan_entry_qwen_v0 import (
     build_phase_state,
     evaluate_case,
 )
+from tiku_agent.conditional_guard_v0 import assess_conditional_request
 from tiku_agent.intent_runtime_v2 import build_runtime_context_v2
 from tiku_agent.intent_v2 import call_qwen_decision_v2
 from tiku_agent.shadow_plan_v0 import (
@@ -215,6 +216,12 @@ def diagnose_candidate_plan(
 ) -> dict[str, Any]:
     state = build_phase_state(str(case["phase"]), case_id=f"admission-{case['id']}")
     context = build_runtime_context_v2(state)
+    condition = assess_conditional_request(
+        str(case["text"]),
+        phase=context.phase,
+        retryable_error=context.retryable_error,
+        continuation_available=context.continuation_available,
+    )
     result = planner.plan(str(case["text"]), context.to_prompt_payload())
     if result is None:
         return {
@@ -227,6 +234,7 @@ def diagnose_candidate_plan(
             "result": None,
             "permission_review": None,
             "semantic_review": None,
+            "condition_outcome": condition.outcome,
         }
 
     facts = build_permission_review_facts(state)
@@ -239,7 +247,11 @@ def diagnose_candidate_plan(
     route = _diagnostic_route(result, permission, semantic)
     effective_forbidden = forbidden if route == ROUTE_SHADOW_ACTIONABLE else []
     useful = bool(required) and required_covered and not forbidden and bool(actions)
-    conditional_guard_required = str(case["group"]) == "conditional" and bool(actions)
+    conditional_guard_required = (
+        str(case["group"]) == "conditional"
+        and bool(actions)
+        and condition.blocks_execution
+    )
     conditional_semantic_allow_risk = (
         conditional_guard_required
         and permission.allowed
@@ -261,6 +273,7 @@ def diagnose_candidate_plan(
         "conditional_guard_required": conditional_guard_required,
         "conditional_semantic_allow_risk": conditional_semantic_allow_risk,
         "future_admission_ready": future_admission_ready,
+        "condition_outcome": condition.outcome,
         "result": _result_to_dict(result),
         "permission_review": _review_to_dict(permission),
         "semantic_review": _semantic_to_dict(semantic),
@@ -309,6 +322,12 @@ def summarize_admission(
     never_records = [
         record for record in records if record["expected_entry"] == EXPECTED_NEVER
     ]
+    atomic_records = [record for record in records if record["group"] == "atomic"]
+    verified_condition_records = [
+        record
+        for record in records
+        if record["group"] == "conditional" and record["expected_entry"] == EXPECTED_NEVER
+    ]
     diagnostic_routes = Counter(str(record["diagnostic"]["route"]) for record in records)
     fixed_intents = Counter(str(record["current_response_intent"]) for record in records)
     summary = {
@@ -324,6 +343,12 @@ def summarize_admission(
             4,
         ) if should_records else 0.0,
         "current_atomic_false_admissions": sum(
+            bool(record["current_admitted"]) for record in atomic_records
+        ),
+        "current_verified_condition_false_admissions": sum(
+            bool(record["current_admitted"]) for record in verified_condition_records
+        ),
+        "current_never_false_admissions": sum(
             bool(record["current_admitted"]) for record in never_records
         ),
         "current_conditional_tool_calls": sum(
@@ -333,6 +358,12 @@ def summarize_admission(
         ),
         "current_conditional_tool_turns": sum(
             bool(record.get("current_tool_call_count", len(record.get("current_tools", []))))
+            for record in records
+            if record["group"] == "conditional"
+        ),
+        "current_unresolved_conditional_tool_turns": sum(
+            bool(record.get("current_tool_call_count", len(record.get("current_tools", []))))
+            and record["diagnostic"].get("condition_outcome") in {"unknown", "unsatisfied"}
             for record in records
             if record["group"] == "conditional"
         ),
@@ -394,10 +425,15 @@ def summarize_admission(
             **profile,
             "group_contract_rates": group_contract_rates,
             "active_weight": round(active_weight, 4),
+            "profile_complete": abs(active_weight - 1.0) <= 1e-9,
             "weighted_entry_contract_rate": round(weighted_contract_rate, 4),
             "hard_gate_results": hard_gate_results,
             "hard_gates_passed": all(hard_gate_results.values()),
-            "release_ready": round(weighted_contract_rate, 4) == 1.0 and all(hard_gate_results.values()),
+            "release_ready": (
+                abs(active_weight - 1.0) <= 1e-9
+                and round(weighted_contract_rate, 4) == 1.0
+                and all(hard_gate_results.values())
+            ),
         }
     return summary
 

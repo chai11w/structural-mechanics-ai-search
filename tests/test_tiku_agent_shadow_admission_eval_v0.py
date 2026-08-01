@@ -64,7 +64,8 @@ class AdmissionFixtureTest(unittest.TestCase):
         self.assertAlmostEqual(sum(profile["group_weights"].values()), 1.0)
         self.assertGreater(profile["group_weights"]["atomic"], profile["group_weights"]["sequential"])
         self.assertGreater(profile["group_weights"]["sequential"], profile["group_weights"]["conditional"])
-        self.assertIn("current_conditional_tool_turns", profile["hard_gates"])
+        self.assertIn("current_unresolved_conditional_tool_turns", profile["hard_gates"])
+        self.assertIn("current_verified_condition_false_admissions", profile["hard_gates"])
 
     def test_required_steps_are_order_sensitive(self):
         self.assertTrue(_is_subsequence(["show_candidates", "select_candidate"], ["show_candidates", "select_candidate"]))
@@ -129,7 +130,8 @@ class AdmissionDiagnosticTest(unittest.TestCase):
             _planner(_result(ShadowPlanStep("select_candidate", {"candidate_rank": 2}))),
         )
         self.assertTrue(diagnostic["goal_covered"])
-        self.assertTrue(diagnostic["conditional_semantic_allow_risk"])
+        self.assertEqual(diagnostic["condition_outcome"], "unknown")
+        self.assertFalse(diagnostic["conditional_semantic_allow_risk"])
         self.assertFalse(diagnostic["future_admission_ready"])
 
     def test_summary_separates_missed_observation_from_false_admission(self):
@@ -146,6 +148,7 @@ class AdmissionDiagnosticTest(unittest.TestCase):
                     "useful": True,
                     "forbidden_actions_seen": [],
                     "effective_forbidden_actions": [],
+                    "condition_outcome": "not_present",
                 },
                 "current_response_intent": "select_candidate",
                 "current_tools": [],
@@ -164,6 +167,7 @@ class AdmissionDiagnosticTest(unittest.TestCase):
                     "useful": True,
                     "forbidden_actions_seen": [],
                     "effective_forbidden_actions": [],
+                    "condition_outcome": "not_present",
                 },
                 "current_response_intent": "continue_search",
                 "current_tools": [],
@@ -198,6 +202,7 @@ class AdmissionDiagnosticTest(unittest.TestCase):
                     "useful": True,
                     "forbidden_actions_seen": [],
                     "effective_forbidden_actions": [],
+                    "condition_outcome": "unknown" if group == "conditional" else "not_present",
                 },
                 "current_response_intent": "retry_search",
                 "current_tools": ["coarse_search"] if group == "conditional" else [],
@@ -207,7 +212,35 @@ class AdmissionDiagnosticTest(unittest.TestCase):
         summary = summarize_admission(records, profile=profile)
         representative = summary["representative_profile"]
         self.assertEqual(representative["weighted_entry_contract_rate"], 1.0)
-        self.assertFalse(representative["hard_gate_results"]["current_conditional_tool_turns"])
+        self.assertFalse(
+            representative["hard_gate_results"]["current_unresolved_conditional_tool_turns"]
+        )
+        self.assertFalse(representative["release_ready"])
+
+    def test_group_only_summary_never_claims_full_profile_release_readiness(self):
+        profile = load_evaluation_profile(FIXTURE)
+        record = {
+            "expected_entry": EXPECTED_OBSERVE,
+            "group": "conditional",
+            "current_admitted": True,
+            "entry_contract_ok": True,
+            "observable_equal": True,
+            "diagnostic": {
+                "route": "needs_confirmation",
+                "required_steps_covered": True,
+                "useful": True,
+                "forbidden_actions_seen": [],
+                "effective_forbidden_actions": [],
+                "condition_outcome": "unknown",
+            },
+            "current_response_intent": "clarification",
+            "current_tools": [],
+            "case_id": "conditional_only",
+            "run": 1,
+        }
+        representative = summarize_admission([record], profile=profile)["representative_profile"]
+        self.assertEqual(representative["weighted_entry_contract_rate"], 1.0)
+        self.assertFalse(representative["profile_complete"])
         self.assertFalse(representative["release_ready"])
 
 
