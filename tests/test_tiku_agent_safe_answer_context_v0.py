@@ -3,6 +3,7 @@ import unittest
 
 from tiku_agent.action_decision_v2 import TASK_ACTIONS
 from tiku_agent.safe_answer_context_v0 import (
+    SAFE_ACTION_LABELS,
     SafeConversationContext,
     build_safe_answer_context,
     render_state_section,
@@ -62,14 +63,12 @@ class SafeAnswerContextV0Test(unittest.TestCase):
             continuation_available=True,
         )
         ctx = build_safe_answer_context(state)
-        self.assertIn("select_candidate", ctx.allowed_actions)
-        self.assertIn("reject_candidates", ctx.allowed_actions)
-        self.assertIn("continue_search", ctx.allowed_actions)
-        self.assertIn("show_candidates", ctx.allowed_actions)
-        self.assertIn("set_chapter", ctx.allowed_actions)
-        self.assertNotIn("global_search", ctx.allowed_actions)
-        self.assertNotIn("cancel", ctx.allowed_actions)
-        self.assertNotIn("search_image", ctx.allowed_actions)
+        self.assertIn("选择候选题", ctx.allowed_actions)
+        self.assertIn("说明候选都不合适", ctx.allowed_actions)
+        self.assertIn("查看下一批候选", ctx.allowed_actions)
+        self.assertIn("重新查看候选列表", ctx.allowed_actions)
+        self.assertIn("补充或更换章节", ctx.allowed_actions)
+        self.assertNotIn("确认后查找全部章节", ctx.allowed_actions)
         self.assertEqual(ctx.candidate_count, 3)
         self.assertEqual(ctx.current_chapter, "4力法")
 
@@ -80,9 +79,9 @@ class SafeAnswerContextV0Test(unittest.TestCase):
             candidates=[{"rank": 1}, {"rank": 2}],
         )
         with_cont = build_safe_answer_context(_candidate_state(**base, continuation_available=True))
-        self.assertIn("continue_search", with_cont.allowed_actions)
+        self.assertIn("查看下一批候选", with_cont.allowed_actions)
         without_cont = build_safe_answer_context(_candidate_state(**base, continuation_available=False))
-        self.assertNotIn("continue_search", without_cont.allowed_actions)
+        self.assertNotIn("查看下一批候选", without_cont.allowed_actions)
 
     def test_global_search_only_when_offered(self):
         base = dict(
@@ -91,9 +90,9 @@ class SafeAnswerContextV0Test(unittest.TestCase):
             questions=[{"index": 1}],
         )
         offered = build_safe_answer_context(_candidate_state(**base, global_search_offered=True))
-        self.assertIn("global_search", offered.allowed_actions)
+        self.assertIn("确认后查找全部章节", offered.allowed_actions)
         not_offered = build_safe_answer_context(_candidate_state(**base, global_search_offered=False))
-        self.assertNotIn("global_search", not_offered.allowed_actions)
+        self.assertNotIn("确认后查找全部章节", not_offered.allowed_actions)
 
     def test_retry_search_only_in_error_phase(self):
         base = dict(
@@ -102,8 +101,8 @@ class SafeAnswerContextV0Test(unittest.TestCase):
             last_error="timeout",
         )
         ctx = build_safe_answer_context(_candidate_state(**base))
-        self.assertIn("retry_search", ctx.allowed_actions)
-        self.assertIn("explain_failure", ctx.allowed_actions)
+        self.assertIn("重试刚才的操作", ctx.allowed_actions)
+        self.assertIn("了解失败情况", ctx.allowed_actions)
 
     def test_internal_phases_have_no_meaningful_actions(self):
         for phase in (PHASE_PROCESSING, PHASE_READY_TO_ROUTE, PHASE_READY_FOR_SEARCH):
@@ -121,9 +120,9 @@ class SafeAnswerContextV0Test(unittest.TestCase):
         )
         ctx = build_safe_answer_context(state)
         self.assertTrue(ctx.has_answer)
-        self.assertIn("resend_answer", ctx.allowed_actions)
-        self.assertIn("select_candidate", ctx.allowed_actions)
-        self.assertIn("set_chapter", ctx.allowed_actions)
+        self.assertIn("重新查看刚才的答案", ctx.allowed_actions)
+        self.assertIn("选择候选题", ctx.allowed_actions)
+        self.assertIn("补充或更换章节", ctx.allowed_actions)
 
     def test_no_match_phase_offers_chapter_change(self):
         state = _candidate_state(
@@ -131,7 +130,7 @@ class SafeAnswerContextV0Test(unittest.TestCase):
             current_image_path="D:/bank/6/q1.jpg",
         )
         ctx = build_safe_answer_context(state)
-        self.assertIn("set_chapter", ctx.allowed_actions)
+        self.assertIn("补充或更换章节", ctx.allowed_actions)
         self.assertEqual(ctx.waiting_for, "换章节或新题图")
         self.assertEqual(ctx.last_completed_step, "无匹配题目")
 
@@ -209,7 +208,7 @@ class SafeAnswerContextV0Test(unittest.TestCase):
                 self.assertNotIn("stack", str(value))
                 self.assertNotIn("score", str(value))
 
-    def test_allowed_actions_are_all_task_actions(self):
+    def test_allowed_actions_are_reviewed_labels_not_internal_actions(self):
         ctx = build_safe_answer_context(
             _candidate_state(
                 phase=STATE_WAIT_CANDIDATE_CHOICE,
@@ -218,10 +217,12 @@ class SafeAnswerContextV0Test(unittest.TestCase):
                 continuation_available=True,
             )
         )
-        self.assertTrue(set(ctx.allowed_actions) <= TASK_ACTIONS)
-        # cancel/search_image are intentionally excluded from the safe surface.
-        self.assertNotIn("cancel", ctx.allowed_actions)
-        self.assertNotIn("search_image", ctx.allowed_actions)
+        self.assertTrue(set(ctx.allowed_actions) <= set(SAFE_ACTION_LABELS.values()))
+        self.assertTrue(set(ctx.allowed_actions).isdisjoint(TASK_ACTIONS))
+        self.assertEqual(
+            set(SAFE_ACTION_LABELS),
+            set(TASK_ACTIONS) - {"cancel", "search_image"},
+        )
 
     def test_render_state_section_mentions_candidate_count(self):
         state = _candidate_state(
@@ -237,7 +238,9 @@ class SafeAnswerContextV0Test(unittest.TestCase):
         self.assertIn("WAIT_CANDIDATE_CHOICE", section)
         self.assertIn("候选数量：2", section)
         self.assertIn("等待：候选选择", section)
-        self.assertIn("select_candidate", section)
+        self.assertIn("选择候选题", section)
+        for internal_action in TASK_ACTIONS:
+            self.assertNotIn(internal_action, section)
 
 
 if __name__ == "__main__":

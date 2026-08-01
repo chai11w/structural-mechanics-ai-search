@@ -24,6 +24,23 @@ from tiku_agent.state import PHASE_ERROR, AgentState, KNOWN_PHASES
 # trusted image event and is not something a conversation model needs to name.
 _SAFE_ACTION_UNIVERSE = tuple(sorted(TASK_ACTIONS - {"cancel", "search_image"}))
 
+# The permission matrix continues to use the internal action names above.  The
+# safe-answer model only receives these reviewed user-facing labels; it never
+# sees executor identifiers such as ``select_candidate`` or ``retry_search``.
+SAFE_ACTION_LABELS = {
+    "global_search": "确认后查找全部章节",
+    "set_chapter": "补充或更换章节",
+    "select_question": "选择要处理的题目",
+    "select_candidate": "选择候选题",
+    "reject_candidates": "说明候选都不合适",
+    "continue_search": "查看下一批候选",
+    "show_candidates": "重新查看候选列表",
+    "report_answer_mismatch": "说明答案不对应",
+    "resend_answer": "重新查看刚才的答案",
+    "explain_failure": "了解失败情况",
+    "retry_search": "重试刚才的操作",
+}
+
 # Waiting-for / last-completed-step labels are human Chinese and avoid the
 # banned execution-claim verbs (搜索/检索/找到/查到/读取/修改/删除…) so that a
 # model echo cannot trip the output validator.
@@ -81,9 +98,9 @@ class SafeConversationContext:
             raise ValueError(f"unknown safe-answer phase: {self.phase}")
         if self.question_count < 0 or self.candidate_count < 0:
             raise ValueError("question_count and candidate_count must not be negative")
-        unknown = set(self.allowed_actions) - set(TASK_ACTIONS)
+        unknown = set(self.allowed_actions) - set(SAFE_ACTION_LABELS.values())
         if unknown:
-            raise ValueError(f"non-whitelisted actions: {sorted(unknown)}")
+            raise ValueError(f"non-whitelisted user actions: {sorted(unknown)}")
 
     def to_prompt_payload(self) -> dict[str, object]:
         """Return the exact whitelisted summary the model may be shown."""
@@ -109,7 +126,7 @@ def build_safe_answer_context(state: AgentState) -> SafeConversationContext:
         current_chapter=_clean_optional_text(state.current_chapter),
         question_count=state.question_count,
         candidate_count=state.candidate_count,
-        allowed_actions=_authorized_text_actions(state),
+        allowed_actions=_authorized_user_actions(state),
         waiting_for=_WAITING_FOR.get(state.phase),
         last_completed_step=_LAST_COMPLETED_STEP.get(state.phase, ""),
         has_active_image=bool(state.active_image_path),
@@ -144,8 +161,8 @@ def render_state_section(context: SafeConversationContext) -> str:
     return "\n".join(lines)
 
 
-def _authorized_text_actions(state: AgentState) -> tuple[str, ...]:
-    """Ask the real permission matrix which text-addressable actions are legal."""
+def _authorized_user_actions(state: AgentState) -> tuple[str, ...]:
+    """Translate actions allowed by the real matrix into reviewed user labels."""
     decision_context = DecisionContextV2(
         phase=state.phase,
         question_count=state.question_count,
@@ -162,7 +179,7 @@ def _authorized_text_actions(state: AgentState) -> tuple[str, ...]:
     for action in _SAFE_ACTION_UNIVERSE:
         decision = _minimal_decision(action)
         if authorize_action_v2(decision, decision_context).allowed:
-            allowed.append(action)
+            allowed.append(SAFE_ACTION_LABELS[action])
     return tuple(allowed)
 
 

@@ -7,12 +7,30 @@
 
 - **目标**：8794 状态感知安全回答（roadmap Stage 4）——让安全回答能感知当前业务阶段（等待章节/候选选择/答案展示），业务操作仍走固定状态机。
 - **总计划**：M1 状态摘要模块 → M2 prompt 契约 → M4 generator+agent 接线 → M3 接线后按需兜底文案 → M5 runtime 验收测试 → M6 离线状态感知矩阵评估 + 反射指令强化。
-- **已完成**：M1–M6 全部完成；Codex 复核发现并完成 R1 状态矛盾输出校验。状态感知安全回答已具备白名单摘要、真实模型生成和代码级高置信度矛盾拦截。
-- **下一步**：继续按 Codex 审查项逐个讨论，下一项是白名单字段与内部 action 名称边界；问题收敛后再交 8793 评审并提升 8790。
+- **已完成**：M1–M6 全部完成；Codex 复核完成 R1 状态矛盾输出校验与 R2 内部 action 中文翻译。状态感知安全回答已具备白名单摘要、真实模型生成、代码级高置信度矛盾拦截和用户语义下一步。
+- **下一步**：继续按 Codex 审查项逐个讨论，下一项是模型失败时阶段兜底为空的取舍；问题收敛后再交 8793 评审并提升 8790。
 
 ---
 
 ## 已完成步骤
+
+### R2 内部 action 中文翻译（Codex 复核修复）
+业务权限矩阵仍以原始 action 判断合法性，但 `SafeConversationContext.allowed_actions` 不再保存或展示 `select_candidate`、`retry_search` 等执行器标识。新增11项完整固定映射，把所有可暴露动作翻译为“选择候选题”“查看下一批候选”“重试刚才的操作”等用户语言；`cancel`和`search_image`继续不进入安全回答面。上下文构造会拒绝未经审查的标签，测试保证映射键完整覆盖允许宇宙、prompt 与业务 action 集合不相交。
+
+7阶段实际 prompt 抽样全部只显示中文，`RAW_ACTION_LEAKS=[]`；相关69项和全量311项测试通过，业务权限、路由、工具与状态均未改。
+
+改动文件：
+- `tiku_agent/safe_answer_context_v0.py`
+- `tests/test_tiku_agent_safe_answer_context_v0.py`
+- `tests/test_tiku_agent_safe_answer_contract_v0.py`
+- `tests/test_tiku_agent_safe_answer_generator_v0.py`
+- `tests/test_tiku_agent_safe_answer_state_aware.py`
+
+验证命令：
+```powershell
+python -B -m unittest tests.test_tiku_agent_safe_answer_state_consistency_v0 tests.test_tiku_agent_safe_answer_context_v0 tests.test_tiku_agent_safe_answer_contract_v0 tests.test_tiku_agent_safe_answer_generator_v0 tests.test_tiku_agent_safe_answer_route_v0 tests.test_tiku_agent_safe_answer_state_aware
+python -B -m unittest discover -s tests -p "test_*.py"
+```
 
 ### R1 状态矛盾输出校验（Codex 复核修复）
 真实 Qwen 矩阵确认 prompt 状态感知有效，但旧校验器只接收 `text + category`，会放行“等待章节时重新索要题图”“已有章节时再次询问章节”“ERROR 时编造章节判断失败”等矛盾回答。现已让输出校验器接收 `SafeConversationContext`，只拦截高确定性矛盾：内部 phase/action 标识、候选数量不一致、无候选/无答案时的正面声称、已有题图时重复索图、已有章节时声称未知或再次索要、ERROR 时编造具体错误原因。无 context 的 V0 调用保持兼容。

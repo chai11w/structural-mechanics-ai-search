@@ -105,7 +105,7 @@ class SafeAnswerContractV0Test(unittest.TestCase):
             phase=STATE_WAIT_CANDIDATE_CHOICE,
             current_chapter="4力法",
             candidate_count=3,
-            allowed_actions=("select_candidate",),
+            allowed_actions=("选择候选题",),
             waiting_for="候选选择",
             last_completed_step="候选已就绪",
             has_active_image=True,
@@ -313,7 +313,7 @@ class SafeAnswerContractV0Test(unittest.TestCase):
             current_chapter="4力法",
             question_count=1,
             candidate_count=3,
-            allowed_actions=("select_candidate", "continue_search"),
+            allowed_actions=("选择候选题", "查看下一批候选"),
             waiting_for="候选选择",
             last_completed_step="候选已就绪",
             has_active_image=True,
@@ -327,7 +327,8 @@ class SafeAnswerContractV0Test(unittest.TestCase):
         self.assertIn("WAIT_CANDIDATE_CHOICE", prompt.system_prompt)
         self.assertIn("候选数量：3", prompt.system_prompt)
         self.assertIn("等待：候选选择", prompt.system_prompt)
-        self.assertIn("select_candidate", prompt.system_prompt)
+        self.assertIn("选择候选题", prompt.system_prompt)
+        self.assertNotIn("select_candidate", prompt.system_prompt)
         self.assertIn("不得逐字复述", prompt.system_prompt)
         # The phase-reflect directive must ride along with any state section so
         # simple chitchat (greetings) also reflects the current phase instead of

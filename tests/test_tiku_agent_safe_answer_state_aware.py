@@ -277,13 +277,13 @@ class SafeAnswerStateAwareAcceptanceTest(unittest.TestCase):
         cases = (
             (
                 STATE_WAIT_CANDIDATE_CHOICE,
-                ("select_candidate", "reject_candidates", "continue_search"),
+                ("选择候选题", "说明候选都不合适", "查看下一批候选"),
             ),
             (
                 PHASE_ANSWERED,
-                ("select_candidate", "set_chapter", "resend_answer"),
+                ("选择候选题", "补充或更换章节", "重新查看刚才的答案"),
             ),
-            (PHASE_NO_MATCH, ("set_chapter",)),
+            (PHASE_NO_MATCH, ("补充或更换章节",)),
         )
         for phase, expected_actions in cases:
             with self.subTest(phase=phase):
