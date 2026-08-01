@@ -867,3 +867,43 @@ python -B -m unittest discover -s tests -p "test_*.py"
 ### 下一步
 
 - 只为2个稳定类建立纯代码顺序准入识别器与反例金标准；先离线评估，不直接改`Agent.handle_text()`入口。
+
+---
+
+## 步骤：Stage 5 两类顺序请求离线准入识别
+
+### 干了啥
+
+- 新增纯代码`shadow_sequential_admission_v0`，只识别两个已在全新确认集稳定的类别：`WAIT_CANDIDATE_CHOICE`阶段“展示候选→选择明确编号候选”，以及`ANSWERED`阶段“明确报告答案不匹配→返回候选”。
+- 要求两个动作各自有原话证据、顺序正确且中间有明确连接词；条件句、否定、疑问/不确定、倒序、单动作、模糊候选编号和错误阶段全部拒绝。
+- 特意不接受`ANSWERED`阶段“返回候选→再选择”，因为该类在真实确认矩阵只有3/6，不用代码规则掩盖Planner不稳定。
+- 新增离线评估器，复用开发集、独立留出集和全新确认集；不调用模型、不执行工具、不修改状态。
+- 本轮未修改`Agent.handle_text()`、Planner Prompt、运行时准入或用户响应，识别器尚未上线。
+
+### 改动文件
+
+- `tiku_agent/shadow_sequential_admission_v0.py`（新增）
+- `scripts/evaluate_shadow_sequential_admission_v0.py`（新增）
+- `tests/test_tiku_agent_shadow_sequential_admission_v0.py`（新增）
+- `.agents/roadmap.md`
+- `.agents/project_memory.md`
+- `.agents/8794_handoff.md`
+
+### 验证结果
+
+- 离线三组共79条：12条正例全部识别，67条反例全部拒绝；开发集2/2、留出集6/6、确认集4/4，无假阳性、无假阴性。
+- 专项20/20通过；整仓424/424通过。受限沙箱首次全量运行仍触发既有Windows临时目录权限假失败，沙箱外原命令复跑全过。
+- 结论：具备下一轮“接入纯影子观察”的资格，不代表具备执行Planner动作或发布资格。
+
+### 验证命令
+
+```powershell
+python scripts\evaluate_shadow_sequential_admission_v0.py
+python -m unittest tests.test_tiku_agent_shadow_sequential_admission_v0 tests.test_tiku_agent_conditional_guard_v0 tests.test_tiku_agent_shadow_sequential_holdout_v0 -v
+python -m unittest discover -s tests -p "test*.py"
+```
+
+### 下一步
+
+- 把识别器接到纯影子入口：只有它接受的两类才允许Planner观察，仍不执行计划。
+- 成对验证影子开关下回答、状态、原工具调用完全一致；识别器拒绝的所有类别不得进入Planner。
