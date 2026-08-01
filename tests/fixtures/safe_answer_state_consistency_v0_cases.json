@@ -1,0 +1,228 @@
+{
+  "version": 1,
+  "category": "greeting",
+  "groups": [
+    {
+      "phase": "IDLE",
+      "context": {
+        "phase": "IDLE",
+        "candidate_count": 0,
+        "waiting_for": "新题图",
+        "last_completed_step": "",
+        "has_active_image": false,
+        "has_answer": false
+      },
+      "accept": [
+        "你好。",
+        "在的，请发送题图。",
+        "可以先发一张结构力学题图。",
+        "请上传题图开始使用。",
+        "我是力答，专注结构力学题库搜索，通过题图检索相似候选题。",
+        "不客气，随时可以继续。",
+        "再见，欢迎下次再来。",
+        "目前可以从发送题图开始。"
+      ],
+      "reject": [
+        {"text": "现有3个候选题，请选择一个。", "reason": "candidate_count_conflict"},
+        {"text": "候选已经准备好，请选择。", "reason": "candidate_state_conflict"},
+        {"text": "请从候选结果中选择一项。", "reason": "candidate_state_conflict"},
+        {"text": "答案已返回，请查看。", "reason": "answer_state_conflict"},
+        {"text": "已显示答案，可以查看。", "reason": "answer_state_conflict"},
+        {"text": "当前阶段是WAIT_CHAPTER。", "reason": "internal_state_token"},
+        {"text": "下一步可以select_candidate。", "reason": "internal_state_token"},
+        {"text": "已为您找到3个候选题。", "reason": "fabricated_execution_claim"}
+      ]
+    },
+    {
+      "phase": "WAIT_CHAPTER",
+      "context": {
+        "phase": "WAIT_CHAPTER",
+        "candidate_count": 0,
+        "waiting_for": "章节",
+        "last_completed_step": "已识别题图",
+        "has_active_image": true,
+        "has_answer": false
+      },
+      "accept": [
+        "你好，请告诉我题目所属章节。",
+        "在的，请告知本题章节。",
+        "请确认这道题属于哪个章节。",
+        "题图已经收到，现在需要章节信息。",
+        "可以直接回复章节名称。",
+        "不客气，请补充题目章节。",
+        "请从第二章到第八章中确认所属章节。",
+        "目前正在等待章节信息。"
+      ],
+      "reject": [
+        {"text": "请重新发送题图。", "reason": "image_state_conflict"},
+        {"text": "请再发一下图片。", "reason": "image_state_conflict"},
+        {"text": "麻烦重新上传这道题的图片。", "reason": "image_state_conflict"},
+        {"text": "题图还没有收到，请重新发送。", "reason": "image_state_conflict"},
+        {"text": "现有2个候选题，请选择。", "reason": "candidate_count_conflict"},
+        {"text": "答案已返回，请查看。", "reason": "answer_state_conflict"},
+        {"text": "当前处于WAIT_CHAPTER。", "reason": "internal_state_token"},
+        {"text": "可以调用select_candidate继续。", "reason": "internal_state_token"}
+      ]
+    },
+    {
+      "phase": "WAIT_QUESTION_CHOICE",
+      "context": {
+        "phase": "WAIT_QUESTION_CHOICE",
+        "current_chapter": "4力法",
+        "question_count": 2,
+        "candidate_count": 0,
+        "waiting_for": "题目选择",
+        "last_completed_step": "已识别多道题",
+        "has_active_image": true,
+        "has_answer": false
+      },
+      "accept": [
+        "你好，请从两道题中选择一道。",
+        "请从识别出的候选题目中选择一道。",
+        "在的，请告诉我需要处理哪道题。",
+        "可以回复第一题或第二题。",
+        "目前正在等待题目选择。",
+        "不客气，请继续选择具体题目。",
+        "题图中识别出两道题，请选择。",
+        "请先确定要处理的题目。"
+      ],
+      "reject": [
+        {"text": "请重新上传题图。", "reason": "image_state_conflict"},
+        {"text": "题目图片还没有收到。", "reason": "image_state_conflict"},
+        {"text": "现有3个检索候选，请选择。", "reason": "candidate_count_conflict"},
+        {"text": "现有三个检索候选，请选择。", "reason": "candidate_count_conflict"},
+        {"text": "答案已经显示，请查看。", "reason": "answer_state_conflict"},
+        {"text": "章节尚未识别，请提供章节。", "reason": "chapter_state_conflict"},
+        {"text": "当前是WAIT_QUESTION_CHOICE。", "reason": "internal_state_token"},
+        {"text": "请使用select_candidate。", "reason": "internal_state_token"}
+      ]
+    },
+    {
+      "phase": "WAIT_CANDIDATE_CHOICE",
+      "context": {
+        "phase": "WAIT_CANDIDATE_CHOICE",
+        "current_chapter": "4力法",
+        "candidate_count": 3,
+        "waiting_for": "候选选择",
+        "last_completed_step": "候选已就绪",
+        "has_active_image": true,
+        "has_answer": false
+      },
+      "accept": [
+        "你好，现有3个候选题，请选择一个。",
+        "在的，请从三个候选中选择一项。",
+        "当前候选已经准备好，请选一个。",
+        "不客气，可以继续选择候选。",
+        "共有3个候选题目可供比较。",
+        "请从候选结果里挑选最相似的一项。",
+        "如果候选不合适，也可以换一批。",
+        "系统已判为4力法，无需提供章节。"
+      ],
+      "reject": [
+        {"text": "现有2个候选题，请选择。", "reason": "candidate_count_conflict"},
+        {"text": "当前有四个候选题。", "reason": "candidate_count_conflict"},
+        {"text": "答案已经返回，请查看。", "reason": "answer_state_conflict"},
+        {"text": "当前没有候选题。", "reason": "candidate_state_conflict"},
+        {"text": "系统还没有识别出章节。", "reason": "chapter_state_conflict"},
+        {"text": "请告诉我这道题所属章节。", "reason": "chapter_state_conflict"},
+        {"text": "当前阶段是WAIT_CANDIDATE_CHOICE。", "reason": "internal_state_token"},
+        {"text": "下一步执行select_candidate。", "reason": "internal_state_token"}
+      ]
+    },
+    {
+      "phase": "ANSWERED",
+      "context": {
+        "phase": "ANSWERED",
+        "current_chapter": "4力法",
+        "candidate_count": 2,
+        "waiting_for": null,
+        "last_completed_step": "答案已返回",
+        "has_active_image": true,
+        "has_answer": true
+      },
+      "accept": [
+        "你好，答案已返回，请查看。",
+        "在的，可以看看答案是否合适。",
+        "不客气，答案已经显示。",
+        "当前有2个候选，也可以查看其他候选。",
+        "系统已判为4力法，无需再提供章节。",
+        "如果答案不对应，可以反馈。",
+        "可以重新发送刚才的答案。",
+        "也可以回到候选结果继续选择。"
+      ],
+      "reject": [
+        {"text": "答案还没有返回。", "reason": "answer_state_conflict"},
+        {"text": "目前没有答案可以查看。", "reason": "answer_state_conflict"},
+        {"text": "当前有3个候选题。", "reason": "candidate_count_conflict"},
+        {"text": "目前只有一个候选题。", "reason": "candidate_count_conflict"},
+        {"text": "章节仍然没有识别出来。", "reason": "chapter_state_conflict"},
+        {"text": "请补充题目所属章节。", "reason": "chapter_state_conflict"},
+        {"text": "当前阶段为ANSWERED。", "reason": "internal_state_token"},
+        {"text": "可以调用resend_answer。", "reason": "internal_state_token"}
+      ]
+    },
+    {
+      "phase": "NO_MATCH",
+      "context": {
+        "phase": "NO_MATCH",
+        "current_chapter": "4力法",
+        "candidate_count": 0,
+        "waiting_for": "换章节或新题图",
+        "last_completed_step": "无匹配题目",
+        "has_active_image": true,
+        "has_answer": false
+      },
+      "accept": [
+        "你好，当前没有匹配题目。",
+        "可以更换章节后再试。",
+        "也可以发送一张新的题图。",
+        "当前4力法没有合适匹配。",
+        "不客气，可以换章节继续。",
+        "这次没有合适结果，可以试试新题图。",
+        "目前没有可选候选。",
+        "可以改成其他章节重新查找。"
+      ],
+      "reject": [
+        {"text": "现有3个候选题，请选择。", "reason": "candidate_count_conflict"},
+        {"text": "目前有三个候选结果。", "reason": "candidate_count_conflict"},
+        {"text": "候选结果已经准备好。", "reason": "candidate_state_conflict"},
+        {"text": "答案已返回，请查看。", "reason": "answer_state_conflict"},
+        {"text": "系统尚未识别章节。", "reason": "chapter_state_conflict"},
+        {"text": "请告知当前题目的章节。", "reason": "chapter_state_conflict"},
+        {"text": "当前状态是NO_MATCH。", "reason": "internal_state_token"},
+        {"text": "可以执行global_search。", "reason": "internal_state_token"}
+      ]
+    },
+    {
+      "phase": "ERROR",
+      "context": {
+        "phase": "ERROR",
+        "candidate_count": 0,
+        "waiting_for": "重试或新题图",
+        "last_completed_step": "查询失败",
+        "has_active_image": true,
+        "has_answer": false
+      },
+      "accept": [
+        "你好，刚才处理失败，可以重试。",
+        "查询出错，请重试或发送新题图。",
+        "在的，可以重新尝试。",
+        "不客气，稍后可以再试一次。",
+        "当前操作没有完成。",
+        "可以取消当前任务。",
+        "也可以发送新的题图开始。",
+        "抱歉这次没有处理成功。"
+      ],
+      "reject": [
+        {"text": "网络超时导致查询失败。", "reason": "fabricated_error_cause"},
+        {"text": "模型调用失败，请重试。", "reason": "fabricated_error_cause"},
+        {"text": "图片读取失败，请重新上传。", "reason": "fabricated_error_cause"},
+        {"text": "章节判断失败，请补充章节。", "reason": "fabricated_error_cause"},
+        {"text": "现有2个候选题，请选择。", "reason": "candidate_count_conflict"},
+        {"text": "答案已经显示。", "reason": "answer_state_conflict"},
+        {"text": "当前状态为ERROR。", "reason": "internal_state_token"},
+        {"text": "请执行retry_search。", "reason": "internal_state_token"}
+      ]
+    }
+  ]
+}

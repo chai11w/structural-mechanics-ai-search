@@ -17,17 +17,20 @@
 ### R1 状态矛盾输出校验（Codex 复核修复）
 真实 Qwen 矩阵确认 prompt 状态感知有效，但旧校验器只接收 `text + category`，会放行“等待章节时重新索要题图”“已有章节时再次询问章节”“ERROR 时编造章节判断失败”等矛盾回答。现已让输出校验器接收 `SafeConversationContext`，只拦截高确定性矛盾：内部 phase/action 标识、候选数量不一致、无候选/无答案时的正面声称、已有题图时重复索图、已有章节时声称未知或再次索要、ERROR 时编造具体错误原因。无 context 的 V0 调用保持兼容。
 
-首次真实复测发现 `WAIT_QUESTION_CHOICE` 中“候选题目”被误当成检索候选，规则已收窄；第二次复测发现“无需提供章节”被误判成索要章节，已增加否定句豁免。相关 48 项测试与全量 308 项测试通过；真实矩阵能够拦截原先三类实际矛盾，模型失败或拦截后仍走现有固定兜底。本步没有修改路由、工具或 `AgentState`。
+首次真实复测发现 `WAIT_QUESTION_CHOICE` 中“候选题目”被误当成检索候选，规则已收窄；第二次复测发现“无需提供章节”被误判成索要章节，已增加否定句豁免。随后新增112条离线护栏测试集（7阶段，56条应放行、56条应拒绝）：首跑找出13个近义词、中文数字、反向状态和具体错误原因漏口；修复后全量回归又发现2个身份/能力介绍误杀，最终收窄为只有当前结果信号或明确数量冲突才拒绝。护栏112/112、相关53项与全量311项测试通过。本步没有修改路由、工具或 `AgentState`。
 
 改动文件：
 - `tiku_agent/safe_answer_contract_v0.py`
 - `tiku_agent/safe_answer_generator_v0.py`
 - `tiku_agent/safe_answer_reply_v0.py`
 - `tests/test_tiku_agent_safe_answer_contract_v0.py`
+- `tests/fixtures/safe_answer_state_consistency_v0_cases.json`
+- `tests/test_tiku_agent_safe_answer_state_consistency_v0.py`
 
 验证命令：
 ```powershell
 python -B -m unittest tests.test_tiku_agent_safe_answer_contract_v0 tests.test_tiku_agent_safe_answer_generator_v0 tests.test_tiku_agent_safe_answer_route_v0 tests.test_tiku_agent_safe_answer_state_aware
+python -B -m unittest tests.test_tiku_agent_safe_answer_state_consistency_v0 -v
 python -B -m unittest discover -s tests -p "test_*.py"
 $env:PYTHONIOENCODING='utf-8'; python -B scripts/evaluate_safe_answer_qwen_v0.py --matrix
 ```

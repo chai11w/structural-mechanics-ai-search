@@ -87,17 +87,47 @@ _INTERNAL_STATE_TOKEN_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 _IMAGE_REQUEST_PATTERN = re.compile(
-    r"(?:请|麻烦|可以|可)?(?:你|您)?(?:重新|再)?(?:发送|上传|提供|重发).{0,6}(?:题图|图片)"
+    r"(?:请|麻烦|可以|可)?(?:你|您)?(?:重新|再)?(?:发送|上传|提供|重发|发).{0,6}(?:题图|图片)"
+)
+_IMAGE_MISSING_CLAIM_PATTERN = re.compile(
+    r"(?:题图|题目图片|图片).{0,6}(?:还没有|还没|尚未|没有|未)(?:收到|上传|发送|提供)|"
+    r"(?:还没有|还没|尚未|没有|未).{0,6}(?:收到|拿到).{0,6}(?:题图|图片)"
 )
 _POSITIVE_CANDIDATE_PATTERN = re.compile(
     r"(?:现有|已有|当前有|共有|存在).{0,8}候选|"
     r"候选(?:题|项|结果)?(?:已经|已)?(?:准备好|就绪)|"
     r"请.{0,10}候选.{0,5}(?:选|选择)"
 )
-_CANDIDATE_COUNT_PATTERN = re.compile(r"(\d{1,3})\s*个(?:相似)?候选")
+_EXPLICIT_SEARCH_CANDIDATE_PATTERN = re.compile(
+    r"(?:现有|已有|当前有|共有|存在).{0,8}(?:检索|搜索|匹配|相似).{0,4}候选"
+)
+_CANDIDATE_COUNT_PATTERN = re.compile(
+    r"(\d{1,3}|[一二两三四五六七八九十])\s*个?(?:相似|检索|搜索|匹配)?候选"
+)
+_CHINESE_NUMBER_VALUES = {
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
+_NO_CANDIDATE_PATTERN = re.compile(
+    r"(?:当前|目前|现在)?(?:没有|无|不存在|尚无).{0,4}候选|"
+    r"候选.{0,4}(?:没有|不存在|为零|是零)"
+)
 _ANSWER_AVAILABLE_PATTERN = re.compile(
     r"答案(?:已经|已)?(?:返回|展示|显示|准备好|就绪)|"
     r"(?:已经|已)(?:返回|展示|显示).{0,4}答案"
+)
+_ANSWER_MISSING_PATTERN = re.compile(
+    r"答案.{0,4}(?:还没有|还没|尚未|没有|未)(?:返回|展示|显示|准备好)|"
+    r"(?:没有|无|尚无).{0,4}答案|答案.{0,4}(?:没有|不存在)"
 )
 _CHAPTER_REQUEST_PATTERN = re.compile(
     r"(?:请|麻烦).{0,12}(?:告诉|告知|提供|补充|确认|指定).{0,10}章节"
@@ -109,11 +139,12 @@ _CHAPTER_NOT_REQUIRED_PATTERN = re.compile(
 )
 _CHAPTER_UNKNOWN_CLAIM_PATTERN = re.compile(
     r"(?:未|无法|没有|没).{0,6}(?:识别|确定|判断).{0,6}章节|"
-    r"章节.{0,6}(?:未识别|无法确定|未确定)"
+    r"章节.{0,8}(?:(?:仍然)?(?:还没有|还没|尚未|没有|未|无法)(?:被)?(?:识别|确定|判断)|"
+    r"未识别|无法确定|未确定)"
 )
 _SPECIFIC_ERROR_CAUSE_PATTERN = re.compile(
     r"(?:判断|识别).{0,4}章节.{0,4}(?:失败|出错|异常)|"
-    r"(?:章节|模型|网络|接口|api|文件).{0,8}(?:失败|出错|异常|超时)"
+    r"(?:章节|模型|网络|接口|api|文件|图片|题图).{0,8}(?:失败|出错|异常|超时)"
 )
 _SCOPE_ANCHORS = (
     "力答",
@@ -234,21 +265,35 @@ def _state_consistency_rejection(
         return ""
     if _INTERNAL_STATE_TOKEN_PATTERN.search(text):
         return "internal_state_token"
+    for match in _CANDIDATE_COUNT_PATTERN.finditer(text):
+        raw_count = match.group(1)
+        count = int(raw_count) if raw_count.isdigit() else _CHINESE_NUMBER_VALUES[raw_count]
+        if count != context.candidate_count:
+            return "candidate_count_conflict"
     if (
         context.candidate_count == 0
-        and context.phase != STATE_WAIT_QUESTION_CHOICE
-        and _POSITIVE_CANDIDATE_PATTERN.search(text)
+        and (
+            _EXPLICIT_SEARCH_CANDIDATE_PATTERN.search(text)
+            or (
+                context.phase != STATE_WAIT_QUESTION_CHOICE
+                and _POSITIVE_CANDIDATE_PATTERN.search(text)
+            )
+        )
     ):
         return "candidate_state_conflict"
-    for match in _CANDIDATE_COUNT_PATTERN.finditer(text):
-        if int(match.group(1)) != context.candidate_count:
-            return "candidate_count_conflict"
+    if context.candidate_count > 0 and _NO_CANDIDATE_PATTERN.search(text):
+        return "candidate_state_conflict"
     if not context.has_answer and _ANSWER_AVAILABLE_PATTERN.search(text):
+        return "answer_state_conflict"
+    if context.has_answer and _ANSWER_MISSING_PATTERN.search(text):
         return "answer_state_conflict"
     if (
         context.has_active_image
         and context.phase in {STATE_WAIT_CHAPTER, STATE_WAIT_QUESTION_CHOICE}
-        and _IMAGE_REQUEST_PATTERN.search(text)
+        and (
+            _IMAGE_REQUEST_PATTERN.search(text)
+            or _IMAGE_MISSING_CLAIM_PATTERN.search(text)
+        )
     ):
         return "image_state_conflict"
     if (
