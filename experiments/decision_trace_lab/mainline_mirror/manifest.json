@@ -2,8 +2,8 @@
   "schema_version": 1,
   "source_repository": "F:/cc/7-题库检索",
   "source_branch": "codex/mainline-bounded-autonomy-v1",
-  "source_commit": "8151267dd76d8299f723d83927d4a6c06798725c",
-  "created_at": "2026-07-30T04:30:36.999070+00:00",
+  "source_commit": "04d3a86ddc9c83e29b0dd841193425ec1c2c6847",
+  "created_at": "2026-08-01T06:23:02.372164+00:00",
   "snapshot_scope": "tracked mainline code, tests, fixtures and safe documentation; excludes .git, local config/secrets, xlsx question-bank assets, runtime/logs/caches, project-agent metadata, review data, and special_unindexed_questions.json",
   "files": [
     {
@@ -16,11 +16,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "1cdbfac8a701140bacd4309ff75a49ef6d82b365e9b8912d175af5e466fc0944"
+      "sha256": "4165f5ff162cfddbc07f52acb6c073b193728bb85534c096354cb798246b6390"
     },
     {
       "path": "SKILL.md",
-      "sha256": "b4287522d443f54e270dbad67b976c77b3ca575e7d1cdd9d85ec61415500ac65"
+      "sha256": "9271fc534863f2cdc9a57b0b344be5c8640d42873755a33b31bd724c9a8aac9f"
     },
     {
       "path": "build_index.py",
@@ -36,7 +36,7 @@
     },
     {
       "path": "requirements.txt",
-      "sha256": "1d063fb92c795852358a5286ef3594d104196a7ebb6336f2277d594f997a9ecd"
+      "sha256": "237bac587cd3fe813073163903404ad463e0ac5c00a8d91cab554e762abf61d3"
     },
     {
       "path": "scripts/apply_main_bank_update.py",
@@ -68,7 +68,7 @@
     },
     {
       "path": "scripts/evaluate_global_search.py",
-      "sha256": "752a9aac354d4dfe7a0420f7e62dd2b214f26ac18e92186b119ccb9609ef41c6"
+      "sha256": "180f420b900fba8f17ef5e8b30f09f12816ccb9f8022487bb8bc6acf0c4ae8d2"
     },
     {
       "path": "scripts/evaluate_intent_v2.py",
@@ -204,7 +204,7 @@
     },
     {
       "path": "tests/test_global_search_evaluation.py",
-      "sha256": "0f8b3569caa65d913fa22adf299c28ba4d43b1932b833a596a53f0803e4b5d4a"
+      "sha256": "feb3a7fef84bb9b1dc557712553d38244768a14747eb7aec7978169408844f0f"
     },
     {
       "path": "tests/test_multi_agent_rerank_policy.py",
@@ -308,7 +308,7 @@
     },
     {
       "path": "tests/test_tiku_agent_tools.py",
-      "sha256": "ac80fd86b87c9cfc14b8e62bd1bc29f0f070ee8a7decdf603e7a85fea71bd18e"
+      "sha256": "81ea0abaa85eb9896197537afbdb46684fe4a2f842f7c12f5840110035fc8305"
     },
     {
       "path": "tiku_agent/__init__.py",
@@ -416,7 +416,7 @@
     },
     {
       "path": "tiku_agent/tools.py",
-      "sha256": "4d154cc0ef3a03a163ee2ff55500b3d02facf21049e3e11f9afd2e10b5b507f4"
+      "sha256": "6041cd45520f9136696b02776edf3723885a774719deafddc5aaca9e42899740"
     },
     {
       "path": "tiku_shared/__init__.py",

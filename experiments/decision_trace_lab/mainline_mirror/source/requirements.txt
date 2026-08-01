@@ -3,6 +3,7 @@ openpyxl
 Pillow
 zhipuai
 opencv-python
+tkinterdnd2
 fastapi==0.139.0
 python-multipart==0.0.20
 uvicorn==0.51.0
