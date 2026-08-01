@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from tiku_agent import render
 from tiku_agent.action_decision_v2 import (
@@ -29,6 +30,16 @@ from tiku_agent.safe_answer_context_v0 import (
 from tiku_agent.safe_answer_generator_v0 import SafeAnswerGeneratorV0
 from tiku_agent.safe_answer_policy_v0 import evaluate_safe_answer_policy
 from tiku_agent.safe_answer_reply_v0 import render_safe_answer_v0
+from tiku_agent.session_artifacts import session_key
+from tiku_agent.shadow_plan_log import ShadowPlanLogEntry, ShadowPlanLogger
+from tiku_agent.shadow_plan_v0 import (
+    MAX_PLANS_PER_TURN,
+    PermissionReview,
+    ShadowPlan,
+    build_permission_review_facts,
+    review_shadow_plan,
+)
+from tiku_agent.shadow_planner_v0 import ShadowPlannerV0
 from tiku_agent.state import (
     PHASE_ANSWERED,
     PHASE_ERROR,
@@ -88,6 +99,8 @@ class TikuSearchAgent:
         progress_reporter: Callable[[str, str], None] | None = None,
         enable_safe_answer_v0: bool = False,
         safe_answer_generator_v0: SafeAnswerGeneratorV0 | None = None,
+        shadow_planner: ShadowPlannerV0 | None = None,
+        shadow_logger: ShadowPlanLogger | None = None,
     ) -> None:
         self.state = state or AgentState()
         self.tools = tools or AgentToolbox()
@@ -97,6 +110,9 @@ class TikuSearchAgent:
         self.progress_reporter = progress_reporter
         self.enable_safe_answer_v0 = enable_safe_answer_v0
         self.safe_answer_generator_v0 = safe_answer_generator_v0
+        self.shadow_planner = shadow_planner
+        self.shadow_logger = shadow_logger
+        self._shadow_plan_count = 0
 
     def handle_image(self, image_path: str | Path) -> AgentResponse:
         context = build_runtime_context_v2(self.state, trusted_image_event=True)
@@ -109,6 +125,7 @@ class TikuSearchAgent:
         return self._dispatch_v2(decision, context, image_path=image_path)
 
     def handle_text(self, text: str) -> AgentResponse:
+        self._shadow_plan_count = 0
         if self.enable_safe_answer_v0:
             safe_decision = evaluate_safe_answer_policy(text)
             if safe_decision.eligible:
@@ -121,6 +138,7 @@ class TikuSearchAgent:
                     )
                     if decision.action in TASK_ACTIONS | SAFETY_ACTIONS:
                         return self._dispatch_v2(decision, context)
+                    self._maybe_shadow_plan(text, decision, context)
                 return self._safe_answer_response(text, safe_decision.category)
         context = build_runtime_context_v2(self.state)
         decision = decide_intent_v2(
@@ -128,7 +146,49 @@ class TikuSearchAgent:
             context,
             llm_client=self._v2_llm_client(),
         )
+        self._maybe_shadow_plan(text, decision, context)
         return self._dispatch_v2(decision, context)
+
+    def _maybe_shadow_plan(
+        self,
+        text: str,
+        decision: ActionDecisionV2,
+        context: ConversationContextV2,
+    ) -> None:
+        """Record one shadow plan for an unresolved long-tail request.
+
+        The shadow path is a pure observer: it never mutates state, never calls
+        a tool, and its return value is discarded.  The user-facing response is
+        computed independently of whatever the Planner proposed.  Any failure
+        here is swallowed so the fixed state machine is never interrupted.
+        """
+        if self.shadow_planner is None or self.shadow_logger is None:
+            return
+        if decision.action != "clarification":
+            return
+        if decision.clarification_reason not in _SHADOW_TRIGGER_REASONS:
+            return
+        if self._shadow_plan_count >= MAX_PLANS_PER_TURN:
+            return
+        self._shadow_plan_count += 1
+        try:
+            facts = build_permission_review_facts(self.state)
+            plan = self.shadow_planner.plan(text, context.to_prompt_payload())
+            review = review_shadow_plan(plan, facts) if plan is not None else None
+            self.shadow_logger.write(
+                ShadowPlanLogEntry(
+                    task_id=uuid4().hex,
+                    session_key=session_key(self.state.session_id),
+                    user_text=text,
+                    trigger_reason=decision.clarification_reason,
+                    phase_before=self.state.phase,
+                    plan=_plan_to_log(plan),
+                    review=_review_to_log(review),
+                    planner_unavailable=plan is None,
+                )
+            )
+        except Exception:  # noqa: BLE001 - shadow observation must never break the response path.
+            pass
 
     def _safe_answer_response(self, text: str, category: str) -> AgentResponse:
         context, validation_facts = self._safe_answer_inputs()
@@ -530,3 +590,40 @@ class TikuSearchAgent:
     def _report_progress(self, stage: str, message: str) -> None:
         if self.progress_reporter is not None:
             self.progress_reporter(stage, message)
+
+
+# Only genuinely ambiguous long-tail requests enter the shadow planner.  The
+# ``missing_*`` / ``out_of_range`` / ``no_more_candidates`` reasons are resolved
+# by fixed replies and must not burn a model call on them.
+_SHADOW_TRIGGER_REASONS = frozenset(
+    {"ambiguous_reference", "ambiguous_action", "ambiguous_number_namespace"}
+)
+
+
+def _plan_to_log(plan: ShadowPlan | None) -> dict | None:
+    if plan is None:
+        return None
+    return {
+        "goal": plan.goal,
+        "steps": [
+            {
+                "action": step.action,
+                "params": dict(step.params),
+                "reason": step.reason,
+            }
+            for step in plan.steps
+        ],
+        "stop_condition": plan.stop_condition,
+        "source": plan.source,
+    }
+
+
+def _review_to_log(review: PermissionReview | None) -> dict | None:
+    if review is None:
+        return None
+    return {
+        "outcome": review.outcome,
+        "code": review.code,
+        "reason": review.reason,
+        "violations": list(review.violations),
+    }

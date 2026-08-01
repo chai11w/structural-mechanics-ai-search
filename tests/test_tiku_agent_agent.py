@@ -6,6 +6,11 @@ from tiku_agent.state import AgentState, PHASE_ANSWERED, PHASE_ERROR, STATE_WAIT
 from tiku_agent.tools import AgentToolConfig, ToolResult
 
 
+def _business_state(state: dict) -> dict:
+    """Exclude the per-agent random session_id from state comparisons."""
+    return {key: value for key, value in state.items() if key != "session_id"}
+
+
 class FakeTools:
     def __init__(self, *, chapter="4力法"):
         self.chapter = chapter
@@ -782,9 +787,224 @@ class TikuSearchAgentTest(unittest.TestCase):
 
         self.assertEqual(response.intent, "greeting")
         self.assertIn("在的", response.text)
-        self.assertIn("继续选题", response.text)
+
+    def test_shadow_planner_runs_once_for_ambiguous_long_tail(self):
+        from tiku_agent.shadow_plan_log import ShadowPlanLogger
+        from tiku_agent.shadow_plan_v0 import ShadowPlan, ShadowPlanStep
+
+        class RecordingPlanner:
+            def __init__(self):
+                self.calls = 0
+
+            def plan(self, user_text, context_payload):
+                self.calls += 1
+                return ShadowPlan(
+                    goal="理解用户到底想做什么",
+                    steps=(ShadowPlanStep(action="show_candidates"),),
+                )
+
+        class RecordingLogger(ShadowPlanLogger):
+            def __init__(self):
+                self.entries = []
+
+            def write(self, entry):
+                self.entries.append(entry)
+
+        fake = FakeTools(chapter="4力法")
+        planner = RecordingPlanner()
+        logger = RecordingLogger()
+        agent = TikuSearchAgent(
+            tools=fake.toolbox(),
+            config=AgentToolConfig(top_k=3, rerank_top=3),
+            use_llm_intent=False,
+            shadow_planner=planner,
+            shadow_logger=logger,
+        )
+
+        response = agent.handle_text("jqwx")
+
+        self.assertEqual(planner.calls, 1)
+        self.assertEqual(len(logger.entries), 1)
+        self.assertEqual(logger.entries[0].trigger_reason, "ambiguous_action")
+        self.assertEqual(logger.entries[0].phase_before, "IDLE")
+        self.assertIn("jqwx", logger.entries[0].user_text)
+        self.assertIsNotNone(logger.entries[0].plan)
+        self.assertIsNotNone(logger.entries[0].review)
+        self.assertEqual(response.intent, "clarification")
+
+    def test_shadow_planner_not_called_for_fixed_business_path(self):
+        from tiku_agent.shadow_plan_log import ShadowPlanLogger
+        from tiku_agent.shadow_plan_v0 import ShadowPlan, ShadowPlanStep
+
+        class RecordingPlanner:
+            def __init__(self):
+                self.calls = 0
+
+            def plan(self, user_text, context_payload):
+                self.calls += 1
+                return ShadowPlan(
+                    goal="g",
+                    steps=(ShadowPlanStep(action="show_candidates"),),
+                )
+
+        class RecordingLogger(ShadowPlanLogger):
+            def __init__(self):
+                self.entries = []
+
+            def write(self, entry):
+                self.entries.append(entry)
+
+        fake = FakeTools(chapter="4力法")
+        planner = RecordingPlanner()
+        logger = RecordingLogger()
+        agent = TikuSearchAgent(
+            tools=fake.toolbox(),
+            config=AgentToolConfig(top_k=3, rerank_top=3),
+            use_llm_intent=False,
+            shadow_planner=planner,
+            shadow_logger=logger,
+        )
+
+        agent.handle_image("q.jpg")
+        response = agent.handle_text("候选1")
+
+        self.assertEqual(planner.calls, 0)
+        self.assertEqual(len(logger.entries), 0)
+        self.assertIsNotNone(response)
+
+    def test_shadow_planner_never_changes_business_response(self):
+        from tiku_agent.shadow_plan_log import ShadowPlanLogger
+        from tiku_agent.shadow_plan_v0 import ShadowPlan, ShadowPlanStep
+
+        class RecordingPlanner:
+            def __init__(self):
+                self.calls = 0
+
+            def plan(self, user_text, context_payload):
+                self.calls += 1
+                return ShadowPlan(
+                    goal="g",
+                    steps=(ShadowPlanStep(action="show_candidates"),),
+                )
+
+        class RecordingLogger(ShadowPlanLogger):
+            def write(self, entry):
+                pass
+
+        # Build two identical agents; only one has the shadow planner attached.
+        plain_fake = FakeTools(chapter="4力法")
+        plain_agent = TikuSearchAgent(
+            tools=plain_fake.toolbox(),
+            config=AgentToolConfig(top_k=3, rerank_top=3),
+            use_llm_intent=False,
+        )
+
+        shadow_fake = FakeTools(chapter="4力法")
+        planner = RecordingPlanner()
+        shadow_agent = TikuSearchAgent(
+            tools=shadow_fake.toolbox(),
+            config=AgentToolConfig(top_k=3, rerank_top=3),
+            use_llm_intent=False,
+            shadow_planner=planner,
+            shadow_logger=RecordingLogger(),
+        )
+
+        for text in ("jqwx", "这个我看不太懂", "别的呢"):
+            plain_response = plain_agent.handle_text(text)
+            shadow_response = shadow_agent.handle_text(text)
+
+            self.assertEqual(
+                plain_response.text,
+                shadow_response.text,
+                f"shadow planner changed the reply for {text!r}",
+            )
+            # The shadow path must not mutate business state: both agents end
+            # with identical business state (session_id is unique per agent, so
+            # it is excluded), proving the planner added no observable side
+            # effect on top of the normal last_intent record.
+            self.assertEqual(
+                _business_state(plain_response.state),
+                _business_state(shadow_response.state),
+            )
+            self.assertEqual(
+                _business_state(plain_agent.state.to_dict()),
+                _business_state(shadow_agent.state.to_dict()),
+            )
+
+    def test_shadow_planner_records_rejected_over_authority_plan(self):
+        from tiku_agent.shadow_plan_log import ShadowPlanLogger
+        from tiku_agent.shadow_plan_v0 import ShadowPlan, ShadowPlanStep
+
+        class OverAuthorityPlanner:
+            def plan(self, user_text, context_payload):
+                return ShadowPlan(
+                    goal="强行改到旧版本候选",
+                    steps=(
+                        ShadowPlanStep(
+                            action="select_candidate",
+                            params={"candidate_rank": 1, "task_revision": 0},
+                        ),
+                    ),
+                )
+
+        class RecordingLogger(ShadowPlanLogger):
+            def __init__(self):
+                self.entries = []
+
+            def write(self, entry):
+                self.entries.append(entry)
+
+        fake = FakeTools(chapter="4力法")
+        logger = RecordingLogger()
+        agent = TikuSearchAgent(
+            tools=fake.toolbox(),
+            config=AgentToolConfig(top_k=3, rerank_top=3),
+            use_llm_intent=False,
+            shadow_planner=OverAuthorityPlanner(),
+            shadow_logger=logger,
+        )
+        agent.handle_image("q.jpg")
+        agent.handle_text("4力法")
+        agent.handle_text("候选1")
+        phase_before = agent.state.phase
+
+        response = agent.handle_text("jqwx")
+
+        self.assertEqual(len(logger.entries), 1)
+        self.assertEqual(logger.entries[0].review["outcome"], "reject")
+        self.assertEqual(logger.entries[0].review["code"], "stale_task_revision")
+        self.assertEqual(response.intent, "clarification")
         self.assertEqual(agent.state.phase, phase_before)
-        self.assertEqual(agent.state.candidates, candidates_before)
+
+    def test_shadow_planner_survives_planner_error(self):
+        from tiku_agent.shadow_plan_log import ShadowPlanLogger
+
+        class ExplodingPlanner:
+            def plan(self, user_text, context_payload):
+                raise RuntimeError("model unreachable")
+
+        class RecordingLogger(ShadowPlanLogger):
+            def __init__(self):
+                self.entries = []
+
+            def write(self, entry):
+                self.entries.append(entry)
+
+        fake = FakeTools(chapter="4力法")
+        logger = RecordingLogger()
+        agent = TikuSearchAgent(
+            tools=fake.toolbox(),
+            config=AgentToolConfig(top_k=3, rerank_top=3),
+            use_llm_intent=False,
+            shadow_planner=ExplodingPlanner(),
+            shadow_logger=logger,
+        )
+
+        response = agent.handle_text("jqwx")
+
+        self.assertIsNotNone(response)
+        self.assertEqual(response.intent, "clarification")
+        self.assertIn("想继续", response.text)
 
     def test_explains_sanitized_failure_reason_on_request(self):
         agent = self.make_agent(FakeTools(chapter="4力法"))

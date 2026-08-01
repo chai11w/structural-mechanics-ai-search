@@ -320,3 +320,56 @@ python -B -m unittest discover -s tests -p "test_*.py"                          
 
 ### 建议下一步命令
 - M3 实施前审查本步：`git show <m2-commit>`；运行上述两个验证命令。
+
+---
+
+## 步骤：Stage 5 影子规划 + 权限审核（S1–S5 分步落地）
+
+### 干了啥
+在 8794 候选上实现 roadmap Stage 5 的第一段：一个 AI Planner 对固定状态机处理不了的长尾请求提出结构化计划（目标/步骤/参数/停止条件），由代码权限层审核（只读/phase/题目版本/候选批次/章节/参数范围/预算），**只生成、审核、记录，不执行工具、不修改业务状态、不改变用户最终回答**。
+
+分五步落地：
+- **S1 纯数据结构模块 `tiku_agent/shadow_plan_v0.py`**：`ShadowPlan`/`ShadowPlanStep`/`PermissionReview`/`PermissionReviewFacts` 四个 frozen dataclass + `review_shadow_plan(plan, facts)` 纯审核函数 + `build_permission_review_facts(state)` 代码侧事实派生。计划动作宇宙 = `TASK_ACTIONS - {cancel, search_image}`；预算常量 `MAX_PLAN_STEPS=4`、`MAX_PLANS_PER_TURN=1`。step 合法性复用现有 `authorize_action_v2` 权限矩阵；版本/批次校验复刻 `fastapi_demo._validate_action_context` 逻辑（这是 agent 侧首次检查 `task_revision`/`candidate_generation` 一致性）。
+- **S2 规划器 prompt + 客户端 `tiku_agent/shadow_planner_v0.py`**：`SHADOW_PLAN_PROMPT`（只读规划器角色 + 动作宇宙 + 参数要求 + 禁写/禁编造）、`build_shadow_plan_prompt_v0`（用户原话 + `ConversationContextV2.to_prompt_payload()` 脱敏摘要）、`parse_shadow_plan_v0` 严格解析、`ShadowPlannerV0`（注入 model_client，任何失败降级 `None`）、`call_qwen_planner_v0`（环境变量读 key）。规划器模型只拿脱敏摘要，**从不接触 `AgentState`**。
+- **S3 agent 接线 `tiku_agent/agent.py`**：`__init__` 加 `shadow_planner`/`shadow_logger` 可选参数（默认 None=完全关闭，行为逐字节一致）；`handle_text` 两个 `decide_intent_v2` 后插 `_maybe_shadow_plan`；触发 = `clarification` 且 reason ∈ `{ambiguous_reference, ambiguous_action, ambiguous_number_namespace}`（`missing_*`/`out_of_range` 等固定回复不烧模型调用）；单回合最多一次（入口重置 + 防御计数）；整段 `try/except Exception: pass`。
+- **S4 影子日志 `tiku_agent/shadow_plan_log.py`**：`ShadowPlanLogEntry`（含 `user_text` 评审用、`plan`、`review`、`trigger_reason`、`phase_before`、`planner_unavailable`）+ `JsonlShadowPlanLogger`（JSONL 追加，`session_key` 哈希与 task_log 一致）。只写 8794 运行目录 `shadow_plans.jsonl`，不入 git。
+- **S5 runner 接线 `scripts/run_tiku_agent_8794.py`**：`build_runtime`/`build_app` 加 `enable_shadow_planning`（默认 True，注入真实 Qwen 规划器 + 日志），argparse 互斥组 `--enable-shadow-planning`/`--disable-shadow-planning`。
+
+### 改动文件
+- `tiku_agent/shadow_plan_v0.py`（新增）
+- `tiku_agent/shadow_planner_v0.py`（新增）
+- `tiku_agent/shadow_plan_log.py`（新增）
+- `tiku_agent/agent.py`（修改）
+- `scripts/run_tiku_agent_8794.py`（修改）
+- `tests/test_tiku_agent_shadow_plan_v0.py`（新增，18 条纯函数）
+- `tests/test_tiku_agent_shadow_planner_v0.py`（新增，15 条 prompt/解析/客户端）
+- `tests/test_tiku_agent_agent.py`（追加 5 条接线测试）
+
+### 验证命令与结果
+```powershell
+python -B -m unittest tests.test_tiku_agent_shadow_plan_v0 tests.test_tiku_agent_shadow_planner_v0 tests.test_tiku_agent_agent   # 33+45 全过
+python -B -m unittest discover -s tests -p "test_*.py"   # 361 全量通过，无回归
+```
+
+### 审查关注点
+- **零影响主路径**：`shadow_planner=None` 时行为逐字节不变；接线测试证明开/关影子规划同一请求 `AgentResponse` 的 text 与业务 state 一致。
+- **架构边界**：规划器模型只收 `ConversationContextV2.to_prompt_payload()`，prompt 测试断言不含 session_id/路径/score/stack；执行权始终在代码（step 走现有权限矩阵）。
+- **触发收敛**：只有 `ambiguous_*` 长尾进规划器，`missing_*`/`out_of_range` 等固定回复不触发（0 模型调用）。
+- **越权必拒**：写动作、旧版本、旧批次、非法章节、越界参数、超预算均 reject 且记中文原因。
+- **单回合预算**：最多一次规划（计数 + `MAX_PLANS_PER_TURN`）。
+- **失败隔离**：规划器抛错/坏 JSON/超时一律 `None` 或吞掉，绝不进用户回复路径。
+
+### 剩余任务 / 已知风险
+- **8793 无法自动观测 8794 影子计划**：8793 镜像 8790 主线，不跑 8794 代码。影子计划目前只能人工读 8794 运行目录 `shadow_plans.jsonl`（含用户原话，评审数据，不入 git）。"自动问题交接闭环"仍挂起，接受为本阶段限制。
+- **影子规划是同步模型调用**：长尾请求会多一次 Qwen 调用（约 1.5s+），用户回复内容不变但延迟增加。这是 Stage 5 记录的本质，后续如需可改成异步。
+- **测试用注入 stub，未连真实 Qwen 跑影子规划矩阵**：真实长尾观察待 8794 服务人工验证（建议下一步：浏览器发含糊请求，确认 shadow_plans.jsonl 追加）。
+- 未提升 8790；8790/8793/8788 未受影响。
+
+### 建议下一步命令
+```powershell
+# 1) 起 8794 服务（默认启用影子规划）
+python -B scripts/run_tiku_agent_8794.py --port 8794
+# 2) 浏览器 http://127.0.0.1:8794 发一句含糊请求（如"这个题你帮我看看"）
+# 3) 确认 .tmp_tiku_agent_v2_candidate_8794\shadow_plans.jsonl 追加了 plan+review
+# 4) 交 Codex 审查：读本交接文档 → git diff 改动文件清单 → 跑上述验证命令
+```

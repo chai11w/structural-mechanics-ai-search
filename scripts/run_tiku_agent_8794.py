@@ -23,6 +23,8 @@ from tiku_agent.safe_answer_qwen_v0 import QwenSafeAnswerClientV0
 from tiku_agent.session_artifacts import SessionArtifacts
 from tiku_agent.session_runtime import AgentSessionRuntime
 from tiku_agent.session_store import SQLiteSessionStore
+from tiku_agent.shadow_plan_log import JsonlShadowPlanLogger
+from tiku_agent.shadow_planner_v0 import ShadowPlannerV0, call_qwen_planner_v0
 from tiku_agent.state import AgentState
 from tiku_agent.task_log import JsonlTaskLogger
 from tiku_agent.tools import AgentToolConfig
@@ -38,15 +40,24 @@ def build_runtime(
     *,
     enable_safe_answer_v0: bool = False,
     safe_answer_model_client: Callable[[SafeAnswerModelRequestV0], str] | None = None,
+    enable_shadow_planning: bool = False,
 ) -> AgentSessionRuntime:
     """Build the 8794 runtime with all writable state under one isolated root."""
     root = Path(runtime_dir).resolve()
     artifacts = SessionArtifacts(root / "sessions")
     agent_factory = None
-    if enable_safe_answer_v0:
-        generator = SafeAnswerGeneratorV0(
-            safe_answer_model_client or QwenSafeAnswerClientV0()
-        )
+
+    if enable_safe_answer_v0 or enable_shadow_planning:
+        generator = None
+        if enable_safe_answer_v0:
+            generator = SafeAnswerGeneratorV0(
+                safe_answer_model_client or QwenSafeAnswerClientV0()
+            )
+        shadow_planner = None
+        shadow_logger = None
+        if enable_shadow_planning:
+            shadow_planner = ShadowPlannerV0(model_client=call_qwen_planner_v0)
+            shadow_logger = JsonlShadowPlanLogger(root / "shadow_plans.jsonl")
 
         def build_agent(state: AgentState) -> TikuSearchAgent:
             return TikuSearchAgent(
@@ -55,8 +66,10 @@ def build_runtime(
                     runtime_dir=root,
                     session_dir=artifacts.session_dir(state.session_id),
                 ),
-                enable_safe_answer_v0=True,
+                enable_safe_answer_v0=enable_safe_answer_v0,
                 safe_answer_generator_v0=generator,
+                shadow_planner=shadow_planner,
+                shadow_logger=shadow_logger,
             )
 
         agent_factory = build_agent
@@ -74,6 +87,7 @@ def build_app(
     runtime: AgentSessionRuntime | None = None,
     enable_safe_answer_v0: bool = False,
     safe_answer_model_client: Callable[[SafeAnswerModelRequestV0], str] | None = None,
+    enable_shadow_planning: bool = False,
 ):
     """Create the behavior-equivalent 8794 app with isolated state and cookie."""
     root = Path(runtime_dir).resolve()
@@ -83,6 +97,7 @@ def build_app(
             root,
             enable_safe_answer_v0=enable_safe_answer_v0,
             safe_answer_model_client=safe_answer_model_client,
+            enable_shadow_planning=enable_shadow_planning,
         ),
         incoming_dir=root / "incoming",
         session_cookie=SESSION_COOKIE,
@@ -114,6 +129,21 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Temporarily disable safe answers and use the original Intent V2 replies",
     )
     parser.set_defaults(enable_safe_answer_v0=True)
+
+    shadow_group = parser.add_mutually_exclusive_group()
+    shadow_group.add_argument(
+        "--enable-shadow-planning",
+        dest="enable_shadow_planning",
+        action="store_true",
+        help="Record shadow plans + permission reviews for unresolved long-tail requests (default)",
+    )
+    shadow_group.add_argument(
+        "--disable-shadow-planning",
+        dest="enable_shadow_planning",
+        action="store_false",
+        help="Turn off shadow planning so long-tail requests use only the fixed replies",
+    )
+    parser.set_defaults(enable_shadow_planning=True)
     return parser
 
 
@@ -123,6 +153,7 @@ def main() -> int:
         build_app(
             args.runtime_dir,
             enable_safe_answer_v0=args.enable_safe_answer_v0,
+            enable_shadow_planning=args.enable_shadow_planning,
         ),
         host=args.host,
         port=args.port,
