@@ -9,8 +9,14 @@ from tiku_agent.safe_answer_contract_v0 import (
     validate_safe_answer_output_v0,
 )
 from tiku_agent.safe_answer_context_v0 import SafeConversationContext
-from tiku_agent.safe_answer_reply_v0 import render_safe_answer_v0
-from tiku_agent.state import STATE_WAIT_CANDIDATE_CHOICE
+from tiku_agent.safe_answer_reply_v0 import (
+    _PHASE_REPLY_BUILDERS,
+    render_safe_answer_v0,
+)
+from tiku_agent.state import (
+    STATE_IDLE,
+    STATE_WAIT_CANDIDATE_CHOICE,
+)
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "safe_answer_v0_cases.json"
@@ -62,6 +68,91 @@ class SafeAnswerContractV0Test(unittest.TestCase):
                 validation = validate_safe_answer_output_v0(reply, category)
                 self.assertTrue(validation.accepted, validation.reason)
                 self.assertLessEqual(len(reply), MAX_SAFE_ANSWER_CHARS)
+
+    def test_empty_phase_builder_table_falls_back_to_generic_for_every_phase(self):
+        # M3 wires the phase lookup but intentionally registers no builder:
+        # business guidance already lives in the render.py state machine, so a
+        # chitchat fallback needs no phase-specific wording.  With an empty
+        # table every phase must return the same reviewed generic reply.
+        self.assertEqual(_PHASE_REPLY_BUILDERS, {})
+        phases = (
+            STATE_IDLE,
+            STATE_WAIT_CANDIDATE_CHOICE,
+        )
+        for category in CATEGORY_GUIDANCE_V0:
+            for phase in phases:
+                with self.subTest(category=category, phase=phase):
+                    context = SafeConversationContext(
+                        phase=phase,
+                        waiting_for="新题图",
+                        last_completed_step="",
+                    )
+                    self.assertEqual(
+                        render_safe_answer_v0(category, context),
+                        render_safe_answer_v0(category),
+                    )
+
+    def test_registered_phase_builder_overrides_only_its_own_phase(self):
+        # The lookup mechanism works: a registered builder is used only for its
+        # exact (category, phase) pair; every other combination falls back.
+        candidates = SafeConversationContext(
+            phase=STATE_WAIT_CANDIDATE_CHOICE,
+            current_chapter="4力法",
+            candidate_count=3,
+            allowed_actions=("select_candidate",),
+            waiting_for="候选选择",
+            last_completed_step="候选已就绪",
+            has_active_image=True,
+        )
+        idle = SafeConversationContext(
+            phase=STATE_IDLE,
+            waiting_for="新题图",
+            last_completed_step="",
+        )
+        original = dict(_PHASE_REPLY_BUILDERS)
+        try:
+            _PHASE_REPLY_BUILDERS[("greeting", STATE_WAIT_CANDIDATE_CHOICE)] = (
+                lambda ctx: f"你好。当前有{ctx.candidate_count}个候选。"
+            )
+            self.assertEqual(
+                render_safe_answer_v0("greeting", candidates),
+                "你好。当前有3个候选。",
+            )
+            # Same category, different phase -> generic.
+            self.assertEqual(
+                render_safe_answer_v0("greeting", idle),
+                render_safe_answer_v0("greeting"),
+            )
+            # Different category, same phase -> generic.
+            self.assertEqual(
+                render_safe_answer_v0("courtesy", candidates),
+                render_safe_answer_v0("courtesy"),
+            )
+        finally:
+            _PHASE_REPLY_BUILDERS.clear()
+            _PHASE_REPLY_BUILDERS.update(original)
+
+    def test_phase_builder_violating_the_contract_falls_back_to_generic(self):
+        candidates = SafeConversationContext(
+            phase=STATE_WAIT_CANDIDATE_CHOICE,
+            current_chapter="4力法",
+            candidate_count=3,
+            waiting_for="候选选择",
+            last_completed_step="候选已就绪",
+            has_active_image=True,
+        )
+        original = dict(_PHASE_REPLY_BUILDERS)
+        try:
+            _PHASE_REPLY_BUILDERS[("greeting", STATE_WAIT_CANDIDATE_CHOICE)] = (
+                lambda ctx: "我已经帮你检索到答案。"
+            )
+            self.assertEqual(
+                render_safe_answer_v0("greeting", candidates),
+                render_safe_answer_v0("greeting"),
+            )
+        finally:
+            _PHASE_REPLY_BUILDERS.clear()
+            _PHASE_REPLY_BUILDERS.update(original)
 
     def test_invalid_outputs_are_rejected_with_specific_reasons(self):
         cases = (

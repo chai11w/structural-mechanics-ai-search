@@ -7,6 +7,8 @@ a later bounded model generator must satisfy.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from tiku_agent.safe_answer_contract_v0 import (
     MAX_SAFE_ANSWER_CHARS,
     validate_safe_answer_output_v0,
@@ -24,18 +26,37 @@ _SAFE_REPLIES = {
 }
 
 
+# Phase-aware fallback copy, keyed by (category, phase).  The table is
+# intentionally empty: business guidance for each phase already lives in the
+# render.py state machine (chapter prompt, global search offer, error/retry,
+# candidate list), so a pure chitchat fallback needs no phase-specific wording.
+# A builder, when registered, must return text that passes the output contract;
+# otherwise the generic fixed reply is used.
+_PHASE_REPLY_BUILDERS: dict[
+    tuple[str, str],
+    Callable[[SafeConversationContext], str],
+] = {}
+
+
 def render_safe_answer_v0(
     category: str,
     context: SafeConversationContext | None = None,
 ) -> str:
     """Return one reviewed, concise reply for an eligible pure conversation.
 
-    ``context`` is accepted for the state-aware wiring (M4); the phase-aware
-    copy table is filled in by a later step (M3), until then the same fixed
-    replies are returned so existing callers stay byte-for-byte unchanged.
+    When ``context`` is provided and a phase-aware builder is registered for
+    ``(category, phase)``, its copy is used if it satisfies the output contract.
+    Every other call falls back to the reviewed fixed reply, so a model failure
+    always yields a valid single-line answer, never an empty one.
     """
 
-    del context
+    if context is not None:
+        builder = _PHASE_REPLY_BUILDERS.get((category, context.phase))
+        if builder is not None:
+            reply = builder(context)
+            validation = validate_safe_answer_output_v0(reply, category)
+            if validation.accepted:
+                return validation.normalized_text
     try:
         reply = _SAFE_REPLIES[category]
     except KeyError as exc:

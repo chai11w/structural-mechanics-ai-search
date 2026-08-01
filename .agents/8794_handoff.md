@@ -7,15 +7,47 @@
 
 - **目标**：8794 状态感知安全回答（roadmap Stage 4）——让安全回答能感知当前业务阶段（等待章节/候选选择/答案展示），业务操作仍走固定状态机。
 - **总计划**：M1 状态摘要模块 → M2 prompt 契约 → M4 generator+agent 接线 → M3 接线后按需兜底文案 → M5 runtime 验收测试。
-- **已完成**：M1 状态摘要模块、M2 prompt 契约扩展、M4 generator+agent 接线。
-- **下一步**：M3 接线后按需兜底文案（M4 之后做，先看哪些 (category, phase) 真正需要兜底文案，默认回落 `_SAFE_REPLIES` 通用寒暄；业务话术已由 render.py 状态机承担，不重复）。
+- **已完成**：M1 状态摘要模块、M2 prompt 契约扩展、M4 generator+agent 接线、M3 接线后按需兜底文案（机制落地 + 空表）。
+- **下一步**：M5 runtime 级验收测试（候选阶段寒暄、等待章节致谢、答案后寒暄、业务不误入、跨重启恢复、跨用户隔离）。
 
 ---
 
 ## 已完成步骤
 
+### M3 接线后按需兜底文案（空表机制）
+`render_safe_answer_v0` 增加 `_PHASE_REPLY_BUILDERS[(category, phase)]` 查询：命中 builder 则用过输出契约的 phase 文案；否则回落 `_SAFE_REPLIES` 通用兜底。表**有意保持为空**——各阶段业务引导已由 render.py 状态机承担（章节提示/全局搜索/错误重试/候选列表），纯寒暄兜底不需要 phase 专用文案；模型失败时永远回落合法单行回答，不会无回答。新增 3 条边界测试：空表逐 phase 回落、命中仅覆盖本 (category, phase)、builder 违反契约回落。
+
 ### M1 状态摘要模块（commit `82634dd`）
 新增纯模块 `safe_answer_context_v0.py`，从 `AgentState` 派生脱敏白名单摘要 `SafeConversationContext`。allowed_actions 动态权限矩阵派生；phase 英文常量、waiting_for/last_completed_step 中文；路径/分数/错误/session_id 不入白名单；IDLE 无状态小节。18 个单测 + 全量通过。
+
+---
+
+## 步骤：M3 接线后按需兜底文案（空表机制）
+
+### 干了啥
+`render_safe_answer_v0(category, context=None)` 增加 `_PHASE_REPLY_BUILDERS[(category, phase)]` 查询：命中 builder 则用其文案（必须过 `validate_safe_answer_output_v0`，不过回落）；否则回落 `_SAFE_REPLIES` 通用兜底。表**有意保持为空**——各阶段业务引导已由 render.py 状态机承担（`render_chapter_prompt`/`render_error`/`render_candidates` 等），纯寒暄兜底不需要 phase 专用文案。模型失败时永远回落合法单行回答，不会无回答。
+
+### 改动文件
+- `tiku_agent/safe_answer_reply_v0.py` → 新增 `_PHASE_REPLY_BUILDERS`（空 dict）、`render_safe_answer_v0` 由 `del context` 改为查询 builder、import `Callable`。
+- `tests/test_tiku_agent_safe_answer_contract_v0.py` → 新增 `test_empty_phase_builder_table_falls_back_to_generic_for_every_phase`、`test_registered_phase_builder_overrides_only_its_own_phase`、`test_phase_builder_violating_the_contract_falls_back_to_generic`。
+
+### 验证命令与结果
+```
+python -B -m unittest tests.test_tiku_agent_safe_answer_contract_v0 tests.test_tiku_agent_safe_answer_generator_v0 tests.test_tiku_agent_safe_answer_route_v0 tests.test_tiku_agent_safe_answer_context_v0   # 53/53 通过
+python -B -m unittest discover -s tests -p "test_*.py"                                                                                                                                                # 全量 OK，无回归
+```
+
+### 审查关注点
+- `_PHASE_REPLY_BUILDERS` 是否确实为空（生产行为 = 通用兜底，与 M4 之前逐字节一致）。
+- 命中 builder 是否只覆盖本 (category, phase)（其他 phase/类别回落通用）。
+- builder 输出违反契约时是否回落通用而非返回违规文案。
+- 业务话术（章节/全局搜索/重试/候选引导）是否未混入兜底表——表空即证明。
+
+### 剩余任务 / 已知风险
+- 无。表空是**有意设计**（用户拍板），不是未完成项；将来某阶段确实需要 phase 文案时直接注册 builder 即可。
+
+### 建议下一步命令
+- M5 实施前审查本步：`git show <m3-commit>`；运行上述验证命令。
 
 ---
 
