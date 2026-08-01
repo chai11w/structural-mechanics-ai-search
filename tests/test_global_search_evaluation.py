@@ -1,23 +1,23 @@
 import unittest
 
-from scripts.evaluate_global_search import is_accepted_rerank, summarize_results
+from scripts.evaluate_global_search import is_accepted_final_score, summarize_results
 
 
 class GlobalSearchEvaluationTest(unittest.TestCase):
-    def test_visual_threshold_is_strictly_greater_than_ninety_five(self):
-        self.assertFalse(
-            is_accepted_rerank(
-                {"rerank_status": "completed", "rerank_score": 0.95}, 0.95
-            )
-        )
+    def test_final_score_threshold_includes_ninety_five(self):
         self.assertTrue(
-            is_accepted_rerank(
-                {"rerank_status": "completed", "rerank_score": 0.951}, 0.95
+            is_accepted_final_score(
+                {"rerank_status": "completed", "final_score": 0.95}, 0.95
             )
         )
         self.assertFalse(
-            is_accepted_rerank(
-                {"rerank_status": "timeout", "rerank_score": 1.0}, 0.95
+            is_accepted_final_score(
+                {"rerank_status": "completed", "final_score": 0.949}, 0.95
+            )
+        )
+        self.assertFalse(
+            is_accepted_final_score(
+                {"rerank_status": "timeout", "final_score": 1.0}, 0.95
             )
         )
 

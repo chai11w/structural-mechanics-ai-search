@@ -27,7 +27,7 @@ from tiku_agent.intent_contract import CHAPTERS
 
 
 DEFAULT_COARSE_THRESHOLD = 0.999
-DEFAULT_RERANK_THRESHOLD = 0.95
+DEFAULT_FINAL_SCORE_THRESHOLD = 0.95
 DEFAULT_MAX_WORKERS = 10
 
 
@@ -149,7 +149,9 @@ def rerank_all_candidates(
     return sorted(
         scored,
         key=lambda item: (
-            item.get("rerank_score") is not None,
+            item.get("final_score") is not None,
+            float(item.get("final_score") or 0),
+            float(item.get("score") or 0),
             float(item.get("rerank_score") or 0),
             -int(item.get("rank") or 0),
         ),
@@ -162,7 +164,7 @@ def evaluate_case(
     records_by_chapter: dict[str, list[dict[str, Any]]],
     *,
     coarse_threshold: float,
-    rerank_threshold: float,
+    final_score_threshold: float,
     max_workers: int,
     timeout_seconds: float,
     coarse_only: bool,
@@ -189,7 +191,9 @@ def evaluate_case(
         max_workers=max_workers,
         timeout_seconds=timeout_seconds,
     )
-    accepted = [item for item in scored if is_accepted_rerank(item, rerank_threshold)]
+    accepted = [
+        item for item in scored if is_accepted_final_score(item, final_score_threshold)
+    ]
     self_accepted = sum(
         item["content_hash"] == sample["content_hash"] for item in accepted
     )
@@ -213,6 +217,7 @@ def evaluate_case(
                 "candidate_rank": rank,
                 "source_chapters": item["source_chapters"],
                 "rerank_score": item.get("rerank_score"),
+                "final_score": item.get("final_score"),
                 "is_exact_file": item["content_hash"] == sample["content_hash"],
             }
             for rank, item in enumerate(accepted, 1)
@@ -263,10 +268,10 @@ def summarize_results(cases: list[dict[str, Any]], *, coarse_only: bool) -> dict
     return summary
 
 
-def is_accepted_rerank(item: dict[str, Any], threshold: float) -> bool:
+def is_accepted_final_score(item: dict[str, Any], threshold: float) -> bool:
     return (
         item.get("rerank_status") == "completed"
-        and float(item.get("rerank_score") or 0) > threshold
+        and float(item.get("final_score") or 0) >= threshold
     )
 
 
@@ -287,7 +292,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--per-chapter", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20260714)
     parser.add_argument("--coarse-threshold", type=float, default=DEFAULT_COARSE_THRESHOLD)
-    parser.add_argument("--rerank-threshold", type=float, default=DEFAULT_RERANK_THRESHOLD)
+    parser.add_argument(
+        "--final-score-threshold", type=float, default=DEFAULT_FINAL_SCORE_THRESHOLD
+    )
     parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS)
     parser.add_argument("--candidate-timeout", type=float, default=15.0)
     parser.add_argument("--coarse-only", action="store_true")
@@ -306,7 +313,7 @@ def main() -> int:
             sample,
             records,
             coarse_threshold=args.coarse_threshold,
-            rerank_threshold=args.rerank_threshold,
+            final_score_threshold=args.final_score_threshold,
             max_workers=args.max_workers,
             timeout_seconds=args.candidate_timeout,
             coarse_only=args.coarse_only,
@@ -318,8 +325,8 @@ def main() -> int:
         "mode": "coarse_only" if args.coarse_only else "visual_pilot",
         "policy": {
             "coarse_threshold": args.coarse_threshold,
-            "rerank_threshold": args.rerank_threshold,
-            "rerank_comparison": ">",
+            "final_score_threshold": args.final_score_threshold,
+            "final_score_comparison": ">=",
             "max_workers": args.max_workers,
             "total_candidate_limit": None,
             "result_limit": None,

@@ -58,7 +58,7 @@ class AgentToolConfig:
     top_k: int = search.TOP_K
     rerank_top: int = search.DISPLAY_MAX_RESULTS
     global_coarse_threshold: float = 0.999
-    global_rerank_threshold: float = 0.95
+    global_final_score_threshold: float = 0.95
     global_rerank_workers: int = 10
     global_candidate_timeout_seconds: float = 15.0
     global_retry_incomplete_once: bool = True
@@ -573,13 +573,14 @@ def global_search_tool(
         visible = [
             item
             for item in scored
-            if float(item.get("rerank_score") or 0)
-            > config.global_rerank_threshold
+            if float(item.get("final_score") or 0)
+            >= config.global_final_score_threshold
         ]
         visible.sort(
             key=lambda item: (
-                float(item.get("rerank_score") or 0),
+                float(item.get("final_score") or 0),
                 float(item.get("score") or 0),
+                float(item.get("rerank_score") or 0),
                 -int(item.get("rank") or 0),
             ),
             reverse=True,

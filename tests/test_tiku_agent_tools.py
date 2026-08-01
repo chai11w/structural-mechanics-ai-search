@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
+import search
 from tiku_agent.tools import (
     AgentToolConfig,
     ToolOutcome,
@@ -92,6 +93,9 @@ class TikuAgentToolsTest(unittest.TestCase):
             item = dict(candidate)
             item["rerank_status"] = "completed"
             item["rerank_score"] = 1.0 if candidate["content_hash"] == "same" else 0.95
+            item["final_score"] = search.compute_final_rerank_score(
+                item["score"], item["rerank_score"]
+            )
             return item
 
         with patch("tiku_agent.tools.CHAPTERS", ["2静定结构", "4力法"]), patch(
@@ -111,7 +115,7 @@ class TikuAgentToolsTest(unittest.TestCase):
                 loads,
                 query,
                 route="main",
-                config=AgentToolConfig(global_rerank_threshold=0.95),
+                config=AgentToolConfig(global_final_score_threshold=0.95),
             )
 
         self.assertTrue(result.ok, result.error)
@@ -120,12 +124,52 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertEqual(result.data["model_calls"], 2)
         self.assertEqual(result.data["retry_model_calls"], 0)
         self.assertEqual(scorer.call_count, 2)
-        self.assertEqual(len(result.data["candidates"]), 1)
+        self.assertEqual(len(result.data["candidates"]), 2)
         self.assertEqual(
             result.data["candidates"][0]["source_chapters"],
             ["2静定结构", "4力法"],
         )
         self.assertEqual(result.data["candidates"][0]["rerank_score"], 1.0)
+        self.assertEqual(result.data["candidates"][1]["rerank_score"], 0.95)
+        self.assertEqual(result.data["candidates"][1]["final_score"], 0.975)
+
+    def test_global_search_accepts_final_score_equal_to_ninety_five_on_both_routes(self):
+        loads = [{"type": "集中", "raw": "P"}]
+        query = Path("query.jpg")
+        frame = pd.DataFrame(
+            [{"题目名称": "query.jpg", "荷载": json.dumps({"loads": loads}, ensure_ascii=False)}]
+        )
+
+        def score_at_boundary(_query, candidate, **_kwargs):
+            item = dict(candidate)
+            item.update(
+                {
+                    "rerank_status": "completed",
+                    "rerank_score": 0.9,
+                    "final_score": search.compute_final_rerank_score(item["score"], 0.9),
+                }
+            )
+            return item
+
+        for route in ("main", "symbolic"):
+            with self.subTest(route=route), patch(
+                "tiku_agent.tools.CHAPTERS", ["2静定结构"]
+            ), patch(
+                "tiku_agent.tools.load_bank_excel", return_value=frame
+            ), patch(
+                "tiku_agent.tools.search.resolve_question_path",
+                side_effect=lambda name, **_kwargs: (Path(name), name, False),
+            ), patch("tiku_agent.tools.Path.is_file", return_value=True), patch(
+                "tiku_agent.tools._file_sha256", return_value="question"
+            ), patch(
+                "tiku_agent.tools.search.score_rerank_candidate",
+                side_effect=score_at_boundary,
+            ):
+                result = global_search_tool(loads, query, route=route)
+
+            self.assertEqual(result.outcome, ToolOutcome.SUCCESS)
+            self.assertEqual(len(result.data["candidates"]), 1)
+            self.assertEqual(result.data["candidates"][0]["final_score"], 0.95)
 
     def test_global_search_rejects_partial_visual_batch(self):
         loads = [{"type": "集中", "raw": "P"}]
@@ -181,7 +225,13 @@ class TikuAgentToolsTest(unittest.TestCase):
                 raise ValueError("malformed model response")
             item = dict(candidate)
             score = 0.98 if content_hash == "question" else 0.94
-            item.update({"rerank_status": "completed", "rerank_score": score})
+            item.update(
+                {
+                    "rerank_status": "completed",
+                    "rerank_score": score,
+                    "final_score": search.compute_final_rerank_score(item["score"], score),
+                }
+            )
             return item
 
         with patch("tiku_agent.tools.CHAPTERS", ["4力法"]), patch(
@@ -199,7 +249,7 @@ class TikuAgentToolsTest(unittest.TestCase):
             result = global_search_tool(loads, query, route="main")
 
         self.assertTrue(result.ok, result.to_dict())
-        self.assertEqual(len(result.data["candidates"]), 1)
+        self.assertEqual(len(result.data["candidates"]), 2)
         self.assertEqual(result.data["model_calls"], 3)
         self.assertEqual(result.data["retry_model_calls"], 1)
         self.assertEqual(result.data["unfinished_candidates"], 0)
