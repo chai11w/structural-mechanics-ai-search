@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "description": "Independent Stage 5 holdout for the six sequential request classes that were stable in the admission-development set. These phrasings must not duplicate shadow_admission_v0_cases.json.",
+  "cases": [
+    {"id":"holdout_show_select_1","scenario":"show_then_select","group":"sequential","phase":"WAIT_CANDIDATE_CHOICE","text":"把候选列表重新展示一下，然后选候选3","expected_entry":"optional","future_expectation":"future_ready","required_steps":["show_candidates","select_candidate"],"forbidden_actions":[]},
+    {"id":"holdout_show_select_2","scenario":"show_then_select","group":"sequential","phase":"WAIT_CANDIDATE_CHOICE","text":"我想先再看一遍候选，接着打开第二个候选","expected_entry":"optional","future_expectation":"future_ready","required_steps":["show_candidates","select_candidate"],"forbidden_actions":[]},
+    {"id":"holdout_show_select_3","scenario":"show_then_select","group":"sequential","phase":"WAIT_CANDIDATE_CHOICE","text":"候选名单先发回来，之后就看候选1","expected_entry":"optional","future_expectation":"future_ready","required_steps":["show_candidates","select_candidate"],"forbidden_actions":[]},
+
+    {"id":"holdout_answered_show_select_1","scenario":"answered_show_then_select","group":"sequential","phase":"ANSWERED","text":"先退出当前答案回到候选，再改选候选2","expected_entry":"optional","future_expectation":"future_ready","required_steps":["show_candidates","select_candidate"],"forbidden_actions":[]},
+    {"id":"holdout_answered_show_select_2","scenario":"answered_show_then_select","group":"sequential","phase":"ANSWERED","text":"把候选页调回来，然后换看第二个候选","expected_entry":"optional","future_expectation":"future_ready","required_steps":["show_candidates","select_candidate"],"forbidden_actions":[]},
+    {"id":"holdout_answered_show_select_3","scenario":"answered_show_then_select","group":"sequential","phase":"ANSWERED","text":"先返回候选列表，接下来打开候选1","expected_entry":"optional","future_expectation":"future_ready","required_steps":["show_candidates","select_candidate"],"forbidden_actions":[]},
+
+    {"id":"holdout_report_show_1","scenario":"report_then_show","group":"sequential","phase":"ANSWERED","text":"这个答案对不上，先标记不匹配，再回到候选列表","expected_entry":"optional","future_expectation":"future_ready","required_steps":["report_answer_mismatch","show_candidates"],"forbidden_actions":[]},
+    {"id":"holdout_report_show_2","scenario":"report_then_show","group":"sequential","phase":"ANSWERED","text":"确认这份解答错了，记录后回到候选列表","expected_entry":"optional","future_expectation":"future_ready","required_steps":["report_answer_mismatch","show_candidates"],"forbidden_actions":[]},
+    {"id":"holdout_report_show_3","scenario":"report_then_show","group":"sequential","phase":"ANSWERED","text":"这份结果和题目不匹配，处理完请再看候选","expected_entry":"optional","future_expectation":"future_ready","required_steps":["report_answer_mismatch","show_candidates"],"forbidden_actions":[]},
+
+    {"id":"holdout_resend_show_1","scenario":"resend_then_show","group":"sequential","phase":"ANSWERED","text":"答案先重发给我，然后返回候选列表","expected_entry":"optional","future_expectation":"future_ready","required_steps":["resend_answer","show_candidates"],"forbidden_actions":[]},
+    {"id":"holdout_resend_show_2","scenario":"resend_then_show","group":"sequential","phase":"ANSWERED","text":"先把解答再发一次，看完回到候选","expected_entry":"optional","future_expectation":"future_ready","required_steps":["resend_answer","show_candidates"],"forbidden_actions":[]},
+    {"id":"holdout_resend_show_3","scenario":"resend_then_show","group":"sequential","phase":"ANSWERED","text":"先再看一下答案，之后再看候选列表","expected_entry":"optional","future_expectation":"future_ready","required_steps":["resend_answer","show_candidates"],"forbidden_actions":[]},
+
+    {"id":"holdout_explain_retry_1","scenario":"explain_then_retry","group":"sequential","phase":"ERROR","text":"告诉我刚才为什么失败，再重新试一次","expected_entry":"optional","future_expectation":"future_ready","required_steps":["explain_failure","retry_search"],"forbidden_actions":[]},
+    {"id":"holdout_explain_retry_2","scenario":"explain_then_retry","group":"sequential","phase":"ERROR","text":"先说清楚没找到的原因，再重新搜索","expected_entry":"optional","future_expectation":"future_ready","required_steps":["explain_failure","retry_search"],"forbidden_actions":[]},
+    {"id":"holdout_explain_retry_3","scenario":"explain_then_retry","group":"sequential","phase":"ERROR","text":"告诉我检索失败怎么回事，然后再试一下","expected_entry":"optional","future_expectation":"future_ready","required_steps":["explain_failure","retry_search"],"forbidden_actions":[]},
+
+    {"id":"holdout_continue_show_1","scenario":"continue_then_show","group":"sequential","phase":"WAIT_CANDIDATE_CHOICE","text":"再搜一批，然后把新候选列表展示出来","expected_entry":"optional","future_expectation":"future_ready","required_steps":["continue_search","show_candidates"],"forbidden_actions":[]},
+    {"id":"holdout_continue_show_2","scenario":"continue_then_show","group":"sequential","phase":"WAIT_CANDIDATE_CHOICE","text":"接着检索下一批，完成后返回候选列表","expected_entry":"optional","future_expectation":"future_ready","required_steps":["continue_search","show_candidates"],"forbidden_actions":[]},
+    {"id":"holdout_continue_show_3","scenario":"continue_then_show","group":"sequential","phase":"WAIT_CANDIDATE_CHOICE","text":"换一批结果，再发候选列表给我","expected_entry":"optional","future_expectation":"future_ready","required_steps":["continue_search","show_candidates"],"forbidden_actions":[]},
+
+    {"id":"holdout_atomic_show","scenario":"atomic_guard","group":"atomic","phase":"WAIT_CANDIDATE_CHOICE","text":"候选列表再发一下","expected_entry":"never","future_expectation":"fast_path_only","required_steps":["show_candidates"],"forbidden_actions":[]},
+    {"id":"holdout_atomic_select","scenario":"atomic_guard","group":"atomic","phase":"ANSWERED","text":"直接选候选2","expected_entry":"never","future_expectation":"fast_path_only","required_steps":["select_candidate"],"forbidden_actions":[]},
+    {"id":"holdout_atomic_report","scenario":"atomic_guard","group":"atomic","phase":"ANSWERED","text":"这份解答和题目对不上","expected_entry":"never","future_expectation":"fast_path_only","required_steps":["report_answer_mismatch"],"forbidden_actions":[]},
+    {"id":"holdout_atomic_resend","scenario":"atomic_guard","group":"atomic","phase":"ANSWERED","text":"答案再发一下","expected_entry":"never","future_expectation":"fast_path_only","required_steps":["resend_answer"],"forbidden_actions":[]},
+    {"id":"holdout_atomic_explain","scenario":"atomic_guard","group":"atomic","phase":"ERROR","text":"为什么检索失败","expected_entry":"never","future_expectation":"fast_path_only","required_steps":["explain_failure"],"forbidden_actions":[]},
+    {"id":"holdout_atomic_continue","scenario":"atomic_guard","group":"atomic","phase":"WAIT_CANDIDATE_CHOICE","text":"接着找下一批候选","expected_entry":"never","future_expectation":"fast_path_only","required_steps":["continue_search"],"forbidden_actions":[]}
+  ]
+}

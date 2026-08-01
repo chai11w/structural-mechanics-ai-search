@@ -492,7 +492,8 @@ def _is_unique_candidate_confirmation(
 
 
 def _is_resend(text: str) -> bool:
-    return "答案" in text and any(word in text for word in ("刚才", "上次", "再发", "重发", "再给"))
+    answer_object = any(word in text for word in ("答案", "解答", "结果"))
+    return answer_object and any(word in text for word in ("刚才", "上次", "再发", "重发", "再给"))
 
 
 def _is_failure_explanation(text: str) -> bool:
@@ -570,7 +571,12 @@ def _has_continue_search_evidence(text: str) -> bool:
 
 def _has_show_candidates_evidence(text: str) -> bool:
     compact = re.sub(r"[\s，。！？!?、,.]+", "", text)
-    return bool(re.search(r"(?:回到|返回|再看|重看|重新看|再发).{0,5}候选|候选.{0,5}(?:列表|再发|重发)", compact))
+    return bool(re.search(
+        r"(?:回到|返回|切回|再看|重看|重新看|再发).{0,6}候选|"
+        r"候选.{0,5}(?:列表|再发|重发)|"
+        r"候选(?:列表|名单|清单|页|结果页)?.{0,6}(?:发回来|调回来|调出来|打开|展示)",
+        compact,
+    ))
 
 
 def _has_answer_mismatch_evidence(text: str) -> bool:

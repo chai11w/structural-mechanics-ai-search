@@ -542,6 +542,12 @@ class IntentV2Test(unittest.TestCase):
             "report_answer_mismatch",
         )
         self.assertEqual(decide_intent_v2("回到候选", answered).action, "show_candidates")
+        for text in ("候选名单先发回来", "把候选页调回来", "把候选清单调出来", "切回候选页"):
+            with self.subTest(text=text):
+                self.assertEqual(decide_intent_v2(text, answered).action, "show_candidates")
+        for text in ("请重发解答", "把结果再给我一次"):
+            with self.subTest(text=text):
+                self.assertEqual(decide_intent_v2(text, answered).action, "resend_answer")
 
     def test_model_can_map_natural_result_feedback_into_bounded_actions(self):
         candidate_context = ConversationContextV2(

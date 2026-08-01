@@ -200,6 +200,21 @@ class ShadowSemanticGateTest(unittest.TestCase):
         self.assertFalse(explicit.requires_confirmation)
         self.assertTrue(vague.requires_confirmation)
 
+    def test_candidate_display_synonyms_are_explicit_authorization(self):
+        for text in (
+            "候选名单先发回来",
+            "把候选页调回来",
+            "把候选清单调出来",
+            "切回候选页",
+        ):
+            with self.subTest(text=text):
+                result = review_shadow_plan_semantics(
+                    text,
+                    _result(ShadowPlanStep("show_candidates")),
+                    _candidate_facts(),
+                )
+                self.assertFalse(result.requires_confirmation, result.evidence)
+
     def test_answer_mismatch_question_is_not_a_report(self):
         assertion = review_shadow_plan_semantics(
             "这个答案不对",

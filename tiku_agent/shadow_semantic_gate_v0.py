@@ -208,8 +208,9 @@ def _authorize_step(
     if action == "show_candidates":
         matched = _matches(
             compact,
-            r"(?:回到|返回|再看|重看|重新看|再发).{0,5}候选",
+            r"(?:回到|返回|切回|再看|重看|重新看|再发).{0,6}候选",
             r"候选.{0,5}(?:列表|再发|重发)",
+            r"候选(?:列表|名单|清单|页|结果页)?.{0,6}(?:发回来|调回来|调出来|打开|展示)",
         )
         return _evidence(action, "explicit_show_candidates", "show_candidates_not_explicit", matched)
     if action == "resend_answer":

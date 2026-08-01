@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Untouched confirmation split for five first-wave sequential scenarios after the initial holdout exposed deterministic candidate-display evidence gaps. continue_then_show is intentionally excluded because the Planner omitted its second step in the initial holdout.",
+  "cases": [
+    {"id":"confirm_show_select_1","scenario":"show_then_select","group":"sequential","phase":"WAIT_CANDIDATE_CHOICE","text":"先把候选清单给我调出来，再打开候选2","expected_entry":"optional","future_expectation":"future_ready","required_steps":["show_candidates","select_candidate"],"forbidden_actions":[]},
+    {"id":"confirm_show_select_2","scenario":"show_then_select","group":"sequential","phase":"WAIT_CANDIDATE_CHOICE","text":"把候选结果页重新打开，随后选择候选1","expected_entry":"optional","future_expectation":"future_ready","required_steps":["show_candidates","select_candidate"],"forbidden_actions":[]},
+
+    {"id":"confirm_answered_show_select_1","scenario":"answered_show_then_select","group":"sequential","phase":"ANSWERED","text":"返回候选结果页后改看候选2","expected_entry":"optional","future_expectation":"future_ready","required_steps":["show_candidates","select_candidate"],"forbidden_actions":[]},
+    {"id":"confirm_answered_show_select_2","scenario":"answered_show_then_select","group":"sequential","phase":"ANSWERED","text":"先把候选清单打开，再换成候选1","expected_entry":"optional","future_expectation":"future_ready","required_steps":["show_candidates","select_candidate"],"forbidden_actions":[]},
+
+    {"id":"confirm_report_show_1","scenario":"report_then_show","group":"sequential","phase":"ANSWERED","text":"这份答案明显有误，记下后返回候选","expected_entry":"optional","future_expectation":"future_ready","required_steps":["report_answer_mismatch","show_candidates"],"forbidden_actions":[]},
+    {"id":"confirm_report_show_2","scenario":"report_then_show","group":"sequential","phase":"ANSWERED","text":"解答与题目对不上，接着把候选页打开","expected_entry":"optional","future_expectation":"future_ready","required_steps":["report_answer_mismatch","show_candidates"],"forbidden_actions":[]},
+
+    {"id":"confirm_resend_show_1","scenario":"resend_then_show","group":"sequential","phase":"ANSWERED","text":"先重发这份解答，随后打开候选清单","expected_entry":"optional","future_expectation":"future_ready","required_steps":["resend_answer","show_candidates"],"forbidden_actions":[]},
+    {"id":"confirm_resend_show_2","scenario":"resend_then_show","group":"sequential","phase":"ANSWERED","text":"答案再给我一次，然后切回候选页","expected_entry":"optional","future_expectation":"future_ready","required_steps":["resend_answer","show_candidates"],"forbidden_actions":[]},
+
+    {"id":"confirm_explain_retry_1","scenario":"explain_then_retry","group":"sequential","phase":"ERROR","text":"先说明检索失败的原因，之后重新试一下","expected_entry":"optional","future_expectation":"future_ready","required_steps":["explain_failure","retry_search"],"forbidden_actions":[]},
+    {"id":"confirm_explain_retry_2","scenario":"explain_then_retry","group":"sequential","phase":"ERROR","text":"解释为什么没有找到，再搜一次","expected_entry":"optional","future_expectation":"future_ready","required_steps":["explain_failure","retry_search"],"forbidden_actions":[]},
+
+    {"id":"confirm_atomic_show","scenario":"atomic_guard","group":"atomic","phase":"WAIT_CANDIDATE_CHOICE","text":"把候选清单调出来","expected_entry":"never","future_expectation":"fast_path_only","required_steps":["show_candidates"],"forbidden_actions":[]},
+    {"id":"confirm_atomic_select","scenario":"atomic_guard","group":"atomic","phase":"ANSWERED","text":"换成候选1","expected_entry":"never","future_expectation":"fast_path_only","required_steps":["select_candidate"],"forbidden_actions":[]},
+    {"id":"confirm_atomic_report","scenario":"atomic_guard","group":"atomic","phase":"ANSWERED","text":"这份答案有误","expected_entry":"never","future_expectation":"fast_path_only","required_steps":["report_answer_mismatch"],"forbidden_actions":[]},
+    {"id":"confirm_atomic_resend","scenario":"atomic_guard","group":"atomic","phase":"ANSWERED","text":"请重发解答","expected_entry":"never","future_expectation":"fast_path_only","required_steps":["resend_answer"],"forbidden_actions":[]},
+    {"id":"confirm_atomic_explain","scenario":"atomic_guard","group":"atomic","phase":"ERROR","text":"说说没找到的原因","expected_entry":"never","future_expectation":"fast_path_only","required_steps":["explain_failure"],"forbidden_actions":[]}
+  ]
+}

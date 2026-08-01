@@ -821,3 +821,49 @@ python -B -m unittest discover -s tests -p "test_*.py"
 ### 下一步
 
 - 扩充6类稳定顺序请求的独立留出集；只在留出集证明稳定后实现纯影子准入，仍不执行Planner动作。
+
+---
+
+## 步骤：Stage 5 顺序请求独立留出与确认
+
+### 干了啥
+
+- 新增24条独立初始留出：6类顺序请求各3条全新说法，加6条单动作保护反例；与原40条开发集无文本重复。
+- 初始真实千问1轮为14/18正例可准入，只有3/6类全过。4条失败拆为：1条ANSWERED候选3越界的测试数据错误、2条Planner完整但候选展示同义词未过语义闸门、1条“续搜后展示”Planner漏掉展示步骤。
+- 修正越界数据；固定Intent与语义闸门补“候选名单发回来/候选页调回来/候选清单调出来/切回候选页”等明确展示证据。初始Planner漏步骤样本保留，不改Prompt刷分。
+- 另建15条全新确认集：5类×2条正例+5条单动作反例，明确排除已漏步骤的`continue_then_show`。三轮45次中正例21/30；只有`show_then_select`与`report_then_show`各6/6稳定，其余3类各3/6。
+- 确认集单动作“请重发解答”3/3误进现有Planner，原因是固定Intent只认“答案”不认“解答/结果”；已修为三种答案对象并补测试。本轮仍未开放任何新运行时Planner准入。
+
+### 改动文件
+
+- `tests/fixtures/shadow_sequential_holdout_v0_cases.json`（新增）
+- `tests/fixtures/shadow_sequential_confirmation_v0_cases.json`（新增）
+- `scripts/evaluate_shadow_sequential_holdout_qwen_v0.py`（新增）
+- `tests/test_tiku_agent_shadow_sequential_holdout_v0.py`（新增）
+- `tiku_agent/intent_v2.py`
+- `tiku_agent/shadow_semantic_gate_v0.py`
+- `tests/test_tiku_agent_intent_v2.py`
+- `tests/test_tiku_agent_shadow_semantic_gate_v0.py`
+- `.agents/roadmap.md`
+- `.agents/project_memory.md`
+- `.agents/8794_handoff.md`
+
+### 真实验证
+
+- 初始留出：`.tmp_shadow_sequential_holdout_eval_8794/20260801_233151/`，18条正例14条可准入，原子误入0、可见差异0、实际放行禁止动作0。
+- 全新确认：`.tmp_shadow_sequential_holdout_eval_8794/20260801_233839/`，30次正例21次可准入；稳定类2/5，原子误入3次均来自同一“请重发解答”并已修复；可见差异0、实际放行禁止动作0。
+
+### 验证命令
+
+```powershell
+python -B -m unittest tests.test_tiku_agent_shadow_sequential_holdout_v0 tests.test_tiku_agent_intent_v2 tests.test_tiku_agent_shadow_semantic_gate_v0 tests.test_tiku_agent_shadow_admission_eval_v0
+$env:PYTHONIOENCODING='utf-8'; python -u -B scripts\evaluate_shadow_sequential_holdout_qwen_v0.py --runs 1
+$env:PYTHONIOENCODING='utf-8'; python -u -B scripts\evaluate_shadow_sequential_holdout_qwen_v0.py --fixture tests\fixtures\shadow_sequential_confirmation_v0_cases.json --runs 3
+python -B -m unittest discover -s tests -p "test_*.py"
+```
+
+结果：专项58/58、全量418/418通过；运行时Planner准入逻辑未改。
+
+### 下一步
+
+- 只为2个稳定类建立纯代码顺序准入识别器与反例金标准；先离线评估，不直接改`Agent.handle_text()`入口。
