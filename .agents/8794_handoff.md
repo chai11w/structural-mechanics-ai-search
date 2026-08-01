@@ -373,3 +373,90 @@ python -B scripts/run_tiku_agent_8794.py --port 8794
 # 3) 确认 .tmp_tiku_agent_v2_candidate_8794\shadow_plans.jsonl 追加了 plan+review
 # 4) 交 Codex 审查：读本交接文档 → git diff 改动文件清单 → 跑上述验证命令
 ```
+
+---
+
+## 步骤：Stage 5 真实 Qwen 矩阵评估（发现审核事实缺口）
+
+### 干了啥
+按 Stage 4 M6 的成熟套路，为影子规划写真实效果评估脚本 `scripts/evaluate_shadow_plan_qwen_v0.py`：
+- 7 阶段（IDLE/WAIT_CHAPTER/WAIT_QUESTION_CHOICE/WAIT_CANDIDATE_CHOICE/ANSWERED/NO_MATCH/ERROR）× 15 条**真实长尾口语话术**（"这个题你帮我看看""那换一道难一点的吧""它怎么说的来着"等含糊指代/省略/换目标，非 fixture 书面例句）= 105 格。
+- 每格：构造合法 `AgentState` → `build_runtime_context_v2(...).to_prompt_payload()` 脱敏摘要 → 真实 Qwen 规划器 `ShadowPlannerV0.plan()` → `review_shadow_plan` → 记录 plan+review。
+- 输出 `.tmp_shadow_plan_eval_8794/<时间戳>/`（records.jsonl + summary.json + matrix_report.txt），忽略目录不提交。
+
+### 结果
+- **结构合法率 105/105 = 100%**：真实 Qwen 规划器每条都能产出可解析的 `ShadowPlan`——prompt 契约 + 严格解析工作正常。
+- 总 review 通过率 41/105 = 39%。分阶段：
+  - WAIT_QUESTION_CHOICE 10/15、WAIT_CANDIDATE_CHOICE 14/15、ANSWERED 14/15——**通过率高且计划质量好**（正确索引 select_question、reject_candidates+continue_search、report_answer_mismatch、resend_answer 等贴合用户意图）。
+  - IDLE / NO_MATCH / ERROR **0/15 全拒**。
+
+### 发现的真实缺口（注入测试发现不了的）
+拒绝码分布：`explainable_failure_required` **55 次**占大头。逐格核对确认**不是模型错，是审核事实缺失**：
+- NO_MATCH 用户问"它怎么说的来着" → 规划器合理提议 `explain_failure()` → 被拒。
+- ERROR 用户问"为啥失败" → 规划器合理提议 `explain_failure()` → 被拒。
+- 根因：`PermissionReviewFacts` **漏了 `has_explainable_failure` 和 `retryable_error` 两个字段**，`_facts_to_decision_context` 里二者硬编码为 False，导致 `explain_failure`/`retry_search` 这两个合法只读动作在任何阶段都被误杀。
+
+其余拒绝码合理（非 bug）：`current_question_required`/`chapter_unknown_question_required`（IDLE/ANSWERED 提 global_search/set_chapter，阶段不合法）；`candidate_list_required`（WAIT_QUESTION_CHOICE 提 show_candidates，该阶段无候选）。
+
+### 改动文件
+- `scripts/evaluate_shadow_plan_qwen_v0.py`（新增，离线评估工具）
+
+### 验证命令与结果
+```powershell
+PYTHONIOENCODING=utf-8 python -B scripts/evaluate_shadow_plan_qwen_v0.py   # 105 格，结构合法率 100%
+python -B -m unittest discover -s tests -p "test_*.py"   # 361 全量通过，无回归
+```
+
+### 审查关注点
+- 评估脚本是**纯离线工具**，不接线到任何生产路径；全部输出进忽略目录。
+- 用 `DASHSCOPE_API_KEY` 环境变量，不落盘。
+- 脚本自身用 stub 规划器冒烟测试过（105 格全跑通、统计正确），确保脚本无 bug 后再连真模型。
+
+### 剩余任务 / 下一步
+- **待修复**：`build_permission_review_facts` 补派生 `has_explainable_failure`（=`bool(state.last_error)`）和 `retryable_error`（=`state.phase==PHASE_ERROR and bool(state.active_image_path)`），并对齐 `safe_answer_context_v0._authorized_user_actions` 的写法；`_facts_to_decision_context` 透传。修完重跑矩阵对比通过率。
+- 修复完成后补测试锁定：NO_MATCH 阶段 explain_failure 计划应放行、ERROR 阶段 retry_search 计划应放行。
+- 后续：把修复后的矩阵结果与交接文档一并交 Codex 审查。
+
+### 修复：PermissionReviewFacts 补 has_explainable_failure / retryable_error
+真实矩阵暴露 `explainable_failure_required` 55 次误杀后，`shadow_plan_v0.py` 补齐审核事实并透传：
+- `PermissionReviewFacts` 新增 `has_explainable_failure`、`retryable_error` 两个字段。
+- `build_permission_review_facts` 派生：`has_explainable_failure = bool(state.last_error)`；`retryable_error = state.phase == PHASE_ERROR and bool(state.active_image_path)`（对齐 `safe_answer_context_v0._authorized_user_actions` 的既有写法，且 `retryable_error` 同时要求有活跃题图）。
+- `_facts_to_decision_context` 透传两个字段给现有 `DecisionContextV2`。
+
+新增 3 条测试锁定：NO_MATCH 阶段 `explain_failure` 计划放行；ERROR 阶段 `retry_search` 计划放行；ERROR 但**无活跃题图**时 `retry_search` 仍拒绝（`retryable_error` 的双条件边界）。相关测试 21 条、全量 364 条通过。
+
+改动文件：
+- `tiku_agent/shadow_plan_v0.py`
+- `tests/test_tiku_agent_shadow_plan_v0.py`
+
+验证命令：
+```powershell
+python -B -m unittest tests.test_tiku_agent_shadow_plan_v0   # 21/21 通过
+python -B -m unittest discover -s tests -p "test_*.py"        # 364 全量通过
+PYTHONIOENCODING=utf-8 python -B scripts/evaluate_shadow_plan_qwen_v0.py   # 重跑矩阵对比通过率
+```
+
+### 修复后真实矩阵重跑结果
+修复 `PermissionReviewFacts` 缺字段后重跑同一矩阵（`.tmp_shadow_plan_eval_8794/20260801_182658/`）：
+
+| 阶段 | 修复前 | 修复后 |
+|---|---|---|
+| 总通过率 | 41/105 (39.1%) | **59/105 (56.2%)** |
+| WAIT_QUESTION_CHOICE | 10/15 | 8/15 |
+| WAIT_CANDIDATE_CHOICE | 14/15 | **15/15** |
+| ANSWERED | 14/15 | 14/15 |
+| NO_MATCH | 0/15 | **9/15** |
+| ERROR | 0/15 | **10/15** |
+| IDLE | 0/15 | 0/15 |
+| WAIT_CHAPTER | 3/15 | 3/15 |
+
+- `explainable_failure_required` 从 55 降至 27——缺字段误杀已修复，NO_MATCH/ERROR 的 explain_failure/retry_search 计划正常放行。
+- **结构合法率保持 100%**：规划器 prompt 契约稳定。
+
+### 剩余两个待解问题（均已定位，未改代码）
+1. **WAIT_CHAPTER 阶段规划器动作选择偏差**：等章节时用户说"有没有更接近的/后面那几道也看看/它怎么说的来着"，规划器大量提 `explain_failure()`，而非 `continue_search`/`show_candidates`。这不是审核误杀（无失败可解释时拒得对），是 `SHADOW_PLAN_PROMPT` 对动作语义的引导不足——需要更明确告诉模型"explain_failure 只在有失败可解释时用；续搜/看候选是常见诉求"。
+2. **审核把 clarify 当 reject（语义粗粒度）**：IDLE 阶段规划器提 `set_chapter` 被拒为 `current_question_required`——该拒绝码在权限矩阵里实为 `clarify`（"缺信息可引导"），影子审核统一记为 reject。本阶段纯记录不执行，不会造成危险，只是观测分类不够精确；是否细化为记录取舍，留待 Codex 审查决定。
+
+### 下一步候选
+- 迭代 `SHADOW_PLAN_PROMPT` 修正 WAIT_CHAPTER 动作选择（对照 Stage 4 反射指令三版迭代的成熟做法）。
+- 或在交接后交 Codex 审查当前结果，再决定是否继续调。

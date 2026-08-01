@@ -16,6 +16,8 @@ from tiku_agent.shadow_plan_v0 import (
 )
 from tiku_agent.state import (
     PHASE_ANSWERED,
+    PHASE_ERROR,
+    PHASE_NO_MATCH,
     STATE_WAIT_CANDIDATE_CHOICE,
     STATE_WAIT_CHAPTER,
     AgentState,
@@ -236,6 +238,52 @@ class ReviewShadowPlanTest(unittest.TestCase):
         )
         review = review_shadow_plan(plan, facts)
         self.assertIn("过期", review.reason)
+
+    def test_no_match_explain_failure_plan_is_allowed(self) -> None:
+        # Real-Qwen matrix exposed this gap: in NO_MATCH the planner reasonably
+        # proposes explain_failure, but the facts omitted has_explainable_failure
+        # so the review rejected every such plan.
+        state = AgentState(
+            phase=PHASE_NO_MATCH,
+            current_image_path="input/q1.jpg",
+            current_question_image_path="crop/q1.jpg",
+            current_loads=[{"type": "集中", "raw": "P"}],
+            current_chapter="4力法",
+            last_error="no match",
+        )
+        facts = build_permission_review_facts(state)
+        self.assertTrue(facts.has_explainable_failure)
+        plan = _plan(_step("explain_failure"))
+        review = review_shadow_plan(plan, facts)
+        self.assertEqual(review.outcome, REVIEW_ALLOW)
+
+    def test_error_retry_search_plan_is_allowed(self) -> None:
+        # Same matrix gap on the ERROR phase: retry_search needs retryable_error.
+        state = AgentState(
+            phase=PHASE_ERROR,
+            current_image_path="input/q1.jpg",
+            current_question_image_path="crop/q1.jpg",
+            current_loads=[{"type": "集中", "raw": "P"}],
+            last_error="tool error",
+        )
+        facts = build_permission_review_facts(state)
+        self.assertTrue(facts.retryable_error)
+        plan = _plan(_step("retry_search"))
+        review = review_shadow_plan(plan, facts)
+        self.assertEqual(review.outcome, REVIEW_ALLOW)
+
+    def test_error_without_image_retry_search_is_rejected(self) -> None:
+        # retryable_error also requires an active image; without one the plan
+        # must still be rejected rather than silently allowed.
+        state = AgentState(
+            phase=PHASE_ERROR,
+            last_error="tool error",
+        )
+        facts = build_permission_review_facts(state)
+        self.assertFalse(facts.retryable_error)
+        plan = _plan(_step("retry_search"))
+        review = review_shadow_plan(plan, facts)
+        self.assertEqual(review.outcome, REVIEW_REJECT)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ from tiku_agent.action_permissions_v2 import (
     authorize_action_v2,
 )
 from tiku_agent.intent_contract import CHAPTERS
-from tiku_agent.state import AgentState, KNOWN_PHASES
+from tiku_agent.state import PHASE_ERROR, AgentState, KNOWN_PHASES
 
 # Actions a shadow plan may propose.  ``cancel`` clears the task through the
 # fixed state machine and ``search_image`` needs a trusted image event, so both
@@ -100,6 +100,8 @@ class PermissionReviewFacts:
     candidate_count: int = 0
     has_active_image: bool = False
     has_answer: bool = False
+    has_explainable_failure: bool = False
+    retryable_error: bool = False
     global_search_offered: bool = False
     continuation_available: bool = False
     read_only_actions: frozenset[str] = frozenset(PLAN_ACTION_UNIVERSE)
@@ -147,6 +149,8 @@ def build_permission_review_facts(state: AgentState) -> PermissionReviewFacts:
         candidate_count=state.candidate_count,
         has_active_image=bool(state.active_image_path),
         has_answer=bool(state.last_answer_paths),
+        has_explainable_failure=bool(state.last_error),
+        retryable_error=state.phase == PHASE_ERROR and bool(state.active_image_path),
         global_search_offered=state.global_search_offered,
         continuation_available=state.continuation_available,
     )
@@ -248,6 +252,8 @@ def _facts_to_decision_context(facts: PermissionReviewFacts) -> DecisionContextV
         candidate_count=facts.candidate_count,
         has_active_image=facts.has_active_image,
         has_answer=facts.has_answer,
+        has_explainable_failure=facts.has_explainable_failure,
+        retryable_error=facts.retryable_error,
         global_search_offered=facts.global_search_offered,
         continuation_available=facts.continuation_available,
     )
