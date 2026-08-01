@@ -16,6 +16,10 @@ from tiku_agent.safe_answer_contract_v0 import (
     build_safe_answer_prompt_v0,
     validate_safe_answer_output_v0,
 )
+from tiku_agent.safe_answer_context_v0 import (
+    SafeAnswerValidationFacts,
+    SafeConversationContext,
+)
 from tiku_agent.safe_answer_policy_v0 import evaluate_safe_answer_policy
 from tiku_agent.safe_answer_reply_v0 import render_safe_answer_v0
 
@@ -67,7 +71,12 @@ class SafeAnswerGeneratorV0:
         self.max_tokens = max_tokens
         self.clock = clock
 
-    def generate(self, user_text: str) -> SafeAnswerGenerationV0:
+    def generate(
+        self,
+        user_text: str,
+        context: SafeConversationContext | None = None,
+        validation_facts: SafeAnswerValidationFacts | None = None,
+    ) -> SafeAnswerGenerationV0:
         decision = evaluate_safe_answer_policy(user_text)
         if not decision.eligible:
             return SafeAnswerGenerationV0(
@@ -79,7 +88,11 @@ class SafeAnswerGeneratorV0:
             )
 
         request = SafeAnswerModelRequestV0(
-            prompt=build_safe_answer_prompt_v0(decision.category, user_text),
+            prompt=build_safe_answer_prompt_v0(
+                decision.category,
+                user_text,
+                context,
+            ),
             timeout_seconds=self.timeout_seconds,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
@@ -88,18 +101,43 @@ class SafeAnswerGeneratorV0:
         try:
             output = self.model_client(request)
         except TimeoutError:
-            return self._fallback(decision.category, "model_timeout", started)
+            return self._fallback(
+                decision.category,
+                "model_timeout",
+                started,
+                context,
+                validation_facts,
+            )
         except Exception:  # noqa: BLE001 - every provider failure must use the safe fallback.
-            return self._fallback(decision.category, "model_error", started)
+            return self._fallback(
+                decision.category,
+                "model_error",
+                started,
+                context,
+                validation_facts,
+            )
 
         if not isinstance(output, str):
-            return self._fallback(decision.category, "invalid_output_type", started)
-        validation = validate_safe_answer_output_v0(output, decision.category)
+            return self._fallback(
+                decision.category,
+                "invalid_output_type",
+                started,
+                context,
+                validation_facts,
+            )
+        validation = validate_safe_answer_output_v0(
+            output,
+            decision.category,
+            context,
+            validation_facts,
+        )
         if not validation.accepted:
             return self._fallback(
                 decision.category,
                 f"output_{validation.reason}",
                 started,
+                context,
+                validation_facts,
             )
         return SafeAnswerGenerationV0(
             text=validation.normalized_text,
@@ -114,9 +152,11 @@ class SafeAnswerGeneratorV0:
         category: str,
         reason: str,
         started: float,
+        context: SafeConversationContext | None = None,
+        validation_facts: SafeAnswerValidationFacts | None = None,
     ) -> SafeAnswerGenerationV0:
         return SafeAnswerGenerationV0(
-            text=render_safe_answer_v0(category),
+            text=render_safe_answer_v0(category, context, validation_facts),
             source="fixed_fallback",
             category=category,
             fallback_reason=reason,

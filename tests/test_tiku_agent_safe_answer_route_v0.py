@@ -2,12 +2,16 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from tiku_agent.agent import AgentToolbox, TikuSearchAgent
 from tiku_agent.safe_answer_generator_v0 import SafeAnswerGeneratorV0
 from tiku_agent.safe_answer_reply_v0 import MAX_SAFE_ANSWER_CHARS
-from tiku_agent.state import AgentState, PHASE_ANSWERED
+from tiku_agent.state import (
+    STATE_WAIT_CANDIDATE_CHOICE,
+    AgentState,
+    PHASE_ANSWERED,
+)
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "safe_answer_v0_cases.json"
@@ -283,6 +287,71 @@ class SafeAnswerRouteV0Test(unittest.TestCase):
 
         self.assertEqual(response.intent, "safe_answer")
         self.assertEqual(response.reply_source, "model")
+
+    def test_candidate_phase_greeting_is_phase_aware_zero_tool_zero_state(self):
+        state = AgentState(
+            session_id="candidate-greeting",
+            phase=STATE_WAIT_CANDIDATE_CHOICE,
+            current_image_path="question.jpg",
+            current_question_image_path="question.jpg",
+            current_loads=[{"type": "集中", "raw": "P"}],
+            current_chapter="4力法",
+            candidates=[{"rank": 1}, {"rank": 2}, {"rank": 3}],
+            continuation_available=True,
+        )
+        before = deepcopy(state.to_dict())
+        toolbox, tool_mocks = _toolbox_that_must_not_run()
+        seen = []
+        generator = SafeAnswerGeneratorV0(
+            lambda request: (
+                seen.append(request.prompt),
+                "你好，候选已经准备好了。",
+            )[1]
+        )
+        agent = TikuSearchAgent(
+            state=state,
+            tools=toolbox,
+            use_llm_intent=False,
+            enable_safe_answer_v0=True,
+            safe_answer_generator_v0=generator,
+        )
+
+        response = agent.handle_text("你好")
+
+        self.assertEqual(response.intent, "safe_answer")
+        self.assertEqual(response.reply_source, "model")
+        self.assertIn("WAIT_CANDIDATE_CHOICE", seen[0].system_prompt)
+        self.assertIn("候选数量：3", seen[0].system_prompt)
+        self.assertEqual(agent.state.to_dict(), before)
+        self.assertEqual(response.state, before)
+        for tool_mock in tool_mocks.values():
+            tool_mock.assert_not_called()
+
+    def test_context_derivation_failure_degrades_to_state_free_fallback(self):
+        state = AgentState(
+            session_id="broken-state",
+            phase=STATE_WAIT_CANDIDATE_CHOICE,
+            current_image_path="question.jpg",
+        )
+        toolbox, tool_mocks = _toolbox_that_must_not_run()
+        agent = TikuSearchAgent(
+            state=state,
+            tools=toolbox,
+            use_llm_intent=False,
+            enable_safe_answer_v0=True,
+        )
+
+        with patch(
+            "tiku_agent.agent.build_safe_answer_context",
+            side_effect=RuntimeError("state summary must not break safe answer"),
+        ):
+            response = agent.handle_text("你好")
+
+        self.assertEqual(response.intent, "safe_answer")
+        self.assertEqual(response.reply_source, "fixed_fallback")
+        self.assertEqual(response.text, "你好。")
+        for tool_mock in tool_mocks.values():
+            tool_mock.assert_not_called()
 
 
 if __name__ == "__main__":

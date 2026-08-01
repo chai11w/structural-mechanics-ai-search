@@ -3,8 +3,16 @@ from pathlib import Path
 import unittest
 from unittest.mock import Mock
 
+from tiku_agent.safe_answer_context_v0 import (
+    SafeAnswerValidationFacts,
+    SafeConversationContext,
+)
 from tiku_agent.safe_answer_generator_v0 import SafeAnswerGeneratorV0
 from tiku_agent.safe_answer_reply_v0 import render_safe_answer_v0
+from tiku_agent.state import (
+    STATE_WAIT_CANDIDATE_CHOICE,
+    STATE_WAIT_CHAPTER,
+)
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "safe_answer_v0_cases.json"
@@ -131,6 +139,76 @@ class SafeAnswerGeneratorV0Test(unittest.TestCase):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(ValueError):
                     SafeAnswerGeneratorV0(client, **kwargs)
+
+    def test_generate_passes_whitelisted_context_into_the_prompt(self):
+        context = SafeConversationContext(
+            phase=STATE_WAIT_CANDIDATE_CHOICE,
+            chapter="4力法",
+            candidate_count=3,
+            allowed_actions=("选择候选题",),
+            waiting_for="候选选择",
+            last_completed_step="候选已就绪",
+        )
+        seen = []
+        client = lambda request: (seen.append(request), "你好。")[1]
+        result = SafeAnswerGeneratorV0(client).generate("你好", context)
+        self.assertEqual(result.source, "model")
+        self.assertEqual(len(seen), 1)
+        self.assertIn("WAIT_CANDIDATE_CHOICE", seen[0].prompt.system_prompt)
+        self.assertIn("候选数量：3", seen[0].prompt.system_prompt)
+        self.assertIn("等待：候选选择", seen[0].prompt.system_prompt)
+        self.assertIn("选择候选题", seen[0].prompt.system_prompt)
+        self.assertNotIn("select_candidate", seen[0].prompt.system_prompt)
+        for forbidden in (
+            "session_id",
+            "current_image_path",
+            "D:/",
+            ".jpg",
+            "score",
+            "stack",
+        ):
+            self.assertNotIn(forbidden, seen[0].prompt.system_prompt)
+            self.assertNotIn(forbidden, seen[0].prompt.user_prompt)
+
+    def test_generate_without_context_remains_state_free(self):
+        seen = []
+        client = lambda request: (seen.append(request), "你好。")[1]
+        SafeAnswerGeneratorV0(client).generate("你好")
+        self.assertNotIn("当前状态", seen[0].prompt.system_prompt)
+        self.assertNotIn("不得逐字复述", seen[0].prompt.system_prompt)
+
+    def test_generate_fallback_with_context_passes_context_to_render(self):
+        seen = []
+
+        def render_spy(category, context=None, validation_facts=None):
+            seen.append((category, context, validation_facts))
+            return "你好。"
+
+        original_render = render_safe_answer_v0
+        import tiku_agent.safe_answer_generator_v0 as generator_module
+
+        generator_module.render_safe_answer_v0 = render_spy
+        try:
+            context = SafeConversationContext(
+                phase=STATE_WAIT_CHAPTER,
+                waiting_for="章节",
+                last_completed_step="已识别题图",
+            )
+            validation_facts = SafeAnswerValidationFacts(has_active_image=True)
+            client = Mock(side_effect=TimeoutError("slow"))
+            result = SafeAnswerGeneratorV0(client).generate(
+                "你好",
+                context,
+                validation_facts,
+            )
+            self.assertEqual(result.source, "fixed_fallback")
+            self.assertEqual(result.fallback_reason, "model_timeout")
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(seen[0][0], "greeting")
+            self.assertIs(seen[0][1], context)
+            self.assertIs(seen[0][2], validation_facts)
+        finally:
+            generator_module.render_safe_answer_v0 = original_render
 
 
 if __name__ == "__main__":

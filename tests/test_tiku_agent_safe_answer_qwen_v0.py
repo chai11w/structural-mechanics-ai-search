@@ -6,13 +6,18 @@ import unittest
 from unittest.mock import patch
 
 from scripts.evaluate_safe_answer_qwen_v0 import (
+    _raw_action_request,
+    build_phase_state,
+    evaluate_action_label_comparison,
     evaluate_cases,
     load_full_cases,
     load_pilot_cases,
     summarize,
+    summarize_action_label_comparison,
     write_results,
 )
 from tiku_agent.safe_answer_contract_v0 import build_safe_answer_prompt_v0
+from tiku_agent.safe_answer_context_v0 import SAFE_ACTION_LABELS, build_safe_answer_context
 from tiku_agent.safe_answer_generator_v0 import SafeAnswerModelRequestV0
 from tiku_agent.safe_answer_qwen_v0 import QwenSafeAnswerClientV0
 
@@ -32,6 +37,39 @@ class _Response:
 
 
 class SafeAnswerQwenV0Test(unittest.TestCase):
+    def test_raw_action_comparison_changes_only_the_allowed_action_line(self):
+        context = build_safe_answer_context(build_phase_state("WAIT_CANDIDATE_CHOICE"))
+        request = SafeAnswerModelRequestV0(
+            prompt=build_safe_answer_prompt_v0("greeting", "你好", context)
+        )
+        changed = _raw_action_request(request, context)
+
+        self.assertEqual(changed.prompt.user_prompt, request.prompt.user_prompt)
+        self.assertIn("select_candidate", changed.prompt.system_prompt)
+        self.assertNotIn("选择候选题", changed.prompt.system_prompt)
+        restored = changed.prompt.system_prompt
+        for action, label in SAFE_ACTION_LABELS.items():
+            restored = restored.replace(action, label)
+        self.assertEqual(restored, request.prompt.system_prompt)
+
+    def test_action_label_comparison_is_paired_and_summarized(self):
+        def client(request):
+            if "select_candidate" in request.prompt.system_prompt:
+                return "你好，可以从select_candidate开始。"
+            return "你好，可以选择候选题。"
+
+        records = evaluate_action_label_comparison(model_client=client)
+        summary = summarize_action_label_comparison(records)
+
+        self.assertEqual(len(records), 140)
+        self.assertEqual({record["variant"] for record in records}, {"raw", "translated"})
+        self.assertEqual(summary["by_variant"]["translated"]["total"], 70)
+        self.assertEqual(summary["by_variant"]["translated"]["action_context"]["total"], 60)
+        self.assertEqual(summary["by_variant"]["raw"]["raw_action_echoes"], 20)
+        self.assertEqual(summary["by_variant"]["translated"]["raw_action_echoes"], 0)
+        self.assertGreaterEqual(summary["paired_outcomes"].get("translation_improved", 0), 1)
+        self.assertEqual(summary["paired_outcomes"].get("translation_regressed", 0), 0)
+
     def test_adapter_uses_environment_key_and_bounded_request(self):
         request = SafeAnswerModelRequestV0(
             prompt=build_safe_answer_prompt_v0("identity", "你是谁"),
