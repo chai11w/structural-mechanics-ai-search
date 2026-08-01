@@ -680,3 +680,65 @@ $env:PYTHONIOENCODING = "utf-8"; python -B scripts\evaluate_shadow_plan_entry_qw
 - 先讨论Planner准入范围：是否仅增加“原话明确包含两个及以上动作”的影子观察入口；固定业务仍照常响应和执行。
 - 为新准入增加可执行计划金标准，证明语义闸门不是全部拒绝，同时保持单动作快速路径不调用Planner。
 - 两条固定Intent误判单独处理；暂不拆工具、不进入Stage 6、不提升8790。
+
+---
+
+## 步骤：Stage 5 复杂请求Planner准入基线
+
+### 干了啥
+
+- 新增40条平衡准入数据集：原子固定动作、明确顺序请求、条件请求、澄清/暂不支持各10条；字段包含`expected_entry/required_steps/forbidden_actions`。
+- 新增独立评估器，严格区分两条数据：
+  - 真实入口：从`Agent.handle_text()`成对比较开关影子规划，记录当前是否真的进入Planner、固定Intent、工具调用和可见差异；
+  - 诊断Planner：对同一原始状态额外调用Planner，判断它能否补全固定单动作没有表达的步骤。诊断结果绝不冒充真实准入，也不执行计划。
+- 统计原子误入、复杂请求准入召回、步骤顺序覆盖、状态权限、语义授权、禁止动作、条件授权风险和“未来可准入”顺序计划。
+- 支持`--group`聚焦重跑单一类别；默认基线不因当前准入缺口返回失败，`--strict`留给未来准入实现后的验收。
+- 本步骤未修改`agent.py`、Intent、Planner Prompt、语义闸门或运行时准入，用户体验没有变化。
+
+### 改动文件
+
+- `tests/fixtures/shadow_admission_v0_cases.json`（新增，40条）
+- `scripts/evaluate_shadow_admission_qwen_v0.py`（新增）
+- `tests/test_tiku_agent_shadow_admission_eval_v0.py`（新增）
+- `.agents/roadmap.md`
+- `.agents/project_memory.md`
+- `.agents/8794_handoff.md`
+
+### 真实结果
+
+完整三轮输出：`.tmp_shadow_admission_eval_8794/20260801_211726/`（忽略目录，不提交）。
+
+- 总计120次；原子快速路径30次、顺序30次、条件30次、澄清/暂不支持30次。
+- 应观察的顺序+条件60次，真实入口进入Planner：0；当前准入召回0%。
+- 原子快速路径误入Planner：0；开关影子后的回答/状态/原工具差异：0。
+- 独立诊断Planner完整覆盖复杂目标36/60次（60%）；实际禁止动作放行0。
+
+修正一条ANSWERED候选编号后聚焦复验：
+
+- 顺序组：`.tmp_shadow_admission_eval_8794/20260801_212301/`。6/10类连续三轮完整规划并通过当前权限/语义闸门，共18/30；其余4类为排除+续搜只保留续搜、连续两次选题只保留一次、章节搜索后的未来候选选择被安全延后。
+- 稳定6类：重新展示候选→选择候选、答案不匹配→回候选、重发答案→回候选、解释失败→重试、继续搜索→展示新候选，以及ANSWERED回候选→选择候选。
+- 条件组：`.tmp_shadow_admission_eval_8794/20260801_212528/`。目标步骤覆盖20/30，但`future_admission_ready=0`；25/30被现有语义闸门视为直接授权风险。
+- 更严重的是固定Intent已先吃掉条件句：27/30直接形成业务动作/响应，12/30调用了检索工具。例如“如果还能重试，就再试一次”直接重跑完整检索链，“如果这题适合力法，就按力法搜”直接搜索。
+
+### 结论
+
+- 不能直接把“所有明确复杂请求”送入未来执行；顺序与条件必须拆开。
+- 顺序请求存在可验证价值，可作为后续首批纯影子准入候选。
+- 条件请求当前只适合观测。Plan协议没有条件/分支前提，固定Intent和语义闸门也没有保护“条件未成立”；先修条件保护，再谈准入。
+- 这一步由测试结果决定方向，没有设置模型置信度阈值，也没有实现模型反问。
+
+### 验证命令
+
+```powershell
+python -B -m unittest tests.test_tiku_agent_shadow_admission_eval_v0
+python -B -m unittest discover -s tests -p "test_*.py"
+$env:PYTHONIOENCODING = "utf-8"; python -u -B scripts\evaluate_shadow_admission_qwen_v0.py --runs 3
+$env:PYTHONIOENCODING = "utf-8"; python -u -B scripts\evaluate_shadow_admission_qwen_v0.py --runs 3 --group sequential
+$env:PYTHONIOENCODING = "utf-8"; python -u -B scripts\evaluate_shadow_admission_qwen_v0.py --runs 3 --group conditional
+```
+
+### 剩余任务 / 下一步
+
+- 下一步先讨论并建立条件表达保护测试，不直接实现顺序准入。
+- 条件保护必须同时覆盖固定Intent和语义闸门，且不能破坏明确无条件指令。
+- 条件保护通过后，再扩充顺序请求留出集并实现第一批纯影子准入；暂不进入Stage 6、不拆工具、不提升8790。
