@@ -7,9 +7,15 @@ a later bounded model generator must satisfy.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from tiku_agent.safe_answer_contract_v0 import (
     MAX_SAFE_ANSWER_CHARS,
     validate_safe_answer_output_v0,
+)
+from tiku_agent.safe_answer_context_v0 import (
+    SafeAnswerValidationFacts,
+    SafeConversationContext,
 )
 
 _SAFE_REPLIES = {
@@ -23,9 +29,43 @@ _SAFE_REPLIES = {
 }
 
 
-def render_safe_answer_v0(category: str) -> str:
-    """Return one reviewed, concise reply for an eligible pure conversation."""
+# Phase-aware fallback copy, keyed by (category, phase).  The table is
+# intentionally empty: business guidance for each phase already lives in the
+# render.py state machine (chapter prompt, global search offer, error/retry,
+# candidate list), so a pure chitchat fallback needs no phase-specific wording.
+# A builder, when registered, must return text that passes the output contract;
+# otherwise the generic fixed reply is used.
+_PHASE_REPLY_BUILDERS: dict[
+    tuple[str, str],
+    Callable[[SafeConversationContext], str],
+] = {}
 
+
+def render_safe_answer_v0(
+    category: str,
+    context: SafeConversationContext | None = None,
+    validation_facts: SafeAnswerValidationFacts | None = None,
+) -> str:
+    """Return one reviewed, concise reply for an eligible pure conversation.
+
+    When ``context`` is provided and a phase-aware builder is registered for
+    ``(category, phase)``, its copy is used if it satisfies the output contract.
+    Every other call falls back to the reviewed fixed reply, so a model failure
+    always yields a valid single-line answer, never an empty one.
+    """
+
+    if context is not None:
+        builder = _PHASE_REPLY_BUILDERS.get((category, context.phase))
+        if builder is not None:
+            reply = builder(context)
+            validation = validate_safe_answer_output_v0(
+                reply,
+                category,
+                context,
+                validation_facts,
+            )
+            if validation.accepted:
+                return validation.normalized_text
     try:
         reply = _SAFE_REPLIES[category]
     except KeyError as exc:

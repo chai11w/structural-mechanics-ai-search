@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "source_repository": "F:/cc/7-题库检索",
-  "source_branch": "codex/mainline-bounded-autonomy-v1",
-  "source_commit": "90349bc6aa597c1f13e057ec9b1e6bafb3774b62",
-  "created_at": "2026-08-01T07:23:49.705105+00:00",
+  "source_branch": "codex/8794-candidate-v1",
+  "source_commit": "cd569f6a137a020ef47e4bf5f8f598db9853d1bc",
+  "created_at": "2026-08-01T07:41:24.056395+00:00",
   "snapshot_scope": "tracked mainline code, tests, fixtures and safe documentation; excludes .git, local config/secrets, xlsx question-bank assets, runtime/logs/caches, project-agent metadata, review data, and special_unindexed_questions.json",
   "files": [
     {
@@ -16,11 +16,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "4165f5ff162cfddbc07f52acb6c073b193728bb85534c096354cb798246b6390"
+      "sha256": "2cd8f31222dc7017a623fd2a65c970d51a6cff389c6a4439a9ccbe400e3c2f65"
     },
     {
       "path": "SKILL.md",
-      "sha256": "9271fc534863f2cdc9a57b0b344be5c8640d42873755a33b31bd724c9a8aac9f"
+      "sha256": "27250b30278bf8876fd431b4ea050b8cd993ca5b33a67e1eed7599f443171849"
     },
     {
       "path": "build_index.py",
@@ -32,11 +32,11 @@
     },
     {
       "path": "multi_agent_pipeline.py",
-      "sha256": "5a54132d06220fb175d4cd28c4cafb6b1e8bb76e943bbeb8875a0006db8f9412"
+      "sha256": "689aec3ed8661f028942ddcb00f2af28dadba3cd5f177e7ece56a96446798512"
     },
     {
       "path": "requirements.txt",
-      "sha256": "237bac587cd3fe813073163903404ad463e0ac5c00a8d91cab554e762abf61d3"
+      "sha256": "1d063fb92c795852358a5286ef3594d104196a7ebb6336f2277d594f997a9ecd"
     },
     {
       "path": "scripts/apply_main_bank_update.py",
@@ -84,7 +84,7 @@
     },
     {
       "path": "scripts/evaluate_safe_answer_qwen_v0.py",
-      "sha256": "19f8dd327320fcbab7d5c6c8014ce0859f4916e5aeb29b765f8623ce7cbb5a8c"
+      "sha256": "cc627fe774e1ece45f28897b8113c34afadc60083e9c1148dc198d42a80f068b"
     },
     {
       "path": "scripts/evaluate_shape_rerank_prompt.py",
@@ -183,6 +183,10 @@
       "sha256": "4860b8409e15598e8df36c47c94905a8b2971c9bef5329665effb545b8a52ba8"
     },
     {
+      "path": "tests/fixtures/safe_answer_state_consistency_v0_cases.json",
+      "sha256": "7b5031e9c256071ed8d85db78a6f36fb8414615360a0752c327282a59d93f775"
+    },
+    {
       "path": "tests/fixtures/safe_answer_v0_cases.json",
       "sha256": "339885535c5a03014b5edeeba6656a2a50367a52cd94533bb1a9b2f42e7870e7"
     },
@@ -232,7 +236,7 @@
     },
     {
       "path": "tests/test_tiku_agent_agent.py",
-      "sha256": "3777e83775ff96050c5a4101994de043a2cfcbba77c3e0ffed7ab45821213772"
+      "sha256": "890c3c9ad2d50374bfff5bb70e7b4c055d3a692e2e6f220a6ed66ad5b0fa3653"
     },
     {
       "path": "tests/test_tiku_agent_conversation_context_v2.py",
@@ -263,12 +267,16 @@
       "sha256": "a05398e4bd77a9329c866b2a5712adc045387960b208aaa5be6c49acbda108e7"
     },
     {
+      "path": "tests/test_tiku_agent_safe_answer_context_v0.py",
+      "sha256": "ff8f7e7baf0e261c1c606844565287a81765893e6007692fc887a1eef5883b78"
+    },
+    {
       "path": "tests/test_tiku_agent_safe_answer_contract_v0.py",
-      "sha256": "2a66379cbc01f2e337033b63d53837cfba2adfa0bc2c2f9bb6fc87ce9444c3df"
+      "sha256": "c62536944dfaa2b4ecb3af65ea5f27aa3bf763c46029cb8794b8f7e6d238709e"
     },
     {
       "path": "tests/test_tiku_agent_safe_answer_generator_v0.py",
-      "sha256": "e0dd565f9711419f38022e60f59e6dde51d9b3df051acec04446e0d3bab6318e"
+      "sha256": "7d177fc474ebc07a6a393dbb87d9c97475b87862e3f03e5257f097113f0c1cae"
     },
     {
       "path": "tests/test_tiku_agent_safe_answer_policy_v0.py",
@@ -276,11 +284,19 @@
     },
     {
       "path": "tests/test_tiku_agent_safe_answer_qwen_v0.py",
-      "sha256": "1510d753c96002f4504cfe5f4d4d42dd0de8bd6163ec0df9cda33e25cfeb8120"
+      "sha256": "a76a9f4bab44e38a07d1cc1fcdcc191ddeecbc2f29aee91f1b94df42cdd523d9"
     },
     {
       "path": "tests/test_tiku_agent_safe_answer_route_v0.py",
-      "sha256": "86c1aac4ab81c9fccee68e9641789ef8008ca75cbd9fd92bc5578e4264a2f7c9"
+      "sha256": "d396d54fd819fa0035e9a5db9892a2ab7338742c8de6a8bd76ce6ab3d648d486"
+    },
+    {
+      "path": "tests/test_tiku_agent_safe_answer_state_aware.py",
+      "sha256": "1ffc4ae07b4171191b2655cc3899d32ba404f96c5ea0478352904668bc75a922"
+    },
+    {
+      "path": "tests/test_tiku_agent_safe_answer_state_consistency_v0.py",
+      "sha256": "d4c7f9e48395522c3c243c212240f9626586031c3b8580988f5d1be9ca955d58"
     },
     {
       "path": "tests/test_tiku_agent_session_artifacts.py",
@@ -308,7 +324,7 @@
     },
     {
       "path": "tests/test_tiku_agent_tools.py",
-      "sha256": "81ea0abaa85eb9896197537afbdb46684fe4a2f842f7c12f5840110035fc8305"
+      "sha256": "ce09e777309eed8067fa1c20a9a168f67c1a5abd642f3930d78afe578fef32b2"
     },
     {
       "path": "tiku_agent/__init__.py",
@@ -324,7 +340,7 @@
     },
     {
       "path": "tiku_agent/agent.py",
-      "sha256": "c43ec3ff619d5807e5b1a767f71223e3a8056a9e3523b03e503a6a1e77b578cb"
+      "sha256": "0a2ee3394b69db99511b812f25f9792b93db76efc6bf1fcf045f1da242d178f3"
     },
     {
       "path": "tiku_agent/conversation_context_v2.py",
@@ -371,12 +387,16 @@
       "sha256": "a168f4c4b67b7929cf708d3102ec00fa36a517d6f13f1f2a35477a266a719db0"
     },
     {
+      "path": "tiku_agent/safe_answer_context_v0.py",
+      "sha256": "b8efa32187f92474f5b2393863dd061d52a94c5687c64238d14f28b880c1a91e"
+    },
+    {
       "path": "tiku_agent/safe_answer_contract_v0.py",
-      "sha256": "92afab80a46c2ddd0ee61505f02974f6cc083f28f688b62d391aa14dc7e48171"
+      "sha256": "b91b489b8d0600f61a33f14deab7d23ffc4a06aeb4eb064fa6ed5995f6fc585d"
     },
     {
       "path": "tiku_agent/safe_answer_generator_v0.py",
-      "sha256": "73f38d57dac169499882592874736c370d97ed23b0cb477fea0adca886e1c0a7"
+      "sha256": "8535fc5ab563483b721068aabede27d8b08c7a1cbbfeeda52d8d5d8a2704a4df"
     },
     {
       "path": "tiku_agent/safe_answer_policy_v0.py",
@@ -388,7 +408,7 @@
     },
     {
       "path": "tiku_agent/safe_answer_reply_v0.py",
-      "sha256": "7f194e0db5839071f6358254832eafa2aa2047d743f468e4e42457065244ed09"
+      "sha256": "18cb1dfcb6ab390ba299cd27108cf2c8b1c2bff53c9479dac595d525f03463f4"
     },
     {
       "path": "tiku_agent/session_artifacts.py",

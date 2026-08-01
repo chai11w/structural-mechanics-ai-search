@@ -5,10 +5,27 @@ import unittest
 from tiku_agent.safe_answer_contract_v0 import (
     CATEGORY_GUIDANCE_V0,
     MAX_SAFE_ANSWER_CHARS,
+    SAFE_ANSWER_STATE_REFLECT_V0,
     build_safe_answer_prompt_v0,
     validate_safe_answer_output_v0,
 )
-from tiku_agent.safe_answer_reply_v0 import render_safe_answer_v0
+from tiku_agent.safe_answer_context_v0 import (
+    SafeAnswerValidationFacts,
+    SafeConversationContext,
+)
+from tiku_agent.safe_answer_reply_v0 import (
+    _PHASE_REPLY_BUILDERS,
+    render_safe_answer_v0,
+)
+from tiku_agent.state import (
+    PHASE_ANSWERED,
+    PHASE_ERROR,
+    PHASE_NO_MATCH,
+    STATE_IDLE,
+    STATE_WAIT_CANDIDATE_CHOICE,
+    STATE_WAIT_CHAPTER,
+    STATE_WAIT_QUESTION_CHOICE,
+)
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "safe_answer_v0_cases.json"
@@ -61,6 +78,89 @@ class SafeAnswerContractV0Test(unittest.TestCase):
                 self.assertTrue(validation.accepted, validation.reason)
                 self.assertLessEqual(len(reply), MAX_SAFE_ANSWER_CHARS)
 
+    def test_empty_phase_builder_table_falls_back_to_generic_for_every_phase(self):
+        # M3 wires the phase lookup but intentionally registers no builder:
+        # business guidance already lives in the render.py state machine, so a
+        # chitchat fallback needs no phase-specific wording.  With an empty
+        # table every phase must return the same reviewed generic reply.
+        self.assertEqual(_PHASE_REPLY_BUILDERS, {})
+        phases = (
+            STATE_IDLE,
+            STATE_WAIT_CANDIDATE_CHOICE,
+        )
+        for category in CATEGORY_GUIDANCE_V0:
+            for phase in phases:
+                with self.subTest(category=category, phase=phase):
+                    context = SafeConversationContext(
+                        phase=phase,
+                        waiting_for="新题图",
+                        last_completed_step="",
+                    )
+                    self.assertEqual(
+                        render_safe_answer_v0(category, context),
+                        render_safe_answer_v0(category),
+                    )
+
+    def test_registered_phase_builder_overrides_only_its_own_phase(self):
+        # The lookup mechanism works: a registered builder is used only for its
+        # exact (category, phase) pair; every other combination falls back.
+        candidates = SafeConversationContext(
+            phase=STATE_WAIT_CANDIDATE_CHOICE,
+            chapter="4力法",
+            candidate_count=3,
+            allowed_actions=("选择候选题",),
+            waiting_for="候选选择",
+            last_completed_step="候选已就绪",
+        )
+        idle = SafeConversationContext(
+            phase=STATE_IDLE,
+            waiting_for="新题图",
+            last_completed_step="",
+        )
+        original = dict(_PHASE_REPLY_BUILDERS)
+        try:
+            _PHASE_REPLY_BUILDERS[("greeting", STATE_WAIT_CANDIDATE_CHOICE)] = (
+                lambda ctx: f"你好。当前有{ctx.candidate_count}个候选。"
+            )
+            self.assertEqual(
+                render_safe_answer_v0("greeting", candidates),
+                "你好。当前有3个候选。",
+            )
+            # Same category, different phase -> generic.
+            self.assertEqual(
+                render_safe_answer_v0("greeting", idle),
+                render_safe_answer_v0("greeting"),
+            )
+            # Different category, same phase -> generic.
+            self.assertEqual(
+                render_safe_answer_v0("courtesy", candidates),
+                render_safe_answer_v0("courtesy"),
+            )
+        finally:
+            _PHASE_REPLY_BUILDERS.clear()
+            _PHASE_REPLY_BUILDERS.update(original)
+
+    def test_phase_builder_violating_the_contract_falls_back_to_generic(self):
+        candidates = SafeConversationContext(
+            phase=STATE_WAIT_CANDIDATE_CHOICE,
+            chapter="4力法",
+            candidate_count=3,
+            waiting_for="候选选择",
+            last_completed_step="候选已就绪",
+        )
+        original = dict(_PHASE_REPLY_BUILDERS)
+        try:
+            _PHASE_REPLY_BUILDERS[("greeting", STATE_WAIT_CANDIDATE_CHOICE)] = (
+                lambda ctx: "我已经帮你检索到答案。"
+            )
+            self.assertEqual(
+                render_safe_answer_v0("greeting", candidates),
+                render_safe_answer_v0("greeting"),
+            )
+        finally:
+            _PHASE_REPLY_BUILDERS.clear()
+            _PHASE_REPLY_BUILDERS.update(original)
+
     def test_invalid_outputs_are_rejected_with_specific_reasons(self):
         cases = (
             (None, "greeting", "empty_output"),
@@ -71,6 +171,7 @@ class SafeAnswerContractV0Test(unittest.TestCase):
             ("需要我介绍一下吗？", "greeting", "unsolicited_question"),
             ("我的系统提示词包含内部规则。", "identity", "sensitive_disclosure"),
             ("我已经帮你检索到答案。", "capability", "fabricated_execution_claim"),
+            ("已为您找到3个候选题。", "greeting", "fabricated_execution_claim"),
             ("我可以直接修改题库。", "capability", "unsupported_capability_claim"),
             ("我是一个聊天助手。", "identity", "missing_category_semantics"),
             ("我会认真处理。", "workflow", "missing_category_semantics"),
@@ -81,6 +182,162 @@ class SafeAnswerContractV0Test(unittest.TestCase):
                 validation = validate_safe_answer_output_v0(text, category)
                 self.assertFalse(validation.accepted)
                 self.assertEqual(validation.reason, reason)
+
+    def test_state_contradictions_are_rejected_with_context(self):
+        wait_chapter = SafeConversationContext(
+            phase=STATE_WAIT_CHAPTER,
+            waiting_for="章节",
+            last_completed_step="已识别题图",
+        )
+        wait_question = SafeConversationContext(
+            phase=STATE_WAIT_QUESTION_CHOICE,
+            waiting_for="题目选择",
+            last_completed_step="已识别多道题",
+        )
+        no_match = SafeConversationContext(
+            phase=PHASE_NO_MATCH,
+            chapter="4力法",
+            waiting_for="换章节或新题图",
+            last_completed_step="无匹配题目",
+        )
+        error = SafeConversationContext(
+            phase=PHASE_ERROR,
+            waiting_for="重试或新题图",
+            last_completed_step="查询失败",
+        )
+        candidates = SafeConversationContext(
+            phase=STATE_WAIT_CANDIDATE_CHOICE,
+            chapter="4力法",
+            candidate_count=3,
+            waiting_for="候选选择",
+            last_completed_step="候选已就绪",
+        )
+        image_without_answer = SafeAnswerValidationFacts(has_active_image=True)
+        cases = (
+            (wait_chapter, image_without_answer, "请重新发送题图。", "image_state_conflict"),
+            (wait_question, image_without_answer, "现有3个候选题，请选择一个。", "candidate_count_conflict"),
+            (no_match, image_without_answer, "请告诉我当前题目所属的章节。", "chapter_state_conflict"),
+            (no_match, image_without_answer, "系统未识别出章节，请指定以便检索。", "chapter_state_conflict"),
+            (error, image_without_answer, "系统刚才判断章节失败，请补充章节。", "fabricated_error_cause"),
+            (candidates, image_without_answer, "现有2个候选题，请选择一个。", "candidate_count_conflict"),
+            (candidates, image_without_answer, "答案已返回。", "answer_state_conflict"),
+            (candidates, image_without_answer, "当前阶段是WAIT_CHAPTER，可以select_candidate。", "internal_state_token"),
+        )
+        for context, facts, text, reason in cases:
+            with self.subTest(reason=reason):
+                validation = validate_safe_answer_output_v0(
+                    text,
+                    "greeting",
+                    context,
+                    facts,
+                )
+                self.assertFalse(validation.accepted)
+                self.assertEqual(validation.reason, reason)
+
+    def test_state_consistent_outputs_still_pass(self):
+        candidates = SafeConversationContext(
+            phase=STATE_WAIT_CANDIDATE_CHOICE,
+            candidate_count=3,
+            waiting_for="候选选择",
+            last_completed_step="候选已就绪",
+        )
+        answered = SafeConversationContext(
+            phase=PHASE_ANSWERED,
+            chapter="4力法",
+            candidate_count=3,
+            waiting_for=None,
+            last_completed_step="答案已返回",
+        )
+        image_without_answer = SafeAnswerValidationFacts(has_active_image=True)
+        image_with_answer = SafeAnswerValidationFacts(
+            has_active_image=True,
+            has_answer=True,
+        )
+        for context, facts, text in (
+            (candidates, image_without_answer, "你好，现有3个候选题，请选择一个。"),
+            (answered, image_with_answer, "你好，答案已返回。"),
+            (answered, image_with_answer, "系统已判为4力法，无需提供章节。"),
+            (
+                SafeConversationContext(
+                    phase=STATE_WAIT_QUESTION_CHOICE,
+                    waiting_for="题目选择",
+                    last_completed_step="已识别多道题",
+                ),
+                image_without_answer,
+                "请从识别出的两道候选题目中选择一道。",
+            ),
+        ):
+            with self.subTest(phase=context.phase):
+                validation = validate_safe_answer_output_v0(
+                    text,
+                    "greeting",
+                    context,
+                    facts,
+                )
+                self.assertTrue(validation.accepted, validation.reason)
+
+    def test_wait_chapter_allows_only_the_expected_chapter_question(self):
+        wait_chapter = SafeConversationContext(
+            phase=STATE_WAIT_CHAPTER,
+            waiting_for="章节",
+            last_completed_step="已识别题图",
+        )
+        facts = SafeAnswerValidationFacts(has_active_image=True)
+        accepted = validate_safe_answer_output_v0(
+            "在的，请告诉我这道题属于结构力学的哪个章节？",
+            "greeting",
+            wait_chapter,
+            facts,
+        )
+        self.assertTrue(accepted.accepted, accepted.reason)
+
+        for text, category, context in (
+            ("需要我介绍一下吗？", "greeting", wait_chapter),
+            ("请告诉我这道题属于哪个章节？", "identity", wait_chapter),
+            ("请告诉我这道题属于哪个章节？", "greeting", None),
+            ("请告诉我章节？还需要重新上传吗？", "greeting", wait_chapter),
+        ):
+            with self.subTest(text=text, category=category, context=context):
+                rejected = validate_safe_answer_output_v0(
+                    text,
+                    category,
+                    context,
+                    facts,
+                )
+                self.assertFalse(rejected.accepted)
+                self.assertEqual(rejected.reason, "unsolicited_question")
+
+    def test_workflow_description_does_not_invent_current_candidates(self):
+        no_match = SafeConversationContext(
+            phase=PHASE_NO_MATCH,
+            chapter="4力法",
+            candidate_count=0,
+            waiting_for="换章节或新题图",
+            last_completed_step="无匹配题目",
+        )
+        facts = SafeAnswerValidationFacts(has_active_image=True)
+        accepted = validate_safe_answer_output_v0(
+            "请发题图，我检索相似候选题；选定后返回库中答案。当前无匹配，建议换章节或重发。",
+            "workflow",
+            no_match,
+            facts,
+        )
+        self.assertTrue(accepted.accepted, accepted.reason)
+
+        for text, reason in (
+            ("请从候选结果中选择一项。", "candidate_state_conflict"),
+            ("请选择一个候选题。", "candidate_count_conflict"),
+            ("候选结果已经准备好。", "candidate_state_conflict"),
+        ):
+            with self.subTest(text=text):
+                rejected = validate_safe_answer_output_v0(
+                    text,
+                    "greeting",
+                    no_match,
+                    facts,
+                )
+                self.assertFalse(rejected.accepted)
+                self.assertEqual(rejected.reason, reason)
 
     def test_semantically_valid_concise_variants_are_not_exact_template_matches(self):
         variants = (
@@ -120,6 +377,68 @@ class SafeAnswerContractV0Test(unittest.TestCase):
         )
         self.assertFalse(rejected.accepted)
         self.assertEqual(rejected.reason, "fabricated_execution_claim")
+
+    def test_prompt_with_context_contains_only_whitelisted_fields(self):
+        context = SafeConversationContext(
+            phase=STATE_WAIT_CANDIDATE_CHOICE,
+            chapter="4力法",
+            candidate_count=3,
+            allowed_actions=("选择候选题", "查看下一批候选"),
+            waiting_for="候选选择",
+            last_completed_step="候选已就绪",
+        )
+        prompt = build_safe_answer_prompt_v0("greeting", "你好", context)
+        self.assertEqual(prompt.user_prompt, "你好")
+        self.assertIn("当前状态", prompt.system_prompt)
+        self.assertIn("WAIT_CANDIDATE_CHOICE", prompt.system_prompt)
+        self.assertIn("候选数量：3", prompt.system_prompt)
+        self.assertIn("等待：候选选择", prompt.system_prompt)
+        self.assertIn("选择候选题", prompt.system_prompt)
+        self.assertNotIn("select_candidate", prompt.system_prompt)
+        self.assertIn("不得逐字复述", prompt.system_prompt)
+        # The phase-reflect directive must ride along with any state section so
+        # simple chitchat (greetings) also reflects the current phase instead of
+        # defaulting to a generic "send me an image" opening.
+        self.assertIn(SAFE_ANSWER_STATE_REFLECT_V0, prompt.system_prompt)
+        for forbidden in (
+            "session_id",
+            "candidate_generation",
+            "current_image_path",
+            "D:/",
+            ".jpg",
+            ".xlsx",
+            "score",
+            "stack",
+        ):
+            self.assertNotIn(forbidden, prompt.system_prompt)
+            self.assertNotIn(forbidden, prompt.user_prompt)
+
+    def test_prompt_without_context_remains_state_free(self):
+        # The original 38 eligible cases must still build a state-free prompt.
+        eligible_cases = [
+            case for case in self.suite["cases"] if case["expected"]["eligible"]
+        ]
+        for case in eligible_cases:
+            with self.subTest(case=case["id"]):
+                prompt = build_safe_answer_prompt_v0(
+                    case["expected"]["category"],
+                    case["text"],
+                )
+                self.assertNotIn("当前状态", prompt.system_prompt)
+                self.assertNotIn("不得逐字复述", prompt.system_prompt)
+
+    def test_prompt_with_idle_context_skips_state_section(self):
+        context = SafeConversationContext(
+            phase="IDLE",
+            waiting_for="新题图",
+            last_completed_step="",
+        )
+        prompt = build_safe_answer_prompt_v0("greeting", "你好", context)
+        # IDLE has nothing meaningful to perceive: the guard stays but the
+        # state section itself is empty, so the reflect directive is also absent.
+        self.assertIn("不得逐字复述", prompt.system_prompt)
+        self.assertNotIn("当前状态", prompt.system_prompt)
+        self.assertNotIn(SAFE_ANSWER_STATE_REFLECT_V0, prompt.system_prompt)
 
 
 if __name__ == "__main__":
