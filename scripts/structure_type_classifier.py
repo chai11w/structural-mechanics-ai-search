@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.classify_question_bank import image_to_data_url, parse_model_json
+from tiku_shared.model_costs import timed_model_call
 
 
 VALID_STRUCTURE_TYPES = {"梁", "钢架", "桁架", "拱", "unknown"}
@@ -51,8 +52,18 @@ def qwen_structure_type(image_path: Path, *, endpoint: str, model: str, api_key:
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    def request_data() -> dict[str, Any]:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    data = timed_model_call(
+        request_data,
+        provider="dashscope",
+        model=model,
+        call_type="qwen_structure_type",
+        usage_getter=lambda value: value.get("usage", {}),
+        request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
+    )
 
     content = data["choices"][0]["message"]["content"]
     parsed = parse_model_json(content)

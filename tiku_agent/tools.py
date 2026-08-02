@@ -37,6 +37,7 @@ from tiku_shared.multi_question import (
 )
 from tiku_agent.intent_contract import CHAPTERS
 from tiku_agent.tool_result import ToolOutcome, ToolResult
+from tiku_shared.model_costs import submit_with_model_cost_context
 
 
 BASE = Path(__file__).resolve().parent.parent
@@ -625,7 +626,8 @@ def _score_global_candidates(
     scored = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(
+            submit_with_model_cost_context(
+                executor,
                 search.score_rerank_candidate,
                 str(query_image_path),
                 candidate,

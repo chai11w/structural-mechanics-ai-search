@@ -39,6 +39,8 @@ import pandas as pd
 from PIL import Image, ImageOps
 from zhipuai import ZhipuAI
 
+from tiku_shared.model_costs import submit_with_model_cost_context, timed_model_call
+
 # ============================================================
 # 配置
 # ============================================================
@@ -515,7 +517,14 @@ def score_candidate_pair(
     if timeout_seconds is not None:
         request["timeout"] = float(timeout_seconds)
 
-    resp = client.chat.completions.create(**request)
+    resp = timed_model_call(
+        lambda: client.chat.completions.create(**request),
+        provider="zhipu",
+        model=request["model"],
+        call_type=("zhipu_length_tie_break" if prompt == LENGTH_TIE_PROMPT else "zhipu_shape_rerank"),
+        usage_getter=lambda value: getattr(value, "usage", None),
+        request_id_getter=lambda value: str(getattr(value, "request_id", "") or getattr(value, "id", "")),
+    )
     raw_text = resp.choices[0].message.content.strip()
     raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
     raw_text = re.sub(r"\s*```$", "", raw_text)
@@ -737,7 +746,8 @@ def rerank_candidates_concurrent(
     scored = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [
-            executor.submit(
+            submit_with_model_cost_context(
+                executor,
                 score_rerank_candidate,
                 query_image_path,
                 candidate,
@@ -930,18 +940,25 @@ def extract_loads(client, image_path):
 
     for attempt in range(3):
         try:
-            resp = client.chat.completions.create(
+            resp = timed_model_call(
+                lambda: client.chat.completions.create(
+                    model=DEFAULT_ZHIPU_RERANK_MODEL,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": [
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                            {"type": "text", "text": "输出JSON。"},
+                        ]},
+                    ],
+                    temperature=0.1,
+                    max_tokens=1024,
+                    extra_body={"thinking": {"type": "disabled"}},
+                ),
+                provider="zhipu",
                 model=DEFAULT_ZHIPU_RERANK_MODEL,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": [
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                        {"type": "text", "text": "输出JSON。"},
-                    ]},
-                ],
-                temperature=0.1,
-                max_tokens=1024,
-                extra_body={"thinking": {"type": "disabled"}},
+                call_type=("zhipu_load_extraction" if attempt == 0 else "zhipu_load_extraction_retry"),
+                usage_getter=lambda value: getattr(value, "usage", None),
+                request_id_getter=lambda value: str(getattr(value, "request_id", "") or getattr(value, "id", "")),
             )
             raw_text = resp.choices[0].message.content
 

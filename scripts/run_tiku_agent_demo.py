@@ -26,6 +26,7 @@ from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_log import JsonlTaskLogger
 from tiku_agent.tools import AgentToolConfig
+from tiku_shared.model_costs import SQLiteModelCostLedger
 
 
 DEFAULT_V2_RUNTIME_DIR = BASE / ".tmp_tiku_agent_v2"
@@ -62,6 +63,7 @@ def build_runtime(
         SQLiteSessionStore(root / "session.db"),
         artifacts=artifacts,
         task_logger=JsonlTaskLogger(root / "task_logs.jsonl"),
+        cost_ledger=SQLiteModelCostLedger(root / "model_costs.sqlite3"),
         agent_factory=agent_factory,
     )
 

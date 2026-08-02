@@ -25,6 +25,8 @@ from pathlib import Path
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 
+from tiku_shared.model_costs import timed_model_call
+
 try:
     import cv2
     import numpy as np
@@ -48,6 +50,12 @@ CHAPTERS = ["2静定结构", "3静定结构位移", "4力法", "5位移法", "6�
 CHAPTER_UNKNOWN = "unknown"
 TRANSIENT_HTTP_STATUS = {429, 500, 502, 503, 504}
 HTTP_RETRY_DELAYS = (0.5, 1.0)
+
+
+class ProviderResponse(dict):
+    """Dictionary-compatible provider payload with private client metadata."""
+
+    client_attempt_count: int = 1
 CHAPTER_TRIGGER_WORDS = {
     "2静定结构": ["静定结构", "静定梁", "静定刚架", "静定钢架", "静定桁架"],
     "3静定结构位移": ["静定结构位移", "图乘法", "单位荷载法"],
@@ -464,15 +472,37 @@ def request_json_with_retry(
     for attempt in range(len(retry_delays) + 1):
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
+                data = ProviderResponse(json.loads(response.read().decode("utf-8")))
+                data.client_attempt_count = attempt + 1
+                return data
         except urllib.error.HTTPError as exc:
             if exc.code not in TRANSIENT_HTTP_STATUS or attempt >= len(retry_delays):
+                exc.model_attempt_count = attempt + 1
                 raise
-        except (TimeoutError, urllib.error.URLError):
+        except (TimeoutError, urllib.error.URLError) as exc:
             if attempt >= len(retry_delays):
+                exc.model_attempt_count = attempt + 1
                 raise
         time.sleep(retry_delays[attempt])
     raise RuntimeError("HTTP retry loop exhausted")  # pragma: no cover
+
+
+def tracked_qwen_request(
+    request: urllib.request.Request,
+    *,
+    timeout: int,
+    model: str,
+    call_type: str,
+) -> dict:
+    return timed_model_call(
+        lambda: request_json_with_retry(request, timeout=timeout),
+        provider="dashscope",
+        model=model,
+        call_type=call_type,
+        usage_getter=lambda value: value.get("usage", {}),
+        request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
+        attempt_count_getter=lambda value: int(getattr(value, "client_attempt_count", 1) or 1),
+    )
 
 
 def qwen_extract_loads(image_path: Path, *, model: str, endpoint: str, api_key: str, timeout: int) -> dict:
@@ -502,7 +532,9 @@ def qwen_extract_loads(image_path: Path, *, model: str, endpoint: str, api_key: 
         },
         method="POST",
     )
-    data = request_json_with_retry(req, timeout=timeout)
+    data = tracked_qwen_request(
+        req, timeout=timeout, model=model, call_type="qwen_image_classification"
+    )
 
     content = data["choices"][0]["message"]["content"]
     parsed = parse_model_json(content)
@@ -557,7 +589,9 @@ def qwen_analyze_layout(image_path: Path, *, model: str, endpoint: str, api_key:
         },
         method="POST",
     )
-    data = request_json_with_retry(req, timeout=timeout)
+    data = tracked_qwen_request(
+        req, timeout=timeout, model=model, call_type="qwen_layout_analysis"
+    )
 
     content = data["choices"][0]["message"]["content"]
     parsed = parse_model_json(content)
@@ -581,7 +615,9 @@ def qwen_analyze_image_scope(image_path: Path, *, model: str, endpoint: str, api
     }
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(endpoint, data=body, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
-    data = request_json_with_retry(req, timeout=timeout)
+    data = tracked_qwen_request(
+        req, timeout=timeout, model=model, call_type="qwen_image_scope"
+    )
     content = data["choices"][0]["message"]["content"]
     result = normalize_image_scope_result(parse_model_json(content))
     result["raw_content"] = content
@@ -624,7 +660,9 @@ def qwen_locate_diagram(
         },
         method="POST",
     )
-    data = request_json_with_retry(req, timeout=timeout)
+    data = tracked_qwen_request(
+        req, timeout=timeout, model=model, call_type="qwen_diagram_location"
+    )
 
     content = data["choices"][0]["message"]["content"]
     parsed = parse_model_json(content)
@@ -683,7 +721,9 @@ def qwen_verify_diagram(
         },
         method="POST",
     )
-    data = request_json_with_retry(req, timeout=timeout)
+    data = tracked_qwen_request(
+        req, timeout=timeout, model=model, call_type="qwen_diagram_verification"
+    )
     content = data["choices"][0]["message"]["content"]
     parsed = parse_model_json(content)
     confidence = normalize_chapter_confidence(parsed.get("confidence"))

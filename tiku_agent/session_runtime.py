@@ -14,6 +14,11 @@ from tiku_agent.session_store import SessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_log import JsonlTaskLogger, TaskLogEntry, TaskLogger
 from tiku_agent.tools import AgentToolConfig
+from tiku_shared.model_costs import (
+    ModelCostCollector,
+    SQLiteModelCostLedger,
+    model_cost_scope,
+)
 
 
 AgentFactory = Callable[[AgentState], TikuSearchAgent]
@@ -29,11 +34,13 @@ class AgentSessionRuntime:
         *,
         artifacts: SessionArtifacts | None = None,
         task_logger: TaskLogger | None = None,
+        cost_ledger: SQLiteModelCostLedger | None = None,
         agent_factory: AgentFactory | None = None,
     ) -> None:
         self.store = store
         self.artifacts = artifacts or SessionArtifacts()
         self.task_logger = task_logger or JsonlTaskLogger()
+        self.cost_ledger = cost_ledger
         self.agent_factory = agent_factory
 
     def handle_image(
@@ -141,11 +148,19 @@ class AgentSessionRuntime:
         phase_before = state.phase
         started_at = datetime.now(UTC)
         started = time.perf_counter()
+        task_id = uuid4().hex
+        cost_collector = ModelCostCollector(
+            run_id=task_id,
+            session_key=session_key(clean_session_id),
+            task_kind=kind,
+            started_at=started_at.isoformat(),
+        )
         agent = self._make_agent(state, progress=progress)
         response: AgentResponse | None = None
         error_kind = ""
         try:
-            response = handler(agent)
+            with model_cost_scope(cost_collector):
+                response = handler(agent)
             if response.intent == "cancel":
                 self.store.clear(clean_session_id)
                 self.artifacts.clear_session(clean_session_id)
@@ -156,8 +171,9 @@ class AgentSessionRuntime:
             error_kind = type(exc).__name__
             raise
         finally:
+            outcome = _task_outcome(agent.state, response, error_kind)
             self._write_task_log(
-                task_id=uuid4().hex,
+                task_id=task_id,
                 session_id=clean_session_id,
                 kind=kind,
                 started_at=started_at,
@@ -167,6 +183,19 @@ class AgentSessionRuntime:
                 response=response,
                 error_kind=error_kind,
             )
+            if self.cost_ledger is not None:
+                try:
+                    if agent.state.task_revision > 0:
+                        cost_collector.search_key = (
+                            f"{cost_collector.session_key}:{agent.state.task_revision}"
+                        )
+                    self.cost_ledger.write_run(
+                        cost_collector,
+                        finished_at=datetime.now(UTC).isoformat(),
+                        outcome=outcome,
+                    )
+                except Exception:  # noqa: BLE001 - cost observability must never break a user turn.
+                    pass
 
     def _make_agent(
         self,
