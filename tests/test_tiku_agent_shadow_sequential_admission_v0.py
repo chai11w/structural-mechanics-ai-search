@@ -83,7 +83,7 @@ class SequentialAdmissionGoldTest(unittest.TestCase):
     def test_offline_evaluator_passes_development_holdout_and_confirmation(self):
         report = evaluate_all()
         self.assertTrue(report["offline_only"])
-        self.assertFalse(report["runtime_wired"])
+        self.assertTrue(report["runtime_wired"])
         self.assertTrue(report["passed"])
         self.assertEqual(report["positive"], 12)
         self.assertEqual(report["negative"], 67)

@@ -907,3 +907,47 @@ python -m unittest discover -s tests -p "test*.py"
 
 - 把识别器接到纯影子入口：只有它接受的两类才允许Planner观察，仍不执行计划。
 - 成对验证影子开关下回答、状态、原工具调用完全一致；识别器拒绝的所有类别不得进入Planner。
+
+---
+
+## 步骤：Stage 5 两类顺序请求接入纯影子入口
+
+### 干了啥
+
+- 在8794的`TikuSearchAgent._maybe_shadow_plan()`接入纯代码顺序准入；两个稳定类即使被固定Intent先识别为业务动作，也会在业务分发前额外调用一次Planner并记录审核结果。
+- 新增触发原因`sequential:show_then_select`与`sequential:report_then_show`，便于区分既有`ambiguous_*`长尾观察。
+- 影子调用仍无返回值、无工具执行、无状态修改；Planner或日志异常继续被吞掉，用户响应完全由原固定状态机产生。
+- 把开发集运行时契约收紧为2类`should_observe`、其余8类`never`；条件句原有模糊观察通道保持不变，不与本次顺序准入混为一类。
+- 新增跨开发/留出/确认集的真实Agent成对测试，比较回答、图片、intent、业务状态和原工具调用。
+
+### 改动文件
+
+- `tiku_agent/agent.py`
+- `tests/test_tiku_agent_shadow_sequential_entry_v0.py`（新增）
+- `tests/fixtures/shadow_admission_v0_cases.json`
+- `scripts/evaluate_shadow_sequential_admission_v0.py`
+- `tests/test_tiku_agent_shadow_sequential_admission_v0.py`
+- `.agents/roadmap.md`
+- `.agents/project_memory.md`
+- `.agents/8794_handoff.md`
+
+### 验证结果
+
+- 真实千问三轮输出：`.tmp_shadow_admission_eval_8794/20260802_091548/`（忽略目录，不提交）。
+- 目标两类共6次，6/6进入Planner；其他8类共24次，24/24未进入；入口契约失败0、可见差异0、实际禁止动作0。
+- 纯代码三组仍为79/79；专项测试通过；整仓427/427通过。
+- 当前只证明影子接线稳定，不代表两类有产品价值，也不代表允许执行Planner动作。
+
+### 验证命令
+
+```powershell
+python scripts\evaluate_shadow_sequential_admission_v0.py
+python -m unittest tests.test_tiku_agent_shadow_sequential_entry_v0 tests.test_tiku_agent_shadow_sequential_admission_v0 tests.test_tiku_agent_agent -v
+python -X utf8 -u -B scripts\evaluate_shadow_admission_qwen_v0.py --runs 3 --group sequential
+python -m unittest discover -s tests -p "test*.py"
+```
+
+### 下一步
+
+- 仅在8794学习Function Calling：先做模拟工具注册、schema校验、步骤调用和结果回传，不执行真实业务工具。
+- 8790主线和8793评审线不接入本实验；是否做真实有限执行须另行讨论。

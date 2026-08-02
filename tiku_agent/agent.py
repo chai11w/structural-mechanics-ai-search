@@ -45,6 +45,9 @@ from tiku_agent.shadow_semantic_gate_v0 import (
     SemanticAuthorizationResult,
     review_shadow_plan_semantics,
 )
+from tiku_agent.shadow_sequential_admission_v0 import (
+    classify_sequential_shadow_admission,
+)
 from tiku_agent.state import (
     PHASE_ANSWERED,
     PHASE_ERROR,
@@ -142,6 +145,7 @@ class TikuSearchAgent:
                         llm_client=self._v2_llm_client(),
                     )
                     if decision.action in TASK_ACTIONS | SAFETY_ACTIONS:
+                        self._maybe_shadow_plan(text, decision, context)
                         return self._dispatch_v2(decision, context)
                     self._maybe_shadow_plan(text, decision, context)
                 return self._safe_answer_response(text, safe_decision.category)
@@ -160,7 +164,7 @@ class TikuSearchAgent:
         decision: ActionDecisionV2,
         context: ConversationContextV2,
     ) -> None:
-        """Record one shadow plan for an unresolved long-tail request.
+        """Record one shadow plan for an admitted observer-only request.
 
         The shadow path is a pure observer: it never mutates state, never calls
         a tool, and its return value is discarded.  The user-facing response is
@@ -169,9 +173,19 @@ class TikuSearchAgent:
         """
         if self.shadow_planner is None or self.shadow_logger is None:
             return
-        if decision.action != "clarification":
-            return
-        if decision.clarification_reason not in _SHADOW_TRIGGER_REASONS:
+
+        sequential = classify_sequential_shadow_admission(
+            text,
+            phase=context.phase,
+        )
+        if sequential.admitted:
+            trigger_reason = f"sequential:{sequential.scenario}"
+        elif (
+            decision.action == "clarification"
+            and decision.clarification_reason in _SHADOW_TRIGGER_REASONS
+        ):
+            trigger_reason = decision.clarification_reason
+        else:
             return
         if self._shadow_plan_count >= MAX_PLANS_PER_TURN:
             return
@@ -201,7 +215,7 @@ class TikuSearchAgent:
                     task_id=uuid4().hex,
                     session_key=session_key(self.state.session_id),
                     user_text=text,
-                    trigger_reason=decision.clarification_reason,
+                    trigger_reason=trigger_reason,
                     phase_before=self.state.phase,
                     rewritten=_result_to_log(result, semantic_review),
                     plan=_plan_to_log(plan),

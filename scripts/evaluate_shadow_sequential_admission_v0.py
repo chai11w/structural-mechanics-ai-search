@@ -68,7 +68,7 @@ def evaluate_all() -> dict[str, Any]:
     splits = [evaluate_split(name, path) for name, path in SPLITS.items()]
     return {
         "offline_only": True,
-        "runtime_wired": False,
+        "runtime_wired": True,
         "splits": splits,
         "total": sum(item["total"] for item in splits),
         "positive": sum(item["positive"] for item in splits),

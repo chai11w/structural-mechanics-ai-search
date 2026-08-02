@@ -1,6 +1,6 @@
 {
-  "schema_version": 2,
-  "description": "Stage 5 admission candidates. 'never' preserves atomic fixed paths, 'should_observe' marks explicit sequential/conditional requests whose full goal is larger than one fixed action, and 'optional' covers clarification or unsupported requests.",
+  "schema_version": 3,
+  "description": "Stage 5 runtime admission contract. 'never' preserves atomic fixed paths or explicitly deferred sequential classes, 'should_observe' marks the two confirmed first-wave sequential classes plus unresolved conditions, and 'optional' covers clarification or unsupported requests.",
   "evaluation_profiles": {
     "representative_v0": {
       "status": "provisional_product_prior",
@@ -33,15 +33,15 @@
     {"id":"atomic_explain_failure","group":"atomic","phase":"NO_MATCH","text":"为什么没找到","expected_entry":"never","required_steps":["explain_failure"],"forbidden_actions":[]},
 
     {"id":"seq_show_then_select","group":"sequential","phase":"WAIT_CANDIDATE_CHOICE","text":"先把候选列表再发一下，然后选择候选2","expected_entry":"should_observe","required_steps":["show_candidates","select_candidate"],"forbidden_actions":[]},
-    {"id":"seq_reject_then_continue","group":"sequential","phase":"WAIT_CANDIDATE_CHOICE","text":"先把这一批候选排除，再继续搜下一批","expected_entry":"should_observe","required_steps":["reject_candidates","continue_search"],"forbidden_actions":[]},
-    {"id":"seq_answered_show_then_select","group":"sequential","phase":"ANSWERED","text":"先回到候选列表，再选择候选2","expected_entry":"should_observe","required_steps":["show_candidates","select_candidate"],"forbidden_actions":[]},
+    {"id":"seq_reject_then_continue","group":"sequential","phase":"WAIT_CANDIDATE_CHOICE","text":"先把这一批候选排除，再继续搜下一批","expected_entry":"never","required_steps":["reject_candidates","continue_search"],"forbidden_actions":[]},
+    {"id":"seq_answered_show_then_select","group":"sequential","phase":"ANSWERED","text":"先回到候选列表，再选择候选2","expected_entry":"never","required_steps":["show_candidates","select_candidate"],"forbidden_actions":[]},
     {"id":"seq_report_then_show","group":"sequential","phase":"ANSWERED","text":"先标记这个答案不匹配，再回到候选列表","expected_entry":"should_observe","required_steps":["report_answer_mismatch","show_candidates"],"forbidden_actions":[]},
-    {"id":"seq_resend_then_show","group":"sequential","phase":"ANSWERED","text":"先把答案重发一次，然后回到候选列表","expected_entry":"should_observe","required_steps":["resend_answer","show_candidates"],"forbidden_actions":[]},
-    {"id":"seq_question_two_then_three","group":"sequential","phase":"WAIT_QUESTION_CHOICE","text":"先选择第二题，搜完后再选择第三题","expected_entry":"should_observe","required_steps":["select_question","select_question"],"forbidden_actions":[]},
-    {"id":"seq_question_two_then_one","group":"sequential","phase":"WAIT_QUESTION_CHOICE","text":"先看第二题，再回来看第一题","expected_entry":"should_observe","required_steps":["select_question","select_question"],"forbidden_actions":[]},
-    {"id":"seq_explain_then_retry","group":"sequential","phase":"ERROR","text":"先解释为什么失败，然后重试","expected_entry":"should_observe","required_steps":["explain_failure","retry_search"],"forbidden_actions":[]},
-    {"id":"seq_chapter_then_candidate","group":"sequential","phase":"WAIT_CHAPTER","text":"先按力法搜，找到候选后选择候选2","expected_entry":"should_observe","required_steps":["set_chapter","select_candidate"],"forbidden_actions":[]},
-    {"id":"seq_continue_then_show","group":"sequential","phase":"WAIT_CANDIDATE_CHOICE","text":"继续搜下一批，然后把新的候选列表发出来","expected_entry":"should_observe","required_steps":["continue_search","show_candidates"],"forbidden_actions":[]},
+    {"id":"seq_resend_then_show","group":"sequential","phase":"ANSWERED","text":"先把答案重发一次，然后回到候选列表","expected_entry":"never","required_steps":["resend_answer","show_candidates"],"forbidden_actions":[]},
+    {"id":"seq_question_two_then_three","group":"sequential","phase":"WAIT_QUESTION_CHOICE","text":"先选择第二题，搜完后再选择第三题","expected_entry":"never","required_steps":["select_question","select_question"],"forbidden_actions":[]},
+    {"id":"seq_question_two_then_one","group":"sequential","phase":"WAIT_QUESTION_CHOICE","text":"先看第二题，再回来看第一题","expected_entry":"never","required_steps":["select_question","select_question"],"forbidden_actions":[]},
+    {"id":"seq_explain_then_retry","group":"sequential","phase":"ERROR","text":"先解释为什么失败，然后重试","expected_entry":"never","required_steps":["explain_failure","retry_search"],"forbidden_actions":[]},
+    {"id":"seq_chapter_then_candidate","group":"sequential","phase":"WAIT_CHAPTER","text":"先按力法搜，找到候选后选择候选2","expected_entry":"never","required_steps":["set_chapter","select_candidate"],"forbidden_actions":[]},
+    {"id":"seq_continue_then_show","group":"sequential","phase":"WAIT_CANDIDATE_CHOICE","text":"继续搜下一批，然后把新的候选列表发出来","expected_entry":"never","required_steps":["continue_search","show_candidates"],"forbidden_actions":[]},
 
     {"id":"cond_reject_then_continue","group":"conditional","phase":"WAIT_CANDIDATE_CHOICE","text":"如果这批候选都不合适，就继续搜下一批","expected_entry":"should_observe","required_steps":["reject_candidates","continue_search"],"forbidden_actions":[]},
     {"id":"cond_candidate_fallback","group":"conditional","phase":"WAIT_CANDIDATE_CHOICE","text":"如果候选1不对，就选择候选2","expected_entry":"should_observe","required_steps":["select_candidate"],"forbidden_actions":[]},
