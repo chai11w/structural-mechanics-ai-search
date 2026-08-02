@@ -33,6 +33,14 @@ if str(BASE) not in sys.path:
 from multi_agent_pipeline import MultiAgentCoordinator, is_auto_chapter  # noqa: E402
 from search import ANSWER_OUTPUT, DISPLAY_MAX_RESULTS, answer, cfg  # noqa: E402
 from scripts.chapter_judgment_log import append_chapter_judgment_log  # noqa: E402
+from scripts.admin_fee_query import (  # noqa: E402
+    AdminFeeQueryService,
+    DEFAULT_CURSOR_FILE_NAME,
+    DEFAULT_FEE_DB,
+    REPLY_FAILURE,
+    is_admin_fee_query,
+    normalize_admin_sender_ids,
+)
 from scripts.feishu_delete_flow import (  # noqa: E402
     DeletePlan,
     FeishuDeleteService,
@@ -86,6 +94,9 @@ class FeishuTikuOptions:
     rerank_top: int = DISPLAY_MAX_RESULTS
     max_message_age_seconds: int = 15 * 60
     working_reaction: str | None = "OK"
+    admin_sender_ids: tuple[str, ...] = ()
+    admin_fee_db: Path = DEFAULT_FEE_DB
+    admin_fee_state_dir: Path | None = None
 
 
 @dataclass
@@ -271,6 +282,11 @@ class TikuBot:
         self.sessions = sessions or TikuSessionStore(options.session_ttl_seconds)
         self.store_service = store_service or FeishuStoreService(dry_run=options.dry_run)
         self.delete_service = delete_service or FeishuDeleteService(dry_run=options.dry_run)
+        self.admin_fee_query = AdminFeeQueryService(
+            fee_db=options.admin_fee_db,
+            state_path=(options.admin_fee_state_dir or options.temp_dir) / DEFAULT_CURSOR_FILE_NAME,
+            admin_sender_ids=options.admin_sender_ids,
+        )
         self._chapter_modes: dict[str, str] = {}
         self._mode_lock = threading.Lock()
 
@@ -291,6 +307,10 @@ class TikuBot:
 
     def receive_text(self, sender: str, text: str) -> BotResponse:
         clean = text.strip()
+
+        if is_admin_fee_query(clean):
+            return self._admin_fee_query_reply(sender)
+
         session = self.sessions.get(sender)
 
         if session.state == DELETE_CONFIRM_STATE:
@@ -361,6 +381,14 @@ class TikuBot:
             return BotResponse(texts=["请先发送题目图片，然后我会用这个章节检索。"])
         mode_label = "自动章节" if self.chapter_mode(sender) == CHAPTER_MODE_AUTO else "手动章节"
         return BotResponse(texts=[f"请先发送题目图片。当前模式：{mode_label}。发送“手动”或“自动”可切换。"])
+
+    def _admin_fee_query_reply(self, sender: str) -> BotResponse:
+        try:
+            reply = self.admin_fee_query.query_reply(sender)
+        except Exception as exc:  # noqa: BLE001 - must never affect other flows.
+            print(f"admin fee query failed: {exc}", file=sys.stderr, flush=True)
+            reply = REPLY_FAILURE
+        return BotResponse(texts=[reply])
 
     def _start_delete_candidate(
         self,
@@ -1691,6 +1719,7 @@ def load_options(args: argparse.Namespace) -> FeishuTikuOptions:
     app_id = get_env_or_user(args.app_id_env) or cfg.get("feishu_app_id", "")
     app_secret = get_env_or_user(args.app_secret_env) or cfg.get("feishu_app_secret", "")
     verification_token = get_env_or_user(args.verification_token_env) or cfg.get("feishu_verification_token")
+    admin_sender_ids = normalize_admin_sender_ids(cfg.get("feishu_admin_sender_ids"))
     return FeishuTikuOptions(
         app_id=app_id,
         app_secret=app_secret,
@@ -1702,6 +1731,7 @@ def load_options(args: argparse.Namespace) -> FeishuTikuOptions:
         rerank_top=args.rerank_top,
         max_message_age_seconds=args.max_message_age_minutes * 60,
         working_reaction=args.working_reaction or None,
+        admin_sender_ids=admin_sender_ids,
     )
 
 
