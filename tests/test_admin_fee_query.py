@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import shutil
 import sqlite3
+import time
 import unittest
 from uuid import uuid4
 
@@ -13,14 +14,25 @@ from scripts.admin_fee_query import (
     REPLY_FAILURE,
     REPLY_NO_PERMISSION,
     REPLY_NO_RECORDS,
+    enroll_sender_once,
     is_admin_fee_query,
     load_cursor,
+    load_enrolled_sender,
     normalize_admin_sender_ids,
     query_cost_summary,
     resolve_interval,
     save_cursor,
+    _format_cny,
+    _format_cny,
 )
-from scripts.feishu_tiku_bot import FeishuTikuOptions, TikuBot, TikuSession, load_options
+from scripts.feishu_tiku_bot import (
+    FeishuClient,
+    FeishuTikuBridge,
+    FeishuTikuOptions,
+    TikuBot,
+    TikuSession,
+    load_options,
+)
 from tiku_shared.model_costs import ModelCostCollector, SQLiteModelCostLedger
 
 
@@ -128,6 +140,28 @@ class AdminFeeQueryTest(unittest.TestCase):
         self.assertEqual(normalize_admin_sender_ids("admin"), ("admin",))
         self.assertEqual(normalize_admin_sender_ids(123), ())
 
+    def test_cny_display_rounds_to_four_decimal_places(self):
+        self.assertEqual(_format_cny(9601), "0.0096")
+        self.assertEqual(_format_cny(999999), "1")
+        self.assertEqual(_format_cny(10000), "0.01")
+
+    def test_cny_display_rounds_to_four_decimal_places(self):
+        self.assertEqual(_format_cny(9601), "0.0096")
+        self.assertEqual(_format_cny(999999), "1")
+        self.assertEqual(_format_cny(10000), "0.01")
+
+    def test_local_enrollment_keeps_first_sender_and_never_overwrites(self):
+        state = self.directory / "enrolled_sender.json"
+        self.assertTrue(enroll_sender_once(state, "admin-1"))
+        self.assertFalse(enroll_sender_once(state, "admin-2"))
+        self.assertEqual(load_enrolled_sender(state), "admin-1")
+
+    def test_malformed_local_enrollment_fails_closed(self):
+        state = self.directory / "enrolled_sender.json"
+        state.write_text("not-json", encoding="utf-8")
+        with self.assertRaises(Exception):
+            load_enrolled_sender(state)
+
     def test_first_query_counts_last_24_hours_and_persists_cursor(self):
         database = self.directory / "costs.sqlite3"
         write_run(database, run_id="r1", search_key="key-a", started_at=self.iso(-120), cost_micros=1000)
@@ -139,8 +173,8 @@ class AdminFeeQueryTest(unittest.TestCase):
             admin_sender_ids=("admin-1",),
         )
         reply = service.query_reply("admin-1")
-        self.assertIn("有费用更新 1 次搜题", reply)
-        self.assertIn("总 0.001 元", reply)
+        self.assertIn("新增搜题：1 次", reply)
+        self.assertIn("本区间总费用：0.001 元", reply)
         cutoff = load_cursor(state, "admin-1")
         self.assertIsNotNone(cutoff)
         parsed = datetime.fromisoformat(cutoff)
@@ -160,9 +194,9 @@ class AdminFeeQueryTest(unittest.TestCase):
             admin_sender_ids=("admin-1",),
         )
         reply = service.query_reply("admin-1")
-        self.assertIn("有费用更新 1 次搜题", reply)
-        self.assertIn("总 0.007 元", reply)
-        self.assertIn("最高 0.007 元", reply)
+        self.assertIn("新增搜题：1 次", reply)
+        self.assertIn("本区间总费用：0.007 元", reply)
+        self.assertIn("最贵一次：0.007 元", reply)
         self.assertNotIn("0.999", reply)
 
     def test_aggregation_by_search_key_and_filters(self):
@@ -276,8 +310,8 @@ class AdminFeeQueryTest(unittest.TestCase):
             admin_sender_ids=("admin-1",),
         )
         reply = service.query_reply("admin-1")
-        self.assertIn("有费用更新 0 次搜题", reply)
-        self.assertIn("已记录截止", reply)
+        self.assertIn("新增搜题：0 次", reply)
+        self.assertIn("已记录本次截止时间", reply)
         self.assertIsNotNone(load_cursor(state, "admin-1"))
 
     def test_reply_has_no_sensitive_fields(self):
@@ -352,14 +386,14 @@ class AdminFeeBotIntegrationTest(unittest.TestCase):
         database = self.directory / "costs.sqlite3"
         write_run(database, run_id="r1", search_key="k1", started_at=self.iso(-5), cost_micros=9000)
         bot = self.make_bot(admins=("admin-1",), database=database)
-        self.assertIn("费用统计", "\n".join(bot.receive_text("admin-1", "?").texts))
-        self.assertIn("费用统计", "\n".join(bot.receive_text("admin-1", "？").texts))
+        self.assertIn("费用检查", "\n".join(bot.receive_text("admin-1", "?").texts))
+        self.assertIn("费用检查", "\n".join(bot.receive_text("admin-1", "？").texts))
 
         bot.sessions.save(
             "admin-1",
             TikuSession(state="waiting_choice", results=[{"rank": 1, "path": "x.jpg", "score": 1.0}]),
         )
-        self.assertIn("费用统计", "\n".join(bot.receive_text("admin-1", "?").texts))
+        self.assertIn("费用检查", "\n".join(bot.receive_text("admin-1", "?").texts))
         self.assertNotIn("费用统计", "\n".join(bot.receive_text("admin-1", "这道题怎么做？").texts))
 
     def test_bot_whitelist_denies_non_admin_and_empty_config(self):

@@ -5,6 +5,7 @@ param(
     [string]$PublicHost = $env:TIKU_PUBLIC_HOST,
     [int]$MaxMessageAgeMinutes = 15,
     [switch]$ExternalTunnel,
+    [switch]$EnrollAdminSenderOnce,
     [switch]$NoMonitorWindows
 )
 
@@ -87,6 +88,9 @@ $arguments = @(
     "-Port", $Port,
     "-MaxMessageAgeMinutes", $MaxMessageAgeMinutes
 )
+if ($EnrollAdminSenderOnce) {
+    $arguments += "-EnrollAdminSenderOnce"
+}
 if ($TunnelName) {
     $arguments += @("-TunnelName", $TunnelName)
 }

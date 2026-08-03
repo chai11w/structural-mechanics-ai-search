@@ -7,6 +7,6 @@
 新对话推荐读取顺序：
 
 1. `AGENTS.md`
-2. `.agents/project_memory.md`
+2. `.claude/project_memory.md`
 3. `SKILL.md`
 4. 按任务读取相关代码

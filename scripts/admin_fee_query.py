@@ -6,9 +6,9 @@ never trigger this feature.
 
 The 8790 model-cost ledger (``.tmp_tiku_agent_v2_prod_8790/model_costs.sqlite3``)
 is opened with SQLite read-only URI semantics and a ``query_only`` pragma;
-this module never writes to it.  The per-admin cursor is persisted inside the
-8788 bot's own state directory (``admin_fee_cursor.json``), completely
-separate from the 8790 runtime state.
+this module never writes to it.  The per-admin cursor and optional one-time
+locally enrolled sender are persisted inside the 8788 bot's own state
+directory, completely separate from the 8790 runtime state.
 
 Cursor semantics:
 - first successful query counts the trailing 24 hours;
@@ -38,6 +38,7 @@ from tiku_shared.model_costs import utc_now
 BASE = Path(__file__).resolve().parents[1]
 DEFAULT_FEE_DB = BASE / ".tmp_tiku_agent_v2_prod_8790" / "model_costs.sqlite3"
 DEFAULT_CURSOR_FILE_NAME = "admin_fee_cursor.json"
+DEFAULT_ENROLLED_SENDER_FILE_NAME = "admin_fee_enrolled_sender.json"
 
 ADMIN_FEE_TRIGGERS = ("?", "？")
 FIRST_QUERY_WINDOW_HOURS = 24
@@ -99,6 +100,48 @@ def normalize_admin_sender_ids(raw: Any) -> tuple[str, ...]:
     except TypeError:
         return ()
     return tuple(str(item).strip() for item in items if str(item).strip())
+
+
+def load_enrolled_sender(state_file: Path | str) -> str | None:
+    """Read the single locally enrolled sender without exposing its value."""
+
+    state_file = Path(state_file)
+    if not state_file.exists():
+        return None
+    if not state_file.is_file():
+        raise FeeQueryError("enrollment_read_failed")
+    try:
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FeeQueryError("enrollment_read_failed") from exc
+    sender = data.get("sender") if isinstance(data, dict) else None
+    if not isinstance(sender, str) or not sender.strip():
+        raise FeeQueryError("enrollment_read_failed")
+    return sender.strip()
+
+
+def enroll_sender_once(state_file: Path | str, sender: str) -> bool:
+    """Atomically store the first explicitly enrolled sender; never replace it."""
+
+    state_file = Path(state_file)
+    sender = str(sender or "").strip()
+    if not sender:
+        raise FeeQueryError("enrollment_write_failed")
+    with _STATE_LOCK:
+        existing = load_enrolled_sender(state_file)
+        if existing is not None:
+            return False
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        temp = state_file.with_name(state_file.name + ".tmp")
+        try:
+            temp.write_text(
+                json.dumps({"version": 1, "sender": sender, "enrolled_at": utc_now()}, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            os.replace(temp, state_file)
+        except OSError as exc:
+            raise FeeQueryError("enrollment_write_failed") from exc
+    return True
 
 
 def resolve_interval(last_cutoff: str | None, query_started_at: str) -> tuple[str, str]:
@@ -250,8 +293,8 @@ def format_timestamp(iso: str) -> str:
 
 
 def _format_cny(micros: int) -> str:
-    value = round(int(micros or 0) / 1_000_000, 6)
-    return format(value, ".6f").rstrip("0").rstrip(".") or "0"
+    value = round(int(micros or 0) / 1_000_000, 4)
+    return format(value, ".4f").rstrip("0").rstrip(".") or "0"
 
 
 def format_cost_summary(
@@ -260,13 +303,21 @@ def format_cost_summary(
     interval_end: str,
     cutoff: str,
 ) -> str:
-    return (
-        f"费用统计 {format_timestamp(interval_start)}~{format_timestamp(interval_end)}："
-        f"有费用更新 {summary.search_count} 次搜题，超0.05元 {summary.over_count} 次，"
-        f"最高 {_format_cny(summary.max_cost_micros)} 元，"
-        f"总 {_format_cny(summary.total_cost_micros)} 元。"
-        f"已记录截止 {format_timestamp(cutoff)}。"
-    )
+    lines = [
+        "费用检查",
+        f"区间：{format_timestamp(interval_start)}—{format_timestamp(interval_end)}",
+        f"新增搜题：{summary.search_count} 次",
+    ]
+    if summary.over_count:
+        lines.append(f"超过0.05元：{summary.over_count} 次")
+    else:
+        lines.append("没有超过0.05元")
+    lines.extend([
+        f"最贵一次：{_format_cny(summary.max_cost_micros)} 元",
+        f"本区间总费用：{_format_cny(summary.total_cost_micros)} 元",
+        f"已记录本次截止时间：{format_timestamp(cutoff)}",
+    ])
+    return "\n".join(lines)
 
 
 class AdminFeeQueryService:

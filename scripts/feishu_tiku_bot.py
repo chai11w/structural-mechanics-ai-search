@@ -36,9 +36,12 @@ from scripts.chapter_judgment_log import append_chapter_judgment_log  # noqa: E4
 from scripts.admin_fee_query import (  # noqa: E402
     AdminFeeQueryService,
     DEFAULT_CURSOR_FILE_NAME,
+    DEFAULT_ENROLLED_SENDER_FILE_NAME,
     DEFAULT_FEE_DB,
     REPLY_FAILURE,
+    enroll_sender_once,
     is_admin_fee_query,
+    load_enrolled_sender,
     normalize_admin_sender_ids,
 )
 from scripts.feishu_delete_flow import (  # noqa: E402
@@ -97,6 +100,7 @@ class FeishuTikuOptions:
     admin_sender_ids: tuple[str, ...] = ()
     admin_fee_db: Path = DEFAULT_FEE_DB
     admin_fee_state_dir: Path | None = None
+    enroll_admin_sender_once: bool = False
 
 
 @dataclass
@@ -282,13 +286,41 @@ class TikuBot:
         self.sessions = sessions or TikuSessionStore(options.session_ttl_seconds)
         self.store_service = store_service or FeishuStoreService(dry_run=options.dry_run)
         self.delete_service = delete_service or FeishuDeleteService(dry_run=options.dry_run)
+        state_dir = options.admin_fee_state_dir or options.temp_dir
+        enrolled_sender = self._load_enrolled_admin_sender(state_dir)
         self.admin_fee_query = AdminFeeQueryService(
             fee_db=options.admin_fee_db,
-            state_path=(options.admin_fee_state_dir or options.temp_dir) / DEFAULT_CURSOR_FILE_NAME,
-            admin_sender_ids=options.admin_sender_ids,
+            state_path=state_dir / DEFAULT_CURSOR_FILE_NAME,
+            admin_sender_ids=(*options.admin_sender_ids, *(() if enrolled_sender is None else (enrolled_sender,))),
         )
         self._chapter_modes: dict[str, str] = {}
         self._mode_lock = threading.Lock()
+
+    @staticmethod
+    def _load_enrolled_admin_sender(state_dir: Path) -> str | None:
+        try:
+            return load_enrolled_sender(state_dir / DEFAULT_ENROLLED_SENDER_FILE_NAME)
+        except Exception:  # noqa: BLE001 - invalid enrollment must fail closed.
+            return None
+
+    def enroll_admin_sender_once(self, sender: str) -> bool:
+        """Capture one sender only when the local startup mode explicitly allows it."""
+
+        if not self.options.enroll_admin_sender_once or str(sender).strip() == "feishu":
+            return False
+        try:
+            enrolled = enroll_sender_once(
+                (self.options.admin_fee_state_dir or self.options.temp_dir)
+                / DEFAULT_ENROLLED_SENDER_FILE_NAME,
+                sender,
+            )
+        except Exception:  # noqa: BLE001 - enrollment must never change chat behavior.
+            return False
+        if enrolled:
+            self.admin_fee_query.admin_sender_ids = frozenset(
+                (*self.admin_fee_query.admin_sender_ids, str(sender).strip())
+            )
+        return enrolled
 
     def receive_image(self, sender: str, image_path: Path) -> BotResponse:
         session = self.sessions.get(sender)
@@ -1042,6 +1074,7 @@ class FeishuTikuBridge:
             return {"ok": True, "ignored": "missing-message-id"}
         if is_stale_message(extract_message_created_at(payload, event, message), self.options.max_message_age_seconds):
             return {"ok": True, "ignored": "stale-message", "message_id": message_id}
+        self.bot.enroll_admin_sender_once(sender)
 
         thread = threading.Thread(
             target=self._process_and_reply,
@@ -1732,6 +1765,7 @@ def load_options(args: argparse.Namespace) -> FeishuTikuOptions:
         max_message_age_seconds=args.max_message_age_minutes * 60,
         working_reaction=args.working_reaction or None,
         admin_sender_ids=admin_sender_ids,
+        enroll_admin_sender_once=args.enroll_admin_sender_once,
     )
 
 
@@ -1764,10 +1798,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-message-age-minutes", type=int, default=15)
     parser.add_argument("--top", type=int, default=3)
     parser.add_argument("--rerank-top", type=int, default=DISPLAY_MAX_RESULTS)
+    parser.add_argument("--working-reaction", default="OK", help="收到图片后给原消息添加的 emoji_type；留空则关闭")
     parser.add_argument(
-        "--working-reaction",
-        default="OK",
-        help="收到图片后给原消息添加的 emoji_type；留空则关闭",
+        "--enroll-admin-sender-once",
+        action="store_true",
+        help="仅本次启动：从下一条已验证的飞书消息本地绑定费用查询管理员，不在飞书回传身份标识",
     )
 
     sub = parser.add_subparsers(dest="cmd")

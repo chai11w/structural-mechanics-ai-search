@@ -11,7 +11,7 @@ Codex 在本项目中是题库检索与维护助手。优先保证检索命令�
 ## 上下文读取顺序
 
 1. `AGENTS.md`
-2. `.agents/project_memory.md`
+2. `.claude/project_memory.md`
 3. `SKILL.md`
 4. `README.md`
 5. `multi_agent_pipeline.py`、`scripts/feishu_tiku_bot.py`、`scripts/feishu_store_flow.py`
@@ -38,7 +38,7 @@ Codex 在本项目中是题库检索与维护助手。优先保证检索命令�
 
 ## 优化阶段协作规则
 
-- 开始优化前先读 `AGENTS.md` 和 `.agents/project_memory.md`，再读相关代码。
+- 开始优化前先读 `AGENTS.md` 和 `.claude/project_memory.md`，再读相关代码。
 - 优先区分“目标”和“当前方案”：不要因为已有实现能跑，就默认它是最优路径。
 - 每次优化尽量保留可回退的小步改动，并说明验证方式。
 - 优化 CLI、飞书、Agent 或 Skill 文档任一处时，检查其他入口是否需要同步。
