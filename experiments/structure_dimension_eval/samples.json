@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "description": "Balanced, reproducible 10-image sample for the isolated structure total-span/total-height prefilter experiment. Paths are relative to the configured question-bank root; no answer images are included.",
+  "samples": [
+    {
+      "id": "beam_single",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/1单跨梁/题目a/1力/10.jpg",
+      "selection_note": "单跨梁"
+    },
+    {
+      "id": "beam_continuous",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/3跨/1力/11.jpg",
+      "selection_note": "三跨连续梁"
+    },
+    {
+      "id": "frame_l",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/1L形/具体/14.jpg",
+      "selection_note": "L 形钢架"
+    },
+    {
+      "id": "frame_portal",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/4门/10.jpg",
+      "selection_note": "门式钢架"
+    },
+    {
+      "id": "frame_t",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/5T/20.jpg",
+      "selection_note": "T 形钢架"
+    },
+    {
+      "id": "truss_triangle",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/所有杆/题目aa/三角/1.jpg",
+      "selection_note": "三角桁架"
+    },
+    {
+      "id": "truss_square",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/2方形/2个方/1.jpg",
+      "selection_note": "方形桁架"
+    },
+    {
+      "id": "arch",
+      "expected_structure_type": "拱",
+      "path": "2静定结构/4拱/1内力/题目/1.jpg",
+      "selection_note": "普通拱"
+    },
+    {
+      "id": "arch_axis",
+      "expected_structure_type": "拱",
+      "path": "2静定结构/4拱/2合理拱轴线/题目/1.jpg",
+      "selection_note": "合理拱轴线"
+    },
+    {
+      "id": "composite",
+      "expected_structure_type": "组合结构",
+      "path": "2静定结构/6组合结构/题目1/1M/4.jpg",
+      "selection_note": "组合结构"
+    }
+  ]
+}
