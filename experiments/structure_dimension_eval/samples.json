@@ -1,66 +1,66 @@
 {
   "schema_version": 1,
-  "description": "Balanced, reproducible 10-image sample for the isolated structure total-span/total-height prefilter experiment. Paths are relative to the configured question-bank root; no answer images are included.",
+  "description": "Balanced, reproducible 10-image sample for the isolated structure total-span/total-height prefilter experiment. All image paths verified to exist under the main-bank root and to be catalogued in the letter bank (帮做_字母库) with a structure type. Only 梁/钢架/桁架 are included; 拱 and 组合结构 are excluded (arch needs computed height; combined structures are counted as 钢架 in the letter bank). No answer images.",
   "samples": [
     {
       "id": "beam_single",
       "expected_structure_type": "梁",
-      "path": "2静定结构/1单跨梁/题目a/1力/10.jpg",
-      "selection_note": "单跨梁"
+      "path": "2静定结构/1单跨梁/题目a/1均/1.jpg",
+      "selection_note": "单跨梁，Y=0，检验长=跨"
     },
     {
       "id": "beam_continuous",
       "expected_structure_type": "梁",
-      "path": "2静定结构/2多跨梁/内力图/题目2/3跨/1力/11.jpg",
-      "selection_note": "三跨连续梁"
+      "path": "2静定结构/2多跨梁/内力图/题目2/3跨/1力/34.jpg",
+      "selection_note": "三跨连续梁，检验 X=三跨相加"
+    },
+    {
+      "id": "beam_force_2span",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/2多未知量/题目/2.jpg",
+      "selection_note": "力法多未知量两跨梁"
     },
     {
       "id": "frame_l",
       "expected_structure_type": "钢架",
-      "path": "2静定结构/3钢架/1内力图/题目2/1L形/具体/14.jpg",
+      "path": "2静定结构/3钢架/1内力图/题目2/1L形/3.jpg",
       "selection_note": "L 形钢架"
     },
     {
       "id": "frame_portal",
       "expected_structure_type": "钢架",
-      "path": "2静定结构/3钢架/1内力图/题目2/4门/10.jpg",
+      "path": "2静定结构/3钢架/1内力图/题目2/4门/q/13.jpg",
       "selection_note": "门式钢架"
     },
     {
       "id": "frame_t",
       "expected_structure_type": "钢架",
-      "path": "2静定结构/3钢架/1内力图/题目2/5T/20.jpg",
+      "path": "4力法/2钢架/1单未知量/题目1/2T/2.jpg",
       "selection_note": "T 形钢架"
+    },
+    {
+      "id": "frame_two_story",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/5双层/22.jpg",
+      "selection_note": "双层钢架，检验 Y=两层相加"
     },
     {
       "id": "truss_triangle",
       "expected_structure_type": "桁架",
-      "path": "2静定结构/5桁架/所有杆/题目aa/三角/1.jpg",
+      "path": "2静定结构/5桁架/所有杆/题目aa/三角/18.jpg",
       "selection_note": "三角桁架"
     },
     {
       "id": "truss_square",
       "expected_structure_type": "桁架",
-      "path": "2静定结构/5桁架/指定杆/题目2/2方形/2个方/1.jpg",
-      "selection_note": "方形桁架"
+      "path": "2静定结构/5桁架/指定杆/题目2/2方形/3个方/17.jpg",
+      "selection_note": "方形桁架，3 个方单元"
     },
     {
-      "id": "arch",
-      "expected_structure_type": "拱",
-      "path": "2静定结构/4拱/1内力/题目/1.jpg",
-      "selection_note": "普通拱"
-    },
-    {
-      "id": "arch_axis",
-      "expected_structure_type": "拱",
-      "path": "2静定结构/4拱/2合理拱轴线/题目/1.jpg",
-      "selection_note": "合理拱轴线"
-    },
-    {
-      "id": "composite",
-      "expected_structure_type": "组合结构",
-      "path": "2静定结构/6组合结构/题目1/1M/4.jpg",
-      "selection_note": "组合结构"
+      "id": "truss_trapezoid",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/1梯形/1平行梯形/44.jpg",
+      "selection_note": "梯形桁架"
     }
   ]
 }

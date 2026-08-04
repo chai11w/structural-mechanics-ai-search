@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "description": "Human-verified long×width for the 10 sample letter-bank questions (2026-08-04). Canonical form: long=max(X,Y), width=min(X,Y); letters normalized to L; horizontal beams have Y=0 (width 0). beam_continuous corrected to 5L (Qwen said 4L, addition error); truss_trapezoid written directly from user measurement 18×4.",
+  "verdicts": [
+    {
+      "path": "2静定结构/1单跨梁/题目a/1均/1.jpg",
+      "long_width": "2L×0",
+      "note": "标注 a,a = 2a"
+    },
+    {
+      "path": "2静定结构/2多跨梁/内力图/题目2/3跨/1力/34.jpg",
+      "long_width": "5L×0",
+      "note": "标注 a,a/2,a/2,a,a/2,a/2,a = 5a；修正千问 4L"
+    },
+    {
+      "path": "4力法/1梁/2多未知量/题目/2.jpg",
+      "long_width": "L×0",
+      "note": "标注 l"
+    },
+    {
+      "path": "2静定结构/3钢架/1内力图/题目2/1L形/3.jpg",
+      "long_width": "L×L",
+      "note": "双模型一致"
+    },
+    {
+      "path": "2静定结构/3钢架/1内力图/题目2/4门/q/13.jpg",
+      "long_width": "L×L",
+      "note": "双模型一致"
+    },
+    {
+      "path": "4力法/2钢架/1单未知量/题目1/2T/2.jpg",
+      "long_width": "2L×L",
+      "note": "双模型长宽一致（类型均判组合结构，类别待定）"
+    },
+    {
+      "path": "4力法/3对称性/题目1/5双层/22.jpg",
+      "long_width": "2L×2L",
+      "note": "双模型长宽一致（类型有分歧）"
+    },
+    {
+      "path": "2静定结构/5桁架/所有杆/题目aa/三角/18.jpg",
+      "long_width": "12×3",
+      "note": "双模型一致"
+    },
+    {
+      "path": "2静定结构/5桁架/指定杆/题目2/2方形/3个方/17.jpg",
+      "long_width": "6L×2L",
+      "note": "双模型一致"
+    },
+    {
+      "path": "2静定结构/5桁架/指定杆/题目2/1梯形/1平行梯形/44.jpg",
+      "long_width": "18×4",
+      "note": "用户直接测得 长18 宽4"
+    }
+  ]
+}
