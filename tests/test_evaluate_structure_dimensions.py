@@ -32,10 +32,10 @@ class StructureDimensionEvaluationTests(unittest.TestCase):
         self.assertEqual(normalize_dimension(None), None)
 
     def test_canonical_dimensions_are_direct_rotation_invariant_long_width(self):
-        self.assertEqual(canonical_dimensions("6m", "3m"), {"long": "6m", "width": "3m", "long_width": "6m×3m"})
-        self.assertEqual(canonical_dimensions("3m", "6m"), {"long": "6m", "width": "3m", "long_width": "6m×3m"})
+        self.assertEqual(canonical_dimensions("6m", "3m"), {"long": "6", "width": "3", "long_width": "6×3"})
+        self.assertEqual(canonical_dimensions("3m", "6m"), {"long": "6", "width": "3", "long_width": "6×3"})
         self.assertEqual(canonical_dimensions("4a", "2b"), {"long": "4L", "width": "2L", "long_width": "4L×2L"})
-        self.assertEqual(canonical_dimensions("6m", "0"), {"long": "6m", "width": "0", "long_width": "6m×0"})
+        self.assertEqual(canonical_dimensions("6m", "0"), {"long": "6", "width": "0", "long_width": "6×0"})
         self.assertEqual(canonical_dimensions("3m", "2L"), None)
         self.assertEqual(canonical_dimensions(None, "2m"), None)
 
@@ -119,8 +119,8 @@ class StructureDimensionEvaluationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             reused = load_saved_provider_results(saved_results, "qwen")
-            self.assertEqual(reused["beam"]["normalized"]["total_span"], "6m")
-            self.assertEqual(reused["beam"]["normalized"]["long_width"], "6m×0")
+            self.assertEqual(reused["beam"]["normalized"]["total_span"], "6")
+            self.assertEqual(reused["beam"]["normalized"]["long_width"], "6×0")
         template = mcp_results_template([Sample("beam", "梁", "question.jpg", "single beam")])
         self.assertEqual(template["results"][0]["sample_id"], "beam")
         self.assertIsNone(template["results"][0]["total_span"])
@@ -177,7 +177,7 @@ class StructureDimensionEvaluationTests(unittest.TestCase):
             write_review_html(review_path, payload)
             review_html = review_path.read_text(encoding="utf-8")
             self.assertIn('src="original_images/beam.jpg"', review_html)
-            self.assertIn("6m×0", review_html)
+            self.assertIn("6×0", review_html)
             self.assertIn("blocked", review_html)
 
     def test_review_artifact_copies_original_and_shows_model_results(self):
@@ -210,7 +210,7 @@ class StructureDimensionEvaluationTests(unittest.TestCase):
             write_review_html(review_path, payload)
             review_html = review_path.read_text(encoding="utf-8")
             self.assertIn('src="original_images/beam.jpg"', review_html)
-            self.assertIn("6m×0", review_html)
+            self.assertIn("6×0", review_html)
             self.assertIn("blocked", review_html)
 
 

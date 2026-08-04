@@ -7,9 +7,11 @@ evaluation harness. Pure functions only; no model calls, no bank access.
 Normalization contract (mirrors ``scripts/evaluate_structure_dimensions.py``):
 the total span and total height are single simplified expressions such as
 ``6m``, ``3l`` or ``0``. The outer box is rotation-invariant: long is the larger
-coefficient, width is the smaller one. Symbolic length variables all normalize
-to ``L``; physical length units are preserved. A mix of symbol kinds or missing
-values is rejected (returns ``None``) instead of inventing a comparable key.
+coefficient, width is the smaller one. Like the letter-load normalization,
+physical length units are stripped from numeric dimensions (``6m`` -> ``6``) and
+every symbolic length variable normalizes to ``L`` so that ``a``/``b``/``l``
+all compare equal. A mix of symbolic and numeric kinds, or missing values, is
+rejected (returns ``None``) instead of inventing a comparable key.
 """
 
 from __future__ import annotations
@@ -61,31 +63,49 @@ def normalize_dimension(value: object) -> Dimension | None:
     return Dimension(raw=text, coefficient=coefficient, symbol=(match.group("symbol") or ""))
 
 
+_PHYSICAL_LENGTH_UNITS = {"m", "cm", "mm", "km"}
+
+
 def normalized_dimension_symbol(symbol: str) -> str:
-    """Map symbolic length variables to ``L`` while preserving physical units."""
+    """Map one dimension label to its comparable canonical symbol.
+
+    Mirrors the letter-load normalization: physical length units are dropped
+    from numeric dimensions (``6m`` -> ``6``, units never compare), and every
+    other alphabetic symbol is a length variable normalized to ``L`` so a
+    question diagram labelled ``A`` still matches a bank row stored as ``L``.
+    """
 
     if not symbol:
         return ""
-    if symbol in {"m", "cm", "mm", "km"}:
-        return symbol
+    if symbol in _PHYSICAL_LENGTH_UNITS:
+        return ""
     return "L"
 
 
-def dimension_text(dimension: Dimension) -> str:
-    """Render a parsed dimension after the required unit/letter normalization."""
-
+def _coefficient_text(dimension: Dimension) -> str:
     if not dimension.symbol:
         return dimension.raw
-    coefficient_text = dimension.raw[: -len(dimension.symbol)]
-    return f"{coefficient_text}{normalized_dimension_symbol(dimension.symbol)}" if coefficient_text else normalized_dimension_symbol(dimension.symbol)
+    return dimension.raw[: -len(dimension.symbol)]
+
+
+def dimension_text(dimension: Dimension) -> str:
+    """Render a parsed dimension after unit stripping / letter normalization."""
+
+    normalized_symbol = normalized_dimension_symbol(dimension.symbol)
+    if not normalized_symbol:
+        return _coefficient_text(dimension)
+    if dimension.coefficient == 1:
+        return normalized_symbol
+    return f"{_coefficient_text(dimension)}{normalized_symbol}"
 
 
 def canonical_dimensions(total_span: object, total_height: object) -> dict[str, str] | None:
     """Return rotation-invariant literal long/width dimensions, never a ratio.
 
     The total span must be positive. A zero total height is valid and remains a
-    literal ``0`` width. Letter variables share the canonical symbol ``L``;
-    physical length units must still agree before values can be compared.
+    literal ``0`` width. Numeric units are stripped and letter variables share
+    the canonical symbol ``L``, so values compare equal when their canonical
+    forms do.
     """
 
     span = normalize_dimension(total_span)
