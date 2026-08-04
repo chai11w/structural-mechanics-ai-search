@@ -256,7 +256,7 @@ function humanIntent(payload) {
   const action = payload.final_action || '';
   if (action === 'clarification') return CLARIFICATION_TEXT[payload.clarification_reason] || '需要向你确认更多信息';
   if (action === 'set_chapter' && payload.chapter) return `用户想把题目章节设置为“${payload.chapter}”`;
-  if (action === 'select_question' && payload.question_index != null) return `用户想选择第 ${Number(payload.question_index) + 1} 道题`;
+  if (action === 'select_question' && payload.question_index != null) return `用户想选择第 ${Number(payload.question_index)} 道题`;
   if (action === 'select_candidate' && payload.candidate_rank != null) return `用户想选择第 ${Number(payload.candidate_rank)} 个候选题`;
   return INTENT_TEXT[action] || '无法识别这句话的意图';
 }
