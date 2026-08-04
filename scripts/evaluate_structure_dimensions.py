@@ -3,21 +3,21 @@
 This utility never touches the question-bank indexes or production runtime state.
 It reads a versioned sample manifest, submits each selected image to Qwen (optional),
 merges separately captured MCP vision responses, and writes review-only artifacts to
-an ignored output directory.
+an ignored output directory, including a local original-image review page.
 """
 
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
-import re
+import shutil
 import sys
 import time
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from fractions import Fraction
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -32,6 +32,8 @@ from scripts.classify_question_bank import (  # noqa: E402
     parse_model_json,
     tracked_qwen_request,
 )
+
+from dimensions import Dimension, canonical_dimensions, dimension_text, normalize_dimension, normalized_dimension_symbol  # noqa: E402
 
 VALID_STRUCTURE_TYPES = {"梁", "钢架", "桁架", "拱", "组合结构", "unknown"}
 DEFAULT_MANIFEST = BASE / "experiments" / "structure_dimension_eval" / "samples.json"
@@ -58,17 +60,6 @@ DIMENSION_PROMPT = """你是结构力学题图的结构尺寸识别器。只看�
 严格只输出 JSON，不要输出 Markdown：
 {"structure_type":"梁|钢架|桁架|拱|组合结构|unknown","total_span":"6m|null","total_height":"3m|null","confidence":0.0,"reason":"不超过20字"}"""
 
-_DIMENSION_RE = re.compile(
-    r"^(?:(?P<coefficient>(?:0|[1-9]\d*)(?:\.\d+)?)?(?P<symbol>[A-Za-z]+)|(?P<number>0|[1-9]\d*(?:\.\d+)?))$"
-)
-
-
-@dataclass(frozen=True)
-class Dimension:
-    raw: str
-    coefficient: Fraction
-    symbol: str
-
 
 @dataclass(frozen=True)
 class Sample:
@@ -82,56 +73,6 @@ def now_utc() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def normalize_dimension(value: object) -> Dimension | None:
-    """Normalize one simplified total-span/total-height expression.
-
-    The provider contract permits only a non-negative decimal coefficient with an
-    optional alphabetic unit/symbol. Rejecting all other algebra avoids inventing
-    a dimension key for expressions whose relation is not mechanically known.
-    """
-
-    if value is None:
-        return None
-    text = str(value).strip().replace(" ", "")
-    if not text or text.lower() in {"null", "unknown", "未知", "不确定"}:
-        return None
-    text = text.replace("米", "m")
-    match = _DIMENSION_RE.fullmatch(text)
-    if not match:
-        return None
-    coefficient_text = match.group("coefficient") or match.group("number") or "1"
-    coefficient = Fraction(coefficient_text)
-    if coefficient < 0:
-        return None
-    return Dimension(raw=text, coefficient=coefficient, symbol=(match.group("symbol") or ""))
-
-
-def format_fraction(value: Fraction) -> str:
-    if value.denominator == 1:
-        return str(value.numerator)
-    return f"{value.numerator}/{value.denominator}"
-
-
-def size_key(total_span: object, total_height: object) -> str:
-    """Return a scale-invariant span:height key, or ``unknown``.
-
-    A flat structure has a meaningful special key. For non-flat structures, both
-    values must use the same explicitly written unit/symbol; this prevents false
-    equivalence between, for example, ``3l`` and ``2h``.
-    """
-
-    span = normalize_dimension(total_span)
-    height = normalize_dimension(total_height)
-    if span is None or height is None or span.coefficient <= 0:
-        return "unknown"
-    if height.coefficient == 0:
-        return "flat"
-    if span.symbol != height.symbol:
-        return "unknown"
-    ratio = span.coefficient / height.coefficient
-    return f"{format_fraction(ratio)}:1"
-
-
 def normalize_provider_result(value: Mapping[str, Any] | None) -> dict[str, Any]:
     """Put Qwen or MCP output into the shared, conservative report schema."""
 
@@ -141,15 +82,21 @@ def normalize_provider_result(value: Mapping[str, Any] | None) -> dict[str, Any]
         structure_type = "unknown"
     total_span = normalize_dimension(source.get("total_span"))
     total_height = normalize_dimension(source.get("total_height"))
+    dimensions = canonical_dimensions(
+        total_span.raw if total_span else None,
+        total_height.raw if total_height else None,
+    )
     try:
         confidence = max(0.0, min(1.0, float(source.get("confidence") or 0.0)))
     except (TypeError, ValueError):
         confidence = 0.0
     return {
         "structure_type": structure_type,
-        "total_span": total_span.raw if total_span else None,
-        "total_height": total_height.raw if total_height else None,
-        "size_key": size_key(total_span.raw if total_span else None, total_height.raw if total_height else None),
+        "total_span": dimension_text(total_span) if total_span else None,
+        "total_height": dimension_text(total_height) if total_height else None,
+        "long": dimensions["long"] if dimensions else None,
+        "width": dimensions["width"] if dimensions else None,
+        "long_width": dimensions["long_width"] if dimensions else "unknown",
         "confidence": confidence,
         "reason": str(source.get("reason") or "").strip()[:200],
     }
@@ -287,7 +234,9 @@ def load_saved_provider_results(path: Path, provider: str) -> dict[str, dict[str
                 try:
                     result["normalized"] = normalize_provider_result(parse_model_json(str(raw_content)))
                 except (TypeError, ValueError, json.JSONDecodeError):
-                    pass
+                    result["normalized"] = normalize_provider_result(result.get("normalized"))
+            elif "error" not in result:
+                result["normalized"] = normalize_provider_result(result.get("normalized"))
             results[sample_id] = result
     return results
 
@@ -319,7 +268,9 @@ def provider_cell(result: Mapping[str, Any] | None) -> str:
             f"类型：{markdown_escape(str(normalized.get('structure_type') or 'unknown'))}",
             f"总跨：{markdown_escape(str(normalized.get('total_span') or 'unknown'))}",
             f"总高：{markdown_escape(str(normalized.get('total_height') or 'unknown'))}",
-            f"size_key：{markdown_escape(str(normalized.get('size_key') or 'unknown'))}",
+            f"长：{markdown_escape(str(normalized.get('long') or 'unknown'))}",
+            f"宽：{markdown_escape(str(normalized.get('width') or 'unknown'))}",
+            f"长×宽：{markdown_escape(str(normalized.get('long_width') or 'unknown'))}",
             f"置信度：{float(normalized.get('confidence') or 0):.2f}",
             f"理由：{markdown_escape(str(normalized.get('reason') or ''))}",
         ]
@@ -335,44 +286,44 @@ def comparable_type(result: Mapping[str, Any] | None) -> str | None:
     return value if value != "unknown" else None
 
 
-def comparable_size_key(result: Mapping[str, Any] | None) -> str | None:
-    value = str(((result or {}).get("normalized") or {}).get("size_key") or "unknown")
+def comparable_long_width(result: Mapping[str, Any] | None) -> str | None:
+    value = str(((result or {}).get("normalized") or {}).get("long_width") or "unknown")
     return value if value != "unknown" else None
 
 
 def agreement(left: Mapping[str, Any] | None, right: Mapping[str, Any] | None) -> dict[str, str]:
     left_type, right_type = comparable_type(left), comparable_type(right)
-    left_size, right_size = comparable_size_key(left), comparable_size_key(right)
+    left_dimensions, right_dimensions = comparable_long_width(left), comparable_long_width(right)
     type_agreement = "一致" if left_type and left_type == right_type else "无法比较" if not (left_type and right_type) else "不一致"
-    size_agreement = "一致" if left_size and left_size == right_size else "无法比较" if not (left_size and right_size) else "不一致"
-    return {"structure_type": type_agreement, "size_key": size_agreement}
+    dimensions_agreement = "一致" if left_dimensions and left_dimensions == right_dimensions else "无法比较" if not (left_dimensions and right_dimensions) else "不一致"
+    return {"structure_type": type_agreement, "long_width": dimensions_agreement}
 
 
 def write_markdown_report(output_path: Path, payload: Mapping[str, Any]) -> None:
     rows = payload["results"]
     lines = ["# 结构总跨/总高度双模型对照实验", ""]
-    lines.append("- 目的：比较 Qwen 与 MCP 视觉模型对主承重骨架结构类型、总跨、总高度及归一 `size_key` 的识别结果。")
+    lines.append("- 目的：比较 Qwen 与 MCP 视觉模型对主承重骨架结构类型、总跨、总高度及归一长×宽的识别结果。")
     lines.append("- 尺寸口径：总跨为主骨架最左至最右的总水平跨度；总高度为主骨架最低至最高的总竖向高度。多跨同类尺寸应相加；单条水平梁总高度为 `0`。")
-    lines.append("- `size_key`：总跨 : 总高度的约分比例；总高为 0 时为 `flat`；不同尺寸单位/符号、未知或无法可靠合并时为 `unknown`。")
-    lines.append("- 这是一份模型间一致性对照，不把目录类别或两模型一致直接表述为正确性。请在“人工裁决”栏逐图判定。")
+    lines.append("- 归一长×宽：长为总跨与总高度中的较大值，宽为较小值；符号尺寸中的字母统一为 `L`，物理单位保留；未知或不能可靠合并时为 `unknown`。不计算比例。")
+    lines.append("- 原题图与两侧结果也可在同目录 `review.html` 逐图查看；这是一份模型间一致性对照，不把目录类别或两模型一致直接表述为正确性。")
     lines.append("")
     summary = payload["summary"]
     lines.append(f"- 样本：{summary['total']}；Qwen 成功：{summary['qwen_success']}；MCP 成功：{summary['mcp_success']}；MCP 未提供：{summary['mcp_missing']}")
-    lines.append(f"- 可比较结构类型一致：{summary['type_agreement_count']}/{summary['type_comparable_count']}；可比较 size_key 一致：{summary['size_agreement_count']}/{summary['size_comparable_count']}")
+    lines.append(f"- 可比较结构类型一致：{summary['type_agreement_count']}/{summary['type_comparable_count']}；可比较长×宽一致：{summary['long_width_agreement_count']}/{summary['long_width_comparable_count']}")
     lines.append("")
-    lines.append("| 样本 | 题图 | 目录类别（非尺寸真值） | Qwen | MCP | 结构类型 | size_key | 人工裁决 |")
+    lines.append("| 样本 | 题图 | 目录类别（非尺寸真值） | Qwen | MCP | 结构类型 | 长×宽 | 人工裁决 |")
     lines.append("|---|---|---|---|---|---|---|---|")
     for row in rows:
-        image_path = Path(row["image_path"]).as_posix()
+        image_path = row.get("review_image_path") or Path(row["image_path"]).resolve().as_uri()
         lines.append(
-            "| {sample_id} | ![{sample_id}]({image_path}) | {expected} | {qwen} | {mcp} | {type_agreement} | {size_agreement} | 待填写 |".format(
+            "| {sample_id} | ![{sample_id}]({image_path}) | {expected} | {qwen} | {mcp} | {type_agreement} | {dimensions_agreement} | 待填写 |".format(
                 sample_id=markdown_escape(row["sample_id"]),
                 image_path=image_path,
                 expected=markdown_escape(row["expected_structure_type"] or "未标注"),
                 qwen=provider_cell(row.get("qwen")),
                 mcp=provider_cell(row.get("mcp")),
                 type_agreement=row["agreement"]["structure_type"],
-                size_agreement=row["agreement"]["size_key"],
+                dimensions_agreement=row["agreement"]["long_width"],
             )
         )
     lines.append("")
@@ -385,6 +336,78 @@ def write_markdown_report(output_path: Path, payload: Mapping[str, Any]) -> None
     output_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def review_provider_html(result: Mapping[str, Any] | None) -> str:
+    if not result:
+        return "<p class=\"unavailable\">未提供</p>"
+    if result.get("error"):
+        return f"<p class=\"error\">失败：{html.escape(str(result['error']))}</p>"
+    normalized = result.get("normalized") or {}
+    fields = (
+        ("结构类型", normalized.get("structure_type") or "unknown"),
+        ("总跨度", normalized.get("total_span") or "unknown"),
+        ("总高度", normalized.get("total_height") or "unknown"),
+        ("长", normalized.get("long") or "unknown"),
+        ("宽", normalized.get("width") or "unknown"),
+        ("长×宽", normalized.get("long_width") or "unknown"),
+        ("置信度", f"{float(normalized.get('confidence') or 0):.2f}"),
+        ("理由", normalized.get("reason") or ""),
+    )
+    return "<dl>" + "".join(
+        f"<dt>{html.escape(label)}</dt><dd>{html.escape(str(value))}</dd>" for label, value in fields
+    ) + "</dl>"
+
+
+def write_review_html(output_path: Path, payload: Mapping[str, Any]) -> None:
+    cards = []
+    for row in payload["results"]:
+        image_path = html.escape(str(row["review_image_path"]), quote=True)
+        cards.append(
+            """
+<section class="card">
+  <h2>{sample_id}</h2>
+  <p class="meta">目录类别（非尺寸真值）：{expected}。{note}</p>
+  <div class="content">
+    <figure><img src="{image_path}" alt="{sample_id} 原题图"><figcaption>原题图</figcaption></figure>
+    <div class="results">
+      <article><h3>Qwen</h3>{qwen}</article>
+      <article><h3>MCP</h3>{mcp}</article>
+      <article><h3>对照 / 人工裁决</h3><dl><dt>结构类型</dt><dd>{type_agreement}</dd><dt>长×宽</dt><dd>{dimensions_agreement}</dd><dt>人工裁决</dt><dd>待填写</dd></dl></article>
+    </div>
+  </div>
+</section>""".format(
+                sample_id=html.escape(str(row["sample_id"])),
+                expected=html.escape(str(row["expected_structure_type"] or "未标注")),
+                note=html.escape(str(row["selection_note"] or "")),
+                image_path=image_path,
+                qwen=review_provider_html(row.get("qwen")),
+                mcp=review_provider_html(row.get("mcp")),
+                type_agreement=html.escape(row["agreement"]["structure_type"]),
+                dimensions_agreement=html.escape(row["agreement"]["long_width"]),
+            )
+        )
+    document = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>结构尺寸双模型逐图审阅</title>
+<style>
+body{{margin:0;background:#f4f6f8;color:#1f2937;font:16px/1.5 system-ui,"Microsoft YaHei",sans-serif}}main{{max-width:1500px;margin:auto;padding:24px}}h1{{margin-top:0}}.notice{{background:#fff7ed;border-left:4px solid #f97316;padding:12px 16px}}.card{{background:white;border:1px solid #d8dee8;border-radius:10px;margin:20px 0;padding:20px;box-shadow:0 1px 2px #0000000b}}.card h2{{margin:0}}.meta{{color:#4b5563}}.content{{display:grid;grid-template-columns:minmax(380px,1fr) minmax(480px,1.3fr);gap:20px;align-items:start}}figure{{margin:0;background:#f8fafc;border:1px solid #e2e8f0;padding:12px}}img{{display:block;width:100%;height:auto;max-height:760px;object-fit:contain;background:white}}figcaption{{text-align:center;color:#475569;margin-top:8px}}.results{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}}article{{background:#f8fafc;border:1px solid #e2e8f0;padding:12px;min-height:180px}}article h3{{margin:0 0 8px}}dl{{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0}}dt{{font-weight:700;color:#475569}}dd{{margin:0;word-break:break-word}}.error{{color:#b91c1c}}.unavailable{{color:#64748b}}@media(max-width:900px){{.content{{grid-template-columns:1fr}}.results{{grid-template-columns:1fr}}}}
+</style></head><body><main><h1>结构总跨 / 总高度：双模型逐图审阅</h1><p class="notice">每张原题图与 Qwen、MCP 结果同页相邻展示。长=max(总跨度, 总高度)，宽=min(总跨度, 总高度)；字母变量统一为 L，不计算比例。MCP 无结果或失败会如实显示。</p>{cards}</main></body></html>""".format(cards="\n".join(cards))
+    output_path.write_text(document, encoding="utf-8")
+
+
+def copy_review_images(samples: list[Sample], *, root: Path, output_dir: Path) -> dict[str, str]:
+    """Copy validated originals into the ignored review artifact directory."""
+
+    images_dir = output_dir / "original_images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    review_paths: dict[str, str] = {}
+    for sample in samples:
+        source = root / sample.relative_path
+        suffix = source.suffix.lower() or ".img"
+        target = images_dir / f"{sample.sample_id}{suffix}"
+        shutil.copy2(source, target)
+        review_paths[sample.sample_id] = target.relative_to(output_dir).as_posix()
+    return review_paths
+
+
 def build_payload(
     samples: list[Sample],
     *,
@@ -393,8 +416,10 @@ def build_payload(
     mcp_results: Mapping[str, Mapping[str, Any]],
     qwen_model: str,
     manifest: Path,
+    review_image_paths: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
+    review_image_paths = review_image_paths or {}
     for sample in samples:
         qwen = dict(qwen_results[sample.sample_id]) if sample.sample_id in qwen_results else None
         mcp = dict(mcp_results[sample.sample_id]) if sample.sample_id in mcp_results else None
@@ -406,6 +431,7 @@ def build_payload(
             "selection_note": sample.selection_note,
             "relative_path": sample.relative_path,
             "image_path": str(root / sample.relative_path),
+            "review_image_path": review_image_paths.get(sample.sample_id),
             "qwen": qwen,
             "mcp": mcp,
             "agreement": agreement(qwen, mcp),
@@ -415,13 +441,13 @@ def build_payload(
     qwen_success = sum(1 for row in rows if row["qwen"] and not row["qwen"].get("error"))
     mcp_success = sum(1 for row in rows if row["mcp"] and not row["mcp"].get("error"))
     type_comparable = [row for row in rows if row["agreement"]["structure_type"] != "无法比较"]
-    size_comparable = [row for row in rows if row["agreement"]["size_key"] != "无法比较"]
+    long_width_comparable = [row for row in rows if row["agreement"]["long_width"] != "无法比较"]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": now_utc(),
         "manifest": str(manifest),
         "root": str(root),
-        "prompt_version": "structure-total-span-height-v1",
+        "prompt_version": "structure-total-span-height-long-width-v2",
         "qwen_model": qwen_model,
         "results": rows,
         "summary": {
@@ -431,8 +457,8 @@ def build_payload(
             "mcp_missing": sum(1 for row in rows if row["mcp"] is None),
             "type_comparable_count": len(type_comparable),
             "type_agreement_count": sum(1 for row in type_comparable if row["agreement"]["structure_type"] == "一致"),
-            "size_comparable_count": len(size_comparable),
-            "size_agreement_count": sum(1 for row in size_comparable if row["agreement"]["size_key"] == "一致"),
+            "long_width_comparable_count": len(long_width_comparable),
+            "long_width_agreement_count": sum(1 for row in long_width_comparable if row["agreement"]["long_width"] == "一致"),
         },
     }
 
@@ -488,6 +514,7 @@ def main() -> int:
                 print(f"{index:02d}/{len(samples)} qwen failed {sample.sample_id}: {type(exc).__name__}")
 
     mcp_results = load_mcp_results(args.mcp_results)
+    review_image_paths = copy_review_images(samples, root=root, output_dir=output_dir)
     payload = build_payload(
         samples,
         root=root,
@@ -495,15 +522,19 @@ def main() -> int:
         mcp_results=mcp_results,
         qwen_model=args.qwen_model,
         manifest=args.manifest.resolve(),
+        review_image_paths=review_image_paths,
     )
     (output_dir / "results.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     write_markdown_report(output_dir / "comparison.md", payload)
+    write_review_html(output_dir / "review.html", payload)
     (output_dir / "mcp_prompt.txt").write_text(DIMENSION_PROMPT, encoding="utf-8")
     (output_dir / "mcp_results_template.json").write_text(
         json.dumps(mcp_results_template(samples), ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(f"results={output_dir / 'results.json'}")
     print(f"comparison={output_dir / 'comparison.md'}")
+    print(f"review={output_dir / 'review.html'}")
+    print(f"original_images={output_dir / 'original_images'}")
     print(f"mcp_prompt={output_dir / 'mcp_prompt.txt'}")
     print(f"mcp_template={output_dir / 'mcp_results_template.json'}")
     return 0

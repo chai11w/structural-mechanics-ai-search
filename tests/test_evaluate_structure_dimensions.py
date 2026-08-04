@@ -7,13 +7,15 @@ from pathlib import Path
 
 from scripts.evaluate_structure_dimensions import (
     Sample,
+    canonical_dimensions,
+    copy_review_images,
     build_payload,
     load_manifest,
     load_saved_provider_results,
     mcp_results_template,
     normalize_dimension,
     normalize_provider_result,
-    size_key,
+    write_review_html,
 )
 
 
@@ -29,12 +31,13 @@ class StructureDimensionEvaluationTests(unittest.TestCase):
         self.assertEqual(normalize_dimension("a").coefficient, 1)
         self.assertEqual(normalize_dimension(None), None)
 
-    def test_size_key_requires_same_dimension_symbol(self):
-        self.assertEqual(size_key("6m", "3m"), "2:1")
-        self.assertEqual(size_key("4a", "2a"), "2:1")
-        self.assertEqual(size_key("3l", "2h"), "unknown")
-        self.assertEqual(size_key("6m", "0"), "flat")
-        self.assertEqual(size_key(None, "2m"), "unknown")
+    def test_canonical_dimensions_are_direct_rotation_invariant_long_width(self):
+        self.assertEqual(canonical_dimensions("6m", "3m"), {"long": "6m", "width": "3m", "long_width": "6m×3m"})
+        self.assertEqual(canonical_dimensions("3m", "6m"), {"long": "6m", "width": "3m", "long_width": "6m×3m"})
+        self.assertEqual(canonical_dimensions("4a", "2b"), {"long": "4L", "width": "2L", "long_width": "4L×2L"})
+        self.assertEqual(canonical_dimensions("6m", "0"), {"long": "6m", "width": "0", "long_width": "6m×0"})
+        self.assertEqual(canonical_dimensions("3m", "2L"), None)
+        self.assertEqual(canonical_dimensions(None, "2m"), None)
 
     def test_provider_normalization_is_conservative(self):
         result = normalize_provider_result(
@@ -48,8 +51,8 @@ class StructureDimensionEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(result["structure_type"], "unknown")
         self.assertEqual(result["total_span"], None)
-        self.assertEqual(result["total_height"], "2l")
-        self.assertEqual(result["size_key"], "unknown")
+        self.assertEqual(result["total_height"], "2L")
+        self.assertEqual(result["long_width"], "unknown")
         self.assertEqual(result["confidence"], 1.0)
 
     def test_manifest_rejects_answer_images_and_keeps_safe_relative_paths(self):
@@ -117,6 +120,7 @@ class StructureDimensionEvaluationTests(unittest.TestCase):
             )
             reused = load_saved_provider_results(saved_results, "qwen")
             self.assertEqual(reused["beam"]["normalized"]["total_span"], "6m")
+            self.assertEqual(reused["beam"]["normalized"]["long_width"], "6m×0")
         template = mcp_results_template([Sample("beam", "梁", "question.jpg", "single beam")])
         self.assertEqual(template["results"][0]["sample_id"], "beam")
         self.assertIsNone(template["results"][0]["total_span"])
@@ -140,8 +144,74 @@ class StructureDimensionEvaluationTests(unittest.TestCase):
             manifest=Path("manifest.json"),
         )
         self.assertEqual(payload["summary"]["type_agreement_count"], 1)
-        self.assertEqual(payload["summary"]["size_agreement_count"], 1)
-        self.assertEqual(payload["results"][0]["agreement"]["size_key"], "一致")
+        self.assertEqual(payload["summary"]["long_width_agreement_count"], 0)
+        self.assertEqual(payload["results"][0]["agreement"]["long_width"], "不一致")
+
+    def test_review_artifact_copies_original_and_shows_model_results(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "bank"
+            source = root / "题目" / "beam.jpg"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"original-image")
+            output_dir = Path(temp_dir) / "review"
+            sample = Sample("beam", "梁", "题目/beam.jpg", "single beam")
+            review_paths = copy_review_images([sample], root=root, output_dir=output_dir)
+            copied_image = output_dir / review_paths["beam"]
+            self.assertEqual(copied_image.read_bytes(), b"original-image")
+            payload = build_payload(
+                [sample],
+                root=root,
+                qwen_results={
+                    "beam": {
+                        "normalized": normalize_provider_result(
+                            {"structure_type": "梁", "total_span": "6m", "total_height": "0"}
+                        )
+                    }
+                },
+                mcp_results={"beam": {"error": "blocked"}},
+                qwen_model="qwen",
+                manifest=Path("manifest.json"),
+                review_image_paths=review_paths,
+            )
+            review_path = output_dir / "review.html"
+            write_review_html(review_path, payload)
+            review_html = review_path.read_text(encoding="utf-8")
+            self.assertIn('src="original_images/beam.jpg"', review_html)
+            self.assertIn("6m×0", review_html)
+            self.assertIn("blocked", review_html)
+
+    def test_review_artifact_copies_original_and_shows_model_results(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "bank"
+            source = root / "题目" / "beam.jpg"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"original-image")
+            output_dir = Path(temp_dir) / "review"
+            sample = Sample("beam", "梁", "题目/beam.jpg", "single beam")
+            review_paths = copy_review_images([sample], root=root, output_dir=output_dir)
+            copied_image = output_dir / review_paths["beam"]
+            self.assertEqual(copied_image.read_bytes(), b"original-image")
+            payload = build_payload(
+                [sample],
+                root=root,
+                qwen_results={
+                    "beam": {
+                        "normalized": normalize_provider_result(
+                            {"structure_type": "梁", "total_span": "6m", "total_height": "0"}
+                        )
+                    }
+                },
+                mcp_results={"beam": {"error": "blocked"}},
+                qwen_model="qwen",
+                manifest=Path("manifest.json"),
+                review_image_paths=review_paths,
+            )
+            review_path = output_dir / "review.html"
+            write_review_html(review_path, payload)
+            review_html = review_path.read_text(encoding="utf-8")
+            self.assertIn('src="original_images/beam.jpg"', review_html)
+            self.assertIn("6m×0", review_html)
+            self.assertIn("blocked", review_html)
 
 
 if __name__ == "__main__":
