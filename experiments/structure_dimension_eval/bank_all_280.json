@@ -1,0 +1,1686 @@
+{
+  "schema_version": 1,
+  "description": "Full letter-bank dimension-recognition manifest (2026-08-05): all 280 letter-bank rows (path + bank structure type). Generated from the bank xlsx files; images resolve under the question-bank root.",
+  "samples": [
+    {
+      "id": "2静定结构_1单跨梁_题目a_1均_1",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/1单跨梁/题目a/1均/1.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 2 行"
+    },
+    {
+      "id": "2静定结构_2多跨梁_内力图_题目2_2跨_1力_39",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/2跨/1力/39.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 3 行"
+    },
+    {
+      "id": "2静定结构_2多跨梁_内力图_题目2_2跨_1力_45",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/2跨/1力/45.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 4 行"
+    },
+    {
+      "id": "2静定结构_2多跨梁_内力图_题目2_2跨_均_38f",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/2跨/均/38f.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 5 行"
+    },
+    {
+      "id": "2静定结构_2多跨梁_内力图_题目2_3跨_1力_34",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/3跨/1力/34.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 6 行"
+    },
+    {
+      "id": "2静定结构_2多跨梁_内力图_题目2_3跨_1均_25",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/3跨/1均/25.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 7 行"
+    },
+    {
+      "id": "2静定结构_2多跨梁_内力图_题目2_44",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/44.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 8 行"
+    },
+    {
+      "id": "2静定结构_2多跨梁_弯矩图_题目_1",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/弯矩图/题目/1.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 9 行"
+    },
+    {
+      "id": "2静定结构_2多跨梁_弯矩图_题目_2",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/弯矩图/题目/2.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 10 行"
+    },
+    {
+      "id": "2静定结构_2多跨梁_弯矩图_题目_5",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/弯矩图/题目/5.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 11 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_1",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/1.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 12 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_1L形_3",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/1L形/3.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 13 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_1L形_79",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/1L形/79.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 14 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_2固定端_4",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/2固定端/4.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 15 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_3铰_1不平_40",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/3铰/1不平/40.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 16 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_3铰_2外挑_35",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/3铰/2外挑/35.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 17 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_3铰_2外挑_41",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/3铰/2外挑/41.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 18 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_3铰_2外挑_52",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/3铰/2外挑/52.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 19 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_3铰_2外挑_71",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/3铰/2外挑/71+.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 20 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_3铰_3正规_28",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/3铰/3正规/28.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 21 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_3铰_3正规_70",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/3铰/3正规/70.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 22 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_3铰_3正规_72",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/3铰/3正规/72.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 23 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_3铰_50",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/3铰/50.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 24 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_3铰_60",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/3铰/60.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 25 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_48",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/48.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 26 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_49",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/49.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 27 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_4门_q_13",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/4门/q/13.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 28 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_4门_q_54",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/4门/q/54.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 29 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_4门_q_81",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/4门/q/81.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 30 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_6",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/6.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 31 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_65",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/65.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 32 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_6双门_2",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/6双门/2.png",
+      "selection_note": "字母库 2静定结构.xlsx 第 33 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_6双门_59",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/6双门/59.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 34 行"
+    },
+    {
+      "id": "2静定结构_3钢架_1内力图_题目2_78",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/1内力图/题目2/78.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 35 行"
+    },
+    {
+      "id": "2静定结构_3钢架_2弯矩图_题目a_20",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/2弯矩图/题目a/20.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 36 行"
+    },
+    {
+      "id": "2静定结构_3钢架_2弯矩图_题目a_21",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/2弯矩图/题目a/21.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 37 行"
+    },
+    {
+      "id": "2静定结构_3钢架_2弯矩图_题目a_3铰_14",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/2弯矩图/题目a/3铰/14.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 38 行"
+    },
+    {
+      "id": "2静定结构_3钢架_2弯矩图_题目a_3铰_3",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/2弯矩图/题目a/3铰/3.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 39 行"
+    },
+    {
+      "id": "2静定结构_3钢架_2弯矩图_题目a_4含闭口i_15",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/2弯矩图/题目a/4含闭口i/15.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 40 行"
+    },
+    {
+      "id": "2静定结构_3钢架_2弯矩图_题目a_4含闭口i_17",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/2弯矩图/题目a/4含闭口i/17.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 41 行"
+    },
+    {
+      "id": "2静定结构_3钢架_2弯矩图_题目a_4含闭口i_18",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/2弯矩图/题目a/4含闭口i/18.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 42 行"
+    },
+    {
+      "id": "2静定结构_3钢架_2弯矩图_题目a_4含闭口i_19",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/2弯矩图/题目a/4含闭口i/19.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 43 行"
+    },
+    {
+      "id": "2静定结构_3钢架_2弯矩图_题目a_4含闭口i_22",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/2弯矩图/题目a/4含闭口i/22.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 44 行"
+    },
+    {
+      "id": "2静定结构_3钢架_2弯矩图_题目a_4含闭口i_7",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/2弯矩图/题目a/4含闭口i/7.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 45 行"
+    },
+    {
+      "id": "2静定结构_4拱_1内力_题目_8",
+      "expected_structure_type": "拱",
+      "path": "2静定结构/4拱/1内力/题目/8.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 46 行"
+    },
+    {
+      "id": "2静定结构_4拱_2合理拱轴线_题目_1",
+      "expected_structure_type": "拱",
+      "path": "2静定结构/4拱/2合理拱轴线/题目/1.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 47 行"
+    },
+    {
+      "id": "2静定结构_4拱_2合理拱轴线_题目_2",
+      "expected_structure_type": "拱",
+      "path": "2静定结构/4拱/2合理拱轴线/题目/2.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 48 行"
+    },
+    {
+      "id": "2静定结构_4拱_2合理拱轴线_题目_4",
+      "expected_structure_type": "拱",
+      "path": "2静定结构/4拱/2合理拱轴线/题目/4.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 49 行"
+    },
+    {
+      "id": "2静定结构_5桁架_所有杆_题目aa_1方_11",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/所有杆/题目aa/1方/11.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 50 行"
+    },
+    {
+      "id": "2静定结构_5桁架_所有杆_题目aa_1方_17",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/所有杆/题目aa/1方/17.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 51 行"
+    },
+    {
+      "id": "2静定结构_5桁架_所有杆_题目aa_1方_1个方_9",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/所有杆/题目aa/1方/1个方/9.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 52 行"
+    },
+    {
+      "id": "2静定结构_5桁架_所有杆_题目aa_1方_2个_8",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/所有杆/题目aa/1方/2个/8.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 53 行"
+    },
+    {
+      "id": "2静定结构_5桁架_所有杆_题目aa_1方_3",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/所有杆/题目aa/1方/3.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 54 行"
+    },
+    {
+      "id": "2静定结构_5桁架_所有杆_题目aa_7",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/所有杆/题目aa/7.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 55 行"
+    },
+    {
+      "id": "2静定结构_5桁架_所有杆_题目aa_三角_18",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/所有杆/题目aa/三角/18.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 56 行"
+    },
+    {
+      "id": "2静定结构_5桁架_所有杆_题目aa_三角_6",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/所有杆/题目aa/三角/6.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 57 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_1梯形_19",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/1梯形/19.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 58 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_1梯形_1平行梯形_1荷载上_13",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/1梯形/1平行梯形/1荷载上/13.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 59 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_1梯形_1平行梯形_44",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/1梯形/1平行梯形/44.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 60 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_1梯形_1平行梯形_50",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/1梯形/1平行梯形/50.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 61 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_1梯形_1平行梯形_60",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/1梯形/1平行梯形/60.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 62 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_1梯形_64",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/1梯形/64.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 63 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_1梯形_70",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/1梯形/70.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 64 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_2方形_1个方_51",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/2方形/1个方/51.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 65 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_2方形_1个方_53",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/2方形/1个方/53.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 66 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_2方形_2个方_32",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/2方形/2个方/32.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 67 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_2方形_34",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/2方形/34.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 68 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_2方形_3个方_17",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/2方形/3个方/17.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 69 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_2方形_3个方_33",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/2方形/3个方/33.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 70 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_2方形_3个方_36",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/2方形/3个方/36.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 71 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_2方形_3个方_37",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/2方形/3个方/37.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 72 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_2方形_69",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/2方形/69.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 73 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_2方形_6个方_41",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/2方形/6个方/41.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 74 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_2方形_6个方_52",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/2方形/6个方/52.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 75 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_2方形_6个方_57",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/2方形/6个方/57.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 76 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_3平行_14",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/3平行/14.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 77 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_3平行_3",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/3平行/3.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 78 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_43",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/43.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 79 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_46",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/46.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 80 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_4三角形_67",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/4三角形/67.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 81 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_5对称_15",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/5对称/15.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 82 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_5对称_20",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/5对称/20.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 83 行"
+    },
+    {
+      "id": "2静定结构_5桁架_指定杆_题目2_5对称_42",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/5桁架/指定杆/题目2/5对称/42.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 84 行"
+    },
+    {
+      "id": "2静定结构_6组合结构_题目1_1M_10",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/6组合结构/题目1/1M/10.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 85 行"
+    },
+    {
+      "id": "2静定结构_6组合结构_题目1_1M_15",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/6组合结构/题目1/1M/15.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 86 行"
+    },
+    {
+      "id": "2静定结构_6组合结构_题目1_1M_3",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/6组合结构/题目1/1M/3.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 87 行"
+    },
+    {
+      "id": "2静定结构_6组合结构_题目1_1M_4",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/6组合结构/题目1/1M/4.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 88 行"
+    },
+    {
+      "id": "2静定结构_6组合结构_题目1_2内力_16",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/6组合结构/题目1/2内力/16.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 89 行"
+    },
+    {
+      "id": "2静定结构_6组合结构_题目1_2内力_17",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/6组合结构/题目1/2内力/17.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 90 行"
+    },
+    {
+      "id": "2静定结构_题目_2",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/题目/2.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 91 行"
+    },
+    {
+      "id": "2静定结构_题目_3",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/题目/3.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 92 行"
+    },
+    {
+      "id": "2静定结构_题目_7",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/题目/7.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 93 行"
+    },
+    {
+      "id": "2静定结构_3钢架_2弯矩图_题目a_12",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/3钢架/2弯矩图/题目a/12.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 94 行"
+    },
+    {
+      "id": "2静定结构_4拱_1内力_题目_5",
+      "expected_structure_type": "拱",
+      "path": "2静定结构/4拱/1内力/题目/5.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 95 行"
+    },
+    {
+      "id": "2静定结构_题目_8",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/题目/8.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 96 行"
+    },
+    {
+      "id": "2静定结构_题目_9",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/题目/9.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 97 行"
+    },
+    {
+      "id": "2静定结构_题目_10",
+      "expected_structure_type": "钢架",
+      "path": "2静定结构/题目/10.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 98 行"
+    },
+    {
+      "id": "2静定结构_题目_11",
+      "expected_structure_type": "桁架",
+      "path": "2静定结构/题目/11.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 99 行"
+    },
+    {
+      "id": "2静定结构_题目_12",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/题目/12.jpg",
+      "selection_note": "字母库 2静定结构.xlsx 第 100 行"
+    },
+    {
+      "id": "3静定结构位移_1梁_题目a_1跨_1",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/1跨/1.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 2 行"
+    },
+    {
+      "id": "3静定结构位移_1梁_题目a_1跨_11",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/1跨/11.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 3 行"
+    },
+    {
+      "id": "3静定结构位移_1梁_题目a_1跨_13",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/1跨/13.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 4 行"
+    },
+    {
+      "id": "3静定结构位移_1梁_题目a_1跨_15",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/1跨/15.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 5 行"
+    },
+    {
+      "id": "3静定结构位移_1梁_题目a_1跨_17",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/1跨/17.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 6 行"
+    },
+    {
+      "id": "3静定结构位移_1梁_题目a_1跨_9",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/1跨/9.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 7 行"
+    },
+    {
+      "id": "3静定结构位移_1梁_题目a_2跨_10",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/2跨/10.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 8 行"
+    },
+    {
+      "id": "3静定结构位移_1梁_题目a_2跨_4",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/2跨/4.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 9 行"
+    },
+    {
+      "id": "3静定结构位移_1梁_题目a_2跨_5",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/2跨/5.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 10 行"
+    },
+    {
+      "id": "3静定结构位移_1梁_题目a_2跨_7",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/2跨/7.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 11 行"
+    },
+    {
+      "id": "3静定结构位移_1梁_题目a_2跨_8",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/2跨/8.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 12 行"
+    },
+    {
+      "id": "3静定结构位移_2桁架_题目_10",
+      "expected_structure_type": "桁架",
+      "path": "3静定结构位移/2桁架/题目/10.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 13 行"
+    },
+    {
+      "id": "3静定结构位移_2桁架_题目_2",
+      "expected_structure_type": "桁架",
+      "path": "3静定结构位移/2桁架/题目/2.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 14 行"
+    },
+    {
+      "id": "3静定结构位移_3钢架_题目aa_27",
+      "expected_structure_type": "钢架",
+      "path": "3静定结构位移/3钢架/题目aa/27.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 15 行"
+    },
+    {
+      "id": "3静定结构位移_3钢架_题目aa_28",
+      "expected_structure_type": "钢架",
+      "path": "3静定结构位移/3钢架/题目aa/28.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 16 行"
+    },
+    {
+      "id": "3静定结构位移_3钢架_题目aa_2L形式_12",
+      "expected_structure_type": "钢架",
+      "path": "3静定结构位移/3钢架/题目aa/2L形式/12.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 17 行"
+    },
+    {
+      "id": "3静定结构位移_3钢架_题目aa_2L形式_14",
+      "expected_structure_type": "钢架",
+      "path": "3静定结构位移/3钢架/题目aa/2L形式/14.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 18 行"
+    },
+    {
+      "id": "3静定结构位移_3钢架_题目aa_2L形式_18",
+      "expected_structure_type": "钢架",
+      "path": "3静定结构位移/3钢架/题目aa/2L形式/18.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 19 行"
+    },
+    {
+      "id": "3静定结构位移_3钢架_题目aa_2L形式_24",
+      "expected_structure_type": "钢架",
+      "path": "3静定结构位移/3钢架/题目aa/2L形式/24.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 20 行"
+    },
+    {
+      "id": "3静定结构位移_3钢架_题目aa_3_4",
+      "expected_structure_type": "钢架",
+      "path": "3静定结构位移/3钢架/题目aa/3-4.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 21 行"
+    },
+    {
+      "id": "3静定结构位移_3钢架_题目aa_3胶_2",
+      "expected_structure_type": "钢架",
+      "path": "3静定结构位移/3钢架/题目aa/3胶/2.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 22 行"
+    },
+    {
+      "id": "3静定结构位移_3钢架_题目aa_3门_17",
+      "expected_structure_type": "钢架",
+      "path": "3静定结构位移/3钢架/题目aa/3门/17.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 23 行"
+    },
+    {
+      "id": "3静定结构位移_3钢架_题目aa_3门_21",
+      "expected_structure_type": "钢架",
+      "path": "3静定结构位移/3钢架/题目aa/3门/21.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 24 行"
+    },
+    {
+      "id": "3静定结构位移_3钢架_题目aa_4上开口_11",
+      "expected_structure_type": "钢架",
+      "path": "3静定结构位移/3钢架/题目aa/4上开口/11.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 25 行"
+    },
+    {
+      "id": "3静定结构位移_3钢架_题目aa_4上开口_23",
+      "expected_structure_type": "钢架",
+      "path": "3静定结构位移/3钢架/题目aa/4上开口/23.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 26 行"
+    },
+    {
+      "id": "3静定结构位移_5积分法_题目_1",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/5积分法/题目/1.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 27 行"
+    },
+    {
+      "id": "3静定结构位移_3钢架_题目aa_30",
+      "expected_structure_type": "钢架",
+      "path": "3静定结构位移/3钢架/题目aa/30.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 28 行"
+    },
+    {
+      "id": "3静定结构位移_题目_2",
+      "expected_structure_type": "桁架",
+      "path": "3静定结构位移/题目/2.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 29 行"
+    },
+    {
+      "id": "3静定结构位移_3钢架_题目aa_26",
+      "expected_structure_type": "钢架",
+      "path": "3静定结构位移/3钢架/题目aa/26.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 30 行"
+    },
+    {
+      "id": "3静定结构位移_题目_3",
+      "expected_structure_type": "桁架",
+      "path": "3静定结构位移/题目/3.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 31 行"
+    },
+    {
+      "id": "3静定结构位移_题目_4",
+      "expected_structure_type": "钢架",
+      "path": "3静定结构位移/题目/4.jpg",
+      "selection_note": "字母库 3静定结构位移.xlsx 第 32 行"
+    },
+    {
+      "id": "4力法_1梁_1单未知量_题目_10",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/10.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 2 行"
+    },
+    {
+      "id": "4力法_1梁_1单未知量_题目_1跨_1",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/1跨/1.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 3 行"
+    },
+    {
+      "id": "4力法_1梁_1单未知量_题目_1跨_12",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/1跨/12.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 4 行"
+    },
+    {
+      "id": "4力法_1梁_1单未知量_题目_1跨_13",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/1跨/13.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 5 行"
+    },
+    {
+      "id": "4力法_1梁_1单未知量_题目_1跨_2",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/1跨/2.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 6 行"
+    },
+    {
+      "id": "4力法_1梁_1单未知量_题目_1跨_3",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/1跨/3.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 7 行"
+    },
+    {
+      "id": "4力法_1梁_1单未知量_题目_1跨_5",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/1跨/5.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 8 行"
+    },
+    {
+      "id": "4力法_1梁_1单未知量_题目_2跨_6",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/2跨/6.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 9 行"
+    },
+    {
+      "id": "4力法_1梁_1单未知量_题目_2跨_7",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/2跨/7.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 10 行"
+    },
+    {
+      "id": "4力法_1梁_1单未知量_题目_2跨_8",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/2跨/8.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 11 行"
+    },
+    {
+      "id": "4力法_1梁_1单未知量_题目_2跨_9",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/2跨/9.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 12 行"
+    },
+    {
+      "id": "4力法_1梁_2多未知量_题目_1",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/2多未知量/题目/1.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 13 行"
+    },
+    {
+      "id": "4力法_1梁_2多未知量_题目_2",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/2多未知量/题目/2.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 14 行"
+    },
+    {
+      "id": "4力法_1梁_2多未知量_题目_3",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/2多未知量/题目/3.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 15 行"
+    },
+    {
+      "id": "4力法_1梁_2多未知量_题目_4",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/2多未知量/题目/4.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 16 行"
+    },
+    {
+      "id": "4力法_1梁_2多未知量_题目_6",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/2多未知量/题目/6.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 17 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_0_12",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/0/12.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 18 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_0_13",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/0/13.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 19 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_0_18",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/0/18.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 20 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_0_4",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/0/4.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 21 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_0_48",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/0/48.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 22 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_1L_17",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/1L/17.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 23 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_1L_1提横_14",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/1L/1提横/14.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 24 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_1L_1提横_2固_饺_1",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/1L/1提横/2固+饺/1.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 25 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_1L_1提横_2固_饺_29",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/1L/1提横/2固+饺/29.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 26 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_1L_1提横_2固_饺_8",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/1L/1提横/2固+饺/8.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 27 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_1L_39",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/1L/39.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 28 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_2T_2",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/2T/2.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 29 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_2T_32",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/2T/32.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 30 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_2T_33",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/2T/33.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 31 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_2T_47",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/2T/47.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 32 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_2T_6",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/2T/6.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 33 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_3门_21",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/3门/21.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 34 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_3门_41",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/3门/41.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 35 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_3门_42",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/3门/42.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 36 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_3门_43",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/3门/43.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 37 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_3门_7",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/3门/7.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 38 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_4排架_11",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/4排架/11.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 39 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_4排架_25",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/4排架/25.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 40 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_4排架_30",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/4排架/30.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 41 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_4排架_46",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/4排架/46.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 42 行"
+    },
+    {
+      "id": "4力法_2钢架_2多未知量_题目aa_1L_12",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/2多未知量/题目aa/1L/12.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 43 行"
+    },
+    {
+      "id": "4力法_2钢架_2多未知量_题目aa_1L_13",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/2多未知量/题目aa/1L/13.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 44 行"
+    },
+    {
+      "id": "4力法_2钢架_2多未知量_题目aa_1L_16",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/2多未知量/题目aa/1L/16.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 45 行"
+    },
+    {
+      "id": "4力法_2钢架_2多未知量_题目aa_1L_8",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/2多未知量/题目aa/1L/8.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 46 行"
+    },
+    {
+      "id": "4力法_2钢架_2多未知量_题目aa_1L_9",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/2多未知量/题目aa/1L/9.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 47 行"
+    },
+    {
+      "id": "4力法_2钢架_2多未知量_题目aa_2T_1",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/2多未知量/题目aa/2T/1.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 48 行"
+    },
+    {
+      "id": "4力法_2钢架_2多未知量_题目aa_2T_20",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/2多未知量/题目aa/2T/20.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 49 行"
+    },
+    {
+      "id": "4力法_2钢架_2多未知量_题目aa_3中铰_10",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/2多未知量/题目aa/3中铰/10.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 50 行"
+    },
+    {
+      "id": "4力法_2钢架_2多未知量_题目aa_3中铰_4",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/2多未知量/题目aa/3中铰/4.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 51 行"
+    },
+    {
+      "id": "4力法_2钢架_2多未知量_题目aa_5",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/2多未知量/题目aa/5.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 52 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_1",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/1.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 53 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_1门_反_1均_16",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/1门/反/1均/16.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 54 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_1门_反_1均_19",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/1门/反/1均/19.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 55 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_1门_反_1均_36",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/1门/反/1均/36.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 56 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_1门_反_2力_17",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/1门/反/2力/17.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 57 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_1门_反_2力_2",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/1门/反/2力/2.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 58 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_1门_正_18",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/1门/正/18.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 59 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_1门_正_30",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/1门/正/30.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 60 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_2梁_15",
+      "expected_structure_type": "梁",
+      "path": "4力法/3对称性/题目1/2梁/15.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 61 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_2梁_41",
+      "expected_structure_type": "梁",
+      "path": "4力法/3对称性/题目1/2梁/41.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 62 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_2梁_5",
+      "expected_structure_type": "梁",
+      "path": "4力法/3对称性/题目1/2梁/5.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 63 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_38",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/38.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 64 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_3门_34",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/3门/34.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 65 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_3门_4",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/3门/4.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 66 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_3门_46",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/3门/46.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 67 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_3门_47",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/3门/47.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 68 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_4双门_33",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/4双门/33.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 69 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_4双门_40",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/4双门/40.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 70 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_5双层_22",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/5双层/22.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 71 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_5双层_32",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/5双层/32.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 72 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_5双层_35",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/5双层/35.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 73 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_5双层_37",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/5双层/37.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 74 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_5双层_39",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/5双层/39.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 75 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_5双层_44",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/5双层/44.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 76 行"
+    },
+    {
+      "id": "4力法_3对称性_题目1_5双层_45",
+      "expected_structure_type": "钢架",
+      "path": "4力法/3对称性/题目1/5双层/45.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 77 行"
+    },
+    {
+      "id": "4力法_4桁架_题目_1",
+      "expected_structure_type": "桁架",
+      "path": "4力法/4桁架/题目/1.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 78 行"
+    },
+    {
+      "id": "4力法_4桁架_题目_2",
+      "expected_structure_type": "桁架",
+      "path": "4力法/4桁架/题目/2.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 79 行"
+    },
+    {
+      "id": "4力法_4桁架_题目_4",
+      "expected_structure_type": "桁架",
+      "path": "4力法/4桁架/题目/4.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 80 行"
+    },
+    {
+      "id": "4力法_5组合结构_弹簧_题目_2",
+      "expected_structure_type": "钢架",
+      "path": "4力法/5组合结构+弹簧/题目/2.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 81 行"
+    },
+    {
+      "id": "4力法_5组合结构_弹簧_题目_3",
+      "expected_structure_type": "梁",
+      "path": "4力法/5组合结构+弹簧/题目/3.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 82 行"
+    },
+    {
+      "id": "4力法_6超静定位移计算_题目_4",
+      "expected_structure_type": "钢架",
+      "path": "4力法/6超静定位移计算/题目/4.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 83 行"
+    },
+    {
+      "id": "4力法_题目_2",
+      "expected_structure_type": "钢架",
+      "path": "4力法/题目/2.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 84 行"
+    },
+    {
+      "id": "4力法_2钢架_1单未知量_题目1_3门_20",
+      "expected_structure_type": "钢架",
+      "path": "4力法/2钢架/1单未知量/题目1/3门/20.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 85 行"
+    },
+    {
+      "id": "4力法_题目_4",
+      "expected_structure_type": "钢架",
+      "path": "4力法/题目/4.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 86 行"
+    },
+    {
+      "id": "4力法_题目_5",
+      "expected_structure_type": "梁",
+      "path": "4力法/题目/5.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 87 行"
+    },
+    {
+      "id": "4力法_题目_7",
+      "expected_structure_type": "钢架",
+      "path": "4力法/题目/7.jpg",
+      "selection_note": "字母库 4力法.xlsx 第 88 行"
+    },
+    {
+      "id": "5位移法_1梁_1单未知量_题目_3",
+      "expected_structure_type": "梁",
+      "path": "5位移法/1梁/1单未知量/题目/3.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 2 行"
+    },
+    {
+      "id": "5位移法_1梁_2多未知量_题目_1",
+      "expected_structure_type": "梁",
+      "path": "5位移法/1梁/2多未知量/题目/1.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 3 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_1T_10",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/1T/10.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 4 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_1T_1左固_1",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/1T/1左固/1.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 5 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_1T_1左固_12",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/1T/1左固/12.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 6 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_1T_1左固_21",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/1T/1左固/21.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 7 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_1T_1左固_25",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/1T/1左固/25.png",
+      "selection_note": "字母库 5位移法.xlsx 第 8 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_1T_1左固_30",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/1T/1左固/30.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 9 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_1T_1左固_31",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/1T/1左固/31.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 10 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_1T_20",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/1T/20.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 11 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_2L_5",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/2L/5.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 12 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_33",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/33.png",
+      "selection_note": "字母库 5位移法.xlsx 第 13 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_3排架_13",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/3排架/13.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 14 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_3排架_15",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/3排架/15.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 15 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_3排架_2",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/3排架/2.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 16 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_3排架_26",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/3排架/26.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 17 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_3排架_29",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/3排架/29.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 18 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_4无穷杠_16",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/4无穷杠/16.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 19 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_4无穷杠_24",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/4无穷杠/24.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 20 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_4无穷杠_3",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/4无穷杠/3.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 21 行"
+    },
+    {
+      "id": "5位移法_2钢架_1单未知量_题目aa_9",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/1单未知量/题目aa/9.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 22 行"
+    },
+    {
+      "id": "5位移法_2钢架_2多未知量_题目aa_0_24",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/2多未知量/题目aa/0/24.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 23 行"
+    },
+    {
+      "id": "5位移法_2钢架_2多未知量_题目aa_0_28",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/2多未知量/题目aa/0/28.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 24 行"
+    },
+    {
+      "id": "5位移法_2钢架_2多未知量_题目aa_0_8",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/2多未知量/题目aa/0/8.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 25 行"
+    },
+    {
+      "id": "5位移法_2钢架_2多未知量_题目aa_1门_1",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/2多未知量/题目aa/1门/1.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 26 行"
+    },
+    {
+      "id": "5位移法_2钢架_2多未知量_题目aa_1门_22",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/2多未知量/题目aa/1门/22.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 27 行"
+    },
+    {
+      "id": "5位移法_2钢架_2多未知量_题目aa_1门_39",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/2多未知量/题目aa/1门/39.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 28 行"
+    },
+    {
+      "id": "5位移法_2钢架_2多未知量_题目aa_2门_1左门_13",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/2多未知量/题目aa/2门/1左门/13.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 29 行"
+    },
+    {
+      "id": "5位移法_2钢架_2多未知量_题目aa_2门_1左门_21",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/2多未知量/题目aa/2门/1左门/21.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 30 行"
+    },
+    {
+      "id": "5位移法_2钢架_2多未知量_题目aa_2门_1左门_23",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/2多未知量/题目aa/2门/1左门/23.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 31 行"
+    },
+    {
+      "id": "5位移法_2钢架_2多未知量_题目aa_2门_1左门_34",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/2多未知量/题目aa/2门/1左门/34.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 32 行"
+    },
+    {
+      "id": "5位移法_2钢架_2多未知量_题目aa_2门_1左门_41",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/2多未知量/题目aa/2门/1左门/41.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 33 行"
+    },
+    {
+      "id": "5位移法_2钢架_2多未知量_题目aa_2门_27",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/2多未知量/题目aa/2门/27.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 34 行"
+    },
+    {
+      "id": "5位移法_2钢架_2多未知量_题目aa_3天线_31",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/2多未知量/题目aa/3天线/31.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 35 行"
+    },
+    {
+      "id": "5位移法_2钢架_2多未知量_题目aa_3天线_32",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/2多未知量/题目aa/3天线/32.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 36 行"
+    },
+    {
+      "id": "5位移法_2钢架_2多未知量_题目aa_48",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/2多未知量/题目aa/48.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 37 行"
+    },
+    {
+      "id": "5位移法_2钢架_2多未知量_题目aa_4T_17",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/2多未知量/题目aa/4T/17.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 38 行"
+    },
+    {
+      "id": "5位移法_3对称性_1单未知量_题目_1",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/3对称性/1单未知量/题目/1.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 39 行"
+    },
+    {
+      "id": "5位移法_3对称性_1单未知量_题目_10",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/3对称性/1单未知量/题目/10.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 40 行"
+    },
+    {
+      "id": "5位移法_3对称性_1单未知量_题目_1无支座_11",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/3对称性/1单未知量/题目/1无支座/11.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 41 行"
+    },
+    {
+      "id": "5位移法_3对称性_1单未知量_题目_1无支座_4",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/3对称性/1单未知量/题目/1无支座/4.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 42 行"
+    },
+    {
+      "id": "5位移法_3对称性_1单未知量_题目_1无支座_6",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/3对称性/1单未知量/题目/1无支座/6.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 43 行"
+    },
+    {
+      "id": "5位移法_3对称性_1单未知量_题目_2",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/3对称性/1单未知量/题目/2.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 44 行"
+    },
+    {
+      "id": "5位移法_3对称性_1单未知量_题目_3",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/3对称性/1单未知量/题目/3.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 45 行"
+    },
+    {
+      "id": "5位移法_3对称性_1单未知量_题目_7",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/3对称性/1单未知量/题目/7.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 46 行"
+    },
+    {
+      "id": "5位移法_3对称性_1单未知量_题目_8",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/3对称性/1单未知量/题目/8.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 47 行"
+    },
+    {
+      "id": "5位移法_3对称性_1单未知量_题目_9",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/3对称性/1单未知量/题目/9.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 48 行"
+    },
+    {
+      "id": "5位移法_3对称性_2多未知量_题目_3",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/3对称性/2多未知量/题目/3.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 49 行"
+    },
+    {
+      "id": "5位移法_3对称性_2多未知量_题目_4",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/3对称性/2多未知量/题目/4.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 50 行"
+    },
+    {
+      "id": "5位移法_题目_4",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/题目/4.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 51 行"
+    },
+    {
+      "id": "5位移法_题目_5",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/题目/5.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 52 行"
+    },
+    {
+      "id": "5位移法_题目_6",
+      "expected_structure_type": "梁",
+      "path": "5位移法/题目/6.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 53 行"
+    },
+    {
+      "id": "5位移法_2钢架_题目_4",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/2钢架/题目/4.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 54 行"
+    },
+    {
+      "id": "5位移法_题目_7",
+      "expected_structure_type": "钢架",
+      "path": "5位移法/题目/7.jpg",
+      "selection_note": "字母库 5位移法.xlsx 第 55 行"
+    },
+    {
+      "id": "6力矩分配_1单节点分配_题目aa_1梁_1均_17",
+      "expected_structure_type": "梁",
+      "path": "6力矩分配/1单节点分配/题目aa/1梁/1均/17.jpg",
+      "selection_note": "字母库 6力矩分配.xlsx 第 2 行"
+    },
+    {
+      "id": "6力矩分配_1单节点分配_题目aa_1梁_2简化_26",
+      "expected_structure_type": "梁",
+      "path": "6力矩分配/1单节点分配/题目aa/1梁/2简化/26.jpg",
+      "selection_note": "字母库 6力矩分配.xlsx 第 3 行"
+    },
+    {
+      "id": "6力矩分配_1单节点分配_题目aa_2钢架_2L_18",
+      "expected_structure_type": "钢架",
+      "path": "6力矩分配/1单节点分配/题目aa/2钢架/2L/18.jpg",
+      "selection_note": "字母库 6力矩分配.xlsx 第 4 行"
+    },
+    {
+      "id": "6力矩分配_1单节点分配_题目aa_2钢架_4",
+      "expected_structure_type": "钢架",
+      "path": "6力矩分配/1单节点分配/题目aa/2钢架/4.jpg",
+      "selection_note": "字母库 6力矩分配.xlsx 第 5 行"
+    },
+    {
+      "id": "6力矩分配_3无剪力分配_单层_不可简化_题目_1",
+      "expected_structure_type": "钢架",
+      "path": "6力矩分配/3无剪力分配/单层/不可简化/题目/1.jpg",
+      "selection_note": "字母库 6力矩分配.xlsx 第 6 行"
+    },
+    {
+      "id": "6力矩分配_3无剪力分配_多层_题目_1",
+      "expected_structure_type": "钢架",
+      "path": "6力矩分配/3无剪力分配/多层/题目/1.jpg",
+      "selection_note": "字母库 6力矩分配.xlsx 第 7 行"
+    },
+    {
+      "id": "6力矩分配_4对称性_1单节点_题目_2",
+      "expected_structure_type": "梁",
+      "path": "6力矩分配/4对称性/1单节点/题目/2.jpg",
+      "selection_note": "字母库 6力矩分配.xlsx 第 8 行"
+    },
+    {
+      "id": "7矩阵位移_2杆端力1_2_题目1_1",
+      "expected_structure_type": "钢架",
+      "path": "7矩阵位移/2杆端力1+2/题目1/1.jpg",
+      "selection_note": "字母库 7矩阵位移.xlsx 第 2 行"
+    },
+    {
+      "id": "7矩阵位移_2杆端力1_2_题目1_3",
+      "expected_structure_type": "钢架",
+      "path": "7矩阵位移/2杆端力1+2/题目1/3.jpg",
+      "selection_note": "字母库 7矩阵位移.xlsx 第 3 行"
+    }
+  ]
+}
