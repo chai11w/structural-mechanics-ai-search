@@ -6,8 +6,8 @@
 - 8788 是现有飞书题库机器人，已通过既有固定公网回调正常运行；8790 是稳定网页主线，生产状态位于 `.tmp_tiku_agent_v2_prod_8790`，业务请求继续走 Intent V2 固定编排。
 - 8793 是长期复用的观测与人工评审层，镜像8790并使用独立状态 `.tmp_review_tiku_prod_8793` 和运行身份 `review-8793-prod`。
 - 8794 位于 `F:\cc\7-题库检索-8794` 独立 worktree，源码、端口、Cookie、状态和输出均与8788/8790/8793隔离；自主化按用户指示暂缓，不同时引入 LangGraph。
-- 当前工作线：8790 结构尺寸低成本预筛（字母库第三道硬过滤）。10 样本双模型实验已人工裁决并回填字母库「长×宽」列；6 个 xlsx 已加列（共 280 行，仅 10 条已回填），全量回填未跑。不修改 8790 生产、不硬截断 22 候选。
-- 已定决策：① 回填模型=千问 qwen3.7-plus（与生产识别同一口径，避免系统性偏差）；② DIMENSION_PROMPT 简化——除梁和拱外一律直接长×宽，钢架/桁架不再走多段相加特殊逻辑（顺带消除「组合结构」枚举争议）；③ 多段加法错误兜底暂缓，视实际效果再定。
+- 当前工作线：8790 结构尺寸低成本预筛（字母库第三道硬过滤）。字母库「长×宽」列全量回填已完成：280 行中 267 行已填（10 条人工裁决 + 257 条千问 qwen3.7-plus v4 识别），13 行留空（4 拱高度需计算按设计 null、8 钢架/1 桁架图上无尺寸标注）。不修改 8790 生产、不硬截断 22 候选。
+- 已定决策：① 回填模型=千问 qwen3.7-plus（与生产识别同一口径，避免系统性偏差）；② DIMENSION_PROMPT 采用分段转录 v4（各段与 total_span 独立、禁止凑一致、代码求和权威、rotation-invariant 长×宽），全量回填实际用此版本；早年"钢架/桁架直接长×宽简化"决策已被该分段方案取代，未按旧简化执行；③ 多段加法错误兜底暂缓，视实际效果再定。
 - 8790 模型费用台账只写入 `.tmp_tiku_agent_v2_prod_8790/model_costs.sqlite3`；8788的管理员查询仅以 SQLite `mode=ro` + `query_only` 读取该台账，绑定身份与查询游标都只保存在8788的 `.tmp_feishu_tiku`。
 
 ## Implemented
@@ -27,11 +27,11 @@
 - 模型费用台账按一次搜题聚合千问与智谱的每次调用、尝试次数、输入/缓存/输出/总token、版本化官网价格、估算费用、状态和告警；SQLite写入失败不会影响用户搜题，CLI可按天、模型和单次搜题查询。真实“4力法—钢架—单个字母均布荷载”峰值桶验证进入22次智谱复筛，整次24次模型调用、23,041 tokens，估算0.026261元，无缺失用量或价格。
 - 8788已实现管理员精确 `?`/`？` 费用查询：发送者通过显式一次性本地绑定写入独立状态文件，配置白名单与该本地绑定共同授权；首次统计近24小时、以后按每位管理员成功截止时间查询。按同一题的 `search_key` 汇总该题所有模型调用，严格超过0.05元单列显示；消息逐行输出，金额最多保留四位小数。真实端到端检索、非空费用查询及8788重启已验收。
 - 费用分支全量328项测试、8793主线/观测 parity 23项通过；费用记录不增加模型调用。
-- 结构尺寸识别实验设施：`scripts/evaluate_structure_dimensions.py`（千问+外部视觉结果对比、产出 review.html）、`scripts/run_zhipu_dimension_recognition.py`（智谱 glm-4.6v 直接 API 回退：10 并发/空内容重试/max_tokens 2048）、`scripts/backfill_letter_bank_dimensions.py`（备份后写字母库「长×宽」列）；manifest 与人工裁决在 `experiments/structure_dimension_eval/`。
+- 结构尺寸识别实验设施：`scripts/evaluate_structure_dimensions.py`（千问+外部视觉结果对比、产出 review.html）、`scripts/run_zhipu_dimension_recognition.py`（智谱 glm-4.6v 直接 API 回退：10 并发/空内容重试/max_tokens 2048）、`scripts/backfill_letter_bank_dimensions.py`（备份后写字母库「长×宽」列）、`scripts/backfill_run_dimensions_qwen.py`（千问 v4 并发全量识别：产 results.json + 回填 verdicts，不产 HTML，`--reuse-results` 可免重跑重生成 verdicts）；manifest 与人工裁决在 `experiments/structure_dimension_eval/`（全量 manifest=`bank_all_280.json`）。
 
 ## In Progress
 
-- 字母库全量维度回填（8790 结构尺寸预筛，8794自主化暂缓）：10 样本已人工裁决并回填「长×宽」列；下一步以千问对全部 280 题跑识别并回填，尚未接入 8790 候选流程。
+- 字母库全量维度回填已完成（267/280，千问 v4，13 行留空）；`dimensions=` 硬过滤尚未接入 8790 候选流程（`scan_chapter_candidates`/`coarse_search_tool`），为下一步工作。
 
 ## Not Implemented
 
@@ -60,7 +60,7 @@
 - 真实图片变体、非同文件高分题和外部模型稳定性样本仍不足；开发集不能外推真实泛化能力。
 - 2026-07-29一次8794启动命令曾把两枚模型API密钥展开到本机进程命令行和工具输出；相关进程已立即终止并改为安全环境继承。用户明确选择暂不轮换旧密钥，功能可继续，但残余泄露风险仍由用户承担。
 - 当前会话模型无法看图（Read 图片返回 Unsupported Image）且视觉 MCP 被禁用/拒绝；Claude 侧视觉识别需支持视觉的会话或人工对照题图完成。
-- 多段尺寸求和是千问与智谱共同短板（beam_continuous 真值 5a，两模型均读 4L）；全量回填后若查询与库口径不一致，硬删会漏正确候选，兜底策略暂缓、视实际效果再定。frame_t 双模型均判「组合结构」而目录为钢架，prompt 简化后该枚举不再影响尺寸提取。
+- 多段尺寸求和曾是千问与智谱共同短板（beam_continuous 真值 5a，两模型均读 4L）；v4 反编造子句已修复（6L→5L，7 段忠实转录），全量回填与未来查询识别同用千问 v4 口径，口径一致风险降低；兜底策略仍暂缓、视实际效果再定。frame_t 双模型均判「组合结构」而目录为钢架，该枚举不影响尺寸提取。
 
 ## Do Not Do
 
@@ -74,9 +74,9 @@
 
 ## Next Best Step
 
-1. 按已定决策简化 `DIMENSION_PROMPT`（除梁和拱外一律直接长×宽，仅保留梁 Y=0 与拱 null 的特殊规则），以千问 `qwen3.7-plus`（key 走 DASHSCOPE_API_KEY）对字母库全部 280 题跑维度识别，复用 `scripts/backfill_letter_bank_dimensions.py` 回填「长×宽」列（先备份再写；并行需可控、失败重试，参考智谱脚本模式）。
-2. 将 `dimensions=` 硬过滤接入 `scan_chapter_candidates`/`coarse_search_tool`（章节路由→结构类型→长宽三层），`dimensions_match` 对拱返回 skip；跑新旧流程排名对比实验（ranked/rerank 22→?）。
-3. 真实入口验收：从 `Agent.handle_text` 全链路进入、开关对照、金标准样本、细分类统计、空计划不算成功、多轮稳定性；通过后再考虑 8790 生产接入。实验验证通过前不修改 8790 生产、不硬截断 22 候选。
+1. 将 `dimensions=` 硬过滤接入 `scan_chapter_candidates`/`coarse_search_tool`（章节路由→结构类型→长宽三层），`dimensions_match` 对拱返回 skip；跑新旧流程排名对比实验（ranked/rerank 22→?）。
+2. 真实入口验收：从 `Agent.handle_text` 全链路进入、开关对照、金标准样本、细分类统计、空计划不算成功、多轮稳定性；通过后再考虑 8790 生产接入。实验验证通过前不修改 8790 生产、不硬截断 22 候选。
+3. 若有疑似错值，用 `scripts/backfill_run_dimensions_qwen.py --reuse-results <results.json>` 免重跑重生成 verdicts，复核后经 `scripts/backfill_letter_bank_dimensions.py` 回写（先备份）。
 
 ## Important Commands
 
