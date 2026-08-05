@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Human-verified long×width for the 10 sample letter-bank questions (2026-08-04). Canonical form: long=max(X,Y), width=min(X,Y); letters normalized to L; horizontal beams have Y=0 (width 0). beam_continuous corrected to 5L (Qwen said 4L, addition error); truss_trapezoid written directly from user measurement 18×4.",
+  "description": "Human-verified long×width for the 11 sample letter-bank questions (2026-08-04/05). Canonical form: long=max(X,Y), width=min(X,Y); letters normalized to L; horizontal beams have Y=0 (width 0). beam_continuous corrected to 5L (Qwen said 4L, addition error); truss_trapezoid written directly from user measurement 18×4; truss_all_7 user-verified 2L×2L (2026-08-05).",
   "verdicts": [
     {
       "path": "2静定结构/1单跨梁/题目a/1均/1.jpg",
@@ -51,6 +51,11 @@
       "path": "2静定结构/5桁架/指定杆/题目2/1梯形/1平行梯形/44.jpg",
       "long_width": "18×4",
       "note": "用户直接测得 长18 宽4"
+    },
+    {
+      "path": "2静定结构/5桁架/所有杆/题目aa/7.jpg",
+      "long_width": "2L×2L",
+      "note": "用户人工核对：水平和竖向均 2L"
     }
   ]
 }
