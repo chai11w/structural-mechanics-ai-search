@@ -9,9 +9,11 @@ with per-image retries, and writes two artifacts under an ignored output dir:
   - ``qwen_v4_backfill_verdicts.json`` — ``{path, long_width}`` rows ready for
     ``scripts/backfill_letter_bank_dimensions.py``.
 
-Verdict rule: only ``dimensions_verified`` rows with a readable ``long_width``
-are included, and the 10 already human-verified paths are excluded so model
-output never overwrites human verdicts. Unknown / unverified / failed rows stay
+Verdict rule: every row with a readable ``long_width`` is included — the value
+is the code-summed segments when they parse (authoritative) and falls back to
+the model total otherwise — while the 10 already human-verified paths are
+excluded so model output never overwrites human verdicts. Rows with no readable
+long_width (``unknown``, unreadable segments, arches with a null height) stay
 blank in the bank, which is the recall-preserving choice for the hard filter.
 
 The API key is read from ``DASHSCOPE_API_KEY`` only; never from a file.
@@ -165,13 +167,19 @@ def run_one(
 def build_verdicts(
     results: list[dict[str, Any]], human_paths: set[str]
 ) -> tuple[list[dict[str, str]], dict[str, list[str]]]:
-    """Conservative qwen verdicts: verified, readable, and never over human verdicts."""
+    """Qwen backfill verdicts: any readable long_width, never over human verdicts.
+
+    A readable value is the code-summed segments when they parse (authoritative)
+    and falls back to the model total otherwise; ``dimensions_verified`` is a
+    cross-check flag, not a gate on the value, so a correct code sum is written
+    even when the model's own estimate disagreed.
+    """
 
     verdicts: list[dict[str, str]] = []
     stats: dict[str, list[str]] = {
         "failed": [],
         "unverified": [],
-        "unknown": [],
+        "blank": [],
         "human_preserved": [],
     }
     for row in results:
@@ -180,13 +188,12 @@ def build_verdicts(
             stats["failed"].append(path)
             continue
         normalized = row.get("normalized") or {}
-        if not normalized.get("dimensions_verified"):
-            stats["unverified"].append(path)
-            continue
         long_width = str(normalized.get("long_width") or "").strip()
         if not long_width or long_width == "unknown":
-            stats["unknown"].append(path)
+            stats["blank"].append(path)
             continue
+        if not normalized.get("dimensions_verified"):
+            stats["unverified"].append(path)
         if path in human_paths:
             stats["human_preserved"].append(path)
             continue
@@ -213,6 +220,12 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument(
+        "--reuse-results",
+        type=Path,
+        default=None,
+        help="recompute the verdicts from a prior run's results.json without calling qwen",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=0,
@@ -227,76 +240,78 @@ def main() -> int:
     if not images_root.is_dir():
         raise SystemExit(f"question image root missing: {images_root}")
 
-    api_key = os.environ.get("DASHSCOPE_API_KEY", "")
-    if not api_key:
-        raise SystemExit("DASHSCOPE_API_KEY missing; refusing to read a key from configuration files")
-
     manifest = args.manifest.resolve()
-    if manifest.is_file():
-        samples = load_manifest(manifest, images_root)
+    if args.reuse_results is not None:
+        payload = json.loads(args.reuse_results.read_text(encoding="utf-8"))
+        results = list(payload.get("results") or [])
+        output_dir = args.reuse_results.resolve().parent
+        images_root = Path(str(payload.get("images_root") or images_root))
+        manifest = Path(str(payload.get("manifest") or manifest))
+        qwen_model = str(payload.get("qwen_model") or args.qwen_model)
+        print(f"reused_results={args.reuse_results} rows={len(results)}")
     else:
-        sample_dicts = build_manifest_from_bank(bank_root, images_root)
-        write_manifest(manifest, sample_dicts)
-        samples = load_manifest(manifest, images_root)
-        print(f"wrote_manifest={manifest} samples={len(samples)}")
-    if args.limit:
-        samples = samples[: args.limit]
+        api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+        if not api_key:
+            raise SystemExit("DASHSCOPE_API_KEY missing; refusing to read a key from configuration files")
+        if manifest.is_file():
+            samples = load_manifest(manifest, images_root)
+        else:
+            sample_dicts = build_manifest_from_bank(bank_root, images_root)
+            write_manifest(manifest, sample_dicts)
+            samples = load_manifest(manifest, images_root)
+            print(f"wrote_manifest={manifest} samples={len(samples)}")
+        if args.limit:
+            samples = samples[: args.limit]
 
-    output_dir = args.output_dir or (
-        Path(__file__).resolve().parent.parent
-        / ".tmp_structure_dimension_eval"
-        / f"backfill_qwen_v4_{time.strftime('%Y%m%d_%H%M%S')}"
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = args.output_dir or (
+            Path(__file__).resolve().parent.parent
+            / ".tmp_structure_dimension_eval"
+            / f"backfill_qwen_v4_{time.strftime('%Y%m%d_%H%M%S')}"
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    results: list[dict[str, Any]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {
-            pool.submit(
-                run_one,
-                sample,
-                root=images_root,
-                api_key=api_key,
-                endpoint=args.qwen_endpoint,
-                model=args.qwen_model,
-                timeout=args.timeout,
-            ): sample.sample_id
-            for sample in samples
-        }
-        for future in concurrent.futures.as_completed(futures):
-            row = future.result()
-            results.append(row)
-            if "error" in row:
-                print(f"qwen failed {row['path']}: {row['error'][:160]}")
-            else:
-                print(f"qwen ok {row['path']}")
+        results: list[dict[str, Any]] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+            futures = {
+                pool.submit(
+                    run_one,
+                    sample,
+                    root=images_root,
+                    api_key=api_key,
+                    endpoint=args.qwen_endpoint,
+                    model=args.qwen_model,
+                    timeout=args.timeout,
+                ): sample.sample_id
+                for sample in samples
+            }
+            for future in concurrent.futures.as_completed(futures):
+                row = future.result()
+                results.append(row)
+                if "error" in row:
+                    print(f"qwen failed {row['path']}: {row['error'][:160]}")
+                else:
+                    print(f"qwen ok {row['path']}")
     results.sort(key=lambda row: row["path"])
 
-    def _long_width(row: dict[str, Any]) -> str:
-        return str((row.get("normalized") or {}).get("long_width") or "").strip()
-
-    ok = sum(1 for row in results if "error" not in row)
-    verified = sum(1 for row in results if (row.get("normalized") or {}).get("dimensions_verified"))
-    blank = sum(1 for row in results if "error" not in row and _long_width(row) in ("", "unknown"))
     verdicts, stats = build_verdicts(results, load_human_paths(DEFAULT_HUMAN_VERDICTS))
+    verified = sum(1 for row in results if (row.get("normalized") or {}).get("dimensions_verified"))
 
     payload = {
         "schema_version": 1,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "manifest": str(manifest),
         "images_root": str(images_root),
-        "qwen_model": args.qwen_model,
+        "qwen_model": qwen_model,
         "prompt_version": "structure-total-span-height-long-width-v4",
         "workers": args.workers,
         "summary": {
             "total": len(results),
-            "ok": ok,
+            "ok": sum(1 for row in results if "error" not in row),
             "failed": len(stats["failed"]),
             "verified": verified,
             "verdicts": len(verdicts),
-            "blank": blank,
+            "blank": len(stats["blank"]),
             "unverified": len(stats["unverified"]),
-            "unknown": len(stats["unknown"]),
             "human_preserved": len(stats["human_preserved"]),
         },
         "results": results,
@@ -309,9 +324,9 @@ def main() -> int:
             {
                 "schema_version": 1,
                 "description": (
-                    "Qwen v4 dimension backfill verdicts (verified, readable long_width only; "
-                    "the 10 human-verified rows excluded). Ready for "
-                    "scripts/backfill_letter_bank_dimensions.py."
+                    "Qwen v4 dimension backfill verdicts: any readable long_width (code-summed "
+                    "segments authoritative, model total fallback), the 10 human-verified rows "
+                    "excluded. Ready for scripts/backfill_letter_bank_dimensions.py."
                 ),
                 "verdicts": verdicts,
             },
