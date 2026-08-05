@@ -1,0 +1,306 @@
+{
+  "schema_version": 1,
+  "description": "All letter-bank 梁 samples (2026-08-05): 50 beams catalogued as 梁 in the letter bank. v3 segment-transcription prompt.",
+  "samples": [
+    {
+      "id": "b_2静定结构_1单跨梁_题目a_1均_1",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/1单跨梁/题目a/1均/1.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_2静定结构_2多跨梁_内力图_题目2_2跨_1力_39",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/2跨/1力/39.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_2静定结构_2多跨梁_内力图_题目2_2跨_1力_45",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/2跨/1力/45.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_2静定结构_2多跨梁_内力图_题目2_2跨_均_38f",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/2跨/均/38f.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_2静定结构_2多跨梁_内力图_题目2_3跨_1力_34",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/3跨/1力/34.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_2静定结构_2多跨梁_内力图_题目2_3跨_1均_25",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/3跨/1均/25.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_2静定结构_2多跨梁_内力图_题目2_44",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/44.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_2静定结构_2多跨梁_弯矩图_题目_1",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/弯矩图/题目/1.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_2静定结构_2多跨梁_弯矩图_题目_2",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/弯矩图/题目/2.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_2静定结构_2多跨梁_弯矩图_题目_5",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/弯矩图/题目/5.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_2静定结构_题目_12",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/题目/12.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_3静定结构位移_1梁_题目a_1跨_1",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/1跨/1.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_3静定结构位移_1梁_题目a_1跨_11",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/1跨/11.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_3静定结构位移_1梁_题目a_1跨_13",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/1跨/13.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_3静定结构位移_1梁_题目a_1跨_15",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/1跨/15.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_3静定结构位移_1梁_题目a_1跨_17",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/1跨/17.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_3静定结构位移_1梁_题目a_1跨_9",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/1跨/9.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_3静定结构位移_1梁_题目a_2跨_10",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/2跨/10.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_3静定结构位移_1梁_题目a_2跨_4",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/2跨/4.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_3静定结构位移_1梁_题目a_2跨_5",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/2跨/5.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_3静定结构位移_1梁_题目a_2跨_7",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/2跨/7.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_3静定结构位移_1梁_题目a_2跨_8",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/2跨/8.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_3静定结构位移_5积分法_题目_1",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/5积分法/题目/1.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_1梁_1单未知量_题目_10",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/10.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_1梁_1单未知量_题目_1跨_1",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/1跨/1.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_1梁_1单未知量_题目_1跨_12",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/1跨/12.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_1梁_1单未知量_题目_1跨_13",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/1跨/13.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_1梁_1单未知量_题目_1跨_2",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/1跨/2.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_1梁_1单未知量_题目_1跨_3",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/1跨/3.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_1梁_1单未知量_题目_1跨_5",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/1跨/5.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_1梁_1单未知量_题目_2跨_6",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/2跨/6.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_1梁_1单未知量_题目_2跨_7",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/2跨/7.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_1梁_1单未知量_题目_2跨_8",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/2跨/8.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_1梁_1单未知量_题目_2跨_9",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/2跨/9.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_1梁_2多未知量_题目_1",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/2多未知量/题目/1.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_1梁_2多未知量_题目_2",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/2多未知量/题目/2.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_1梁_2多未知量_题目_3",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/2多未知量/题目/3.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_1梁_2多未知量_题目_4",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/2多未知量/题目/4.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_1梁_2多未知量_题目_6",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/2多未知量/题目/6.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_3对称性_题目1_2梁_15",
+      "expected_structure_type": "梁",
+      "path": "4力法/3对称性/题目1/2梁/15.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_3对称性_题目1_2梁_41",
+      "expected_structure_type": "梁",
+      "path": "4力法/3对称性/题目1/2梁/41.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_3对称性_题目1_2梁_5",
+      "expected_structure_type": "梁",
+      "path": "4力法/3对称性/题目1/2梁/5.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_5组合结构_弹簧_题目_3",
+      "expected_structure_type": "梁",
+      "path": "4力法/5组合结构+弹簧/题目/3.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_4力法_题目_5",
+      "expected_structure_type": "梁",
+      "path": "4力法/题目/5.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_5位移法_1梁_1单未知量_题目_3",
+      "expected_structure_type": "梁",
+      "path": "5位移法/1梁/1单未知量/题目/3.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_5位移法_1梁_2多未知量_题目_1",
+      "expected_structure_type": "梁",
+      "path": "5位移法/1梁/2多未知量/题目/1.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_5位移法_题目_6",
+      "expected_structure_type": "梁",
+      "path": "5位移法/题目/6.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_6力矩分配_1单节点分配_题目aa_1梁_1均_17",
+      "expected_structure_type": "梁",
+      "path": "6力矩分配/1单节点分配/题目aa/1梁/1均/17.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_6力矩分配_1单节点分配_题目aa_1梁_2简化_26",
+      "expected_structure_type": "梁",
+      "path": "6力矩分配/1单节点分配/题目aa/1梁/2简化/26.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    },
+    {
+      "id": "b_6力矩分配_4对称性_1单节点_题目_2",
+      "expected_structure_type": "梁",
+      "path": "6力矩分配/4对称性/1单节点/题目/2.jpg",
+      "selection_note": "字母库 梁 全量样本"
+    }
+  ]
+}

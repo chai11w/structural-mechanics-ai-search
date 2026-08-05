@@ -57,7 +57,8 @@ Y 用同样的分段法写进 vertical_segments：
 - 水平直杆：vertical_segments 写 []，total_height 写 "0"。
 - 竖直直杆：horizontal_segments 写 []，total_span 写 "0"。
 
-total_span 与 total_height：你按自己读到的各段给一个估计总长。程序会按你列出的各段逐段求和，再与你的估计核对；若估计与各段之和不同，以各段之和为准。
+total_span 与 total_height：这是你读出的总长估计，程序会按你列出的各段逐段求和作为权威值，你的估计只用于交叉核对。
+各段与 total_span 是两件独立的事，两者不一致是完全正常的：不要为了让各段之和等于 total_span 而添段、漏段或改标注，也不要为了让 total_span 等于各段之和而改动你的估计。不一致时照实都输出，程序独立核对。
 
 拱的处理：拱 的高度通常需要计算才能得到，图上一般不直接标注。遇到拱 时不要估算、不要计算高度；读不出时 total_height（必要时 total_span）写 null。
 
@@ -550,7 +551,7 @@ def build_payload(
         "generated_at": now_utc(),
         "manifest": str(manifest),
         "root": str(root),
-        "prompt_version": "structure-total-span-height-long-width-v3",
+        "prompt_version": "structure-total-span-height-long-width-v4",
         "qwen_model": qwen_model,
         "results": rows,
         "summary": {
