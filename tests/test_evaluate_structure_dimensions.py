@@ -55,6 +55,88 @@ class StructureDimensionEvaluationTests(unittest.TestCase):
         self.assertEqual(result["long_width"], "unknown")
         self.assertEqual(result["confidence"], 1.0)
 
+    def test_provider_segments_code_sum_is_authoritative(self):
+        result = normalize_provider_result(
+            {
+                "structure_type": "梁",
+                "horizontal_segments": ["a", "a/2", "a/2", "a"],
+                "vertical_segments": [],
+                "total_span": "3L",
+                "total_height": "0",
+            }
+        )
+        self.assertEqual(result["code_span"], "3L")
+        self.assertIs(result["span_consistent"], True)
+        self.assertIs(result["dimensions_verified"], True)
+        self.assertEqual(result["long_width"], "3L×0")
+
+    def test_provider_segments_catch_model_arithmetic_mismatch(self):
+        # Model transcribed l/3,2l/3,l/3,l (sum 7/3 ≈ 2.33) but "felt" 3L.
+        result = normalize_provider_result(
+            {
+                "structure_type": "梁",
+                "horizontal_segments": ["l/3", "2l/3", "l/3", "l"],
+                "vertical_segments": [],
+                "total_span": "3L",
+                "total_height": "0",
+            }
+        )
+        self.assertEqual(result["code_span"], "2.33333L")
+        self.assertIs(result["span_consistent"], False)
+        self.assertIs(result["dimensions_verified"], False)
+        # Code sum wins: long_width reflects the transcribed sum, not the model total.
+        self.assertEqual(result["long_width"], "2.33333L×0")
+
+    def test_provider_segments_fallback_when_unreadable_segment(self):
+        result = normalize_provider_result(
+            {
+                "structure_type": "梁",
+                "horizontal_segments": ["a", "null"],
+                "vertical_segments": [],
+                "total_span": "4L",
+                "total_height": "0",
+            }
+        )
+        self.assertIsNone(result["code_span"])
+        self.assertIs(result["dimensions_verified"], False)
+        self.assertEqual(result["long_width"], "4L×0")
+
+    def test_provider_segments_mixed_kind_falls_back_to_model(self):
+        result = normalize_provider_result(
+            {
+                "structure_type": "梁",
+                "horizontal_segments": ["a", "2"],
+                "vertical_segments": [],
+                "total_span": "3L",
+                "total_height": "0",
+            }
+        )
+        self.assertIsNone(result["code_span"])
+        self.assertEqual(result["long_width"], "3L×0")
+
+    def test_provider_vertical_beam_segments_verify_and_rotate(self):
+        result = normalize_provider_result(
+            {
+                "structure_type": "梁",
+                "horizontal_segments": [],
+                "vertical_segments": ["L", "L/2", "L/2", "L", "L/2", "L/2", "L"],
+                "total_span": "0",
+                "total_height": "5L",
+            }
+        )
+        self.assertEqual(result["code_height"], "5L")
+        self.assertIs(result["height_consistent"], True)
+        self.assertIs(result["dimensions_verified"], True)
+        self.assertEqual(result["long_width"], "5L×0")
+
+    def test_provider_no_segments_is_not_code_verified(self):
+        result = normalize_provider_result(
+            {"structure_type": "钢架", "total_span": "3L", "total_height": "2L"}
+        )
+        self.assertIsNone(result["code_span"])
+        self.assertIs(result["dimensions_verified"], False)
+        self.assertEqual(result["long_width"], "3L×2L")
+
     def test_manifest_rejects_answer_images_and_keeps_safe_relative_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "bank"

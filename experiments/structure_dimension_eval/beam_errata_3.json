@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "description": "Beam prompt-fix regression manifest (2026-08-05): the 3 beams the previous run got wrong, re-run under DIMENSION_PROMPT v3 (segment transcription + code summation). beam_continuous_ctrl truth is 5L×0 (model read 4L); beam_force_sym_41 has 4 segments of L (model read 3); beam_disp_2span_10 segments l/3,2l/3,l/3,l sum to 7/3L (model claimed 3L).",
+  "samples": [
+    {
+      "id": "beam_continuous_ctrl",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/3跨/1力/34.jpg",
+      "selection_note": "已知错例：真值 5L×0（标注 a,a/2,a/2,a,a/2,a/2,a=5a），两模型此前均读 4L"
+    },
+    {
+      "id": "beam_force_sym_41",
+      "expected_structure_type": "梁",
+      "path": "4力法/3对称性/题目1/2梁/41.jpg",
+      "selection_note": "模糊：4 个 L 只读到 3 个，真值 4L"
+    },
+    {
+      "id": "beam_disp_2span_10",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/2跨/10.jpg",
+      "selection_note": "看对但求和错：段 l/3,2l/3,l/3,l 之和 7/3L，模型报 3L"
+    }
+  ]
+}

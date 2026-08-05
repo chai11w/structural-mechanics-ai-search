@@ -82,6 +82,104 @@ def normalized_dimension_symbol(symbol: str) -> str:
     return "L"
 
 
+_SEGMENT_RE = re.compile(
+    r"^(?:(?P<coef>(?:0|[1-9]\d*)(?:\.\d+)?))?(?P<symbol>[A-Za-z]+)?(?:/(?P<den>0|[1-9]\d*))?$"
+)
+_UNREADABLE_LABELS = {"null", "unknown", "未知", "不确定"}
+
+
+def parse_dimension_segment(value: object) -> Dimension | None:
+    """Parse one raw segment label transcribed from the diagram.
+
+    Accepts fractional labels as drawn (``a/2``, ``2a/3``, ``l/2``, ``0.5a``,
+    ``2``, ``1/2``) so the model only transcribes each span label and never has
+    to do arithmetic; the caller sums the coefficients. ``None`` for an empty,
+    unreadable (``null``/``unknown``) or malformed label.
+    """
+
+    if value is None:
+        return None
+    text = str(value).strip().replace(" ", "")
+    if not text or text.lower() in _UNREADABLE_LABELS:
+        return None
+    match = _SEGMENT_RE.fullmatch(text)
+    if not match:
+        return None
+    coefficient = Fraction(match.group("coef") or "1")
+    denominator_text = match.group("den")
+    symbol = match.group("symbol") or ""
+    if not denominator_text and not symbol and match.group("coef") is None:
+        return None
+    if denominator_text:
+        coefficient /= Fraction(denominator_text)
+    if coefficient < 0:
+        return None
+    return Dimension(raw=text, coefficient=coefficient, symbol=symbol)
+
+
+def _render_coefficient(coefficient: Fraction) -> str:
+    if coefficient.denominator == 1:
+        return str(coefficient.numerator)
+    return f"{float(coefficient):.6g}"
+
+
+def sum_dimension_segments(values: object) -> dict[str, object]:
+    """Sum raw transcribed segment labels into one canonical dimension.
+
+    All readable segments must share one kind — every segment symbolic (any
+    letter, normalized to ``L``) or every segment numeric — otherwise the sum is
+    not mechanically valid. The returned total carries a renderable ``raw`` so it
+    can feed :func:`canonical_dimensions` directly.
+
+    Returns ``{"dimension": Dimension|None, "segments": [...parsed...],
+    "readable": int, "total": int, "error": str|None}`` where ``error`` is one
+    of ``"unreadable_segment"`` / ``"mixed_kind"`` when the sum cannot be trusted.
+    """
+
+    items = list(values or [])
+    parsed = [parse_dimension_segment(item) for item in items]
+    readable = [dimension for dimension in parsed if dimension is not None]
+    if len(readable) != len(items):
+        return {
+            "dimension": None,
+            "segments": parsed,
+            "readable": len(readable),
+            "total": len(items),
+            "error": "unreadable_segment",
+        }
+    if not readable:
+        return {
+            "dimension": None,
+            "segments": parsed,
+            "readable": 0,
+            "total": 0,
+            "error": None,
+        }
+    symbols = {
+        normalized_dimension_symbol(dimension.symbol)
+        for dimension in readable
+        if dimension.coefficient != 0
+    }
+    if len(symbols) > 1:
+        return {
+            "dimension": None,
+            "segments": parsed,
+            "readable": len(readable),
+            "total": len(items),
+            "error": "mixed_kind",
+        }
+    symbol = symbols.pop() if symbols else ""
+    coefficient = sum((dimension.coefficient for dimension in readable), Fraction(0))
+    raw = f"{_render_coefficient(coefficient)}{symbol}" if symbol else _render_coefficient(coefficient)
+    return {
+        "dimension": Dimension(raw=raw, coefficient=coefficient, symbol=symbol),
+        "segments": parsed,
+        "readable": len(readable),
+        "total": len(items),
+        "error": None,
+    }
+
+
 def _coefficient_text(dimension: Dimension) -> str:
     if not dimension.symbol:
         return dimension.raw
@@ -102,15 +200,16 @@ def dimension_text(dimension: Dimension) -> str:
 def canonical_dimensions(total_span: object, total_height: object) -> dict[str, str] | None:
     """Return rotation-invariant literal long/width dimensions, never a ratio.
 
-    The total span must be positive. A zero total height is valid and remains a
-    literal ``0`` width. Numeric units are stripped and letter variables share
-    the canonical symbol ``L``, so values compare equal when their canonical
-    forms do.
+    At least one of span / height must be positive; the box is rotation-invariant
+    so a vertical beam (span ``0``, height ``5L``) canonicalizes the same as a
+    horizontal one (``5L``, ``0``). A zero dimension stays a literal ``0`` width.
+    Numeric units are stripped and letter variables share the canonical symbol
+    ``L``, so values compare equal when their canonical forms do.
     """
 
     span = normalize_dimension(total_span)
     height = normalize_dimension(total_height)
-    if span is None or height is None or span.coefficient <= 0:
+    if span is None or height is None or (span.coefficient <= 0 and height.coefficient <= 0):
         return None
 
     span_symbol = normalized_dimension_symbol(span.symbol)

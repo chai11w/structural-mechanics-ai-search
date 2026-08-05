@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from fractions import Fraction
 
 from dimensions import (
     canonical_dimensions,
@@ -8,6 +9,8 @@ from dimensions import (
     dimensions_match,
     normalize_dimension,
     normalized_dimension_symbol,
+    parse_dimension_segment,
+    sum_dimension_segments,
 )
 
 
@@ -39,6 +42,14 @@ class DimensionNormalizationTests(unittest.TestCase):
         self.assertEqual(canonical_dimensions("3m", "2L"), None)
         self.assertEqual(canonical_dimensions(None, "2m"), None)
 
+    def test_canonical_dimensions_rotate_a_vertical_beam(self):
+        # A beam drawn vertically has span 0 and height 5L; rotation-invariant
+        # canonical form must equal the horizontal reading 5L×0.
+        self.assertEqual(
+            canonical_dimensions("0", "5L"), {"long": "5L", "width": "0", "long_width": "5L×0"}
+        )
+        self.assertEqual(canonical_dimensions("0", "0"), None)
+
     def test_units_ignored_and_letters_normalize_like_loads(self):
         # 6m and 6 are the same dimension; units never compare.
         self.assertEqual(canonical_dimensions("6m", "3m"), canonical_dimensions("6", "3"))
@@ -56,6 +67,61 @@ class DimensionNormalizationTests(unittest.TestCase):
         candidate = canonical_dimensions("3l", "l")
         self.assertEqual(query, {"long": "3L", "width": "L", "long_width": "3L×L"})
         self.assertEqual(dimensions_match(query, candidate, "钢架"), "match")
+
+
+class DimensionSegmentTests(unittest.TestCase):
+    def test_parse_dimension_segment_accepts_drawn_fractional_labels(self):
+        self.assertEqual(parse_dimension_segment("a").coefficient, Fraction(1, 1))
+        self.assertEqual(parse_dimension_segment("a").symbol, "a")
+        self.assertEqual(parse_dimension_segment("a/2").coefficient, Fraction(1, 2))
+        self.assertEqual(parse_dimension_segment("2a/3").coefficient, Fraction(2, 3))
+        self.assertEqual(parse_dimension_segment("l/2").coefficient, Fraction(1, 2))
+        self.assertEqual(parse_dimension_segment("0.5a").coefficient, Fraction(1, 2))
+        self.assertEqual(parse_dimension_segment("2.5a").coefficient, Fraction(5, 2))
+        self.assertEqual(parse_dimension_segment("2").coefficient, Fraction(2, 1))
+        self.assertEqual(parse_dimension_segment("1/2").coefficient, Fraction(1, 2))
+
+    def test_parse_dimension_segment_rejects_unreadable_or_malformed_labels(self):
+        self.assertIsNone(parse_dimension_segment(None))
+        self.assertIsNone(parse_dimension_segment(""))
+        self.assertIsNone(parse_dimension_segment("null"))
+        self.assertIsNone(parse_dimension_segment("unknown"))
+        self.assertIsNone(parse_dimension_segment("a+b"))
+        self.assertIsNone(parse_dimension_segment("a/2a"))
+
+    def test_sum_segments_letter_labels_sum_to_L(self):
+        result = sum_dimension_segments(["a", "a/2", "a/2", "a"])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["dimension"].coefficient, Fraction(3, 1))
+        self.assertEqual(result["dimension"].symbol, "L")
+
+    def test_sum_segments_fraction_total_is_exact(self):
+        # 1/3 + 2/3 + 1/3 + 1 = 7/3 — the case qwen summed wrong as 3L.
+        result = sum_dimension_segments(["l/3", "2l/3", "l/3", "l"])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["dimension"].coefficient, Fraction(7, 3))
+
+    def test_sum_segments_numeric_labels_share_no_symbol(self):
+        result = sum_dimension_segments(["2", "3"])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["dimension"].coefficient, 5)
+        self.assertEqual(result["dimension"].symbol, "")
+
+    def test_sum_segments_rejects_mixed_letter_and_number_kind(self):
+        result = sum_dimension_segments(["a", "2"])
+        self.assertIsNone(result["dimension"])
+        self.assertEqual(result["error"], "mixed_kind")
+
+    def test_sum_segments_rejects_unreadable_segment(self):
+        result = sum_dimension_segments(["a", "null"])
+        self.assertIsNone(result["dimension"])
+        self.assertEqual(result["error"], "unreadable_segment")
+
+    def test_sum_segments_empty_is_not_an_error(self):
+        result = sum_dimension_segments([])
+        self.assertIsNone(result["dimension"])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["total"], 0)
 
 
 class DimensionMatchTests(unittest.TestCase):

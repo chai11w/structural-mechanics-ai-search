@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "description": "Beam-only validation run (2026-08-05): 10 new letter-bank 梁 samples plus the known-failure beam_continuous control (Qwen read 4L, human truth 5L). Focus: multi-span addition weakness shared by qwen3.7-plus and glm-4.6v. All paths verified under the main bank root and catalogued in the letter bank with structure type 梁. No answer images.",
+  "samples": [
+    {
+      "id": "beam_static_2span_39",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/2跨/1力/39.jpg",
+      "selection_note": "静定 2 跨连续梁，检验 X=两跨相加"
+    },
+    {
+      "id": "beam_static_3span_25",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/3跨/1均/25.jpg",
+      "selection_note": "静定 3 跨连续梁（与已知错例同类型），检验相加"
+    },
+    {
+      "id": "beam_static_moment_1",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/弯矩图/题目/1.jpg",
+      "selection_note": "静定多跨梁弯矩图，图上有内力图叠加"
+    },
+    {
+      "id": "beam_disp_single_1",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/1跨/1.jpg",
+      "selection_note": "单跨梁基线（Y=0，X=标注），易情形"
+    },
+    {
+      "id": "beam_disp_2span_10",
+      "expected_structure_type": "梁",
+      "path": "3静定结构位移/1梁/题目a/2跨/10.jpg",
+      "selection_note": "位移法 2 跨梁，检验相加"
+    },
+    {
+      "id": "beam_force_single_1",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/1跨/1.jpg",
+      "selection_note": "力法单跨梁基线"
+    },
+    {
+      "id": "beam_force_2span_6",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/1单未知量/题目/2跨/6.jpg",
+      "selection_note": "力法 2 跨梁，检验相加"
+    },
+    {
+      "id": "beam_force_multi_4",
+      "expected_structure_type": "梁",
+      "path": "4力法/1梁/2多未知量/题目/4.jpg",
+      "selection_note": "力法多未知量（大图 1920x852），通常多跨，检验相加"
+    },
+    {
+      "id": "beam_force_sym_41",
+      "expected_structure_type": "梁",
+      "path": "4力法/3对称性/题目1/2梁/41.jpg",
+      "selection_note": "对称性梁"
+    },
+    {
+      "id": "beam_disp_multi_1",
+      "expected_structure_type": "梁",
+      "path": "5位移法/1梁/2多未知量/题目/1.jpg",
+      "selection_note": "位移法多未知量梁"
+    },
+    {
+      "id": "beam_continuous_ctrl",
+      "expected_structure_type": "梁",
+      "path": "2静定结构/2多跨梁/内力图/题目2/3跨/1力/34.jpg",
+      "selection_note": "对照：已知错例 beam_continuous，人工真值 5L×0，两模型均读 4L，测是否稳定复现"
+    }
+  ]
+}

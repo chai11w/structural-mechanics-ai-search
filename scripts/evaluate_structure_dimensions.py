@@ -33,7 +33,7 @@ from scripts.classify_question_bank import (  # noqa: E402
     tracked_qwen_request,
 )
 
-from dimensions import Dimension, canonical_dimensions, dimension_text, normalize_dimension, normalized_dimension_symbol  # noqa: E402
+from dimensions import Dimension, canonical_dimensions, dimension_text, normalize_dimension, normalized_dimension_symbol, sum_dimension_segments  # noqa: E402
 
 VALID_STRUCTURE_TYPES = {"梁", "钢架", "桁架", "拱", "组合结构", "unknown"}
 DEFAULT_MANIFEST = BASE / "experiments" / "structure_dimension_eval" / "samples.json"
@@ -43,21 +43,28 @@ DIMENSION_PROMPT = """你是结构力学题图的结构尺寸识别器。搜题�
 
 输出两样东西：
 1. 结构大类（structure_type）。
-2. 骨架的外围长度 X 和 Y：X 是主承重骨架最左端至最右端的水平总长度；Y 是主承重骨架最低端至最高端的竖直总长度。长、宽由程序取 长=max(X,Y)、宽=min(X,Y)，你不需要算。JSON 里的 total_span 就是 X，total_height 就是 Y。
+2. 骨架的外围长度 X 和 Y：X 是主承重骨架最左端至最右端的水平总长度；Y 是主承重骨架最低端至最高端的竖直总长度。长、宽由程序取 长=max(X,Y)、宽=min(X,Y)，你不需要算。JSON 里的 total_span 就是 X，total_height 就是 Y。图整体旋转 90° 不影响结果——X、Y 永远是骨架在水平和竖直两个方向上的外接总长。
 
-尺寸来源：只能使用图中明确标注的尺寸、符号尺寸，以及能直接相加的同类型尺寸。严禁用图片像素、纸面比例、文字高度或荷载箭头估算。尺寸标注线本身不算结构长度，但标注线写出的数值要读取。
+尺寸来源：只能使用图中明确标注的尺寸、符号尺寸。严禁用图片像素、纸面比例、文字高度或荷载箭头估算。尺寸标注线本身不算结构长度，但标注线写出的数值要读取。
 
-X、Y 怎么算：
-- 同一方向的连续分段要相加：多跨梁/多跨框架把各跨水平长度相加得 X；多层结构把各层层高相加得 Y。
-- 水平直杆的 Y=0；竖直直杆的 X=0。
-- 图整体旋转 90° 不影响结果——X、Y 永远是骨架在水平和竖直两个方向上的外接总长。
+X 的读法——分段法，不要凭感觉报总长：
+1. 沿主承重骨架水平方向，从左到右逐段读出每一段标注，写进 horizontal_segments 数组。每段一个字符串，原样保留图上写法（如 "a"、"a/2"、"2a"、"l"、"2"）。段数与图上标注一一对应。
+2. 全部列出后，从右到左再核对一遍，确认没有漏段、多段。段数偏少时最可能是漏看了一段。
+3. 每段只写标注本身，禁止写 "a+a" 这类求和表达式，禁止把一段拆成多段。
+4. 某一段若读不出可靠标注，该段写 "null"，并把 confidence 降到 0.5 以下。
+
+Y 用同样的分段法写进 vertical_segments：
+- 水平直杆：vertical_segments 写 []，total_height 写 "0"。
+- 竖直直杆：horizontal_segments 写 []，total_span 写 "0"。
+
+total_span 与 total_height：你按自己读到的各段给一个估计总长。程序会按你列出的各段逐段求和，再与你的估计核对；若估计与各段之和不同，以各段之和为准。
 
 拱的处理：拱 的高度通常需要计算才能得到，图上一般不直接标注。遇到拱 时不要估算、不要计算高度；读不出时 total_height（必要时 total_span）写 null。
 
 尺寸写法（与荷载单位处理一致）：
 - 数字一律不带单位："6 m" 写 "6"，m、cm 等单位一律忽略。
 - 字母一律归一为 L：不管图上标注的是 A、B、C、l 还是 a，统一写 "L"；系数带字母写 "3L"；单个字母写 "L"。
-- 只允许三种形式：纯数字（"6"、"0"）、系数+字母（"3L"）、单个字母（"L"）。
+- total_span / total_height 只允许三种形式：纯数字（"6"、"0"）、系数+字母（"3L"）、单个字母（"L"）。
 - 禁止加号、约等号、范围、括号、任何解释文字。
 - 图上读不出可靠值时对应写 null，绝不猜测。
 
@@ -69,7 +76,7 @@ X、Y 怎么算：
 - 组合结构：梁、桁架、拉杆、钢架等不同骨架单元混合，且不能以单一类别完整描述。
 
 严格只输出 JSON，不要输出 Markdown 或其他文字：
-{"structure_type":"梁|钢架|桁架|拱|组合结构|unknown","total_span":"6|null","total_height":"3|null","confidence":0.0,"reason":"不超过20字"}"""
+{"structure_type":"梁|钢架|桁架|拱|组合结构|unknown","horizontal_segments":["a","a/2","a/2"],"vertical_segments":[],"total_span":"3L|null","total_height":"0|null","confidence":0.0,"reason":"不超过20字"}"""
 
 
 @dataclass(frozen=True)
@@ -85,31 +92,79 @@ def now_utc() -> str:
 
 
 def normalize_provider_result(value: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Put Qwen or MCP output into the shared, conservative report schema."""
+    """Put Qwen or MCP output into the shared, conservative report schema.
+
+    When the model transcribes ``horizontal_segments`` / ``vertical_segments``,
+    the code sums each axis itself and uses that sum as the authoritative value;
+    the model's stated ``total_span`` / ``total_height`` become a cross-check only.
+    ``dimensions_verified`` is True only when every segment parsed and the code
+    sum agrees with the model's estimate, so a hard filter can safely skip rows
+    the model read inconsistently.
+    """
 
     source = dict(value or {})
     structure_type = str(source.get("structure_type") or "unknown").strip()
     if structure_type not in VALID_STRUCTURE_TYPES:
         structure_type = "unknown"
-    total_span = normalize_dimension(source.get("total_span"))
-    total_height = normalize_dimension(source.get("total_height"))
+
+    horizontal_segments = list(source.get("horizontal_segments") or [])
+    vertical_segments = list(source.get("vertical_segments") or [])
+    h_sum = sum_dimension_segments(horizontal_segments)
+    v_sum = sum_dimension_segments(vertical_segments)
+
+    model_span = normalize_dimension(source.get("total_span"))
+    model_height = normalize_dimension(source.get("total_height"))
+    code_span = h_sum["dimension"] if h_sum["error"] is None else None
+    code_height = v_sum["dimension"] if v_sum["error"] is None else None
+
+    def consistent(code_dim: Dimension | None, model_dim: Dimension | None) -> bool | None:
+        if code_dim is None or model_dim is None:
+            return None
+        return dimension_text(code_dim) == dimension_text(model_dim)
+
+    span_consistent = consistent(code_span, model_span)
+    height_consistent = consistent(code_height, model_height)
+
+    span_dim = code_span if code_span is not None else model_span
+    height_dim = code_height if code_height is not None else model_height
     dimensions = canonical_dimensions(
-        total_span.raw if total_span else None,
-        total_height.raw if total_height else None,
+        dimension_text(span_dim) if span_dim else None,
+        dimension_text(height_dim) if height_dim else None,
     )
     try:
         confidence = max(0.0, min(1.0, float(source.get("confidence") or 0.0)))
     except (TypeError, ValueError):
         confidence = 0.0
+
+    h_present = len(horizontal_segments) > 0
+    v_present = len(vertical_segments) > 0
+
+    def axis_verified(present: bool, code_ok: bool, consistent: bool | None) -> bool:
+        if not present:
+            return True
+        return code_ok and consistent is not False
+
+    verified = (
+        axis_verified(h_present, h_sum["error"] is None, span_consistent)
+        and axis_verified(v_present, v_sum["error"] is None, height_consistent)
+        and (h_present or v_present)
+    )
     return {
         "structure_type": structure_type,
-        "total_span": dimension_text(total_span) if total_span else None,
-        "total_height": dimension_text(total_height) if total_height else None,
+        "total_span": dimension_text(model_span) if model_span else None,
+        "total_height": dimension_text(model_height) if model_height else None,
         "long": dimensions["long"] if dimensions else None,
         "width": dimensions["width"] if dimensions else None,
         "long_width": dimensions["long_width"] if dimensions else "unknown",
         "confidence": confidence,
         "reason": str(source.get("reason") or "").strip()[:200],
+        "horizontal_segments": horizontal_segments,
+        "vertical_segments": vertical_segments,
+        "code_span": dimension_text(code_span) if code_span is not None else None,
+        "code_height": dimension_text(code_height) if code_height is not None else None,
+        "span_consistent": span_consistent,
+        "height_consistent": height_consistent,
+        "dimensions_verified": verified,
     }
 
 
@@ -268,6 +323,39 @@ def mcp_results_template(samples: list[Sample]) -> dict[str, Any]:
     }
 
 
+def consistency_label(value: object) -> str:
+    if value is True:
+        return "✓一致"
+    if value is False:
+        return "✗不一致"
+    return "无法核对"
+
+
+def segments_text(value: object) -> str:
+    segments = list(value or [])
+    if not segments:
+        return "—"
+    return "、".join(str(segment) for segment in segments)
+
+
+def code_sums_text(normalized: Mapping[str, Any]) -> str:
+    parts = []
+    if normalized.get("code_span") is not None:
+        parts.append(f"水平{normalized['code_span']}")
+    if normalized.get("code_height") is not None:
+        parts.append(f"竖直{normalized['code_height']}")
+    return "、".join(parts) if parts else "—"
+
+
+def axis_consistency_text(normalized: Mapping[str, Any]) -> str:
+    labels = []
+    if normalized.get("span_consistent") is not None:
+        labels.append(f"水平{consistency_label(normalized['span_consistent'])}")
+    if normalized.get("height_consistent") is not None:
+        labels.append(f"竖直{consistency_label(normalized['height_consistent'])}")
+    return "、".join(labels) if labels else "无法核对"
+
+
 def provider_cell(result: Mapping[str, Any] | None) -> str:
     if not result:
         return "未提供"
@@ -277,10 +365,12 @@ def provider_cell(result: Mapping[str, Any] | None) -> str:
     return "<br>".join(
         [
             f"类型：{markdown_escape(str(normalized.get('structure_type') or 'unknown'))}",
-            f"总跨：{markdown_escape(str(normalized.get('total_span') or 'unknown'))}",
-            f"总高：{markdown_escape(str(normalized.get('total_height') or 'unknown'))}",
-            f"长：{markdown_escape(str(normalized.get('long') or 'unknown'))}",
-            f"宽：{markdown_escape(str(normalized.get('width') or 'unknown'))}",
+            f"水平各段：{markdown_escape(segments_text(normalized.get('horizontal_segments')))}",
+            f"竖直各段：{markdown_escape(segments_text(normalized.get('vertical_segments')))}",
+            f"代码求和：{markdown_escape(code_sums_text(normalized))}",
+            f"模型总长：{markdown_escape(str(normalized.get('total_span') or 'unknown'))}",
+            f"模型总高：{markdown_escape(str(normalized.get('total_height') or 'unknown'))}",
+            f"核对：{markdown_escape(axis_consistency_text(normalized))}",
             f"长×宽：{markdown_escape(str(normalized.get('long_width') or 'unknown'))}",
             f"置信度：{float(normalized.get('confidence') or 0):.2f}",
             f"理由：{markdown_escape(str(normalized.get('reason') or ''))}",
@@ -355,10 +445,12 @@ def review_provider_html(result: Mapping[str, Any] | None) -> str:
     normalized = result.get("normalized") or {}
     fields = (
         ("结构类型", normalized.get("structure_type") or "unknown"),
-        ("总跨度", normalized.get("total_span") or "unknown"),
-        ("总高度", normalized.get("total_height") or "unknown"),
-        ("长", normalized.get("long") or "unknown"),
-        ("宽", normalized.get("width") or "unknown"),
+        ("水平各段", segments_text(normalized.get("horizontal_segments"))),
+        ("竖直各段", segments_text(normalized.get("vertical_segments"))),
+        ("代码求和", code_sums_text(normalized)),
+        ("模型总长", normalized.get("total_span") or "unknown"),
+        ("模型总高", normalized.get("total_height") or "unknown"),
+        ("交叉核对", axis_consistency_text(normalized)),
         ("长×宽", normalized.get("long_width") or "unknown"),
         ("置信度", f"{float(normalized.get('confidence') or 0):.2f}"),
         ("理由", normalized.get("reason") or ""),
@@ -454,11 +546,11 @@ def build_payload(
     type_comparable = [row for row in rows if row["agreement"]["structure_type"] != "无法比较"]
     long_width_comparable = [row for row in rows if row["agreement"]["long_width"] != "无法比较"]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at": now_utc(),
         "manifest": str(manifest),
         "root": str(root),
-        "prompt_version": "structure-total-span-height-long-width-v2",
+        "prompt_version": "structure-total-span-height-long-width-v3",
         "qwen_model": qwen_model,
         "results": rows,
         "summary": {
