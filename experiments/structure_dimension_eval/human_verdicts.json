@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Human-verified long×width for the 11 sample letter-bank questions (2026-08-04/05). Canonical form: long=max(X,Y), width=min(X,Y); letters normalized to L; horizontal beams have Y=0 (width 0). beam_continuous corrected to 5L (Qwen said 4L, addition error); truss_trapezoid written directly from user measurement 18×4; truss_all_7 user-verified 2L×2L (2026-08-05).",
+  "description": "Human-verified long×width for the 19 sample letter-bank questions (2026-08-04/05). Canonical form: long=max(X,Y), width=min(X,Y); letters normalized to L; horizontal beams have Y=0 (width 0). beam_continuous corrected to 5L (Qwen said 4L, addition error); truss_trapezoid written directly from user measurement 18×4; the 2026-08-05 batch is user-verified against the question images (truss_all_7 2L×2L, 3-hinge steel frame 2L×2L, four label-less steel frames L×L, and three 2L×L steel frames).",
   "verdicts": [
     {
       "path": "2静定结构/1单跨梁/题目a/1均/1.jpg",
@@ -56,6 +56,46 @@
       "path": "2静定结构/5桁架/所有杆/题目aa/7.jpg",
       "long_width": "2L×2L",
       "note": "用户人工核对：水平和竖向均 2L"
+    },
+    {
+      "path": "2静定结构/3钢架/1内力图/题目2/3铰/2外挑/52.jpg",
+      "long_width": "2L×2L",
+      "note": "用户人工核对：水平和竖向均 2L"
+    },
+    {
+      "path": "4力法/2钢架/1单未知量/题目1/1L/1提横/2固+饺/8.jpg",
+      "long_width": "L×L",
+      "note": "用户人工核对：水平和竖向均 L"
+    },
+    {
+      "path": "4力法/2钢架/1单未知量/题目1/4排架/30.jpg",
+      "long_width": "L×L",
+      "note": "用户人工核对：水平和竖向均 L"
+    },
+    {
+      "path": "4力法/2钢架/2多未知量/题目aa/1L/16.jpg",
+      "long_width": "L×L",
+      "note": "用户人工核对：水平和竖向均 L"
+    },
+    {
+      "path": "4力法/题目/4.jpg",
+      "long_width": "4L×L",
+      "note": "用户人工核对：水平 4L、高 L"
+    },
+    {
+      "path": "5位移法/2钢架/1单未知量/题目aa/3排架/15.jpg",
+      "long_width": "2L×L",
+      "note": "用户人工核对：长 2L、宽 L"
+    },
+    {
+      "path": "5位移法/2钢架/1单未知量/题目aa/3排架/2.jpg",
+      "long_width": "2L×L",
+      "note": "用户人工核对：长 2L、宽 L"
+    },
+    {
+      "path": "5位移法/2钢架/题目/4.jpg",
+      "long_width": "2L×L",
+      "note": "用户人工核对：长 2L、宽 L"
     }
   ]
 }
