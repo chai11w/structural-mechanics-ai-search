@@ -39,12 +39,11 @@ VALID_STRUCTURE_TYPES = {"梁", "钢架", "桁架", "拱", "组合结构", "unkn
 DEFAULT_MANIFEST = BASE / "experiments" / "structure_dimension_eval" / "samples.json"
 DEFAULT_OUTPUT_ROOT = BASE / ".tmp_structure_dimension_eval"
 
-DIMENSION_PROMPT_VERSION = "structure-dimension-segment-transcription-v5"
+DIMENSION_PROMPT_VERSION = "structure-dimension-segment-transcription-v5.2"
 
-DIMENSION_PROMPT = """你是结构力学题图的结构类型与外围尺寸识别器。只看主承重骨架，不解题；严格只输出 JSON。
+DIMENSION_PROMPT = """你是结构力学题图的外围尺寸转录器。结构类型已由上游确定并在用户消息中提供，禁止重新判断或修改结构类型。只看主承重骨架，不解题；严格只输出 JSON。
 
 目标：
-- structure_type 只能是 梁、钢架、桁架、拱、组合结构、unknown。
 - total_span 是骨架最左端到最右端的水平总长；total_height 是最低端到最高端的竖直总高。程序之后自行取长×宽。
 
 尺寸规则：
@@ -52,11 +51,11 @@ DIMENSION_PROMPT = """你是结构力学题图的结构类型与外围尺寸识�
 2. 沿能覆盖外围总长的一条标注链，从左到右原样抄入 horizontal_segments；沿能覆盖外围总高的一条标注链，从下到上原样抄入 vertical_segments。每段一个元素，不合并、不拆分、不写求和式。平行位置若有多条尺寸链，只选能包住整个主骨架、总尺寸更长的外侧尺寸链；忽略较短的内侧尺寸链，绝不能把多条链相加。
 3. 原样保留每段的数字、字母和单位，例如 "a"、"a/2"、"2a"、"6m"。不要统一字母或删除单位，程序会归一化并求和。某段存在但读不清时写 null。
 4. total_span、total_height 是你对两轴总长的独立判断，只能写一个简单值或 null。分段与总长不一致时照实输出，禁止为凑一致而增删、改写分段或总长。
-5. 水平直杆的 vertical_segments 为 []、total_height 为 "0"；竖直直杆的 horizontal_segments 为 []、total_span 为 "0"。
-6. 拱高没有明确标注时写 null，禁止计算或猜测。任何尺寸不可靠时宁可写 null。
+5. 只有已知类型为梁且主骨架确为单一直杆时，未延伸方向才可写 "0"。已知类型为钢架、桁架、组合结构时，绝不允许任何轴写 "0"；未标注的轴必须写 null。
+6. 已知类型为拱时不参与尺寸识别：两组 segments 均为 []，total_span、total_height 均写 null。任何尺寸不可靠时宁可写 null。
 
 输出格式：
-{"structure_type":"梁|钢架|桁架|拱|组合结构|unknown","horizontal_segments":["a","a/2",null],"vertical_segments":[],"total_span":"3a|null","total_height":"0|null","confidence":0.0,"reason":"不超过20字"}"""
+{"horizontal_segments":["a","a/2",null],"vertical_segments":[],"total_span":"3a|null","total_height":"0|null","confidence":0.0,"reason":"不超过20字"}"""
 
 
 @dataclass(frozen=True)
@@ -87,15 +86,29 @@ def normalize_provider_result(value: Mapping[str, Any] | None) -> dict[str, Any]
     if structure_type not in VALID_STRUCTURE_TYPES:
         structure_type = "unknown"
 
-    horizontal_segments = list(source.get("horizontal_segments") or [])
-    vertical_segments = list(source.get("vertical_segments") or [])
+    if structure_type == "拱":
+        horizontal_segments: list[Any] = []
+        vertical_segments: list[Any] = []
+    else:
+        horizontal_segments = list(source.get("horizontal_segments") or [])
+        vertical_segments = list(source.get("vertical_segments") or [])
     h_sum = sum_dimension_segments(horizontal_segments)
     v_sum = sum_dimension_segments(vertical_segments)
 
-    model_span = normalize_dimension(source.get("total_span"))
-    model_height = normalize_dimension(source.get("total_height"))
+    model_span = normalize_dimension(source.get("total_span")) if structure_type != "拱" else None
+    model_height = normalize_dimension(source.get("total_height")) if structure_type != "拱" else None
     code_span = h_sum["dimension"] if h_sum["error"] is None else None
     code_height = v_sum["dimension"] if v_sum["error"] is None else None
+
+    if structure_type in {"钢架", "桁架", "组合结构"}:
+        if model_span is not None and dimension_text(model_span) == "0":
+            model_span = None
+        if model_height is not None and dimension_text(model_height) == "0":
+            model_height = None
+        if code_span is not None and dimension_text(code_span) == "0":
+            code_span = None
+        if code_height is not None and dimension_text(code_height) == "0":
+            code_height = None
 
     def consistent(code_dim: Dimension | None, model_dim: Dimension | None) -> bool | None:
         if code_dim is None or model_dim is None:
@@ -184,7 +197,10 @@ def load_manifest(path: Path, root: Path) -> list[Sample]:
     return samples
 
 
-def build_qwen_request(image_path: Path, *, model: str) -> dict[str, Any]:
+def build_qwen_request(
+    image_path: Path, *, model: str, known_structure_type: str
+) -> dict[str, Any]:
+    known_type = known_structure_type if known_structure_type in VALID_STRUCTURE_TYPES else "unknown"
     return {
         "model": model,
         "messages": [
@@ -193,7 +209,7 @@ def build_qwen_request(image_path: Path, *, model: str) -> dict[str, Any]:
                 "role": "user",
                 "content": [
                     {"type": "image_url", "image_url": {"url": image_to_data_url(image_path)}},
-                    {"type": "text", "text": "只输出JSON。"},
+                    {"type": "text", "text": f"已知结构类型：{known_type}。只识别尺寸，只输出JSON。"},
                 ],
             },
         ],
@@ -210,8 +226,15 @@ def call_qwen(
     endpoint: str,
     model: str,
     timeout: int,
+    known_structure_type: str,
 ) -> tuple[dict[str, Any], dict[str, Any], str]:
-    request = build_qwen_request(image_path, model=model)
+    known_type = known_structure_type if known_structure_type in VALID_STRUCTURE_TYPES else "unknown"
+    if known_type == "拱":
+        raw_content = '{"skipped":"known arch"}'
+        return normalize_provider_result({"structure_type": "拱"}), {}, raw_content
+    request = build_qwen_request(
+        image_path, model=model, known_structure_type=known_type
+    )
     body = json.dumps(request, ensure_ascii=False).encode("utf-8")
     provider_request = urllib.request.Request(
         endpoint,
@@ -226,7 +249,8 @@ def call_qwen(
         call_type="qwen_structure_dimension_eval",
     )
     content = str(response["choices"][0]["message"]["content"])
-    parsed = parse_model_json(content)
+    parsed = dict(parse_model_json(content))
+    parsed["structure_type"] = known_type
     return normalize_provider_result(parsed), dict(response.get("usage") or {}), content
 
 
@@ -581,6 +605,7 @@ def main() -> int:
                     endpoint=args.qwen_endpoint,
                     model=args.qwen_model,
                     timeout=args.qwen_timeout,
+                    known_structure_type=sample.expected_structure_type,
                 )
                 qwen_results[sample.sample_id] = {
                     "normalized": normalized,

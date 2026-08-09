@@ -1,8 +1,10 @@
 """Run the current qwen dimension prompt on the full letter bank, no HTML review.
 
-Builds a versioned manifest from the letter-bank xlsx files (row path + bank
-structure type), calls qwen with the current ``DIMENSION_PROMPT`` concurrently
-with per-image retries, and writes two artifacts under an ignored output dir:
+Builds a versioned manifest from the letter-bank xlsx files (row path + the
+already-known bank structure type), injects that type into the current
+``DIMENSION_PROMPT``, and calls qwen concurrently without asking it to classify
+the structure again. It retries each image independently and writes two
+artifacts under an ignored output dir:
 
   - ``results.json`` — per-image normalized rows (model + code sums, verified
     flag, long_width). No review images and no ``review.html`` are produced.
@@ -147,6 +149,7 @@ def run_one(
                 endpoint=endpoint,
                 model=model,
                 timeout=timeout,
+                known_structure_type=sample.expected_structure_type,
             )
             return {
                 "path": sample.relative_path,

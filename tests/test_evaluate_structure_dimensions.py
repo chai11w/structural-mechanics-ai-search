@@ -11,6 +11,7 @@ from scripts.evaluate_structure_dimensions import (
     DIMENSION_PROMPT_VERSION,
     Sample,
     build_qwen_request,
+    call_qwen,
     canonical_dimensions,
     copy_review_images,
     build_payload,
@@ -25,13 +26,16 @@ from scripts.evaluate_structure_dimensions import (
 
 class StructureDimensionEvaluationTests(unittest.TestCase):
     def test_v5_prompt_is_compact_and_leaves_normalization_to_code(self):
-        self.assertEqual(DIMENSION_PROMPT_VERSION, "structure-dimension-segment-transcription-v5")
+        self.assertEqual(DIMENSION_PROMPT_VERSION, "structure-dimension-segment-transcription-v5.2")
         self.assertLess(len(DIMENSION_PROMPT), 1400)
         self.assertIn("原样保留每段的数字、字母和单位", DIMENSION_PROMPT)
         self.assertIn("程序会归一化并求和", DIMENSION_PROMPT)
         self.assertIn("只选能包住整个主骨架、总尺寸更长的外侧尺寸链", DIMENSION_PROMPT)
         self.assertIn("忽略较短的内侧尺寸链", DIMENSION_PROMPT)
         self.assertIn("绝不能把多条链相加", DIMENSION_PROMPT)
+        self.assertIn("禁止重新判断或修改结构类型", DIMENSION_PROMPT)
+        self.assertIn("绝不允许任何轴写 \"0\"", DIMENSION_PROMPT)
+        self.assertIn("已知类型为拱时不参与尺寸识别", DIMENSION_PROMPT)
         self.assertNotIn("字母一律归一为 L", DIMENSION_PROMPT)
 
     def test_qwen_request_keeps_v5_schema_and_non_thinking_mode(self):
@@ -39,17 +43,35 @@ class StructureDimensionEvaluationTests(unittest.TestCase):
             "scripts.evaluate_structure_dimensions.image_to_data_url",
             return_value="data:image/jpeg;base64,AA==",
         ):
-            request = build_qwen_request(Path("question.jpg"), model="qwen3.7-plus")
+            request = build_qwen_request(
+                Path("question.jpg"), model="qwen3.7-plus", known_structure_type="钢架"
+            )
         self.assertEqual(request["messages"][0]["content"], DIMENSION_PROMPT)
+        self.assertIn("已知结构类型：钢架", request["messages"][1]["content"][1]["text"])
         self.assertFalse(request["enable_thinking"])
         for field in (
-            "structure_type",
             "horizontal_segments",
             "vertical_segments",
             "total_span",
             "total_height",
         ):
             self.assertIn(field, DIMENSION_PROMPT)
+
+    def test_known_arch_skips_qwen_call(self):
+        with patch("scripts.evaluate_structure_dimensions.tracked_qwen_request") as request:
+            normalized, usage, raw = call_qwen(
+                Path("missing.jpg"),
+                api_key="unused",
+                endpoint="https://unused.invalid",
+                model="qwen3.7-plus",
+                timeout=1,
+                known_structure_type="拱",
+            )
+        request.assert_not_called()
+        self.assertEqual(normalized["structure_type"], "拱")
+        self.assertEqual(normalized["long_width"], "unknown")
+        self.assertEqual(usage, {})
+        self.assertIn("known arch", raw)
 
     def test_normalize_dimension_only_accepts_one_simplified_expression(self):
         dimension = normalize_dimension("2.5m")
@@ -167,6 +189,36 @@ class StructureDimensionEvaluationTests(unittest.TestCase):
         self.assertIsNone(result["code_span"])
         self.assertIs(result["dimensions_verified"], False)
         self.assertEqual(result["long_width"], "3L×2L")
+
+    def test_non_beam_zero_axis_is_forced_to_unknown(self):
+        result = normalize_provider_result(
+            {
+                "structure_type": "组合结构",
+                "horizontal_segments": ["a", "a", "a", "a"],
+                "vertical_segments": [],
+                "total_span": "4a",
+                "total_height": "0",
+            }
+        )
+        self.assertEqual(result["total_span"], "4L")
+        self.assertIsNone(result["total_height"])
+        self.assertEqual(result["long_width"], "unknown")
+
+    def test_arch_dimensions_are_ignored_even_if_model_returns_them(self):
+        result = normalize_provider_result(
+            {
+                "structure_type": "拱",
+                "horizontal_segments": ["18m"],
+                "vertical_segments": ["4m"],
+                "total_span": "18m",
+                "total_height": "4m",
+            }
+        )
+        self.assertEqual(result["horizontal_segments"], [])
+        self.assertEqual(result["vertical_segments"], [])
+        self.assertIsNone(result["total_span"])
+        self.assertIsNone(result["total_height"])
+        self.assertEqual(result["long_width"], "unknown")
 
     def test_manifest_rejects_answer_images_and_keeps_safe_relative_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
