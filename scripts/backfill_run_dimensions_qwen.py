@@ -78,7 +78,10 @@ def build_manifest_from_bank(bank_root: Path, images_root: Path) -> list[dict[st
     for xlsx in sorted(bank_root.glob("*.xlsx")):
         import openpyxl
 
-        wb = openpyxl.load_workbook(xlsx, read_only=True)
+        # Some valid xlsx writers omit the optional worksheet dimension hint;
+        # openpyxl read-only mode then reports max_row/max_column as None.
+        # Normal mode derives the range from cells; this scanner never saves.
+        wb = openpyxl.load_workbook(xlsx, read_only=False, data_only=True)
         ws = wb.worksheets[0]
         for row in range(2, ws.max_row + 1):
             raw_path = ws.cell(row=row, column=1).value
