@@ -7,7 +7,7 @@
 - 8793 是长期复用的观测与人工评审层，镜像 8790，独立状态 `.tmp_review_tiku_prod_8793`、运行身份 `review-8793-prod`。
 - 8794 位于 `F:\cc\7-题库检索-8794` 独立 worktree，源码/端口/Cookie/状态/输出均与 8788/8790/8793 隔离；自主化暂缓，不同时引入 LangGraph。
 - 当前工作线：8790 结构尺寸低成本预筛（字母库第三道硬过滤）。字母库「长×宽」列全量回填已完成：280 行中 276 行已填（19 条人工裁决 + 257 条千问 qwen3.7-plus v4 识别），4 行留空（均为拱，高度需计算按设计 null）。
-- 已定决策：① 回填模型=千问 qwen3.7-plus（与生产同口径）；② DIMENSION_PROMPT 用分段转录 v4（各段与 total_span 独立、禁止凑一致、代码求和权威、rotation-invariant），全量回填即此版本，取代早年"钢架/桁架直接长×宽简化"；③ 多段加法错误兜底暂缓。
+- 已定决策：① 全量回填使用千问 qwen3.7-plus 分段转录 v4；② 当前 `DIMENSION_PROMPT` 升为语义兼容的精简 v5，模型原样抄分段、代码归一求和，平行尺寸链只取能包住主骨架的较长外侧链；③ 多段加法错误兜底暂缓。
 - 8790 模型费用台账只写入 `.tmp_tiku_agent_v2_prod_8790/model_costs.sqlite3`；8788 管理员查询以 `mode=ro`+`query_only` 只读，绑定身份与游标仅存 8788 的 `.tmp_feishu_tiku`。
 
 ## Implemented
@@ -24,13 +24,13 @@
 - 智谱复筛默认 `glm-4.6v`、10 路并发并校正 EXIF；普通章节只展示 `>=80%` 可靠结果（`>=90%` 展示全部高分，80–90% 仅最高 1 道），失败或不完整回退粗筛。
 - 唯一候选时支持短肯定直接确认；多候选、已显示答案和复合表达不会自动选择。历史 Tk 端保留为 `legacy_gui.py`，入库执行 plan→confirm→backup→execute。
 - 飞书事件去重为30分钟TTL、20,000条上限和加锁缓存；8788运行当前主线代码。
-- 模型费用台账按一次搜题聚合千问/智谱每次调用、尝试次数、token、版本化价格、估算费用与告警，SQLite 写失败不影响搜题，CLI 可按天/模型/单次搜题查询；费用记录不增加模型调用，全量 386 项测试通过。
+- 模型费用台账按一次搜题聚合千问/智谱每次调用、尝试次数、token、版本化价格、估算费用与告警，SQLite 写失败不影响搜题，CLI 可按天/模型/单次搜题查询；费用记录不增加模型调用，全量 390 项测试通过。
 - 8788 管理员费用查询：发送者显式一次性本地绑定 + 配置白名单共同授权；按同一题的 `search_key` 汇总该题所有模型调用，严格超过 0.05 元单列显示，金额保留四位小数；已端到端验收。
-- 结构尺寸识别设施：`scripts/evaluate_structure_dimensions.py`（千问+外部视觉对比、review.html）、`run_zhipu_dimension_recognition.py`（智谱 glm-4.6v 直连回退）、`backfill_letter_bank_dimensions.py`（备份后写字母库「长×宽」列）、`backfill_run_dimensions_qwen.py`（千问 v4 并发全量识别→results.json+verdicts，`--reuse-results` 免重跑重生成）；manifest 与人工裁决在 `experiments/structure_dimension_eval/`。
+- 结构尺寸识别设施：`scripts/evaluate_structure_dimensions.py`（千问+外部视觉对比、review.html）、`run_zhipu_dimension_recognition.py`（智谱回退）、`backfill_letter_bank_dimensions.py`（备份写「长×宽」）、`backfill_run_dimensions_qwen.py`（当前 v5，支持并发与 `--reuse-results`）；历史280行回填结果为 v4，manifest 与人工裁决在 `experiments/structure_dimension_eval/`。
 
 ## In Progress
 
-- 结构尺寸预筛下一阶段：`dimensions=` 硬过滤接入 `scan_chapter_candidates`/`coarse_search_tool`（query 侧千问 v4 尺寸识别 + `dimensions_match`，拱 skip、query 未验证跳过滤保召回，实验开关对照）——尚未开始，见 Next Best Step 1。
+- 结构尺寸预筛下一阶段：先用既有样本验证精简 v5；通过后仅在字母库、章节+结构+本地荷载初筛的高相似候选超过20条时触发尺寸层，未验证 query 与缺失 candidate 均 skip 保召回——主链路尚未接入。
 
 ## Not Implemented
 
@@ -59,7 +59,7 @@
 - 真实图片变体、非同文件高分题和外部模型稳定性样本仍不足；开发集不能外推真实泛化能力。
 - 2026-07-29一次8794启动命令曾把两枚模型API密钥展开到本机进程命令行和工具输出；相关进程已立即终止并改为安全环境继承。用户明确选择暂不轮换旧密钥，功能可继续，但残余泄露风险仍由用户承担。
 - 当前会话模型无法看图（Read 图片返回 Unsupported Image）且视觉 MCP 被禁用/拒绝；Claude 侧视觉识别需支持视觉的会话或人工对照题图完成。
-- 多段尺寸求和曾是共同短板；v4 反编造子句已修复（beam_continuous 6L→5L），回填与未来查询识别同用千问 v4 口径，口径一致风险降低；兜底策略仍暂缓。frame_t 双模型判「组合结构」而目录为钢架，不影响尺寸提取。
+- 多段尺寸求和曾是共同短板；v4 已修复已知错例，v5 保留分段/总长独立核对并明确平行链取较长外侧链，但尚未跑真实图片对照；历史 v4 回填值与 v5 归一口径兼容。frame_t 类型分歧不影响尺寸提取。
 
 ## Do Not Do
 
@@ -73,9 +73,9 @@
 
 ## Next Best Step
 
-1. 将 `dimensions=` 硬过滤接入 `scan_chapter_candidates`/`coarse_search_tool`：章节路由后对 query 题图做一次千问 v4 尺寸识别（复用 `DIMENSION_PROMPT`/`normalize_provider_result`，一次模型调用），在结构类型匹配后插入 `dimensions_match`（拱返回 skip；query 侧 `dimensions_verified` 为 False 时跳过硬过滤保召回）；加实验开关默认关，跑开/关对照看 22 候选压到多少、有无错删正确候选。
-2. 真实入口验收：从 `Agent.handle_text` 全链路进入、开关对照、金标准样本、细分类统计、空计划不算成功、多轮稳定性；通过后再考虑 8790 生产接入。实验验证通过前不修改 8790 生产、不硬截断 22 候选。
-3. 若有疑似错值，用 `scripts/backfill_run_dimensions_qwen.py --reuse-results <results.json>` 免重跑重生成 verdicts，复核后经 `scripts/backfill_letter_bank_dimensions.py` 回写（先备份）。
+1. 用既有 beam/errata/人工裁决样本跑 v4→v5 只读对照，统计尺寸真值命中、unknown、`dimensions_verified`、P50/P95 延迟；未通过前不接硬过滤。
+2. 对照通过后接入实验开关：仅 `route=symbolic` 且章节+结构+本地荷载初筛的高相似候选 `>20` 时识别 v5 尺寸；`dimensions_match=mismatch` 才删除，query 未验证或 candidate 缺尺寸均保留。
+3. 从 `Agent.handle_text` 做开关对照与真实入口验收，确认无错删后再考虑8790生产；实验通过前不硬截断候选。
 
 ## Important Commands
 

@@ -39,45 +39,24 @@ VALID_STRUCTURE_TYPES = {"梁", "钢架", "桁架", "拱", "组合结构", "unkn
 DEFAULT_MANIFEST = BASE / "experiments" / "structure_dimension_eval" / "samples.json"
 DEFAULT_OUTPUT_ROOT = BASE / ".tmp_structure_dimension_eval"
 
-DIMENSION_PROMPT = """你是结构力学题图的结构尺寸识别器。搜题系统要用题的外包围盒尺寸（长×宽）过滤候选，所以你要从图中读出主承重骨架的外围尺寸。只看主承重骨架，不解题，不提取荷载，不数支座。
+DIMENSION_PROMPT_VERSION = "structure-dimension-segment-transcription-v5"
 
-输出两样东西：
-1. 结构大类（structure_type）。
-2. 骨架的外围长度 X 和 Y：X 是主承重骨架最左端至最右端的水平总长度；Y 是主承重骨架最低端至最高端的竖直总长度。长、宽由程序取 长=max(X,Y)、宽=min(X,Y)，你不需要算。JSON 里的 total_span 就是 X，total_height 就是 Y。图整体旋转 90° 不影响结果——X、Y 永远是骨架在水平和竖直两个方向上的外接总长。
+DIMENSION_PROMPT = """你是结构力学题图的结构类型与外围尺寸识别器。只看主承重骨架，不解题；严格只输出 JSON。
 
-尺寸来源：只能使用图中明确标注的尺寸、符号尺寸。严禁用图片像素、纸面比例、文字高度或荷载箭头估算。尺寸标注线本身不算结构长度，但标注线写出的数值要读取。
+目标：
+- structure_type 只能是 梁、钢架、桁架、拱、组合结构、unknown。
+- total_span 是骨架最左端到最右端的水平总长；total_height 是最低端到最高端的竖直总高。程序之后自行取长×宽。
 
-X 的读法——分段法，不要凭感觉报总长：
-1. 沿主承重骨架水平方向，从左到右逐段读出每一段标注，写进 horizontal_segments 数组。每段一个字符串，原样保留图上写法（如 "a"、"a/2"、"2a"、"l"、"2"）。段数与图上标注一一对应。
-2. 全部列出后，从右到左再核对一遍，确认没有漏段、多段。段数偏少时最可能是漏看了一段。
-3. 每段只写标注本身，禁止写 "a+a" 这类求和表达式，禁止把一段拆成多段。
-4. 某一段若读不出可靠标注，该段写 "null"，并把 confidence 降到 0.5 以下。
+尺寸规则：
+1. 只使用图中明确写出的尺寸标注。禁止按像素、纸面比例、文字、荷载箭头或支座估算。
+2. 沿能覆盖外围总长的一条标注链，从左到右原样抄入 horizontal_segments；沿能覆盖外围总高的一条标注链，从下到上原样抄入 vertical_segments。每段一个元素，不合并、不拆分、不写求和式。平行位置若有多条尺寸链，只选能包住整个主骨架、总尺寸更长的外侧尺寸链；忽略较短的内侧尺寸链，绝不能把多条链相加。
+3. 原样保留每段的数字、字母和单位，例如 "a"、"a/2"、"2a"、"6m"。不要统一字母或删除单位，程序会归一化并求和。某段存在但读不清时写 null。
+4. total_span、total_height 是你对两轴总长的独立判断，只能写一个简单值或 null。分段与总长不一致时照实输出，禁止为凑一致而增删、改写分段或总长。
+5. 水平直杆的 vertical_segments 为 []、total_height 为 "0"；竖直直杆的 horizontal_segments 为 []、total_span 为 "0"。
+6. 拱高没有明确标注时写 null，禁止计算或猜测。任何尺寸不可靠时宁可写 null。
 
-Y 用同样的分段法写进 vertical_segments：
-- 水平直杆：vertical_segments 写 []，total_height 写 "0"。
-- 竖直直杆：horizontal_segments 写 []，total_span 写 "0"。
-
-total_span 与 total_height：这是你读出的总长估计，程序会按你列出的各段逐段求和作为权威值，你的估计只用于交叉核对。
-各段与 total_span 是两件独立的事，两者不一致是完全正常的：不要为了让各段之和等于 total_span 而添段、漏段或改标注，也不要为了让 total_span 等于各段之和而改动你的估计。不一致时照实都输出，程序独立核对。
-
-拱的处理：拱 的高度通常需要计算才能得到，图上一般不直接标注。遇到拱 时不要估算、不要计算高度；读不出时 total_height（必要时 total_span）写 null。
-
-尺寸写法（与荷载单位处理一致）：
-- 数字一律不带单位："6 m" 写 "6"，m、cm 等单位一律忽略。
-- 字母一律归一为 L：不管图上标注的是 A、B、C、l 还是 a，统一写 "L"；系数带字母写 "3L"；单个字母写 "L"。
-- total_span / total_height 只允许三种形式：纯数字（"6"、"0"）、系数+字母（"3L"）、单个字母（"L"）。
-- 禁止加号、约等号、范围、括号、任何解释文字。
-- 图上读不出可靠值时对应写 null，绝不猜测。
-
-结构类型只能为：梁、钢架、桁架、拱、组合结构、unknown。
-- 梁：单跨梁、多跨梁、悬臂梁等主要由梁构件组成的结构。
-- 钢架：由梁柱刚结组成的 L/T/门式/多跨框架等。
-- 桁架：由多根直杆组成三角形或网格杆系。
-- 拱：以拱形曲线或拱轴为主要承重构件。
-- 组合结构：梁、桁架、拉杆、钢架等不同骨架单元混合，且不能以单一类别完整描述。
-
-严格只输出 JSON，不要输出 Markdown 或其他文字：
-{"structure_type":"梁|钢架|桁架|拱|组合结构|unknown","horizontal_segments":["a","a/2","a/2"],"vertical_segments":[],"total_span":"3L|null","total_height":"0|null","confidence":0.0,"reason":"不超过20字"}"""
+输出格式：
+{"structure_type":"梁|钢架|桁架|拱|组合结构|unknown","horizontal_segments":["a","a/2",null],"vertical_segments":[],"total_span":"3a|null","total_height":"0|null","confidence":0.0,"reason":"不超过20字"}"""
 
 
 @dataclass(frozen=True)
@@ -551,7 +530,7 @@ def build_payload(
         "generated_at": now_utc(),
         "manifest": str(manifest),
         "root": str(root),
-        "prompt_version": "structure-total-span-height-long-width-v4",
+        "prompt_version": DIMENSION_PROMPT_VERSION,
         "qwen_model": qwen_model,
         "results": rows,
         "summary": {

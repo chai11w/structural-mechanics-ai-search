@@ -1,4 +1,4 @@
-"""Run qwen v4 dimension recognition on the full letter bank, no HTML review.
+"""Run the current qwen dimension prompt on the full letter bank, no HTML review.
 
 Builds a versioned manifest from the letter-bank xlsx files (row path + bank
 structure type), calls qwen with the current ``DIMENSION_PROMPT`` concurrently
@@ -6,12 +6,12 @@ with per-image retries, and writes two artifacts under an ignored output dir:
 
   - ``results.json`` — per-image normalized rows (model + code sums, verified
     flag, long_width). No review images and no ``review.html`` are produced.
-  - ``qwen_v4_backfill_verdicts.json`` — ``{path, long_width}`` rows ready for
+  - ``qwen_v5_backfill_verdicts.json`` — ``{path, long_width}`` rows ready for
     ``scripts/backfill_letter_bank_dimensions.py``.
 
 Verdict rule: every row with a readable ``long_width`` is included — the value
 is the code-summed segments when they parse (authoritative) and falls back to
-the model total otherwise — while the 10 already human-verified paths are
+the model total otherwise — while already human-verified paths are
 excluded so model output never overwrites human verdicts. Rows with no readable
 long_width (``unknown``, unreadable segments, arches with a null height) stay
 blank in the bank, which is the recall-preserving choice for the hard filter.
@@ -37,6 +37,7 @@ if str(BASE) not in sys.path:
 
 from scripts.classify_question_bank import DEFAULT_ENDPOINT, DEFAULT_MODEL  # noqa: E402
 from scripts.evaluate_structure_dimensions import (  # noqa: E402
+    DIMENSION_PROMPT_VERSION,
     Sample,
     call_qwen,
     load_manifest,
@@ -51,7 +52,12 @@ DEFAULT_HUMAN_VERDICTS = (
 DEFAULT_WORKERS = 10
 MAX_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 2
-VERDICTS_FILENAME = "qwen_v4_backfill_verdicts.json"
+VERDICTS_FILENAME = "qwen_v5_backfill_verdicts.json"
+
+
+def verdicts_filename_for(prompt_version: str) -> str:
+    match = re.search(r"v(\d+)$", str(prompt_version or "").strip())
+    return f"qwen_v{match.group(1)}_backfill_verdicts.json" if match else VERDICTS_FILENAME
 
 
 def _sample_id_from_path(path: str) -> str:
@@ -204,7 +210,7 @@ def build_verdicts(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run qwen v4 dimension recognition on the whole letter bank."
+        description="Run the current qwen dimension prompt on the whole letter bank."
     )
     parser.add_argument("--bank-root", type=Path, default=DEFAULT_BANK_ROOT)
     parser.add_argument("--images-root", type=Path, default=DEFAULT_IMAGES_ROOT)
@@ -213,7 +219,7 @@ def main() -> int:
         "--output-dir",
         type=Path,
         default=None,
-        help="ignored dir for results.json and verdicts (default: .tmp_structure_dimension_eval/backfill_qwen_v4_<date>)",
+        help="ignored dir for results.json and verdicts (default: .tmp_structure_dimension_eval/backfill_qwen_v5_<date>)",
     )
     parser.add_argument("--qwen-model", default=DEFAULT_MODEL)
     parser.add_argument("--qwen-endpoint", default=DEFAULT_ENDPOINT)
@@ -241,6 +247,8 @@ def main() -> int:
         raise SystemExit(f"question image root missing: {images_root}")
 
     manifest = args.manifest.resolve()
+    qwen_model = args.qwen_model
+    prompt_version = DIMENSION_PROMPT_VERSION
     if args.reuse_results is not None:
         payload = json.loads(args.reuse_results.read_text(encoding="utf-8"))
         results = list(payload.get("results") or [])
@@ -248,6 +256,7 @@ def main() -> int:
         images_root = Path(str(payload.get("images_root") or images_root))
         manifest = Path(str(payload.get("manifest") or manifest))
         qwen_model = str(payload.get("qwen_model") or args.qwen_model)
+        prompt_version = str(payload.get("prompt_version") or "unknown")
         print(f"reused_results={args.reuse_results} rows={len(results)}")
     else:
         api_key = os.environ.get("DASHSCOPE_API_KEY", "")
@@ -266,7 +275,7 @@ def main() -> int:
         output_dir = args.output_dir or (
             Path(__file__).resolve().parent.parent
             / ".tmp_structure_dimension_eval"
-            / f"backfill_qwen_v4_{time.strftime('%Y%m%d_%H%M%S')}"
+            / f"backfill_qwen_v5_{time.strftime('%Y%m%d_%H%M%S')}"
         )
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -295,6 +304,7 @@ def main() -> int:
 
     verdicts, stats = build_verdicts(results, load_human_paths(DEFAULT_HUMAN_VERDICTS))
     verified = sum(1 for row in results if (row.get("normalized") or {}).get("dimensions_verified"))
+    verdicts_filename = verdicts_filename_for(prompt_version)
 
     payload = {
         "schema_version": 1,
@@ -302,7 +312,7 @@ def main() -> int:
         "manifest": str(manifest),
         "images_root": str(images_root),
         "qwen_model": qwen_model,
-        "prompt_version": "structure-total-span-height-long-width-v4",
+        "prompt_version": prompt_version,
         "workers": args.workers,
         "summary": {
             "total": len(results),
@@ -319,13 +329,13 @@ def main() -> int:
     (output_dir / "results.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    (output_dir / VERDICTS_FILENAME).write_text(
+    (output_dir / verdicts_filename).write_text(
         json.dumps(
             {
                 "schema_version": 1,
                 "description": (
-                    "Qwen v4 dimension backfill verdicts: any readable long_width (code-summed "
-                    "segments authoritative, model total fallback), the 10 human-verified rows "
+                    f"Qwen {prompt_version} dimension backfill verdicts: any readable long_width (code-summed "
+                    "segments authoritative, model total fallback), human-verified rows "
                     "excluded. Ready for scripts/backfill_letter_bank_dimensions.py."
                 ),
                 "verdicts": verdicts,
@@ -336,7 +346,7 @@ def main() -> int:
         encoding="utf-8",
     )
     print(f"results={output_dir / 'results.json'}")
-    print(f"verdicts={output_dir / VERDICTS_FILENAME}")
+    print(f"verdicts={output_dir / verdicts_filename}")
     print(
         "summary: "
         + json.dumps(payload["summary"], ensure_ascii=False)

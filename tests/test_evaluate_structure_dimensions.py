@@ -4,9 +4,13 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.evaluate_structure_dimensions import (
+    DIMENSION_PROMPT,
+    DIMENSION_PROMPT_VERSION,
     Sample,
+    build_qwen_request,
     canonical_dimensions,
     copy_review_images,
     build_payload,
@@ -20,6 +24,33 @@ from scripts.evaluate_structure_dimensions import (
 
 
 class StructureDimensionEvaluationTests(unittest.TestCase):
+    def test_v5_prompt_is_compact_and_leaves_normalization_to_code(self):
+        self.assertEqual(DIMENSION_PROMPT_VERSION, "structure-dimension-segment-transcription-v5")
+        self.assertLess(len(DIMENSION_PROMPT), 1400)
+        self.assertIn("原样保留每段的数字、字母和单位", DIMENSION_PROMPT)
+        self.assertIn("程序会归一化并求和", DIMENSION_PROMPT)
+        self.assertIn("只选能包住整个主骨架、总尺寸更长的外侧尺寸链", DIMENSION_PROMPT)
+        self.assertIn("忽略较短的内侧尺寸链", DIMENSION_PROMPT)
+        self.assertIn("绝不能把多条链相加", DIMENSION_PROMPT)
+        self.assertNotIn("字母一律归一为 L", DIMENSION_PROMPT)
+
+    def test_qwen_request_keeps_v5_schema_and_non_thinking_mode(self):
+        with patch(
+            "scripts.evaluate_structure_dimensions.image_to_data_url",
+            return_value="data:image/jpeg;base64,AA==",
+        ):
+            request = build_qwen_request(Path("question.jpg"), model="qwen3.7-plus")
+        self.assertEqual(request["messages"][0]["content"], DIMENSION_PROMPT)
+        self.assertFalse(request["enable_thinking"])
+        for field in (
+            "structure_type",
+            "horizontal_segments",
+            "vertical_segments",
+            "total_span",
+            "total_height",
+        ):
+            self.assertIn(field, DIMENSION_PROMPT)
+
     def test_normalize_dimension_only_accepts_one_simplified_expression(self):
         dimension = normalize_dimension("2.5m")
         self.assertIsNotNone(dimension)
