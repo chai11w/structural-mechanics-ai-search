@@ -39,6 +39,8 @@ import pandas as pd
 from PIL import Image, ImageOps
 from zhipuai import ZhipuAI
 
+from tiku_shared.model_costs import submit_with_model_cost_context, timed_model_call
+
 # ============================================================
 # 配置
 # ============================================================
@@ -515,7 +517,14 @@ def score_candidate_pair(
     if timeout_seconds is not None:
         request["timeout"] = float(timeout_seconds)
 
-    resp = client.chat.completions.create(**request)
+    resp = timed_model_call(
+        lambda: client.chat.completions.create(**request),
+        provider="zhipu",
+        model=request["model"],
+        call_type=("zhipu_length_tie_break" if prompt == LENGTH_TIE_PROMPT else "zhipu_shape_rerank"),
+        usage_getter=lambda value: getattr(value, "usage", None),
+        request_id_getter=lambda value: str(getattr(value, "request_id", "") or getattr(value, "id", "")),
+    )
     raw_text = resp.choices[0].message.content.strip()
     raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
     raw_text = re.sub(r"\s*```$", "", raw_text)
@@ -737,7 +746,8 @@ def rerank_candidates_concurrent(
     scored = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [
-            executor.submit(
+            submit_with_model_cost_context(
+                executor,
                 score_rerank_candidate,
                 query_image_path,
                 candidate,
@@ -930,18 +940,25 @@ def extract_loads(client, image_path):
 
     for attempt in range(3):
         try:
-            resp = client.chat.completions.create(
+            resp = timed_model_call(
+                lambda: client.chat.completions.create(
+                    model=DEFAULT_ZHIPU_RERANK_MODEL,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": [
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                            {"type": "text", "text": "输出JSON。"},
+                        ]},
+                    ],
+                    temperature=0.1,
+                    max_tokens=1024,
+                    extra_body={"thinking": {"type": "disabled"}},
+                ),
+                provider="zhipu",
                 model=DEFAULT_ZHIPU_RERANK_MODEL,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": [
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                        {"type": "text", "text": "输出JSON。"},
-                    ]},
-                ],
-                temperature=0.1,
-                max_tokens=1024,
-                extra_body={"thinking": {"type": "disabled"}},
+                call_type=("zhipu_load_extraction" if attempt == 0 else "zhipu_load_extraction_retry"),
+                usage_getter=lambda value: getattr(value, "usage", None),
+                request_id_getter=lambda value: str(getattr(value, "request_id", "") or getattr(value, "id", "")),
             )
             raw_text = resp.choices[0].message.content
 
@@ -1012,6 +1029,7 @@ class ChapterCandidateScan:
 
     scored: list[tuple[float, str]]
     structure_filter_applied: bool
+    dimensions_by_name: dict[str, dict[str, str]]
 
 
 def scan_chapter_candidates(
@@ -1043,12 +1061,26 @@ def scan_chapter_candidates(
 
     normalized_loads = normalize_query_loads(query_loads)
     scored = []
+    dimensions_by_name: dict[str, dict[str, str]] = {}
     for _, row in df.iterrows():
         db_loads = fix_load_types(_safe_parse_loads(row["荷载"]))
         score = compute_similarity(normalized_loads, db_loads)
-        scored.append((score, str(row["题目名称"])))
+        name = str(row["题目名称"])
+        scored.append((score, name))
+        structure_value = row.get("结构类型")
+        long_width_value = row.get("长×宽")
+        single_side_value = row.get("单边尺寸")
+        dimensions_by_name[name] = {
+            "structure_type": str(structure_value).strip() if pd.notna(structure_value) else "",
+            "long_width": str(long_width_value).strip() if pd.notna(long_width_value) else "",
+            "single_side": str(single_side_value).strip() if pd.notna(single_side_value) else "",
+        }
     scored.sort(key=lambda item: item[0], reverse=True)
-    return ChapterCandidateScan(scored=scored, structure_filter_applied=structure_filter_applied)
+    return ChapterCandidateScan(
+        scored=scored,
+        structure_filter_applied=structure_filter_applied,
+        dimensions_by_name=dimensions_by_name,
+    )
 
 
 # ============================================================

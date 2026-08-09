@@ -13,9 +13,9 @@ class ChapterCandidateScannerTest(unittest.TestCase):
         loads = [{"type": "集中", "raw": "P"}]
         frame = pd.DataFrame(
             [
-                {"题目名称": "beam-low.jpg", "荷载": json.dumps({"loads": loads}), "结构类型": "梁"},
-                {"题目名称": "frame.jpg", "荷载": json.dumps({"loads": loads}), "结构类型": "钢架"},
-                {"题目名称": "beam-high.jpg", "荷载": json.dumps({"loads": loads}), "结构类型": "梁"},
+                {"题目名称": "beam-low.jpg", "荷载": json.dumps({"loads": loads}), "结构类型": "梁", "长×宽": "2L×0", "单边尺寸": ""},
+                {"题目名称": "frame.jpg", "荷载": json.dumps({"loads": loads}), "结构类型": "钢架", "长×宽": "3L×L", "单边尺寸": ""},
+                {"题目名称": "beam-high.jpg", "荷载": json.dumps({"loads": loads}), "结构类型": "梁", "长×宽": "", "单边尺寸": "3L"},
             ]
         )
 
@@ -31,6 +31,8 @@ class ChapterCandidateScannerTest(unittest.TestCase):
         self.assertIsNotNone(scan)
         self.assertTrue(scan.structure_filter_applied)
         self.assertEqual(scan.scored, [(1.0, "beam-high.jpg"), (0.4, "beam-low.jpg")])
+        self.assertEqual(scan.dimensions_by_name["beam-high.jpg"]["single_side"], "3L")
+        self.assertEqual(scan.dimensions_by_name["beam-low.jpg"]["long_width"], "2L×0")
 
     def test_scanner_keeps_the_full_chapter_when_structure_filter_has_no_rows(self):
         loads = [{"type": "集中", "raw": "P"}]

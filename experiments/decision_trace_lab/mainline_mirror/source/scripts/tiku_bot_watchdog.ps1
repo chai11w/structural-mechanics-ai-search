@@ -4,7 +4,8 @@ param(
     [string]$CloudflaredConfig = $env:TIKU_CLOUDFLARED_CONFIG,
     [string]$PublicHost = $env:TIKU_PUBLIC_HOST,
     [int]$MaxMessageAgeMinutes = 15,
-    [switch]$ExternalTunnel
+    [switch]$ExternalTunnel,
+    [switch]$EnrollAdminSenderOnce
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,6 +48,9 @@ function Start-Bot {
         "--port", "$Port",
         "--max-message-age-minutes", "$MaxMessageAgeMinutes"
     )
+    if ($EnrollAdminSenderOnce) {
+        $arguments += "--enroll-admin-sender-once"
+    }
     $process = Start-Process python `
         -ArgumentList $arguments `
         -WorkingDirectory $ProjectDir `

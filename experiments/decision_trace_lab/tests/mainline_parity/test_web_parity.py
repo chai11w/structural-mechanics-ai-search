@@ -88,7 +88,7 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertIn("回答结果", observed.text)
         self.assertIn("可能出错的步骤", observed.text)
         self.assertIn("技术详情（开发排查用）", observed.text)
-        self.assertIn("observer.js?v=20260730-rerank-reason-v14", observed.text)
+        self.assertIn("observer.js?v=20260804-question-index-fix-v1", observed.text)
         for asset in ("demo.css", "demo.js"):
             self.assertEqual(self.base_client.get(f"/assets/{asset}").content, self.observed_client.get(f"/assets/{asset}").content)
         script = self.observed_client.get("/assets/demo.js").text
@@ -100,9 +100,9 @@ class MainlineWebParityTest(unittest.TestCase):
         self.assertIn(EXTERNAL_COOKIE, response.headers.get("set-cookie", ""))
         self.assertNotIn("tiku_agent_session=", response.headers.get("set-cookie", ""))
         source = self.observed_client.get("/api/observation/source").json()
-        self.assertEqual(source["source_commit"], "de66e35a5bbfaa608488d0e8bea4b083c5f0f0ef")
+        self.assertEqual(source["source_commit"], "7418506b253aad4d8ffab35f761376382619fbc5")
         self.assertEqual(source["runtime_namespace"], "decision-trace-dev")
-        self.assertEqual(source["verified_files"], 110)
+        self.assertEqual(source["verified_files"], 131)
 
     def test_default_8793_runtime_uses_mainline_safe_answers_and_records_reply_mode(self):
         root = TEST_TMP / uuid4().hex[:6]

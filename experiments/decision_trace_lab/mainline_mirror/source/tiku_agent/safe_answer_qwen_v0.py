@@ -8,6 +8,7 @@ import urllib.request
 
 from scripts.classify_question_bank import DEFAULT_ENDPOINT, DEFAULT_MODEL
 from tiku_agent.safe_answer_generator_v0 import SafeAnswerModelRequestV0
+from tiku_shared.model_costs import timed_model_call
 
 
 class QwenSafeAnswerClientV0:
@@ -45,11 +46,21 @@ class QwenSafeAnswerClientV0:
             },
             method="POST",
         )
-        with urllib.request.urlopen(
-            http_request,
-            timeout=request.timeout_seconds,
-        ) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        def request_data() -> dict:
+            with urllib.request.urlopen(
+                http_request,
+                timeout=request.timeout_seconds,
+            ) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        data = timed_model_call(
+            request_data,
+            provider="dashscope",
+            model=self.model,
+            call_type="qwen_safe_answer",
+            usage_getter=lambda value: value.get("usage", {}),
+            request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
+        )
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:

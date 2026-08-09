@@ -36,6 +36,16 @@ python -B scripts/run_tiku_agent_demo.py --port 8790
 
 Agent 现在只有 Intent V2，不再提供 V1 运行开关。线上 8790 由隐藏进程启动，并使用独立生产目录 `.tmp_tiku_agent_v2_prod_8790/`。8790 默认启用状态感知安全回答 V0：只有寒暄、致谢等安全对话会收到由当前业务阶段生成的脱敏摘要，模型可以自然组织语言，但不能执行操作、编造候选或答案；业务指令仍直接进入原状态机。模型回答还会经过状态一致性、执行声明、内部字段和业务状态未变化校验，不合格时按当前阶段使用固定兜底。业务工具使用 `SUCCESS / NO_MATCH / NEEDS_INPUT / PARTIAL / TOOL_ERROR` 五态结果，固定状态机据此决定继续、澄清、回退或失败。视觉复筛会校正带EXIF旋转标记的输入图，但不修改题库源文件；普通图片仍发送原始字节。
 
+8790 的生产运行目录还会保存 `model_costs.sqlite3`。实际发给千问或智谱的调用会记录模型、调用类型、成功/失败、重试次数、耗时、输入/图像/缓存/输出 Token 和按版本化官网标准价估算的人民币费用；不保存用户原话、Prompt、图片或本地路径。并发复筛先在本轮内存中收集，回合结束后一次事务写入，不额外调用模型。一次题图任务跨补章节、继续搜索等回合时按脱敏会话键和题目版本汇总为同一个 `search_key`。8793和8794不接入该费用数据库；8788只以 SQLite 只读模式查询8790的汇总记录，不写入8790运行状态。
+
+查看8790最近7天费用：
+
+```powershell
+python -B scripts/model_cost_report.py --runtime-dir .tmp_tiku_agent_v2_prod_8790 --days 7
+```
+
+可增加 `--daily-budget 1.0` 查看每日预算50%/80%/100%告警，或用 `--run-id <id>` 查询一次运行的逐调用明细。正常调用只静默记录；超过10次模型调用、Token缺失、价格缺失或模型失败会写入结构化告警码。累计至少50次搜题后，报表还会用搜题费用P95的2倍标记成本异常。价格快照位于 `tiku_shared/model_price_catalog.json`，历史记录保留当时的 `price_version`；临时折扣、赠送额度和资源包不计入标准估算，实际账单仍应按月与供应商控制台核对。
+
 如需临时回退到原固定对话回复，可在手动启动 8790 时显式关闭安全回答：
 
 ```powershell
@@ -76,7 +86,8 @@ flowchart LR
     F --> G["结构类型筛选"]
     E --> H["荷载相似度粗筛"]
     G --> H
-    H --> I["Zhipu 视觉复筛 Top 候选"]
+    H --> X["可选 V5.2 尺寸复筛（字母库 >20）"]
+    X --> I["Zhipu 视觉复筛 Top 候选"]
     I --> J["返回相似题排名"]
     J --> K["按排名打开答案"]
 ```
@@ -117,9 +128,11 @@ flowchart LR
 
 主库保存数值荷载题和已赋值字母题，例如 `P=40kN`、`q=20kN/m`。
 
-字母库保存未赋值字母题，例如 `q`、`2P/a`、`M`。字母库 Excel 列为 `题目名称`、`荷载`、`结构类型`。这类题会写入相似度编码，同时保留原始字母标注，避免把不同量纲体系混在一起比较。
+字母库保存未赋值字母题，例如 `q`、`2P/a`、`M`。字母库 Excel 核心列为 `题目名称`、`荷载`、`结构类型`、`长×宽`、`单边尺寸`。这类题会写入相似度编码，同时保留原始字母标注，避免把不同量纲体系混在一起比较。
 
 字母库检索会先按章节定位，再按 `梁`、`钢架`、`桁架`、`拱` 做结构类型筛选，最后按荷载相似度排序。结构类型优先从题干文字推断；题干不明确时才调用图像分类模型。飞书新增字母题时必须同步写入 `结构类型`，否则后续检索可能漏掉新题。
+
+字母库 Excel 另有 `长×宽` 和 `单边尺寸` 两列。8790、8788、8793、8794 和多 Agent CLI 默认启用尺寸复筛；只有在已知结构类型、字母库荷载粗筛的 100% 候选严格超过 20 条时，才会额外调用一次 Qwen V5.2 识别查询图尺寸。完整两轴尺寸不同才允许剔除；任一边只有单边尺寸时只做同值优先排序，不同值和缺失值都保留。拱不参与；梁的完整尺寸必须为“长×0”。各命令行入口可用 `--disable-dimension-filter` 临时回退。
 
 > 说明：题库图片、答案图片和真实配置属于本地资产，不随仓库公开。克隆仓库后需要在 `config.local.json` 中配置自己的题库路径和模型密钥。
 
@@ -146,6 +159,7 @@ copy config.example.json config.local.json
   "dashscope_api_key": "",
   "zhipuai_api_key": "",
   "zhipu_rerank_model": "glm-4.6v",
+  "dimension_filter_enabled": true,
   "top_k": 3
 }
 ```
@@ -154,6 +168,12 @@ copy config.example.json config.local.json
 
 ```powershell
 python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter auto
+```
+
+多 Agent CLI 默认开启尺寸复筛；如需临时回退：
+
+```powershell
+python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter auto --disable-dimension-filter
 ```
 
 手动荷载检索：
@@ -195,6 +215,7 @@ python legacy_gui.py
 - 多题图先返回题号和识别摘要，用户再按题号逐题检索。
 - 回复 `+` 进入新增题目入库流程。
 - 在候选页回复对应负数可删除错误候选，删除前会二次确认并备份。
+- 管理员单独回复半角 `?` 或全角 `？`，可查看自上次成功查询截止以来有费用更新的搜题数、严格超过0.05元的数量、最高单次完整费用和汇总费用；首次查询覆盖最近24小时。该入口默认关闭，需在 `config.local.json` 配置 `feishu_admin_sender_ids`，或由本机维护者在专用私聊首次绑定。首次绑定时，以 `scripts/start_tiku_bot.ps1 -EnrollAdminSenderOnce` 启动8788，随后从该私聊发送任意一条普通消息；机器人只将身份标识保存到其本机 `.tmp_feishu_tiku` 状态目录，绝不在飞书回复或日志中展示。绑定成功后必须正常重启8788，普通问句不会触发费用查询。
 
 飞书端每次章节判断都会写入 `data/feishu_chapter_failure_log.jsonl`，包括自动采用、需要手动和手动补章节样本。这个文件名沿用早期失败日志名，但现在用于全量观察章节判断效果。
 

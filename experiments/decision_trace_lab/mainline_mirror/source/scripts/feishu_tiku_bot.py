@@ -33,6 +33,17 @@ if str(BASE) not in sys.path:
 from multi_agent_pipeline import MultiAgentCoordinator, is_auto_chapter  # noqa: E402
 from search import ANSWER_OUTPUT, DISPLAY_MAX_RESULTS, answer, cfg  # noqa: E402
 from scripts.chapter_judgment_log import append_chapter_judgment_log  # noqa: E402
+from scripts.admin_fee_query import (  # noqa: E402
+    AdminFeeQueryService,
+    DEFAULT_CURSOR_FILE_NAME,
+    DEFAULT_ENROLLED_SENDER_FILE_NAME,
+    DEFAULT_FEE_DB,
+    REPLY_FAILURE,
+    enroll_sender_once,
+    is_admin_fee_query,
+    load_enrolled_sender,
+    normalize_admin_sender_ids,
+)
 from scripts.feishu_delete_flow import (  # noqa: E402
     DeletePlan,
     FeishuDeleteService,
@@ -86,6 +97,11 @@ class FeishuTikuOptions:
     rerank_top: int = DISPLAY_MAX_RESULTS
     max_message_age_seconds: int = 15 * 60
     working_reaction: str | None = "OK"
+    admin_sender_ids: tuple[str, ...] = ()
+    admin_fee_db: Path = DEFAULT_FEE_DB
+    admin_fee_state_dir: Path | None = None
+    enroll_admin_sender_once: bool = False
+    dimension_filter_enabled: bool = False
 
 
 @dataclass
@@ -267,12 +283,48 @@ class TikuBot:
         delete_service: FeishuDeleteService | None = None,
     ) -> None:
         self.options = options
-        self.coordinator = coordinator or MultiAgentCoordinator(top_k=options.top_k)
+        self.coordinator = coordinator or MultiAgentCoordinator(
+            top_k=options.top_k,
+            dimension_filter_enabled=options.dimension_filter_enabled,
+        )
         self.sessions = sessions or TikuSessionStore(options.session_ttl_seconds)
         self.store_service = store_service or FeishuStoreService(dry_run=options.dry_run)
         self.delete_service = delete_service or FeishuDeleteService(dry_run=options.dry_run)
+        state_dir = options.admin_fee_state_dir or options.temp_dir
+        enrolled_sender = self._load_enrolled_admin_sender(state_dir)
+        self.admin_fee_query = AdminFeeQueryService(
+            fee_db=options.admin_fee_db,
+            state_path=state_dir / DEFAULT_CURSOR_FILE_NAME,
+            admin_sender_ids=(*options.admin_sender_ids, *(() if enrolled_sender is None else (enrolled_sender,))),
+        )
         self._chapter_modes: dict[str, str] = {}
         self._mode_lock = threading.Lock()
+
+    @staticmethod
+    def _load_enrolled_admin_sender(state_dir: Path) -> str | None:
+        try:
+            return load_enrolled_sender(state_dir / DEFAULT_ENROLLED_SENDER_FILE_NAME)
+        except Exception:  # noqa: BLE001 - invalid enrollment must fail closed.
+            return None
+
+    def enroll_admin_sender_once(self, sender: str) -> bool:
+        """Capture one sender only when the local startup mode explicitly allows it."""
+
+        if not self.options.enroll_admin_sender_once or str(sender).strip() == "feishu":
+            return False
+        try:
+            enrolled = enroll_sender_once(
+                (self.options.admin_fee_state_dir or self.options.temp_dir)
+                / DEFAULT_ENROLLED_SENDER_FILE_NAME,
+                sender,
+            )
+        except Exception:  # noqa: BLE001 - enrollment must never change chat behavior.
+            return False
+        if enrolled:
+            self.admin_fee_query.admin_sender_ids = frozenset(
+                (*self.admin_fee_query.admin_sender_ids, str(sender).strip())
+            )
+        return enrolled
 
     def receive_image(self, sender: str, image_path: Path) -> BotResponse:
         session = self.sessions.get(sender)
@@ -291,6 +343,10 @@ class TikuBot:
 
     def receive_text(self, sender: str, text: str) -> BotResponse:
         clean = text.strip()
+
+        if is_admin_fee_query(clean):
+            return self._admin_fee_query_reply(sender)
+
         session = self.sessions.get(sender)
 
         if session.state == DELETE_CONFIRM_STATE:
@@ -361,6 +417,14 @@ class TikuBot:
             return BotResponse(texts=["请先发送题目图片，然后我会用这个章节检索。"])
         mode_label = "自动章节" if self.chapter_mode(sender) == CHAPTER_MODE_AUTO else "手动章节"
         return BotResponse(texts=[f"请先发送题目图片。当前模式：{mode_label}。发送“手动”或“自动”可切换。"])
+
+    def _admin_fee_query_reply(self, sender: str) -> BotResponse:
+        try:
+            reply = self.admin_fee_query.query_reply(sender)
+        except Exception as exc:  # noqa: BLE001 - must never affect other flows.
+            print(f"admin fee query failed: {exc}", file=sys.stderr, flush=True)
+            reply = REPLY_FAILURE
+        return BotResponse(texts=[reply])
 
     def _start_delete_candidate(
         self,
@@ -1014,6 +1078,7 @@ class FeishuTikuBridge:
             return {"ok": True, "ignored": "missing-message-id"}
         if is_stale_message(extract_message_created_at(payload, event, message), self.options.max_message_age_seconds):
             return {"ok": True, "ignored": "stale-message", "message_id": message_id}
+        self.bot.enroll_admin_sender_once(sender)
 
         thread = threading.Thread(
             target=self._process_and_reply,
@@ -1691,6 +1756,7 @@ def load_options(args: argparse.Namespace) -> FeishuTikuOptions:
     app_id = get_env_or_user(args.app_id_env) or cfg.get("feishu_app_id", "")
     app_secret = get_env_or_user(args.app_secret_env) or cfg.get("feishu_app_secret", "")
     verification_token = get_env_or_user(args.verification_token_env) or cfg.get("feishu_verification_token")
+    admin_sender_ids = normalize_admin_sender_ids(cfg.get("feishu_admin_sender_ids"))
     return FeishuTikuOptions(
         app_id=app_id,
         app_secret=app_secret,
@@ -1702,6 +1768,13 @@ def load_options(args: argparse.Namespace) -> FeishuTikuOptions:
         rerank_top=args.rerank_top,
         max_message_age_seconds=args.max_message_age_minutes * 60,
         working_reaction=args.working_reaction or None,
+        admin_sender_ids=admin_sender_ids,
+        enroll_admin_sender_once=args.enroll_admin_sender_once,
+        dimension_filter_enabled=(
+            bool(args.enable_dimension_filter)
+            if args.enable_dimension_filter is not None
+            else cfg.get("dimension_filter_enabled", True) is not False
+        ),
     )
 
 
@@ -1734,10 +1807,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-message-age-minutes", type=int, default=15)
     parser.add_argument("--top", type=int, default=3)
     parser.add_argument("--rerank-top", type=int, default=DISPLAY_MAX_RESULTS)
+    dimension_filter_group = parser.add_mutually_exclusive_group()
+    dimension_filter_group.add_argument(
+        "--enable-dimension-filter",
+        dest="enable_dimension_filter",
+        action="store_true",
+        help="字母库荷载候选超过20条时启用尺寸复筛（默认）",
+    )
+    dimension_filter_group.add_argument(
+        "--disable-dimension-filter",
+        dest="enable_dimension_filter",
+        action="store_false",
+        help="临时关闭尺寸复筛",
+    )
+    parser.set_defaults(enable_dimension_filter=None)
+    parser.add_argument("--working-reaction", default="OK", help="收到图片后给原消息添加的 emoji_type；留空则关闭")
     parser.add_argument(
-        "--working-reaction",
-        default="OK",
-        help="收到图片后给原消息添加的 emoji_type；留空则关闭",
+        "--enroll-admin-sender-once",
+        action="store_true",
+        help="仅本次启动：从下一条已验证的飞书消息本地绑定费用查询管理员，不在飞书回传身份标识",
     )
 
     sub = parser.add_subparsers(dest="cmd")

@@ -19,6 +19,7 @@ from PIL import Image
 from tiku_agent.agent import AgentResponse
 from tiku_agent.session_runtime import AgentSessionRuntime
 from tiku_agent.session_store import SQLiteSessionStore
+from tiku_shared.model_costs import SQLiteModelCostLedger
 from tiku_agent.tools import DEFAULT_RUNTIME_DIR
 
 
@@ -50,7 +51,10 @@ def create_app(
     session_cookie = str(session_cookie).strip()
     if not session_cookie:
         raise ValueError("session_cookie is required")
-    runtime = runtime or AgentSessionRuntime(SQLiteSessionStore(DEFAULT_RUNTIME_DIR / "session.db"))
+    runtime = runtime or AgentSessionRuntime(
+        SQLiteSessionStore(DEFAULT_RUNTIME_DIR / "session.db"),
+        cost_ledger=SQLiteModelCostLedger(DEFAULT_RUNTIME_DIR / "model_costs.sqlite3"),
+    )
     app = FastAPI(title="结构力学搜题 Agent", docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
 

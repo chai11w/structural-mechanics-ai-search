@@ -15,6 +15,14 @@ class MainlineLauncherTest(unittest.TestCase):
             parser.parse_args(["--disable-safe-answer-v0"]).enable_safe_answer_v0
         )
 
+    def test_dimension_filter_is_enabled_by_default_with_explicit_rollback(self):
+        parser = build_argument_parser()
+
+        self.assertTrue(parser.parse_args([]).enable_dimension_filter)
+        self.assertFalse(
+            parser.parse_args(["--disable-dimension-filter"]).enable_dimension_filter
+        )
+
     def test_enabled_runtime_uses_model_only_for_safe_conversation(self):
         root = Path(__file__).resolve().parents[1] / f".tmp_test_8790_{uuid4().hex}"
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))

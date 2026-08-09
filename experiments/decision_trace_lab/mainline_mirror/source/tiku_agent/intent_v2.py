@@ -18,6 +18,7 @@ from tiku_agent.action_permissions_v2 import (
 )
 from tiku_agent.conversation_context_v2 import ConversationContextV2
 from tiku_agent.intent_contract import chinese_number_to_int, parse_chapter
+from tiku_shared.model_costs import timed_model_call
 from scripts.classify_question_bank import DEFAULT_ENDPOINT, DEFAULT_MODEL, parse_model_json
 
 
@@ -147,8 +148,18 @@ def call_qwen_decision_v2(
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    def request_data() -> dict[str, Any]:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    data = timed_model_call(
+        request_data,
+        provider="dashscope",
+        model=model,
+        call_type="qwen_intent_decision",
+        usage_getter=lambda value: value.get("usage", {}),
+        request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
+    )
     return parse_model_json(data["choices"][0]["message"]["content"])
 
 

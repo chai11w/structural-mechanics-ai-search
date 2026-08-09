@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "currency": "CNY",
+  "prices": [
+    {
+      "provider": "dashscope",
+      "models": ["qwen3.7-plus", "qwen3.7-plus-2026-05-26"],
+      "price_version": "qwen3.7-plus-cn-list-2026-05-26",
+      "effective_from": "2026-05-26",
+      "basis": "official_list_price_without_temporary_discount",
+      "source_url": "https://help.aliyun.com/zh/model-studio/model-pricing",
+      "tiers": [
+        {"max_input_tokens": 256000, "input_cny_per_million": "2", "output_cny_per_million": "8"},
+        {"max_input_tokens": 1000000, "input_cny_per_million": "6", "output_cny_per_million": "24"}
+      ]
+    },
+    {
+      "provider": "zhipu",
+      "models": ["glm-4.6v"],
+      "price_version": "glm-4.6v-cn-list-2026-08-02",
+      "effective_from": "2026-08-02",
+      "basis": "official_list_price",
+      "source_url": "https://bigmodel.cn/pricing",
+      "tiers": [
+        {"max_input_tokens": 32000, "input_cny_per_million": "1", "cached_input_cny_per_million": "0.2", "output_cny_per_million": "3"},
+        {"max_input_tokens": 128000, "input_cny_per_million": "2", "cached_input_cny_per_million": "0.4", "output_cny_per_million": "6"}
+      ]
+    }
+  ]
+}

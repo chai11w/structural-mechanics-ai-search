@@ -24,9 +24,11 @@ ROOT_FILES = {
     "SKILL.md",
     "build_index.py",
     "config.example.json",
+    "dimensions.py",
     "multi_agent_pipeline.py",
     "requirements.txt",
     "search.py",
+    "structure_dimensions.py",
 }
 SOURCE_PREFIXES = ("scripts/", "tests/", "tiku_agent/", "tiku_shared/")
 SNAPSHOT_SCOPE = (

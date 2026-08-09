@@ -37,25 +37,27 @@ def build_runtime(
     runtime_dir: str | Path = DEFAULT_RUNTIME_DIR,
     *,
     enable_safe_answer_v0: bool = False,
+    enable_dimension_filter: bool = False,
     safe_answer_model_client: Callable[[SafeAnswerModelRequestV0], str] | None = None,
 ) -> AgentSessionRuntime:
     """Build the 8794 runtime with all writable state under one isolated root."""
     root = Path(runtime_dir).resolve()
     artifacts = SessionArtifacts(root / "sessions")
     agent_factory = None
+    generator = None
     if enable_safe_answer_v0:
-        generator = SafeAnswerGeneratorV0(
-            safe_answer_model_client or QwenSafeAnswerClientV0()
-        )
+        generator = SafeAnswerGeneratorV0(safe_answer_model_client or QwenSafeAnswerClientV0())
 
+    if enable_safe_answer_v0 or enable_dimension_filter:
         def build_agent(state: AgentState) -> TikuSearchAgent:
             return TikuSearchAgent(
                 state=state,
                 config=AgentToolConfig(
                     runtime_dir=root,
                     session_dir=artifacts.session_dir(state.session_id),
+                    dimension_filter_enabled=enable_dimension_filter,
                 ),
-                enable_safe_answer_v0=True,
+                enable_safe_answer_v0=enable_safe_answer_v0,
                 safe_answer_generator_v0=generator,
             )
 
@@ -73,6 +75,7 @@ def build_app(
     *,
     runtime: AgentSessionRuntime | None = None,
     enable_safe_answer_v0: bool = False,
+    enable_dimension_filter: bool = False,
     safe_answer_model_client: Callable[[SafeAnswerModelRequestV0], str] | None = None,
 ):
     """Create the behavior-equivalent 8794 app with isolated state and cookie."""
@@ -82,6 +85,7 @@ def build_app(
         or build_runtime(
             root,
             enable_safe_answer_v0=enable_safe_answer_v0,
+            enable_dimension_filter=enable_dimension_filter,
             safe_answer_model_client=safe_answer_model_client,
         ),
         incoming_dir=root / "incoming",
@@ -100,6 +104,19 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--runtime-dir", type=Path, default=DEFAULT_RUNTIME_DIR)
+    dimension_filter_group = parser.add_mutually_exclusive_group()
+    dimension_filter_group.add_argument(
+        "--enable-dimension-filter",
+        dest="enable_dimension_filter",
+        action="store_true",
+        help="Enable V5.2 dimension filtering when symbolic candidates exceed 20 (default)",
+    )
+    dimension_filter_group.add_argument(
+        "--disable-dimension-filter",
+        dest="enable_dimension_filter",
+        action="store_false",
+        help="Temporarily disable the V5.2 dimension filter",
+    )
     safe_answer_group = parser.add_mutually_exclusive_group()
     safe_answer_group.add_argument(
         "--enable-safe-answer-v0",
@@ -113,7 +130,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Temporarily disable safe answers and use the original Intent V2 replies",
     )
-    parser.set_defaults(enable_safe_answer_v0=True)
+    parser.set_defaults(enable_safe_answer_v0=True, enable_dimension_filter=True)
     return parser
 
 
@@ -123,6 +140,7 @@ def main() -> int:
         build_app(
             args.runtime_dir,
             enable_safe_answer_v0=args.enable_safe_answer_v0,
+            enable_dimension_filter=args.enable_dimension_filter,
         ),
         host=args.host,
         port=args.port,
