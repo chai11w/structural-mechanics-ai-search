@@ -4,6 +4,7 @@ import unittest
 import search
 from multi_agent_pipeline import MultiAgentCoordinator
 from scripts.feishu_tiku_bot import FeishuTikuOptions, build_parser, format_no_match_reply
+from scripts.multi_agent_search import build_parser as build_multi_agent_parser
 from tiku_agent.tools import AgentToolConfig
 
 
@@ -57,6 +58,16 @@ class SharedDisplayPolicyTest(unittest.TestCase):
         self.assertEqual(
             inspect.signature(MultiAgentCoordinator.search_image).parameters["rerank_top"].default,
             search.DISPLAY_MAX_RESULTS,
+        )
+
+    def test_multi_agent_cli_enables_dimension_filter_by_default_with_rollback(self):
+        parser = build_multi_agent_parser()
+
+        self.assertTrue(parser.parse_args(["--image", "question.jpg"]).enable_dimension_filter)
+        self.assertFalse(
+            parser.parse_args(
+                ["--image", "question.jpg", "--disable-dimension-filter"]
+            ).enable_dimension_filter
         )
 
     def test_feishu_distinguishes_reliable_rerank_rejection_from_coarse_no_match(self):

@@ -132,7 +132,7 @@ flowchart LR
 
 字母库检索会先按章节定位，再按 `梁`、`钢架`、`桁架`、`拱` 做结构类型筛选，最后按荷载相似度排序。结构类型优先从题干文字推断；题干不明确时才调用图像分类模型。飞书新增字母题时必须同步写入 `结构类型`，否则后续检索可能漏掉新题。
 
-字母库 Excel 另有 `长×宽` 和 `单边尺寸` 两列。`dimension_filter_enabled` 默认为 `false`；显式开启后，只有在已知结构类型、字母库荷载粗筛的 100% 候选严格超过 20 条时，才会额外调用一次 Qwen V5.2 识别查询图尺寸。完整两轴尺寸不同才允许剔除；任一边只有单边尺寸时只做同值优先排序，不同值和缺失值都保留。拱不参与；梁的完整尺寸必须为“长×0”。
+字母库 Excel 另有 `长×宽` 和 `单边尺寸` 两列。8790、8788、8793、8794 和多 Agent CLI 默认启用尺寸复筛；只有在已知结构类型、字母库荷载粗筛的 100% 候选严格超过 20 条时，才会额外调用一次 Qwen V5.2 识别查询图尺寸。完整两轴尺寸不同才允许剔除；任一边只有单边尺寸时只做同值优先排序，不同值和缺失值都保留。拱不参与；梁的完整尺寸必须为“长×0”。各命令行入口可用 `--disable-dimension-filter` 临时回退。
 
 > 说明：题库图片、答案图片和真实配置属于本地资产，不随仓库公开。克隆仓库后需要在 `config.local.json` 中配置自己的题库路径和模型密钥。
 
@@ -159,7 +159,7 @@ copy config.example.json config.local.json
   "dashscope_api_key": "",
   "zhipuai_api_key": "",
   "zhipu_rerank_model": "glm-4.6v",
-  "dimension_filter_enabled": false,
+  "dimension_filter_enabled": true,
   "top_k": 3
 }
 ```
@@ -170,10 +170,10 @@ copy config.example.json config.local.json
 python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter auto
 ```
 
-单次 CLI 开启实验性尺寸复筛：
+多 Agent CLI 默认开启尺寸复筛；如需临时回退：
 
 ```powershell
-python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter auto --enable-dimension-filter
+python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter auto --disable-dimension-filter
 ```
 
 手动荷载检索：

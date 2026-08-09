@@ -427,12 +427,31 @@ class AdminFeeBotIntegrationTest(unittest.TestCase):
                 del search_module.cfg["feishu_admin_sender_ids"]
         self.assertEqual(options.admin_sender_ids, ("admin-a", "admin-b"))
 
+    def test_feishu_dimension_filter_defaults_on_with_explicit_rollback(self):
+        import search as search_module
+        from scripts.feishu_tiku_bot import build_parser
+
+        previous = search_module.cfg.get("dimension_filter_enabled", None)
+        had_key = "dimension_filter_enabled" in search_module.cfg
+        search_module.cfg.pop("dimension_filter_enabled", None)
+        try:
+            enabled = load_options(build_parser().parse_args([]))
+            disabled = load_options(
+                build_parser().parse_args(["--disable-dimension-filter"])
+            )
+        finally:
+            if had_key:
+                search_module.cfg["dimension_filter_enabled"] = previous
+        self.assertTrue(enabled.dimension_filter_enabled)
+        self.assertFalse(disabled.dimension_filter_enabled)
+
     def test_config_example_placeholder(self):
         example = json.loads(
             (Path(__file__).resolve().parents[1] / "config.example.json").read_text(encoding="utf-8")
         )
         self.assertIn("feishu_admin_sender_ids", example)
         self.assertEqual(example["feishu_admin_sender_ids"], [])
+        self.assertIs(example["dimension_filter_enabled"], True)
 
 
 if __name__ == "__main__":

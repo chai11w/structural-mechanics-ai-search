@@ -8,6 +8,6 @@
   "feishu_app_secret": "",
   "feishu_verification_token": "",
   "feishu_admin_sender_ids": [],
-  "dimension_filter_enabled": false,
+  "dimension_filter_enabled": true,
   "top_k": 3
 }

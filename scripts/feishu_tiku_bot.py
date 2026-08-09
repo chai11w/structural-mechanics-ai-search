@@ -1770,8 +1770,10 @@ def load_options(args: argparse.Namespace) -> FeishuTikuOptions:
         working_reaction=args.working_reaction or None,
         admin_sender_ids=admin_sender_ids,
         enroll_admin_sender_once=args.enroll_admin_sender_once,
-        dimension_filter_enabled=bool(
-            args.enable_dimension_filter or cfg.get("dimension_filter_enabled") is True
+        dimension_filter_enabled=(
+            bool(args.enable_dimension_filter)
+            if args.enable_dimension_filter is not None
+            else cfg.get("dimension_filter_enabled", True) is not False
         ),
     )
 
@@ -1805,11 +1807,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-message-age-minutes", type=int, default=15)
     parser.add_argument("--top", type=int, default=3)
     parser.add_argument("--rerank-top", type=int, default=DISPLAY_MAX_RESULTS)
-    parser.add_argument(
+    dimension_filter_group = parser.add_mutually_exclusive_group()
+    dimension_filter_group.add_argument(
         "--enable-dimension-filter",
+        dest="enable_dimension_filter",
         action="store_true",
-        help="实验性：字母库荷载候选超过20条时启用尺寸复筛",
+        help="字母库荷载候选超过20条时启用尺寸复筛（默认）",
     )
+    dimension_filter_group.add_argument(
+        "--disable-dimension-filter",
+        dest="enable_dimension_filter",
+        action="store_false",
+        help="临时关闭尺寸复筛",
+    )
+    parser.set_defaults(enable_dimension_filter=None)
     parser.add_argument("--working-reaction", default="OK", help="收到图片后给原消息添加的 emoji_type；留空则关闭")
     parser.add_argument(
         "--enroll-admin-sender-once",

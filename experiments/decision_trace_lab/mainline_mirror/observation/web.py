@@ -62,6 +62,7 @@ def create_observed_app(
                 config = AgentToolConfig(
                     runtime_dir=root,
                     session_dir=root / "sessions" / state.session_id,
+                    dimension_filter_enabled=True,
                 )
                 base = TikuSearchAgent(
                     state=state,

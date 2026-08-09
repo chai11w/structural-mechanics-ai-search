@@ -22,7 +22,7 @@ import search
 from multi_agent_pipeline import MultiAgentCoordinator, format_pipeline_result
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="多 Agent 结构力学题库检索")
     parser.add_argument("--image", help="题目图片路径，使用 Qwen Agent 识别和分类")
     parser.add_argument("--loads", help="荷载 JSON，用于不调用 Qwen 的本地路由验证")
@@ -33,12 +33,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rerank-top", type=int, default=search.DISPLAY_MAX_RESULTS, help="Zhipu 复筛返回数量")
     parser.add_argument("--no-rerank", action="store_true", help="跳过 Zhipu 视觉复筛")
     parser.add_argument("--no-cache", action="store_true", help="禁用 Qwen 识别缓存")
-    parser.add_argument(
+    dimension_filter_group = parser.add_mutually_exclusive_group()
+    dimension_filter_group.add_argument(
         "--enable-dimension-filter",
+        dest="enable_dimension_filter",
         action="store_true",
-        help="实验性：字母库荷载粗筛候选超过20条时启用V5.2尺寸复筛",
+        help="字母库荷载粗筛候选超过20条时启用V5.2尺寸复筛（默认）",
     )
-    args = parser.parse_args()
+    dimension_filter_group.add_argument(
+        "--disable-dimension-filter",
+        dest="enable_dimension_filter",
+        action="store_false",
+        help="临时关闭V5.2尺寸复筛",
+    )
+    parser.set_defaults(enable_dimension_filter=True)
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     source_count = sum(bool(value) for value in (args.image, args.loads, args.types))
     if source_count != 1:

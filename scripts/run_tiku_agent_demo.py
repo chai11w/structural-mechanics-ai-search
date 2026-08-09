@@ -98,10 +98,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8790)
     parser.add_argument("--runtime-dir", type=Path)
-    parser.add_argument(
+    dimension_filter_group = parser.add_mutually_exclusive_group()
+    dimension_filter_group.add_argument(
         "--enable-dimension-filter",
+        dest="enable_dimension_filter",
         action="store_true",
-        help="Enable experimental V5.2 dimension filtering only when symbolic candidates exceed 20",
+        help="Enable V5.2 dimension filtering when symbolic candidates exceed 20 (default)",
+    )
+    dimension_filter_group.add_argument(
+        "--disable-dimension-filter",
+        dest="enable_dimension_filter",
+        action="store_false",
+        help="Temporarily disable the V5.2 dimension filter",
     )
     safe_answer_group = parser.add_mutually_exclusive_group()
     safe_answer_group.add_argument(
@@ -116,7 +124,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Temporarily use the original fixed Intent V2 replies",
     )
-    parser.set_defaults(enable_safe_answer_v0=True)
+    parser.set_defaults(enable_safe_answer_v0=True, enable_dimension_filter=True)
     return parser
 
 
