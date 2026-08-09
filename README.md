@@ -86,7 +86,8 @@ flowchart LR
     F --> G["结构类型筛选"]
     E --> H["荷载相似度粗筛"]
     G --> H
-    H --> I["Zhipu 视觉复筛 Top 候选"]
+    H --> X["可选 V5.2 尺寸复筛（字母库 >20）"]
+    X --> I["Zhipu 视觉复筛 Top 候选"]
     I --> J["返回相似题排名"]
     J --> K["按排名打开答案"]
 ```
@@ -127,9 +128,11 @@ flowchart LR
 
 主库保存数值荷载题和已赋值字母题，例如 `P=40kN`、`q=20kN/m`。
 
-字母库保存未赋值字母题，例如 `q`、`2P/a`、`M`。字母库 Excel 列为 `题目名称`、`荷载`、`结构类型`。这类题会写入相似度编码，同时保留原始字母标注，避免把不同量纲体系混在一起比较。
+字母库保存未赋值字母题，例如 `q`、`2P/a`、`M`。字母库 Excel 核心列为 `题目名称`、`荷载`、`结构类型`、`长×宽`、`单边尺寸`。这类题会写入相似度编码，同时保留原始字母标注，避免把不同量纲体系混在一起比较。
 
 字母库检索会先按章节定位，再按 `梁`、`钢架`、`桁架`、`拱` 做结构类型筛选，最后按荷载相似度排序。结构类型优先从题干文字推断；题干不明确时才调用图像分类模型。飞书新增字母题时必须同步写入 `结构类型`，否则后续检索可能漏掉新题。
+
+字母库 Excel 另有 `长×宽` 和 `单边尺寸` 两列。`dimension_filter_enabled` 默认为 `false`；显式开启后，只有在已知结构类型、字母库荷载粗筛的 100% 候选严格超过 20 条时，才会额外调用一次 Qwen V5.2 识别查询图尺寸。完整两轴尺寸不同才允许剔除；任一边只有单边尺寸时只做同值优先排序，不同值和缺失值都保留。拱不参与；梁的完整尺寸必须为“长×0”。
 
 > 说明：题库图片、答案图片和真实配置属于本地资产，不随仓库公开。克隆仓库后需要在 `config.local.json` 中配置自己的题库路径和模型密钥。
 
@@ -156,6 +159,7 @@ copy config.example.json config.local.json
   "dashscope_api_key": "",
   "zhipuai_api_key": "",
   "zhipu_rerank_model": "glm-4.6v",
+  "dimension_filter_enabled": false,
   "top_k": 3
 }
 ```
@@ -164,6 +168,12 @@ copy config.example.json config.local.json
 
 ```powershell
 python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter auto
+```
+
+单次 CLI 开启实验性尺寸复筛：
+
+```powershell
+python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter auto --enable-dimension-filter
 ```
 
 手动荷载检索：

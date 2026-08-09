@@ -35,15 +35,25 @@ def read_bank(root: Path) -> list[dict[str, Any]]:
             workbook.close()
             raise ValueError(f"missing 长×宽 column: {book}")
         dimension_col = headers.index("长×宽") + 1
+        single_col = headers.index("单边尺寸") + 1 if "单边尺寸" in headers else None
         for row_number in range(2, sheet.max_row + 1):
             image_path = str(sheet.cell(row_number, 1).value or "").replace("\\", "/").strip()
             if not image_path:
                 continue
+            current_full = canonical(sheet.cell(row_number, dimension_col).value)
+            current_single = canonical(sheet.cell(row_number, single_col).value) if single_col else UNKNOWN
+            current = (
+                current_full
+                if current_full != UNKNOWN
+                else (f"单边：{current_single}" if current_single != UNKNOWN else UNKNOWN)
+            )
             rows.append(
                 {
                     "path": image_path,
                     "structure_type": canonical(sheet.cell(row_number, 3).value),
-                    "current": canonical(sheet.cell(row_number, dimension_col).value),
+                    "current": current,
+                    "current_full": current_full,
+                    "current_single": current_single,
                     "workbook": book.name,
                     "row": row_number,
                 }
@@ -81,8 +91,26 @@ def build_differences(
             missing.append(bank["path"])
             continue
         normalized = result.get("normalized") or {}
-        proposed = canonical(normalized.get("long_width"))
-        if proposed == bank["current"]:
+        proposed_full = canonical(normalized.get("long_width"))
+        proposed_single = canonical(normalized.get("single_side"))
+        proposed = (
+            proposed_full
+            if proposed_full != UNKNOWN
+            else (f"单边：{proposed_single}" if proposed_single != UNKNOWN else UNKNOWN)
+        )
+        current_full = canonical(bank.get("current_full", bank.get("current")))
+        current_single = canonical(bank.get("current_single"))
+        same = (
+            proposed_full != UNKNOWN
+            and current_full != UNKNOWN
+            and proposed_full == current_full
+        ) or (
+            proposed_full == UNKNOWN
+            and current_full == UNKNOWN
+            and proposed_single != UNKNOWN
+            and proposed_single == current_single
+        )
+        if same:
             continue
         differences.append(
             {

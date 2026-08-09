@@ -101,6 +101,7 @@ class FeishuTikuOptions:
     admin_fee_db: Path = DEFAULT_FEE_DB
     admin_fee_state_dir: Path | None = None
     enroll_admin_sender_once: bool = False
+    dimension_filter_enabled: bool = False
 
 
 @dataclass
@@ -282,7 +283,10 @@ class TikuBot:
         delete_service: FeishuDeleteService | None = None,
     ) -> None:
         self.options = options
-        self.coordinator = coordinator or MultiAgentCoordinator(top_k=options.top_k)
+        self.coordinator = coordinator or MultiAgentCoordinator(
+            top_k=options.top_k,
+            dimension_filter_enabled=options.dimension_filter_enabled,
+        )
         self.sessions = sessions or TikuSessionStore(options.session_ttl_seconds)
         self.store_service = store_service or FeishuStoreService(dry_run=options.dry_run)
         self.delete_service = delete_service or FeishuDeleteService(dry_run=options.dry_run)
@@ -1766,6 +1770,9 @@ def load_options(args: argparse.Namespace) -> FeishuTikuOptions:
         working_reaction=args.working_reaction or None,
         admin_sender_ids=admin_sender_ids,
         enroll_admin_sender_once=args.enroll_admin_sender_once,
+        dimension_filter_enabled=bool(
+            args.enable_dimension_filter or cfg.get("dimension_filter_enabled") is True
+        ),
     )
 
 
@@ -1798,6 +1805,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-message-age-minutes", type=int, default=15)
     parser.add_argument("--top", type=int, default=3)
     parser.add_argument("--rerank-top", type=int, default=DISPLAY_MAX_RESULTS)
+    parser.add_argument(
+        "--enable-dimension-filter",
+        action="store_true",
+        help="实验性：字母库荷载候选超过20条时启用尺寸复筛",
+    )
     parser.add_argument("--working-reaction", default="OK", help="收到图片后给原消息添加的 emoji_type；留空则关闭")
     parser.add_argument(
         "--enroll-admin-sender-once",

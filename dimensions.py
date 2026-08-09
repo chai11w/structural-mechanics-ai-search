@@ -19,13 +19,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Mapping
+from typing import Any, Mapping, Sequence
 
-# Structure types that require both the larger and the smaller dimension.
-# Everything except a single beam compares 长 and 宽; a beam compares 长 only
-# because a single horizontal beam has total height ``0`` (width meaningless).
-BEAM_TYPES = {"梁"}
-COMPARES_WIDTH_TYPES = {"钢架", "桁架", "拱", "组合结构", "unknown"}
+PARTICIPATING_STRUCTURE_TYPES = {"梁", "钢架", "桁架", "组合结构"}
+NONZERO_WIDTH_STRUCTURE_TYPES = {"钢架", "桁架", "组合结构"}
 
 _DIMENSION_RE = re.compile(
     r"^(?:(?P<coefficient>(?:0|[1-9]\d*)(?:\.\d+)?)?(?P<symbol>[A-Za-z]+)|(?P<number>0|[1-9]\d*(?:\.\d+)?))$"
@@ -239,10 +236,126 @@ def canonical_dimensions(total_span: object, total_height: object) -> dict[str, 
     return {"long": long_text, "width": width_text, "long_width": f"{long_text}×{width_text}"}
 
 
-def compares_width(structure_type: object) -> bool:
-    """Whether ``structure_type`` needs both long and width for a hard match."""
+def parse_long_width(value: object) -> dict[str, str] | None:
+    """Parse one stored rotation-invariant ``长×宽`` value.
 
-    return str(structure_type or "").strip() in COMPARES_WIDTH_TYPES
+    The bank stores complete dimensions only. Both sides are normalized through
+    :func:`canonical_dimensions`, so ``a``/``l`` become ``L`` and numeric length
+    units are removed just like model output.
+    """
+
+    text = str(value or "").strip().replace(" ", "")
+    if not text or text.lower() in _UNREADABLE_LABELS:
+        return None
+    parts = re.split(r"[×xX*＊]", text)
+    if len(parts) != 2:
+        return None
+    return canonical_dimensions(parts[0], parts[1])
+
+
+def normalize_single_dimension(value: object) -> str | None:
+    """Normalize one rotation-invariant known side; zero is never a side hint."""
+
+    dimension = normalize_dimension(value)
+    if dimension is None or dimension.coefficient <= 0:
+        return None
+    return dimension_text(dimension)
+
+
+@dataclass(frozen=True)
+class DimensionEvidence:
+    """Comparable complete or one-side-only dimensions for one question."""
+
+    full: Mapping[str, str] | None = None
+    single: str | None = None
+    state: str = "none"
+
+
+def dimensions_consistent_with_structure(
+    dimensions: Mapping[str, str] | None,
+    structure_type: object,
+) -> bool:
+    """Validate the hard type invariant for a complete dimension box."""
+
+    if not dimensions:
+        return False
+    normalized_type = str(structure_type or "").strip()
+    if normalized_type not in PARTICIPATING_STRUCTURE_TYPES:
+        return False
+    long_side = str(dimensions.get("long") or "").strip()
+    width = str(dimensions.get("width") or "").strip()
+    if not long_side or not width:
+        return False
+    if normalized_type == "梁":
+        return width == "0"
+    if normalized_type in NONZERO_WIDTH_STRUCTURE_TYPES:
+        return width != "0"
+    return False
+
+
+def dimension_evidence(
+    long_width: object,
+    single_side: object,
+    structure_type: object,
+) -> DimensionEvidence:
+    """Build conservative evidence from the bank's complete/single columns."""
+
+    normalized_type = str(structure_type or "").strip()
+    if normalized_type not in PARTICIPATING_STRUCTURE_TYPES:
+        return DimensionEvidence(state="skip")
+    full = parse_long_width(long_width)
+    single = normalize_single_dimension(single_side)
+    if full and single:
+        return DimensionEvidence(state="conflict")
+    if full:
+        if not dimensions_consistent_with_structure(full, normalized_type):
+            return DimensionEvidence(state="conflict")
+        return DimensionEvidence(full=full, state="full")
+    if single:
+        return DimensionEvidence(single=single, state="single")
+    return DimensionEvidence(state="none")
+
+
+def dimension_evidence_from_normalized(
+    normalized: Mapping[str, Any] | None,
+    structure_type: object,
+) -> DimensionEvidence:
+    """Build query evidence from normalized V5.2 model output."""
+
+    result = dict(normalized or {})
+    if result.get("dimensions_verified") is not True:
+        return DimensionEvidence(state="none")
+    state = str(result.get("dimension_state") or "").strip()
+    if state in {"skip", "conflict", "none"}:
+        return DimensionEvidence(state=state)
+    if state == "full":
+        full = {
+            "long": str(result.get("long") or "").strip(),
+            "width": str(result.get("width") or "").strip(),
+            "long_width": str(result.get("long_width") or "").strip(),
+        }
+        if dimensions_consistent_with_structure(full, structure_type):
+            return DimensionEvidence(full=full, state="full")
+        return DimensionEvidence(state="conflict")
+    if state == "single":
+        single = normalize_single_dimension(result.get("single_side"))
+        return DimensionEvidence(single=single, state="single" if single else "none")
+
+    # Compatibility for saved V5/V5.2 results written before dimension_state.
+    full = parse_long_width(result.get("long_width"))
+    if full and dimensions_consistent_with_structure(full, structure_type):
+        return DimensionEvidence(full=full, state="full")
+    for key in ("single_side", "code_span", "code_height", "total_span", "total_height"):
+        single = normalize_single_dimension(result.get(key))
+        if single:
+            return DimensionEvidence(single=single, state="single")
+    return DimensionEvidence(state="none")
+
+
+def compares_width(structure_type: object) -> bool:
+    """Whether ``structure_type`` participates in complete two-axis matching."""
+
+    return str(structure_type or "").strip() in PARTICIPATING_STRUCTURE_TYPES
 
 
 def dimensions_match(
@@ -265,11 +378,16 @@ def dimensions_match(
     the side has no usable dimensions. Symbolic dimensions are compared only with
     symbolic (letter symbols already normalized to ``L``), numeric only with
     numeric, and equality is exact string equality after that normalization.
-    Beams compare 长 only; every other structure type (including 组合结构 and
-    unknown) compares 长 and 宽.
+    Every participating structure compares both axes. A beam's width must be
+    the literal ``0``; a frame/truss/composite width must be non-zero. Arches,
+    unknown types, and type/dimension conflicts return ``skip``.
     """
 
-    if not query or not candidate:
+    if not compares_width(structure_type) or not query or not candidate:
+        return "skip"
+    if not dimensions_consistent_with_structure(query, structure_type):
+        return "skip"
+    if not dimensions_consistent_with_structure(candidate, structure_type):
         return "skip"
     query_long = str(query.get("long") or "").strip()
     candidate_long = str(candidate.get("long") or "").strip()
@@ -277,10 +395,110 @@ def dimensions_match(
         return "skip"
     if query_long != candidate_long:
         return "mismatch"
-    if not compares_width(structure_type):
-        return "match"
     query_width = str(query.get("width") or "").strip()
     candidate_width = str(candidate.get("width") or "").strip()
     if not query_width or not candidate_width:
         return "skip"
     return "match" if query_width == candidate_width else "mismatch"
+
+
+def dimension_evidence_verdict(
+    query: DimensionEvidence,
+    candidate: DimensionEvidence,
+    structure_type: object,
+) -> str:
+    """Return ``match``/``mismatch``/``skip`` for complete and single evidence.
+
+    A hard ``mismatch`` is possible only when both sides have valid complete
+    dimensions. If either side has only one known side, equality is a positive
+    soft match; inequality remains ``skip`` so incomplete evidence never deletes
+    a candidate.
+    """
+
+    if not compares_width(structure_type):
+        return "skip"
+    if query.state == "full" and candidate.state == "full":
+        return dimensions_match(query.full, candidate.full, structure_type)
+    if query.state not in {"full", "single"} or candidate.state not in {"full", "single"}:
+        return "skip"
+
+    query_sides: Sequence[str]
+    candidate_sides: Sequence[str]
+    if query.state == "full" and query.full:
+        query_sides = (str(query.full.get("long") or ""), str(query.full.get("width") or ""))
+    else:
+        query_sides = (str(query.single or ""),)
+    if candidate.state == "full" and candidate.full:
+        candidate_sides = (
+            str(candidate.full.get("long") or ""),
+            str(candidate.full.get("width") or ""),
+        )
+    else:
+        candidate_sides = (str(candidate.single or ""),)
+    common = (set(query_sides) & set(candidate_sides)) - {""}
+    return "match" if common else "skip"
+
+
+def filter_ranked_candidates_by_dimensions(
+    candidates: list[dict[str, Any]],
+    query: DimensionEvidence,
+    structure_type: object,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Stable positive reordering plus complete/full hard filtering.
+
+    The original list is returned unchanged when the query is unusable or when
+    every candidate would otherwise be removed. That fallback prevents one bad
+    model response from turning a healthy coarse pool into a false no-match.
+    """
+
+    before = len(candidates)
+    trace: dict[str, Any] = {
+        "triggered": True,
+        "applied": False,
+        "query_state": query.state,
+        "before": before,
+        "after": before,
+        "matches": 0,
+        "mismatches": 0,
+        "skipped": before,
+        "fallback": False,
+    }
+    if query.state not in {"full", "single"}:
+        return list(candidates), trace
+
+    matches: list[dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
+    mismatches = 0
+    for candidate in candidates:
+        evidence = dimension_evidence(
+            candidate.get("long_width"),
+            candidate.get("single_side"),
+            structure_type,
+        )
+        verdict = dimension_evidence_verdict(query, evidence, structure_type)
+        copied = dict(candidate)
+        copied["dimension_verdict"] = verdict
+        copied["dimension_state"] = evidence.state
+        if verdict == "match":
+            matches.append(copied)
+        elif verdict == "mismatch":
+            mismatches += 1
+        else:
+            kept.append(copied)
+
+    filtered = matches + kept
+    if not filtered and candidates:
+        trace.update({"fallback": True, "mismatches": mismatches})
+        return list(candidates), trace
+    trace.update(
+        {
+            "applied": bool(matches or mismatches),
+            "after": len(filtered),
+            "matches": len(matches),
+            "mismatches": mismatches,
+            "skipped": len(kept),
+        }
+    )
+    for rank, candidate in enumerate(filtered, 1):
+        candidate["rank"] = rank
+    return filtered, trace

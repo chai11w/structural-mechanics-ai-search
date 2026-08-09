@@ -40,7 +40,7 @@ class StructureDimensionEvaluationTests(unittest.TestCase):
 
     def test_qwen_request_keeps_v5_schema_and_non_thinking_mode(self):
         with patch(
-            "scripts.evaluate_structure_dimensions.image_to_data_url",
+            "structure_dimensions.image_to_data_url",
             return_value="data:image/jpeg;base64,AA==",
         ):
             request = build_qwen_request(
@@ -58,7 +58,7 @@ class StructureDimensionEvaluationTests(unittest.TestCase):
             self.assertIn(field, DIMENSION_PROMPT)
 
     def test_known_arch_skips_qwen_call(self):
-        with patch("scripts.evaluate_structure_dimensions.tracked_qwen_request") as request:
+        with patch("structure_dimensions.tracked_qwen_request") as request:
             normalized, usage, raw = call_qwen(
                 Path("missing.jpg"),
                 api_key="unused",
@@ -122,6 +122,7 @@ class StructureDimensionEvaluationTests(unittest.TestCase):
         self.assertIs(result["span_consistent"], True)
         self.assertIs(result["dimensions_verified"], True)
         self.assertEqual(result["long_width"], "3L×0")
+        self.assertEqual(result["dimension_state"], "full")
 
     def test_provider_segments_catch_model_arithmetic_mismatch(self):
         # Model transcribed l/3,2l/3,l/3,l (sum 7/3 ≈ 2.33) but "felt" 3L.
@@ -203,6 +204,23 @@ class StructureDimensionEvaluationTests(unittest.TestCase):
         self.assertEqual(result["total_span"], "4L")
         self.assertIsNone(result["total_height"])
         self.assertEqual(result["long_width"], "unknown")
+        self.assertEqual(result["single_side"], "4L")
+        self.assertEqual(result["dimension_state"], "single")
+        self.assertTrue(result["zero_axis_discarded"])
+
+    def test_beam_with_two_nonzero_axes_is_a_type_conflict(self):
+        result = normalize_provider_result(
+            {
+                "structure_type": "梁",
+                "horizontal_segments": ["3a"],
+                "vertical_segments": ["a"],
+                "total_span": "3a",
+                "total_height": "a",
+            }
+        )
+        self.assertEqual(result["long_width"], "unknown")
+        self.assertEqual(result["dimension_state"], "conflict")
+        self.assertTrue(result["dimension_type_conflict"])
 
     def test_arch_dimensions_are_ignored_even_if_model_returns_them(self):
         result = normalize_provider_result(
@@ -219,6 +237,7 @@ class StructureDimensionEvaluationTests(unittest.TestCase):
         self.assertIsNone(result["total_span"])
         self.assertIsNone(result["total_height"])
         self.assertEqual(result["long_width"], "unknown")
+        self.assertEqual(result["dimension_state"], "skip")
 
     def test_manifest_rejects_answer_images_and_keeps_safe_relative_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:

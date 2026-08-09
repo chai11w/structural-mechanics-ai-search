@@ -390,6 +390,9 @@ class TikuSearchAgent:
             "structure_type": structure_type,
             "top_k": self.config.top_k,
         }
+        if self.config.dimension_filter_enabled:
+            coarse_kwargs["query_image_path"] = self._rerank_query_image_path()
+            coarse_kwargs["config"] = self.config
         if continuing:
             coarse_kwargs["exclude_candidate_keys"] = list(self.state.attempted_candidate_keys)
         coarse = self.tools.coarse_search(self.state.current_loads, **coarse_kwargs)

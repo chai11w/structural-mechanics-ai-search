@@ -1029,6 +1029,7 @@ class ChapterCandidateScan:
 
     scored: list[tuple[float, str]]
     structure_filter_applied: bool
+    dimensions_by_name: dict[str, dict[str, str]]
 
 
 def scan_chapter_candidates(
@@ -1060,12 +1061,26 @@ def scan_chapter_candidates(
 
     normalized_loads = normalize_query_loads(query_loads)
     scored = []
+    dimensions_by_name: dict[str, dict[str, str]] = {}
     for _, row in df.iterrows():
         db_loads = fix_load_types(_safe_parse_loads(row["荷载"]))
         score = compute_similarity(normalized_loads, db_loads)
-        scored.append((score, str(row["题目名称"])))
+        name = str(row["题目名称"])
+        scored.append((score, name))
+        structure_value = row.get("结构类型")
+        long_width_value = row.get("长×宽")
+        single_side_value = row.get("单边尺寸")
+        dimensions_by_name[name] = {
+            "structure_type": str(structure_value).strip() if pd.notna(structure_value) else "",
+            "long_width": str(long_width_value).strip() if pd.notna(long_width_value) else "",
+            "single_side": str(single_side_value).strip() if pd.notna(single_side_value) else "",
+        }
     scored.sort(key=lambda item: item[0], reverse=True)
-    return ChapterCandidateScan(scored=scored, structure_filter_applied=structure_filter_applied)
+    return ChapterCandidateScan(
+        scored=scored,
+        structure_filter_applied=structure_filter_applied,
+        dimensions_by_name=dimensions_by_name,
+    )
 
 
 # ============================================================

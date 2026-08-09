@@ -21,6 +21,7 @@ from multi_agent_pipeline import (
     CHAPTER_UNKNOWN,
     QwenClassifier,
     RuleRouter,
+    apply_dimension_prefilter,
     infer_structure_type_from_text,
     load_bank_excel,
     normalize_rerank_results,
@@ -64,10 +65,16 @@ class AgentToolConfig:
     global_candidate_timeout_seconds: float = 15.0
     global_retry_incomplete_once: bool = True
     use_qwen_cache: bool = True
+    dimension_filter_enabled: bool = False
+    dimension_filter_timeout_seconds: int = 30
 
     @property
     def qwen_cache_path(self) -> Path:
         return self.runtime_dir / "qwen_classifier_cache.json"
+
+    @property
+    def qwen_dimension_cache_path(self) -> Path:
+        return self.runtime_dir / "qwen_dimension_cache.json"
 
     @property
     def answer_output_dir(self) -> Path:
@@ -81,6 +88,8 @@ class AgentToolConfig:
 def _make_qwen(config: AgentToolConfig) -> QwenClassifier:
     return QwenClassifier(
         cache_path=config.qwen_cache_path,
+        dimension_cache_path=config.qwen_dimension_cache_path,
+        dimension_timeout=config.dimension_filter_timeout_seconds,
         use_cache=config.use_qwen_cache,
     )
 
@@ -388,6 +397,8 @@ def coarse_search_tool(
     structure_type: str = "",
     top_k: int | None = None,
     exclude_candidate_keys: list[str] | None = None,
+    query_image_path: str | Path | None = None,
+    config: AgentToolConfig | None = None,
 ) -> ToolResult:
     """Run read-only coarse search without writing `_last_search.json`.
 
@@ -396,6 +407,7 @@ def coarse_search_tool(
     Excel paths.
     """
 
+    config = config or AgentToolConfig()
     try:
         excel_root = search.ROOT if route == "main" else symbolic_root(search.ROOT)
         filter_type = normalize_structure_type(structure_type)
@@ -424,12 +436,14 @@ def coarse_search_tool(
         has_more = len(scored) > len(top)
 
         candidates = []
+        dimensions_by_name = getattr(scan, "dimensions_by_name", {})
         for rank, (score, name, candidate_key) in enumerate(top, 1):
             path, resolved_name, repaired = search.resolve_question_path(
                 name,
                 chapter_name=chapter,
                 update_excel=False,
             )
+            dimension_data = dimensions_by_name.get(name, {})
             candidates.append(
                 {
                     "rank": rank,
@@ -442,8 +456,19 @@ def coarse_search_tool(
                     "structure_filter": scan.structure_filter_applied,
                     "path_repaired_in_memory": repaired,
                     "candidate_key": candidate_key,
+                    "long_width": dimension_data.get("long_width", ""),
+                    "single_side": dimension_data.get("single_side", ""),
                 }
             )
+
+        candidates, dimension_filter = apply_dimension_prefilter(
+            candidates,
+            enabled=config.dimension_filter_enabled,
+            route=route,
+            structure_type=filter_type,
+            query_image_path=query_image_path,
+            recognizer=_make_qwen(config) if config.dimension_filter_enabled else None,
+        )
 
         data = {
                 "chapter": chapter,
@@ -453,6 +478,7 @@ def coarse_search_tool(
                 "candidates": candidates,
                 "has_more": has_more,
                 "remaining_candidate_count": max(0, len(scored) - len(top)),
+                "dimension_filter": dimension_filter,
             }
         if not candidates:
             return ToolResult.no_match(

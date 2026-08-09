@@ -2,7 +2,7 @@ from pathlib import Path
 import json
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pandas as pd
 
@@ -23,6 +23,104 @@ from tiku_agent.tools import (
 )
 
 class TikuAgentToolsTest(unittest.TestCase):
+    @staticmethod
+    def _dimension_scan(count: int):
+        names = [f"q{index:02d}.jpg" for index in range(1, count + 1)]
+        return SimpleNamespace(
+            scored=[(1.0, name) for name in names],
+            structure_filter_applied=True,
+            dimensions_by_name={
+                name: {
+                    "long_width": "4L×L" if index == count else "3L×L",
+                    "single_side": "",
+                }
+                for index, name in enumerate(names, 1)
+            },
+        )
+
+    def test_dimension_filter_requires_strictly_more_than_twenty_candidates(self):
+        recognizer = Mock()
+        config = AgentToolConfig(dimension_filter_enabled=True)
+        with patch(
+            "tiku_agent.tools.search.scan_chapter_candidates",
+            return_value=self._dimension_scan(20),
+        ), patch(
+            "tiku_agent.tools.search.resolve_question_path",
+            side_effect=lambda name, **_kwargs: (Path(name), name, False),
+        ), patch("tiku_agent.tools._make_qwen", return_value=recognizer):
+            result = coarse_search_tool(
+                [{"type": "集中", "raw": "P"}],
+                chapter="4力法",
+                route="symbolic",
+                structure_type="钢架",
+                query_image_path="query.jpg",
+                config=config,
+            )
+
+        self.assertTrue(result.ok)
+        recognizer.recognize_dimensions.assert_not_called()
+        self.assertFalse(result.data["dimension_filter"]["triggered"])
+        self.assertEqual(result.data["dimension_filter"]["reason"], "candidate_count_not_over_20")
+
+    def test_dimension_filter_calls_qwen_once_at_twenty_one_and_filters_full_mismatch(self):
+        recognizer = Mock()
+        recognizer.recognize_dimensions.return_value = {
+            "normalized": {
+                "dimensions_verified": True,
+                "dimension_state": "full",
+                "long": "3L",
+                "width": "L",
+                "long_width": "3L×L",
+            },
+            "from_cache": False,
+        }
+        config = AgentToolConfig(dimension_filter_enabled=True)
+        with patch(
+            "tiku_agent.tools.search.scan_chapter_candidates",
+            return_value=self._dimension_scan(21),
+        ), patch(
+            "tiku_agent.tools.search.resolve_question_path",
+            side_effect=lambda name, **_kwargs: (Path(name), name, False),
+        ), patch("tiku_agent.tools._make_qwen", return_value=recognizer):
+            result = coarse_search_tool(
+                [{"type": "集中", "raw": "P"}],
+                chapter="4力法",
+                route="symbolic",
+                structure_type="钢架",
+                query_image_path="query.jpg",
+                config=config,
+            )
+
+        self.assertTrue(result.ok)
+        recognizer.recognize_dimensions.assert_called_once_with("query.jpg", "钢架")
+        self.assertEqual(len(result.data["candidates"]), 20)
+        self.assertTrue(result.data["dimension_filter"]["applied"])
+        self.assertEqual(result.data["dimension_filter"]["mismatches"], 1)
+
+    def test_dimension_filter_model_failure_keeps_original_candidates(self):
+        recognizer = Mock()
+        recognizer.recognize_dimensions.side_effect = RuntimeError("timeout")
+        config = AgentToolConfig(dimension_filter_enabled=True)
+        with patch(
+            "tiku_agent.tools.search.scan_chapter_candidates",
+            return_value=self._dimension_scan(21),
+        ), patch(
+            "tiku_agent.tools.search.resolve_question_path",
+            side_effect=lambda name, **_kwargs: (Path(name), name, False),
+        ), patch("tiku_agent.tools._make_qwen", return_value=recognizer):
+            result = coarse_search_tool(
+                [{"type": "集中", "raw": "P"}],
+                chapter="4力法",
+                route="symbolic",
+                structure_type="钢架",
+                query_image_path="query.jpg",
+                config=config,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.data["candidates"]), 21)
+        self.assertEqual(result.data["dimension_filter"]["reason"], "recognition_failed")
+
     def test_coarse_search_continuation_excludes_every_attempted_candidate(self):
         loads = [{"type": "集中", "raw": "P"}]
         frame = pd.DataFrame(

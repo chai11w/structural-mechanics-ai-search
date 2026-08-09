@@ -11,11 +11,16 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import search
+from dimensions import (
+    PARTICIPATING_STRUCTURE_TYPES,
+    dimension_evidence_from_normalized,
+    filter_ranked_candidates_by_dimensions,
+)
 from scripts.classify_question_bank import (
     DEFAULT_ENDPOINT,
     DEFAULT_MODEL,
@@ -29,6 +34,7 @@ from scripts.classify_question_bank import (
     qwen_extract_loads,
 )
 from scripts.structure_type_classifier import VALID_STRUCTURE_TYPES, qwen_structure_type
+from structure_dimensions import DIMENSION_PROMPT_VERSION, call_qwen as call_dimension_qwen
 
 
 BASE = Path(__file__).resolve().parent
@@ -39,6 +45,7 @@ MAIN_RERANK_MIN_SCORE = 0.65
 SYMBOLIC_RERANK_MIN_SCORE = 0.50
 AUTO_CHAPTER_VALUES = {"", "auto", "自动", "自动识别", "自动识别章节"}
 AUTO_CHAPTER_MIN_CONFIDENCE = 0.45
+DIMENSION_FILTER_TRIGGER_COUNT = 20
 
 
 @dataclass
@@ -65,6 +72,7 @@ class PipelineResult:
     structure_type_confidence: float = 0.0
     structure_type_reason: str = ""
     structure_filter_applied: bool = False
+    dimension_filter: dict[str, Any] = field(default_factory=dict)
 
 
 def symbolic_root(main_root: Path | None = None) -> Path:
@@ -81,13 +89,17 @@ class QwenClassifier:
         model: str = DEFAULT_MODEL,
         endpoint: str = DEFAULT_ENDPOINT,
         cache_path: Path = QWEN_CACHE,
+        dimension_cache_path: Path | None = None,
         timeout: int = 180,
+        dimension_timeout: int = 30,
         use_cache: bool = True,
     ) -> None:
         self.model = model
         self.endpoint = endpoint
         self.cache_path = cache_path
+        self.dimension_cache_path = dimension_cache_path or cache_path.with_name("qwen_dimension_cache.json")
         self.timeout = timeout
+        self.dimension_timeout = dimension_timeout
         self.use_cache = use_cache
 
     def classify_image(self, image_path: str | Path) -> dict[str, Any]:
@@ -168,21 +180,60 @@ class QwenClassifier:
             timeout=self.timeout,
         )
 
+    def recognize_dimensions(
+        self,
+        image_path: str | Path,
+        known_structure_type: str,
+    ) -> dict[str, Any]:
+        """Recognize dimensions once, with a cache isolated from load results."""
+
+        path = Path(image_path)
+        digest = hashlib.md5(path.read_bytes()).hexdigest()
+        cache_key = (
+            f"{DIMENSION_PROMPT_VERSION}:{self.model}:"
+            f"{known_structure_type}:{digest}"
+        )
+        cache = self._load_cache(self.dimension_cache_path) if self.use_cache else {}
+        if self.use_cache and cache_key in cache:
+            return {
+                "normalized": dict(cache[cache_key]),
+                "usage": {},
+                "from_cache": True,
+            }
+
+        api_key = os.environ.get("DASHSCOPE_API_KEY", "") or search.cfg.get("dashscope_api_key", "")
+        if not api_key:
+            raise RuntimeError("DASHSCOPE_API_KEY is not set")
+        normalized, usage, _ = call_dimension_qwen(
+            path,
+            api_key=api_key,
+            endpoint=self.endpoint,
+            model=self.model,
+            timeout=self.dimension_timeout,
+            known_structure_type=known_structure_type,
+        )
+        if self.use_cache:
+            cache[cache_key] = normalized
+            self._save_cache(cache, self.dimension_cache_path)
+        return {"normalized": normalized, "usage": usage, "from_cache": False}
+
     def _cache_key(self, path: Path) -> str:
         digest = hashlib.md5(path.read_bytes()).hexdigest()
         return f"{QWEN_CACHE_SCHEMA_VERSION}:{self.model}:{digest}"
 
-    def _load_cache(self) -> dict[str, Any]:
-        if not self.cache_path.exists():
+    def _load_cache(self, path: Path | None = None) -> dict[str, Any]:
+        target = path or self.cache_path
+        if not target.exists():
             return {}
         try:
-            return json.loads(self.cache_path.read_text(encoding="utf-8"))
+            return json.loads(target.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             return {}
 
-    def _save_cache(self, cache: dict[str, Any]) -> None:
-        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        self.cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+    def _save_cache(self, cache: dict[str, Any], path: Path | None = None) -> None:
+        target = path or self.cache_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 class RuleRouter:
@@ -216,10 +267,16 @@ class MultiAgentCoordinator:
         qwen: QwenClassifier | None = None,
         router: RuleRouter | None = None,
         top_k: int | None = None,
+        dimension_filter_enabled: bool | None = None,
     ) -> None:
         self.qwen = qwen or QwenClassifier()
         self.router = router or RuleRouter()
         self.top_k = top_k or search.TOP_K
+        self.dimension_filter_enabled = (
+            search.cfg.get("dimension_filter_enabled") is True
+            if dimension_filter_enabled is None
+            else bool(dimension_filter_enabled)
+        )
 
     def search_image(
         self,
@@ -312,6 +369,15 @@ class MultiAgentCoordinator:
             structure_type=structure_type if route.route == "symbolic" else None,
         )
         structure_filter_applied = any(item.get("structure_filter") for item in results)
+        results, dimension_filter = apply_dimension_prefilter(
+            results,
+            enabled=self.dimension_filter_enabled,
+            route=route.route,
+            structure_type=structure_type,
+            query_image_path=query_image_path,
+            recognizer=self.qwen,
+            status_callback=status_callback,
+        )
         reranked = False
         rerank_note = ""
         if rerank and query_image_path and results:
@@ -350,6 +416,7 @@ class MultiAgentCoordinator:
             classified,
             rerank_note=rerank_note,
             structure_filter_applied=structure_filter_applied,
+            dimension_filter=dimension_filter,
         )
 
 
@@ -382,6 +449,7 @@ def make_pipeline_result(
     *,
     rerank_note: str = "",
     structure_filter_applied: bool = False,
+    dimension_filter: dict[str, Any] | None = None,
 ) -> PipelineResult:
     classified = classified or {}
     return PipelineResult(
@@ -399,6 +467,7 @@ def make_pipeline_result(
         structure_type_confidence=normalize_chapter_confidence(classified.get("structure_type_confidence")),
         structure_type_reason=str(classified.get("structure_type_reason") or "").strip(),
         structure_filter_applied=structure_filter_applied,
+        dimension_filter=dict(dimension_filter or {}),
     )
 
 
@@ -459,8 +528,10 @@ def rank_bank_candidates(
     top = [item for item in top if item[0] > 0]
 
     results = []
+    dimensions_by_name = getattr(scan, "dimensions_by_name", {})
     for rank, (score, name) in enumerate(top, 1):
         path, resolved_name, _ = search.resolve_question_path(name, chapter_name=chapter, update_excel=True)
+        dimension_data = dimensions_by_name.get(name, {})
         results.append({
             "rank": rank,
             "path": str(path),
@@ -468,8 +539,76 @@ def rank_bank_candidates(
             "score": score,
             "structure_type": filter_type if scan.structure_filter_applied else "",
             "structure_filter": scan.structure_filter_applied,
+            "long_width": dimension_data.get("long_width", ""),
+            "single_side": dimension_data.get("single_side", ""),
         })
     return results
+
+
+def apply_dimension_prefilter(
+    candidates: list[dict[str, Any]],
+    *,
+    enabled: bool,
+    route: str,
+    structure_type: str,
+    query_image_path: str | Path | None,
+    recognizer: Any,
+    status_callback=None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Optionally apply the conservative V5.2 dimension layer.
+
+    The trigger is deliberately strict: symbolic bank, known participating
+    structure, a query image, and more than 20 perfect load candidates. Any
+    model/parse problem leaves the original candidate order untouched.
+    """
+
+    trace: dict[str, Any] = {
+        "enabled": bool(enabled),
+        "triggered": False,
+        "applied": False,
+        "before": len(candidates),
+        "after": len(candidates),
+        "trigger_count": DIMENSION_FILTER_TRIGGER_COUNT,
+    }
+    if not enabled:
+        trace["reason"] = "disabled"
+        return list(candidates), trace
+    if route != "symbolic":
+        trace["reason"] = "not_symbolic"
+        return list(candidates), trace
+    if structure_type not in PARTICIPATING_STRUCTURE_TYPES:
+        trace["reason"] = "structure_not_applicable"
+        return list(candidates), trace
+    if not query_image_path:
+        trace["reason"] = "missing_query_image"
+        return list(candidates), trace
+    if len(candidates) <= DIMENSION_FILTER_TRIGGER_COUNT:
+        trace["reason"] = "candidate_count_not_over_20"
+        return list(candidates), trace
+
+    trace["triggered"] = True
+    if status_callback:
+        status_callback("尺寸复筛中...")
+    try:
+        recognized = recognizer.recognize_dimensions(query_image_path, structure_type)
+        query = dimension_evidence_from_normalized(
+            recognized.get("normalized"),
+            structure_type,
+        )
+        filtered, filter_trace = filter_ranked_candidates_by_dimensions(
+            candidates,
+            query,
+            structure_type,
+        )
+        trace.update(filter_trace)
+        trace["enabled"] = True
+        trace["from_cache"] = bool(recognized.get("from_cache"))
+        trace["reason"] = "applied" if trace.get("applied") else f"query_{query.state}"
+        return filtered, trace
+    except Exception as exc:  # noqa: BLE001 - an optional layer must fail open.
+        trace["reason"] = "recognition_failed"
+        trace["error"] = str(exc)[:200]
+        return list(candidates), trace
 
 
 def rerank_threshold_for_route(route: str) -> float:
@@ -544,6 +683,11 @@ def format_pipeline_result(result: PipelineResult) -> str:
     if result.load_details:
         details = "; ".join(f"{item['type']}:{item['raw']}->{item['load_class']}" for item in result.load_details)
         lines.append(f"load_classes={details}")
+    if result.dimension_filter:
+        lines.append(
+            "dimension_filter="
+            + json.dumps(result.dimension_filter, ensure_ascii=False)
+        )
 
     if result.route.route == "needs_chapter":
         lines.append("needs_chapter: 请手动选择章节后重试")

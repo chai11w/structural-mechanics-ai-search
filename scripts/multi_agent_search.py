@@ -33,6 +33,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rerank-top", type=int, default=search.DISPLAY_MAX_RESULTS, help="Zhipu 复筛返回数量")
     parser.add_argument("--no-rerank", action="store_true", help="跳过 Zhipu 视觉复筛")
     parser.add_argument("--no-cache", action="store_true", help="禁用 Qwen 识别缓存")
+    parser.add_argument(
+        "--enable-dimension-filter",
+        action="store_true",
+        help="实验性：字母库荷载粗筛候选超过20条时启用V5.2尺寸复筛",
+    )
     args = parser.parse_args()
 
     source_count = sum(bool(value) for value in (args.image, args.loads, args.types))
@@ -47,7 +52,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    coordinator = MultiAgentCoordinator(top_k=args.top)
+    coordinator = MultiAgentCoordinator(
+        top_k=args.top,
+        dimension_filter_enabled=args.enable_dimension_filter,
+    )
     coordinator.qwen.use_cache = not args.no_cache
 
     if args.image:

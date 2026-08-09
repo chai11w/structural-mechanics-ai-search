@@ -4,9 +4,13 @@ import unittest
 from fractions import Fraction
 
 from dimensions import (
+    DimensionEvidence,
     canonical_dimensions,
     compares_width,
+    dimension_evidence,
+    dimension_evidence_verdict,
     dimensions_match,
+    filter_ranked_candidates_by_dimensions,
     normalize_dimension,
     normalized_dimension_symbol,
     parse_dimension_segment,
@@ -125,17 +129,20 @@ class DimensionSegmentTests(unittest.TestCase):
 
 
 class DimensionMatchTests(unittest.TestCase):
-    def test_beam_compares_length_only(self):
-        self.assertEqual(compares_width("梁"), False)
+    def test_beam_requires_a_zero_width_and_compares_both_axes(self):
+        self.assertEqual(compares_width("梁"), True)
         self.assertEqual(
-            dimensions_match({"long": "3L", "width": "L"}, {"long": "3L", "width": "不同"}, "梁"), "match"
+            dimensions_match({"long": "3L", "width": "0"}, {"long": "3L", "width": "0"}, "梁"), "match"
         )
         self.assertEqual(
-            dimensions_match({"long": "3L", "width": "L"}, {"long": "4L", "width": "L"}, "梁"), "mismatch"
+            dimensions_match({"long": "3L", "width": "0"}, {"long": "4L", "width": "0"}, "梁"), "mismatch"
+        )
+        self.assertEqual(
+            dimensions_match({"long": "3L", "width": "L"}, {"long": "3L", "width": "L"}, "梁"), "skip"
         )
 
-    def test_every_other_structure_type_compares_long_and_width(self):
-        for structure_type in ("钢架", "桁架", "拱", "组合结构", "unknown"):
+    def test_participating_non_beam_types_compare_long_and_width(self):
+        for structure_type in ("钢架", "桁架", "组合结构"):
             self.assertEqual(compares_width(structure_type), True)
             self.assertEqual(
                 dimensions_match({"long": "3L", "width": "L"}, {"long": "3L", "width": "L"}, structure_type),
@@ -150,11 +157,23 @@ class DimensionMatchTests(unittest.TestCase):
                 "mismatch",
             )
 
+    def test_arch_and_unknown_never_enter_dimension_matching(self):
+        for structure_type in ("拱", "unknown", ""):
+            self.assertFalse(compares_width(structure_type))
+            self.assertEqual(
+                dimensions_match(
+                    {"long": "3L", "width": "L"},
+                    {"long": "3L", "width": "L"},
+                    structure_type,
+                ),
+                "skip",
+            )
+
     def test_missing_dimensions_skip_instead_of_hard_delete(self):
-        self.assertEqual(dimensions_match(None, {"long": "3L", "width": "L"}, "梁"), "skip")
-        self.assertEqual(dimensions_match({"long": "3L", "width": "L"}, None, "梁"), "skip")
+        self.assertEqual(dimensions_match(None, {"long": "3L", "width": "0"}, "梁"), "skip")
+        self.assertEqual(dimensions_match({"long": "3L", "width": "0"}, None, "梁"), "skip")
         self.assertEqual(dimensions_match({}, {"long": "3L", "width": "L"}, "钢架"), "skip")
-        self.assertEqual(dimensions_match({"long": "", "width": "L"}, {"long": "3L", "width": "L"}, "梁"), "skip")
+        self.assertEqual(dimensions_match({"long": "", "width": "0"}, {"long": "3L", "width": "0"}, "梁"), "skip")
         self.assertEqual(dimensions_match({"long": "3L", "width": "L"}, {"long": "3L", "width": ""}, "钢架"), "skip")
 
     def test_symbolic_never_matches_numeric(self):
@@ -173,6 +192,67 @@ class DimensionMatchTests(unittest.TestCase):
         self.assertEqual(
             dimensions_match({"long": "3L", "width": "L"}, {"long": "2L", "width": "L"}, "钢架"), "mismatch"
         )
+
+
+class DimensionEvidenceFilterTests(unittest.TestCase):
+    def test_bank_full_and_single_are_distinct_states(self):
+        self.assertEqual(dimension_evidence("3a×a", "", "钢架").state, "full")
+        single = dimension_evidence("", "3a", "钢架")
+        self.assertEqual(single, DimensionEvidence(single="3L", state="single"))
+        self.assertEqual(dimension_evidence("3L×L", "3L", "钢架").state, "conflict")
+        self.assertEqual(dimension_evidence("3L×0", "", "钢架").state, "conflict")
+        self.assertEqual(dimension_evidence("3L×L", "", "梁").state, "conflict")
+
+    def test_single_side_equality_is_soft_and_inequality_never_deletes(self):
+        query = DimensionEvidence(single="3L", state="single")
+        self.assertEqual(
+            dimension_evidence_verdict(query, dimension_evidence("4L×3L", "", "钢架"), "钢架"),
+            "match",
+        )
+        self.assertEqual(
+            dimension_evidence_verdict(query, dimension_evidence("4L×L", "", "钢架"), "钢架"),
+            "skip",
+        )
+
+    def test_single_side_reorders_matches_but_keeps_nonmatches(self):
+        candidates = [
+            {"rank": 1, "name": "other", "long_width": "4L×L", "single_side": ""},
+            {"rank": 2, "name": "same", "long_width": "", "single_side": "3L"},
+            {"rank": 3, "name": "also-other", "long_width": "", "single_side": "2L"},
+        ]
+        filtered, trace = filter_ranked_candidates_by_dimensions(
+            candidates,
+            DimensionEvidence(single="3L", state="single"),
+            "钢架",
+        )
+        self.assertEqual([item["name"] for item in filtered], ["same", "other", "also-other"])
+        self.assertEqual(len(filtered), 3)
+        self.assertEqual(trace["matches"], 1)
+        self.assertEqual(trace["mismatches"], 0)
+
+    def test_only_full_full_mismatches_are_deleted(self):
+        candidates = [
+            {"rank": 1, "name": "wrong", "long_width": "4L×L", "single_side": ""},
+            {"rank": 2, "name": "single", "long_width": "", "single_side": "3L"},
+            {"rank": 3, "name": "exact", "long_width": "3L×L", "single_side": ""},
+        ]
+        filtered, trace = filter_ranked_candidates_by_dimensions(
+            candidates,
+            dimension_evidence("3L×L", "", "钢架"),
+            "钢架",
+        )
+        self.assertEqual([item["name"] for item in filtered], ["single", "exact"])
+        self.assertEqual(trace["mismatches"], 1)
+
+    def test_all_deleted_falls_back_to_original_pool(self):
+        candidates = [{"rank": 1, "name": "wrong", "long_width": "4L×L", "single_side": ""}]
+        filtered, trace = filter_ranked_candidates_by_dimensions(
+            candidates,
+            dimension_evidence("3L×L", "", "钢架"),
+            "钢架",
+        )
+        self.assertEqual(filtered, candidates)
+        self.assertTrue(trace["fallback"])
 
 
 if __name__ == "__main__":

@@ -36,25 +36,29 @@ def build_runtime(
     runtime_dir: str | Path = DEFAULT_V2_RUNTIME_DIR,
     *,
     enable_safe_answer_v0: bool = True,
+    enable_dimension_filter: bool = False,
     safe_answer_model_client: Callable[[SafeAnswerModelRequestV0], str] | None = None,
 ) -> AgentSessionRuntime:
     """Build the 8790 runtime with bounded safe answers enabled by default."""
     root = Path(runtime_dir).resolve()
     artifacts = SessionArtifacts(root / "sessions")
-    agent_factory = None
+    generator = None
     if enable_safe_answer_v0:
         generator = SafeAnswerGeneratorV0(
             safe_answer_model_client or QwenSafeAnswerClientV0()
         )
 
+    agent_factory = None
+    if enable_safe_answer_v0 or enable_dimension_filter:
         def build_agent(state: AgentState) -> TikuSearchAgent:
             return TikuSearchAgent(
                 state=state,
                 config=AgentToolConfig(
                     runtime_dir=root,
                     session_dir=artifacts.session_dir(state.session_id),
+                    dimension_filter_enabled=enable_dimension_filter,
                 ),
-                enable_safe_answer_v0=True,
+                enable_safe_answer_v0=enable_safe_answer_v0,
                 safe_answer_generator_v0=generator,
             )
 
@@ -73,6 +77,7 @@ def build_app(
     *,
     runtime: AgentSessionRuntime | None = None,
     enable_safe_answer_v0: bool = True,
+    enable_dimension_filter: bool = False,
     safe_answer_model_client: Callable[[SafeAnswerModelRequestV0], str] | None = None,
 ):
     root = Path(runtime_dir).resolve()
@@ -81,6 +86,7 @@ def build_app(
         or build_runtime(
             root,
             enable_safe_answer_v0=enable_safe_answer_v0,
+            enable_dimension_filter=enable_dimension_filter,
             safe_answer_model_client=safe_answer_model_client,
         ),
         incoming_dir=root / "incoming",
@@ -92,6 +98,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8790)
     parser.add_argument("--runtime-dir", type=Path)
+    parser.add_argument(
+        "--enable-dimension-filter",
+        action="store_true",
+        help="Enable experimental V5.2 dimension filtering only when symbolic candidates exceed 20",
+    )
     safe_answer_group = parser.add_mutually_exclusive_group()
     safe_answer_group.add_argument(
         "--enable-safe-answer-v0",
@@ -116,6 +127,7 @@ def main() -> int:
         build_app(
             runtime_dir,
             enable_safe_answer_v0=args.enable_safe_answer_v0,
+            enable_dimension_filter=args.enable_dimension_filter,
         ),
         host=args.host,
         port=args.port,

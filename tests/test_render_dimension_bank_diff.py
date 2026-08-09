@@ -43,6 +43,27 @@ class DimensionBankDiffTests(unittest.TestCase):
         result = build_differences(bank, qwen, require_all=False)
         self.assertEqual([row["path"] for row in result], ["a.jpg"])
 
+    def test_equal_single_side_values_are_not_reported_as_differences(self) -> None:
+        bank = [
+            {
+                "path": "single.jpg",
+                "current": "单边：3L",
+                "current_full": "unknown",
+                "current_single": "3L",
+                "structure_type": "钢架",
+            }
+        ]
+        qwen = {
+            "single.jpg": {
+                "normalized": {
+                    "long_width": "unknown",
+                    "single_side": "3L",
+                    "dimension_state": "single",
+                }
+            }
+        }
+        self.assertEqual(build_differences(bank, qwen), [])
+
 
 if __name__ == "__main__":
     unittest.main()
