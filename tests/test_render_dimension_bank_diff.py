@@ -34,6 +34,15 @@ class DimensionBankDiffTests(unittest.TestCase):
         self.assertEqual(result[0]["path"], "a.jpg")
         self.assertEqual(result[0]["category"], "现库有值 → 新结果 unknown")
 
+    def test_partial_results_can_skip_unreturned_bank_paths(self) -> None:
+        bank = [
+            {"path": "a.jpg", "current": "2L×0", "structure_type": "钢架"},
+            {"path": "b.jpg", "current": "L×L", "structure_type": "钢架"},
+        ]
+        qwen = {"a.jpg": {"normalized": {"long_width": "unknown"}}}
+        result = build_differences(bank, qwen, require_all=False)
+        self.assertEqual([row["path"] for row in result], ["a.jpg"])
+
 
 if __name__ == "__main__":
     unittest.main()
