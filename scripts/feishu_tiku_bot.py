@@ -61,6 +61,9 @@ from scripts.feishu_store_flow import (  # noqa: E402
     format_store_success,
     is_store_entry_command,
 )
+from tiku_agent.safe_answer_reply_v0 import (  # noqa: E402
+    render_grounded_safe_answer_v0,
+)
 from tiku_shared.multi_question import (  # noqa: E402
     build_block_contact_sheet as _build_block_contact_sheet,
     chinese_question_number_to_int as _chinese_question_number_to_int,
@@ -343,6 +346,10 @@ class TikuBot:
 
     def receive_text(self, sender: str, text: str) -> BotResponse:
         clean = text.strip()
+
+        grounded_reply = render_grounded_safe_answer_v0(clean)
+        if grounded_reply is not None:
+            return BotResponse(texts=[grounded_reply])
 
         if is_admin_fee_query(clean):
             return self._admin_fee_query_reply(sender)
