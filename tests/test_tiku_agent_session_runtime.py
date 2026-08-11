@@ -280,6 +280,35 @@ class AgentSessionRuntimeTest(unittest.TestCase):
             runtime.handle_text("budget-session", "你好")
         self.assertEqual(self.logger.entries, [])
 
+    def test_per_identity_daily_budget_only_blocks_the_spent_invitation(self):
+        class IdentityLedger:
+            def estimated_cost_micros_since(
+                self, _started_at: str, *, identity_key: str | None = None
+            ) -> int:
+                return 3_000_000 if identity_key == "invite-spent" else 0
+
+        runtime = AgentSessionRuntime(
+            self.store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            cost_ledger=IdentityLedger(),
+            per_identity_daily_budget_cny=3,
+            agent_factory=lambda state: TikuSearchAgent(
+                state=state,
+                tools=FakeTools().toolbox(),
+                use_llm_intent=False,
+            ),
+        )
+
+        with self.assertRaisesRegex(AgentBudgetExceededError, "该邀请码"):
+            runtime.handle_text(
+                "spent-session", "你好", identity_key="invite-spent"
+            )
+        response = runtime.handle_text(
+            "fresh-session", "你好", identity_key="invite-fresh"
+        )
+        self.assertIsNotNone(response)
+
     def test_current_image_lookup_purges_expired_session_files(self):
         database_path = RUNTIME_DIR / f"session_expiry_test_{uuid4().hex}.db"
         self.addCleanup(lambda: database_path.unlink(missing_ok=True))

@@ -15,6 +15,7 @@ if str(BASE) not in sys.path:
 
 from tiku_agent.agent import TikuSearchAgent
 from tiku_agent.fastapi_demo import create_app
+from tiku_agent.invite_access import InviteAccess
 from tiku_agent.safe_answer_generator_v0 import (
     SafeAnswerGeneratorV0,
     SafeAnswerModelRequestV0,
@@ -42,6 +43,7 @@ def build_runtime(
     max_queued_tasks: int = 0,
     queue_wait_seconds: float = 90.0,
     daily_budget_cny: float | None = None,
+    per_invite_daily_budget_cny: float | None = None,
 ) -> AgentSessionRuntime:
     """Build the 8790 runtime with bounded safe answers enabled by default."""
     root = Path(runtime_dir).resolve()
@@ -77,6 +79,7 @@ def build_runtime(
         max_queued_tasks=max_queued_tasks,
         queue_wait_seconds=queue_wait_seconds,
         daily_budget_cny=daily_budget_cny,
+        per_identity_daily_budget_cny=per_invite_daily_budget_cny,
     )
 
 
@@ -91,6 +94,8 @@ def build_app(
     max_queued_tasks: int = 0,
     queue_wait_seconds: float = 90.0,
     daily_budget_cny: float | None = None,
+    per_invite_daily_budget_cny: float | None = None,
+    invite_config: str | Path | None = None,
 ):
     root = Path(runtime_dir).resolve()
     return create_app(
@@ -104,8 +109,10 @@ def build_app(
             max_queued_tasks=max_queued_tasks,
             queue_wait_seconds=queue_wait_seconds,
             daily_budget_cny=daily_budget_cny,
+            per_invite_daily_budget_cny=per_invite_daily_budget_cny,
         ),
         incoming_dir=root / "incoming",
+        invite_access=InviteAccess(invite_config) if invite_config else None,
     )
 
 
@@ -135,7 +142,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--daily-budget-cny",
         type=float,
-        help="Hard daily estimated model-cost ceiling in CNY; omit to disable",
+        help="Hard global daily estimated model-cost ceiling in CNY; omit to disable",
+    )
+    parser.add_argument(
+        "--per-invite-daily-budget-cny",
+        type=float,
+        help="Hard daily estimated model-cost ceiling for each invitation",
+    )
+    parser.add_argument(
+        "--invite-config",
+        type=Path,
+        help="Hash-only invitation configuration; omit to disable the invitation gate",
     )
     dimension_filter_group = parser.add_mutually_exclusive_group()
     dimension_filter_group.add_argument(
@@ -179,6 +196,8 @@ def main() -> int:
             max_queued_tasks=args.max_queued_tasks,
             queue_wait_seconds=args.queue_wait_seconds,
             daily_budget_cny=args.daily_budget_cny,
+            per_invite_daily_budget_cny=args.per_invite_daily_budget_cny,
+            invite_config=args.invite_config,
         ),
         host=args.host,
         port=args.port,

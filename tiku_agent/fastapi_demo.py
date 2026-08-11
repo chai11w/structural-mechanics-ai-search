@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from tiku_agent.agent import AgentResponse
+from tiku_agent.invite_access import InviteAccess, InviteIdentity
 from tiku_agent.session_runtime import (
     AgentBudgetExceededError,
     AgentRuntimeBusyError,
@@ -44,6 +45,17 @@ logger = logging.getLogger(__name__)
 _PAGE = (WEB_DIR / "index.html").read_text(encoding="utf-8")
 _STYLE = (WEB_DIR / "demo.css").read_text(encoding="utf-8")
 _SCRIPT = (WEB_DIR / "demo.js").read_text(encoding="utf-8")
+_INVITE_PAGE = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>结构力学搜题 · 邀请验证</title><style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f5f5f2;color:#252522;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+main{width:min(420px,calc(100% - 32px));padding:32px;border:1px solid #e2e2dc;border-radius:18px;background:#fff;box-shadow:0 18px 50px rgba(0,0,0,.07)}
+h1{margin:0 0 10px;font-size:22px}p{margin:0 0 24px;color:#6b6b65;line-height:1.65}.error{padding:10px 12px;border-radius:9px;background:#fff1f0;color:#b42318}
+label{display:block;margin-bottom:8px;font-size:13px;font-weight:600}input,button{width:100%;height:46px;border-radius:10px;font:inherit}input{padding:0 13px;border:1px solid #d6d6d0}input:focus{outline:2px solid #292925;outline-offset:1px}button{margin-top:14px;border:0;background:#292925;color:#fff;font-weight:650;cursor:pointer}
+small{display:block;margin-top:18px;color:#8a8a83;line-height:1.55}
+</style></head><body><main><h1>邀请码验证</h1><p>请输入内测邀请码。验证后，本浏览器 30 天内无需重复输入。</p>{error}
+<form method="post" action="/api/invite/login"><label for="invite-code">邀请码</label><input id="invite-code" name="code" type="password" autocomplete="one-time-code" required maxlength="128"><button type="submit">进入搜题</button></form>
+<small>每个邀请码拥有独立的每日使用额度，请勿转发。</small></main></body></html>"""
 
 
 def create_app(
@@ -52,6 +64,7 @@ def create_app(
     incoming_dir: str | Path = INCOMING_DIR,
     session_cookie: str = SESSION_COOKIE,
     cleanup_interval_seconds: float = 300.0,
+    invite_access: InviteAccess | None = None,
 ) -> FastAPI:
     """Create a local-only demo app without any existing Feishu configuration."""
     session_cookie = str(session_cookie).strip()
@@ -107,6 +120,25 @@ def create_app(
     async def secure_public_requests(request: Request, call_next):
         if _forwarded_proto(request) == "http":
             return RedirectResponse(str(request.url.replace(scheme="https")), status_code=308)
+        if invite_access is not None:
+            identity = invite_access.verify_cookie(
+                str(request.cookies.get(invite_access.cookie_name) or "")
+            )
+            request.state.invite_identity = identity
+            public_path = (
+                request.url.path == "/health"
+                or request.url.path == "/invite"
+                or request.url.path == "/api/invite/login"
+                or request.url.path.startswith("/assets/")
+            )
+            if identity is None and not public_path:
+                if request.url.path.startswith("/api/"):
+                    return JSONResponse(
+                        {"detail": "请先使用有效邀请码登录。"},
+                        status_code=401,
+                        headers={"Cache-Control": "no-store"},
+                    )
+                return RedirectResponse("/invite", status_code=303)
         result = await call_next(request)
         result.headers["Content-Security-Policy"] = (
             "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; "
@@ -120,6 +152,59 @@ def create_app(
             result.headers["Strict-Transport-Security"] = "max-age=31536000"
         if request.url.path.startswith("/api/"):
             result.headers.setdefault("Cache-Control", "private, no-store")
+        return result
+
+    @app.get("/invite", response_class=HTMLResponse)
+    def invite_page(request: Request) -> Response:
+        if invite_access is None:
+            return RedirectResponse("/", status_code=303)
+        identity = getattr(request.state, "invite_identity", None)
+        if isinstance(identity, InviteIdentity):
+            return RedirectResponse("/", status_code=303)
+        return HTMLResponse(
+            _INVITE_PAGE.replace("{error}", ""), headers={"Cache-Control": "no-store"}
+        )
+
+    @app.post("/api/invite/login")
+    async def invite_login(request: Request) -> Response:
+        if invite_access is None:
+            raise HTTPException(status_code=404, detail="invitation access is disabled")
+        try:
+            content_length = int(request.headers.get("content-length") or 0)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid content length") from exc
+        if content_length > 4096:
+            raise HTTPException(status_code=413, detail="invitation request is too large")
+        form = await request.form()
+        identity = invite_access.authenticate_code(str(form.get("code") or ""))
+        if identity is None:
+            error = '<p class="error">邀请码无效或已停用，请检查后重试。</p>'
+            return HTMLResponse(
+                _INVITE_PAGE.replace("{error}", error),
+                status_code=401,
+                headers={"Cache-Control": "no-store"},
+            )
+        result = RedirectResponse("/", status_code=303)
+        result.set_cookie(
+            invite_access.cookie_name,
+            invite_access.issue_cookie(identity),
+            max_age=invite_access.auth_max_age_seconds,
+            httponly=True,
+            secure=_is_secure_request(request),
+            samesite="lax",
+        )
+        return result
+
+    @app.post("/api/invite/logout")
+    def invite_logout(request: Request) -> Response:
+        result = RedirectResponse("/invite", status_code=303)
+        if invite_access is not None:
+            result.delete_cookie(
+                invite_access.cookie_name,
+                secure=_is_secure_request(request),
+                httponly=True,
+                samesite="lax",
+            )
         return result
 
     @app.get("/", response_class=HTMLResponse)
@@ -176,7 +261,7 @@ def create_app(
                 secure_cookie=_is_secure_request(request),
                 cookie_name=session_cookie,
             )
-        response = runtime.handle_text(session_id, text)
+        response = _handle_text(runtime, session_id, text, request=request)
         return _agent_json(
             response,
             runtime,
@@ -202,7 +287,9 @@ def create_app(
             stale = _validate_action_context(runtime, session_id, payload.get("action_context"))
             if stale is not None:
                 return _agent_payload(stale, runtime, session_id)
-            response = runtime.handle_text(session_id, text, progress=progress)
+            response = _handle_text(
+                runtime, session_id, text, request=request, progress=progress
+            )
             return _agent_payload(response, runtime, session_id)
 
         result = StreamingResponse(_stream_agent_events(execute), media_type="application/x-ndjson")
@@ -234,7 +321,7 @@ def create_app(
             incoming_dir=incoming_dir,
         )
         try:
-            response = runtime.handle_image(session_id, incoming)
+            response = _handle_image(runtime, session_id, incoming, request=request)
             uploaded_image = runtime.current_image_path(session_id)
         finally:
             incoming.unlink(missing_ok=True)
@@ -260,7 +347,9 @@ def create_app(
 
         def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
             try:
-                response = runtime.handle_image(session_id, incoming, progress=progress)
+                response = _handle_image(
+                    runtime, session_id, incoming, request=request, progress=progress
+                )
                 uploaded_image = runtime.current_image_path(session_id)
                 return _agent_payload(
                     response,
@@ -302,6 +391,43 @@ def create_app(
 def _session_id(request: Request, *, cookie_name: str = SESSION_COOKIE) -> str:
     value = str(request.cookies.get(cookie_name) or "").strip()
     return value or secrets.token_urlsafe(24)
+
+
+def _identity_key(request: Request) -> str:
+    identity = getattr(request.state, "invite_identity", None)
+    return identity.invite_id if isinstance(identity, InviteIdentity) else ""
+
+
+def _handle_text(
+    runtime: AgentSessionRuntime,
+    session_id: str,
+    text: str,
+    *,
+    request: Request,
+    progress: Callable[[str, str], None] | None = None,
+) -> AgentResponse:
+    identity_key = _identity_key(request)
+    if identity_key:
+        return runtime.handle_text(
+            session_id, text, identity_key=identity_key, progress=progress
+        )
+    return runtime.handle_text(session_id, text, progress=progress)
+
+
+def _handle_image(
+    runtime: AgentSessionRuntime,
+    session_id: str,
+    image_path: Path,
+    *,
+    request: Request,
+    progress: Callable[[str, str], None] | None = None,
+) -> AgentResponse:
+    identity_key = _identity_key(request)
+    if identity_key:
+        return runtime.handle_image(
+            session_id, image_path, identity_key=identity_key, progress=progress
+        )
+    return runtime.handle_image(session_id, image_path, progress=progress)
 
 
 def _forwarded_proto(request: Request) -> str:

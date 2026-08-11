@@ -96,6 +96,7 @@ class ModelCostTest(unittest.TestCase):
             collector = ModelCostCollector(
                 run_id="run",
                 session_key="hashed",
+                identity_key="invite-001",
                 task_kind="image",
                 started_at="2026-08-02T00:00:00+00:00",
             )
@@ -122,6 +123,18 @@ class ModelCostTest(unittest.TestCase):
             self.assertEqual(calls, 11)
             self.assertGreater(
                 ledger.estimated_cost_micros_since("2026-08-01T00:00:00+00:00"),
+                0,
+            )
+            self.assertGreater(
+                ledger.estimated_cost_micros_since(
+                    "2026-08-01T00:00:00+00:00", identity_key="invite-001"
+                ),
+                0,
+            )
+            self.assertEqual(
+                ledger.estimated_cost_micros_since(
+                    "2026-08-01T00:00:00+00:00", identity_key="invite-002"
+                ),
                 0,
             )
             self.assertEqual(

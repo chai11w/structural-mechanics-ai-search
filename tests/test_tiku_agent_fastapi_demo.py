@@ -12,6 +12,7 @@ from PIL import Image
 
 from tiku_agent.agent import AgentResponse
 from tiku_agent.fastapi_demo import MAX_IMAGE_BYTES, SESSION_COOKIE, _SCRIPT, _STYLE, _write_incoming_image, create_app
+from tiku_agent.invite_access import InviteAccess, build_invitation_config
 from tiku_agent.session_runtime import AgentBudgetExceededError, AgentRuntimeBusyError
 
 
@@ -21,6 +22,7 @@ class FakeRuntime:
         self.calls = []
         self.upload_session = ""
         self.media_session = ""
+        self.last_identity = ""
         self.snapshot = {
             "session_valid": False,
             "phase": "IDLE",
@@ -30,7 +32,8 @@ class FakeRuntime:
             "candidate_count": 0,
         }
 
-    def handle_text(self, session_id: str, text: str, *, progress=None) -> AgentResponse:
+    def handle_text(self, session_id: str, text: str, *, identity_key="", progress=None) -> AgentResponse:
+        self.last_identity = identity_key
         self.calls.append(("text", session_id, text))
         if progress is not None:
             progress("searching", "正在按「4力法」搜索题目…")
@@ -42,7 +45,8 @@ class FakeRuntime:
         })
         return AgentResponse(text="我明白了。", images=[str(self.image_path)], intent="select_candidate")
 
-    def handle_image(self, session_id: str, image_path: Path, *, progress=None) -> AgentResponse:
+    def handle_image(self, session_id: str, image_path: Path, *, identity_key="", progress=None) -> AgentResponse:
+        self.last_identity = identity_key
         self.calls.append(("image", session_id, image_path.is_file()))
         self.upload_session = session_id
         self.snapshot.update({
@@ -83,6 +87,44 @@ class FakeRuntime:
 
 
 class FastApiDemoTest(unittest.TestCase):
+    def test_invitation_gate_authenticates_and_passes_stable_identity(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        test_dir = runtime_dir / f"invite_gate_{uuid4().hex}"
+        test_dir.mkdir(parents=True)
+        self.addCleanup(lambda: shutil.rmtree(test_dir, ignore_errors=True))
+        image_path = test_dir / "image.jpg"
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        config, codes = build_invitation_config(2)
+        config_path = test_dir / "invites.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        runtime = FakeRuntime(image_path)
+        client = TestClient(
+            create_app(runtime=runtime, invite_access=InviteAccess(config_path))
+        )
+
+        self.assertEqual(client.get("/health").status_code, 200)
+        self.assertEqual(client.get("/api/session").status_code, 401)
+        redirect = client.get("/", follow_redirects=False)
+        self.assertEqual(redirect.status_code, 303)
+        self.assertEqual(redirect.headers["location"], "/invite")
+        self.assertEqual(
+            client.post("/api/invite/login", data={"code": "wrong"}).status_code,
+            401,
+        )
+        self.assertEqual(
+            client.post("/api/invite/login", content=b"x" * 4097).status_code,
+            413,
+        )
+
+        login = client.post(
+            "/api/invite/login", data={"code": codes[0][1]}, follow_redirects=False
+        )
+        self.assertEqual(login.status_code, 303)
+        self.assertEqual(client.get("/").status_code, 200)
+        response = client.post("/api/message", json={"text": "你好"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(runtime.last_identity, codes[0][0])
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for JavaScript syntax validation")
     def test_javascript_has_valid_syntax(self):
         result = subprocess.run(

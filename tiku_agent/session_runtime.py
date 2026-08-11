@@ -97,6 +97,7 @@ class AgentSessionRuntime:
         max_queued_tasks: int = 0,
         queue_wait_seconds: float = 90.0,
         daily_budget_cny: float | Decimal | None = None,
+        per_identity_daily_budget_cny: float | Decimal | None = None,
         budget_timezone: str = "Asia/Shanghai",
     ) -> None:
         self.store = store
@@ -112,6 +113,10 @@ class AgentSessionRuntime:
         self._session_locks = tuple(threading.Lock() for _ in range(64))
         budget = Decimal(str(daily_budget_cny or 0))
         self._daily_budget_micros = max(0, int(budget * Decimal("1000000")))
+        identity_budget = Decimal(str(per_identity_daily_budget_cny or 0))
+        self._per_identity_daily_budget_micros = max(
+            0, int(identity_budget * Decimal("1000000"))
+        )
         self._budget_timezone = ZoneInfo(budget_timezone)
 
     def handle_image(
@@ -119,6 +124,7 @@ class AgentSessionRuntime:
         session_id: str,
         image_path: str | Path,
         *,
+        identity_key: str = "",
         progress: ProgressReporter | None = None,
     ) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
@@ -130,16 +136,20 @@ class AgentSessionRuntime:
                 clean_session_id,
                 "image",
                 lambda agent: agent.handle_image(persisted_image),
+                identity_key=identity_key,
                 progress=progress,
             )
 
-        return self._admit(clean_session_id, execute, progress=progress)
+        return self._admit(
+            clean_session_id, execute, identity_key=identity_key, progress=progress
+        )
 
     def handle_text(
         self,
         session_id: str,
         text: str,
         *,
+        identity_key: str = "",
         progress: ProgressReporter | None = None,
     ) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
@@ -149,8 +159,10 @@ class AgentSessionRuntime:
                 clean_session_id,
                 "text",
                 lambda agent: agent.handle_text(text),
+                identity_key=identity_key,
                 progress=progress,
             ),
+            identity_key=identity_key,
             progress=progress,
         )
 
@@ -228,6 +240,7 @@ class AgentSessionRuntime:
         kind: str,
         handler: Callable[[TikuSearchAgent], AgentResponse],
         *,
+        identity_key: str = "",
         progress: ProgressReporter | None = None,
     ) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
@@ -240,6 +253,7 @@ class AgentSessionRuntime:
         cost_collector = ModelCostCollector(
             run_id=task_id,
             session_key=session_key(clean_session_id),
+            identity_key=str(identity_key).strip(),
             task_kind=kind,
             started_at=started_at.isoformat(),
         )
@@ -313,24 +327,35 @@ class AgentSessionRuntime:
         session_id: str,
         execute: Callable[[], AgentResponse],
         *,
+        identity_key: str = "",
         progress: ProgressReporter | None = None,
     ) -> AgentResponse:
         with self._execution_gate.enter(progress):
             lock = self._session_locks[hash(session_id) % len(self._session_locks)]
             with lock:
-                self._check_daily_budget()
+                self._check_daily_budget(identity_key)
                 return execute()
 
-    def _check_daily_budget(self) -> None:
-        if self._daily_budget_micros <= 0 or self.cost_ledger is None:
+    def _check_daily_budget(self, identity_key: str = "") -> None:
+        if self.cost_ledger is None:
             return
         now = datetime.now(self._budget_timezone)
         local_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        spent = self.cost_ledger.estimated_cost_micros_since(
-            local_start.astimezone(UTC).isoformat()
-        )
-        if spent >= self._daily_budget_micros:
+        started_at = local_start.astimezone(UTC).isoformat()
+        if self._daily_budget_micros > 0 and self.cost_ledger.estimated_cost_micros_since(
+            started_at
+        ) >= self._daily_budget_micros:
             raise AgentBudgetExceededError("今日服务额度已用完，请明天再试。")
+        clean_identity = str(identity_key).strip()
+        if self._per_identity_daily_budget_micros <= 0:
+            return
+        if not clean_identity:
+            raise AgentBudgetExceededError("当前请求缺少有效邀请码，请重新登录。")
+        spent = self.cost_ledger.estimated_cost_micros_since(
+            started_at, identity_key=clean_identity
+        )
+        if spent >= self._per_identity_daily_budget_micros:
+            raise AgentBudgetExceededError("该邀请码今日额度已用完，请明天再试。")
 
     def _write_task_log(
         self,

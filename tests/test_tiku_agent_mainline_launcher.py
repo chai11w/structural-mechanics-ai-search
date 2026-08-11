@@ -29,17 +29,23 @@ class MainlineLauncherTest(unittest.TestCase):
         self.assertEqual(defaults.max_concurrent_tasks, 0)
         self.assertEqual(defaults.max_queued_tasks, 0)
         self.assertIsNone(defaults.daily_budget_cny)
+        self.assertIsNone(defaults.per_invite_daily_budget_cny)
+        self.assertIsNone(defaults.invite_config)
 
         guarded = parser.parse_args([
             "--max-concurrent-tasks", "1",
             "--max-queued-tasks", "2",
             "--queue-wait-seconds", "55",
             "--daily-budget-cny", "5.0",
+            "--per-invite-daily-budget-cny", "3.0",
+            "--invite-config", "invites.json",
         ])
         self.assertEqual(guarded.max_concurrent_tasks, 1)
         self.assertEqual(guarded.max_queued_tasks, 2)
         self.assertEqual(guarded.queue_wait_seconds, 55)
         self.assertEqual(guarded.daily_budget_cny, 5.0)
+        self.assertEqual(guarded.per_invite_daily_budget_cny, 3.0)
+        self.assertEqual(guarded.invite_config, Path("invites.json"))
 
     def test_enabled_runtime_uses_model_only_for_safe_conversation(self):
         root = Path(__file__).resolve().parents[1] / f".tmp_test_8790_{uuid4().hex}"

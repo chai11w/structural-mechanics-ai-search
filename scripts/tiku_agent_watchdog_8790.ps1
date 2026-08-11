@@ -4,7 +4,9 @@ param(
     [int]$MaxConcurrentTasks = 1,
     [int]$MaxQueuedTasks = 2,
     [int]$QueueWaitSeconds = 55,
-    [double]$DailyBudgetCny = 0
+    [double]$DailyBudgetCny = 0,
+    [double]$PerInviteDailyBudgetCny = 0,
+    [string]$InviteConfig
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,6 +16,15 @@ if (-not $RuntimeDir) {
     $RuntimeDir = Join-Path $ProjectDir ".tmp_tiku_agent_v2_prod_8790"
 } elseif (-not [System.IO.Path]::IsPathRooted($RuntimeDir)) {
     $RuntimeDir = Join-Path $ProjectDir $RuntimeDir
+}
+if ($InviteConfig -and -not [System.IO.Path]::IsPathRooted($InviteConfig)) {
+    $InviteConfig = Join-Path $ProjectDir $InviteConfig
+}
+if ($PerInviteDailyBudgetCny -gt 0 -and -not $InviteConfig) {
+    throw "Per-invitation budget requires -InviteConfig."
+}
+if ($InviteConfig -and -not (Test-Path -LiteralPath $InviteConfig -PathType Leaf)) {
+    throw "Invitation config not found: $InviteConfig"
 }
 $LogDir = $RuntimeDir
 $StatusFile = Join-Path $LogDir "watchdog_8790.status"
@@ -70,6 +81,12 @@ function Start-Bot {
     )
     if ($DailyBudgetCny -gt 0) {
         $arguments += @("--daily-budget-cny", "$DailyBudgetCny")
+    }
+    if ($PerInviteDailyBudgetCny -gt 0) {
+        $arguments += @("--per-invite-daily-budget-cny", "$PerInviteDailyBudgetCny")
+    }
+    if ($InviteConfig) {
+        $arguments += @("--invite-config", "$InviteConfig")
     }
     $process = Start-Process python `
         -ArgumentList $arguments `

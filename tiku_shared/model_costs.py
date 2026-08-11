@@ -24,7 +24,7 @@ from uuid import uuid4
 
 
 CATALOG_PATH = Path(__file__).with_name("model_price_catalog.json")
-COST_SCHEMA_VERSION = 1
+COST_SCHEMA_VERSION = 2
 MICRO_CNY = Decimal("1000000")
 TOKENS_PER_MILLION = Decimal("1000000")
 
@@ -60,6 +60,7 @@ class ModelCallRecord:
 class ModelCostCollector:
     run_id: str
     session_key: str = ""
+    identity_key: str = ""
     search_key: str = ""
     task_kind: str = ""
     started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
@@ -297,14 +298,15 @@ class SQLiteModelCostLedger:
                 connection.execute(
                     """
                     INSERT OR REPLACE INTO model_cost_runs (
-                        run_id, session_key, search_key, task_kind, started_at, finished_at,
+                        run_id, session_key, identity_key, search_key, task_kind, started_at, finished_at,
                         outcome, call_count, total_tokens, estimated_cost_micros,
                         warning_codes_json, schema_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         collector.run_id,
                         collector.session_key,
+                        collector.identity_key,
                         collector.search_key,
                         collector.task_kind,
                         collector.started_at,
@@ -341,20 +343,24 @@ class SQLiteModelCostLedger:
                     ],
                 )
 
-    def estimated_cost_micros_since(self, started_at: str) -> int:
+    def estimated_cost_micros_since(self, started_at: str, *, identity_key: str | None = None) -> int:
         """Return the recorded estimated cost at or after an ISO-8601 timestamp."""
         if not self.path.is_file():
             return 0
         with self._lock:
             with sqlite3.connect(self.path) as connection:
                 try:
+                    _create_schema(connection)
+                    identity_clause = " AND identity_key = ?" if identity_key is not None else ""
+                    parameters = (str(started_at), str(identity_key)) if identity_key is not None else (str(started_at),)
                     row = connection.execute(
-                        """
+                        f"""
                         SELECT COALESCE(SUM(estimated_cost_micros), 0)
                         FROM model_cost_runs
                         WHERE started_at >= ?
+                        {identity_clause}
                         """,
-                        (str(started_at),),
+                        parameters,
                     ).fetchone()
                 except sqlite3.OperationalError:
                     return 0
@@ -380,6 +386,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS model_cost_runs (
             run_id TEXT PRIMARY KEY,
             session_key TEXT NOT NULL,
+            identity_key TEXT NOT NULL DEFAULT '',
             search_key TEXT NOT NULL,
             task_kind TEXT NOT NULL,
             started_at TEXT NOT NULL,
@@ -392,6 +399,17 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             schema_version INTEGER NOT NULL
         )
         """
+    )
+    columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(model_cost_runs)")
+    }
+    if "identity_key" not in columns:
+        connection.execute(
+            "ALTER TABLE model_cost_runs ADD COLUMN identity_key TEXT NOT NULL DEFAULT ''"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_model_cost_runs_started_identity "
+        "ON model_cost_runs(started_at, identity_key)"
     )
     connection.execute(
         """
