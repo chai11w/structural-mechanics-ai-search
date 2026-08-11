@@ -544,12 +544,27 @@ def global_search_tool(
             structure_type=structure_type,
             threshold=config.global_coarse_threshold,
         )
+        coarse_candidate_count = len(candidates)
+        candidates, dimension_filter = apply_dimension_prefilter(
+            candidates,
+            enabled=config.dimension_filter_enabled,
+            route=route,
+            structure_type=normalize_structure_type(structure_type),
+            query_image_path=query_image_path,
+            recognizer=(
+                _make_qwen(config)
+                if config.dimension_filter_enabled and route == "symbolic"
+                else None
+            ),
+        )
         if not candidates:
             return ToolResult.no_match(
                 code="NO_GLOBAL_COARSE_CANDIDATES",
                 data={
                     "candidates": [],
-                    "coarse_candidate_count": 0,
+                    "coarse_candidate_count": coarse_candidate_count,
+                    "rerank_candidate_count": 0,
+                    "dimension_filter": dimension_filter,
                     "model_calls": 0,
                     "retry_model_calls": 0,
                 },
@@ -586,7 +601,9 @@ def global_search_tool(
             return ToolResult.partial(
                 code="GLOBAL_RERANK_INCOMPLETE",
                 data={
-                    "coarse_candidate_count": len(candidates),
+                    "coarse_candidate_count": coarse_candidate_count,
+                    "rerank_candidate_count": len(candidates),
+                    "dimension_filter": dimension_filter,
                     "model_calls": len(candidates) + retry_model_calls,
                     "retry_model_calls": retry_model_calls,
                     "unfinished_candidates": len(unfinished),
@@ -615,7 +632,9 @@ def global_search_tool(
         visible = _renumber(visible)
         data = {
                 "candidates": visible,
-                "coarse_candidate_count": len(candidates),
+                "coarse_candidate_count": coarse_candidate_count,
+                "rerank_candidate_count": len(candidates),
+                "dimension_filter": dimension_filter,
                 "model_calls": len(candidates) + retry_model_calls,
                 "retry_model_calls": retry_model_calls,
                 "unfinished_candidates": 0,
@@ -694,6 +713,7 @@ def _collect_global_perfect_candidates(
         )
         if scan is None:
             continue
+        dimensions_by_name = getattr(scan, "dimensions_by_name", {})
         for score, name in scan.scored:
             if score < threshold:
                 continue
@@ -708,7 +728,12 @@ def _collect_global_perfect_candidates(
             existing = by_content.get(content_hash)
             if existing is not None:
                 existing["source_chapters"].add(chapter)
+                _merge_global_dimension_metadata(
+                    existing,
+                    dimensions_by_name.get(name, {}),
+                )
                 continue
+            dimension_data = dimensions_by_name.get(name, {})
             by_content[content_hash] = {
                 "path": str(path),
                 "name": resolved_name,
@@ -717,6 +742,9 @@ def _collect_global_perfect_candidates(
                 "chapter": chapter,
                 "source_chapters": {chapter},
                 "content_hash": content_hash,
+                "long_width": str(dimension_data.get("long_width") or "").strip(),
+                "single_side": str(dimension_data.get("single_side") or "").strip(),
+                "dimension_metadata_conflict": False,
             }
 
     candidates = sorted(
@@ -729,6 +757,38 @@ def _collect_global_perfect_candidates(
         candidate["chapter"] = chapters[0]
         candidate["source_chapters"] = chapters
     return candidates
+
+
+def _merge_global_dimension_metadata(
+    candidate: dict[str, Any],
+    incoming: dict[str, Any] | None,
+) -> None:
+    """Merge duplicate-image dimension metadata without creating a hard-delete risk."""
+
+    if candidate.get("dimension_metadata_conflict"):
+        return
+    incoming = incoming or {}
+    current_pair = (
+        str(candidate.get("long_width") or "").strip(),
+        str(candidate.get("single_side") or "").strip(),
+    )
+    incoming_pair = (
+        str(incoming.get("long_width") or "").strip(),
+        str(incoming.get("single_side") or "").strip(),
+    )
+    if not any(incoming_pair):
+        return
+    if not any(current_pair):
+        candidate["long_width"], candidate["single_side"] = incoming_pair
+        return
+    if current_pair == incoming_pair:
+        return
+
+    # The same image has conflicting index metadata in different chapters.
+    # Blank both values so the conservative dimension layer keeps it as unknown.
+    candidate["long_width"] = ""
+    candidate["single_side"] = ""
+    candidate["dimension_metadata_conflict"] = True
 
 
 def _file_sha256(path: str | Path) -> str:
