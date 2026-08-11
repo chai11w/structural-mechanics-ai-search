@@ -41,6 +41,8 @@ _SUPPORTED_CHAPTERS_QUESTION_PATTERNS = tuple(
     )
 )
 
+_LIMITED_SUPPORT_TOPICS = ("矩阵位移", "影响线")
+
 
 def render_grounded_safe_answer_v0(text: str | None) -> str | None:
     """Return a code-grounded fact reply for one narrowly recognized question.
@@ -61,13 +63,23 @@ def render_grounded_safe_answer_v0(text: str | None) -> str | None:
     ):
         return None
 
-    chapter_labels = []
-    for chapter in CHAPTERS:
-        match = re.fullmatch(r"(\d+)(.+)", chapter)
-        chapter_labels.append(
-            f"第{match.group(1)}章{match.group(2)}" if match else chapter
+    topics = [re.sub(r"^\d+", "", chapter) for chapter in CHAPTERS]
+    missing_limits = [
+        topic for topic in _LIMITED_SUPPORT_TOPICS if topic not in topics
+    ]
+    if missing_limits:
+        raise ValueError(
+            "limited support topic is absent from CHAPTERS: "
+            + "、".join(missing_limits)
         )
-    reply = "结构力学题库支持以下章节：" + "、".join(chapter_labels) + "。"
+    full_support = [topic for topic in topics if topic not in _LIMITED_SUPPORT_TOPICS]
+    reply = (
+        "结构力学题库支持"
+        + "、".join(full_support)
+        + "；"
+        + "和".join(_LIMITED_SUPPORT_TOPICS)
+        + "仅支持含具体外荷载的题目。"
+    )
     validation = validate_safe_answer_output_v0(reply, "capability")
     if not validation.accepted:
         raise ValueError(

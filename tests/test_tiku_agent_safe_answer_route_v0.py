@@ -154,9 +154,10 @@ class SafeAnswerRouteV0Test(unittest.TestCase):
                 self.assertEqual(response.intent, "safe_answer")
 
     def test_supported_chapter_fact_is_exact_zero_model_zero_tool_and_state_preserving(self):
-        expected = "结构力学题库支持以下章节：" + "、".join(
-            f"第{chapter[0]}章{chapter[1:]}" for chapter in CHAPTERS
-        ) + "。"
+        expected = (
+            "结构力学题库支持静定结构、静定结构位移、力法、位移法、力矩分配；"
+            "矩阵位移和影响线仅支持含具体外荷载的题目。"
+        )
         questions = (
             "你可以回答哪些章节的问题",
             "你支持哪些章节？",
@@ -189,6 +190,9 @@ class SafeAnswerRouteV0Test(unittest.TestCase):
                 response = agent.handle_text(text)
 
                 self.assertEqual(response.text, expected)
+                for chapter in CHAPTERS:
+                    self.assertIn(chapter.lstrip("0123456789"), response.text)
+                self.assertNotRegex(response.text, r"第[2-8]章")
                 self.assertEqual(response.intent, "safe_answer")
                 self.assertEqual(response.reply_source, "grounded_fact")
                 self.assertLessEqual(len(response.text), MAX_SAFE_ANSWER_CHARS)
