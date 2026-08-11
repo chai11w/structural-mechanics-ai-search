@@ -26,6 +26,7 @@ const feedbackSubtitle = $('#feedback-subtitle');
 const feedbackTags = $('#feedback-tags');
 const feedbackDetail = $('#feedback-detail');
 const feedbackError = $('#feedback-error');
+const feedbackCancel = $('#feedback-cancel');
 const feedbackSubmit = $('#feedback-submit');
 
 const TEXT_TIMEOUT_MS = 60000;
@@ -57,6 +58,7 @@ let focusBeforeModal = null;
 let operationVersion = 0;
 let pendingUpload = null;
 let activeFeedback = null;
+let feedbackRequestPending = false;
 let sessionContext = {
   session_valid: false, phase: 'IDLE', has_active_image: false,
   task_revision: 0, candidate_generation: '', candidate_count: 0,
@@ -172,14 +174,25 @@ function syncFeedbackButtons(article, rating) {
 }
 
 function closeFeedback() {
-  if (feedbackBackdrop.hidden) return;
+  if (feedbackBackdrop.hidden || feedbackRequestPending) return;
   feedbackBackdrop.hidden = true;
   activeFeedback = null;
   feedbackTags.replaceChildren();
   feedbackDetail.value = '';
   feedbackError.hidden = true;
+  feedbackCancel.hidden = true;
+  feedbackCancel.disabled = false;
+  feedbackCancel.textContent = '取消反馈';
+  feedbackSubmit.disabled = false;
   delete document.body.dataset.modal;
   focusBeforeModal?.focus();
+}
+
+function setFeedbackPending(pending) {
+  feedbackRequestPending = pending;
+  feedbackClose.disabled = pending;
+  feedbackCancel.disabled = pending;
+  feedbackSubmit.disabled = pending;
 }
 
 function renderFeedbackTags() {
@@ -211,6 +224,9 @@ function openFeedback(item, article, rating) {
     : '告诉我们这条回复哪里需要改进';
   feedbackDetail.value = prior?.detail || '';
   feedbackError.hidden = true;
+  feedbackCancel.hidden = !prior;
+  feedbackCancel.disabled = false;
+  feedbackCancel.textContent = '取消反馈';
   feedbackSubmit.disabled = false;
   feedbackSubmit.textContent = prior ? '更新反馈' : '提交';
   renderFeedbackTags();
@@ -250,15 +266,16 @@ function createMessageActions(item, article) {
 }
 
 async function submitFeedback() {
-  if (!activeFeedback || feedbackSubmit.disabled) return;
-  feedbackSubmit.disabled = true;
+  if (!activeFeedback || feedbackRequestPending) return;
+  const context = activeFeedback;
+  setFeedbackPending(true);
   feedbackSubmit.textContent = '正在提交…';
   feedbackError.hidden = true;
   try {
     const payload = {
-      message_id: activeFeedback.item.messageId,
-      rating: activeFeedback.rating,
-      tags: Array.from(activeFeedback.tags),
+      message_id: context.item.messageId,
+      rating: context.rating,
+      tags: Array.from(context.tags),
       detail: feedbackDetail.value.trim(),
     };
     await request('/api/feedback', {
@@ -267,17 +284,43 @@ async function submitFeedback() {
       body: JSON.stringify(payload),
     }, 8000, '反馈提交超时，请稍后重试。', false, '暂时无法提交反馈，请检查网络。');
     const feedback = { rating: payload.rating, tags: payload.tags, detail: payload.detail };
-    activeFeedback.item.feedback = feedback;
-    updateFeedbackHistory(activeFeedback.item.messageId, feedback);
-    syncFeedbackButtons(activeFeedback.article, payload.rating);
+    context.item.feedback = feedback;
+    updateFeedbackHistory(context.item.messageId, feedback);
+    syncFeedbackButtons(context.article, payload.rating);
+    setFeedbackPending(false);
     closeFeedback();
     setStatus('ready', '感谢你的反馈');
     setTimeout(() => { if (!isBusy) setStatus('ready', '准备就绪'); }, 2200);
   } catch (error) {
     feedbackError.textContent = error.message || '反馈提交失败，请稍后重试。';
     feedbackError.hidden = false;
-    feedbackSubmit.disabled = false;
+    setFeedbackPending(false);
     feedbackSubmit.textContent = '重新提交';
+  }
+}
+
+async function cancelFeedback() {
+  if (!activeFeedback || feedbackRequestPending || feedbackCancel.hidden) return;
+  const context = activeFeedback;
+  setFeedbackPending(true);
+  feedbackCancel.textContent = '正在取消…';
+  feedbackError.hidden = true;
+  try {
+    await request(`/api/feedback/${encodeURIComponent(context.item.messageId)}`, {
+      method: 'DELETE',
+    }, 8000, '取消反馈超时，请稍后重试。', false, '暂时无法取消反馈，请检查网络。');
+    context.item.feedback = null;
+    updateFeedbackHistory(context.item.messageId, null);
+    syncFeedbackButtons(context.article, '');
+    setFeedbackPending(false);
+    closeFeedback();
+    setStatus('ready', '反馈已取消');
+    setTimeout(() => { if (!isBusy) setStatus('ready', '准备就绪'); }, 2200);
+  } catch (error) {
+    feedbackError.textContent = error.message || '取消反馈失败，请稍后重试。';
+    feedbackError.hidden = false;
+    setFeedbackPending(false);
+    feedbackCancel.textContent = '重新取消';
   }
 }
 
@@ -900,6 +943,7 @@ lightboxClose.addEventListener('click', closeLightbox);
 lightbox.addEventListener('click', (event) => { if (event.target === lightbox) closeLightbox(); });
 feedbackClose.addEventListener('click', closeFeedback);
 feedbackBackdrop.addEventListener('click', (event) => { if (event.target === feedbackBackdrop) closeFeedback(); });
+feedbackCancel.addEventListener('click', cancelFeedback);
 feedbackSubmit.addEventListener('click', submitFeedback);
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;

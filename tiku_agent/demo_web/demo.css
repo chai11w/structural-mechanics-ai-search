@@ -59,8 +59,11 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .message-action:hover { background: #f1f1ee; }
 .message-action:active { transform: scale(.94); }
 .message-action img { width: 19px; height: 19px; opacity: .9; }
-.message-action.is-selected { background: #ecece8; }
-.message-action.is-selected img { opacity: 1; filter: brightness(.35); }
+.message-action.is-selected { box-shadow: inset 0 0 0 1px currentColor; }
+.message-action.is-selected[data-rating="positive"] { color: #157347; background: #e8f5ee; }
+.message-action.is-selected[data-rating="negative"] { color: #b42318; background: #fff0ee; }
+.message-action.is-selected[data-rating="positive"] img { opacity: 1; filter: invert(37%) sepia(39%) saturate(1082%) hue-rotate(103deg) brightness(88%) contrast(88%); }
+.message-action.is-selected[data-rating="negative"] img { opacity: 1; filter: invert(22%) sepia(74%) saturate(2359%) hue-rotate(351deg) brightness(87%) contrast(88%); }
 .message-time { margin-left: 7px; color: #969690; font-size: 12px; font-variant-numeric: tabular-nums; }
 .retry-upload { align-self: flex-start; min-height: 34px; margin-top: 10px; padding: 0 13px; border: 1px solid #b91c1c; border-radius: 9px; color: #991b1b; background: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
 .retry-upload:hover { background: #fff7f7; }
@@ -162,7 +165,11 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .feedback-detail::placeholder { color: #a0a09a; }
 .feedback-privacy { margin: 10px 0 18px; color: #999992; font-size: 11px; line-height: 1.5; }
 .feedback-error { margin: -7px 0 12px; color: #a61b1b; font-size: 12px; }
-.feedback-submit { width: 100%; height: 46px; border: 0; border-radius: 12px; color: #fff; background: #30302d; font-size: 14px; font-weight: 650; cursor: pointer; }
+.feedback-actions { display: flex; gap: 10px; }
+.feedback-cancel { min-width: 120px; height: 46px; padding: 0 17px; border: 1px solid #d7a6a1; border-radius: 12px; color: #a12820; background: #fff; font-size: 14px; font-weight: 620; cursor: pointer; }
+.feedback-cancel:hover { border-color: #c2746d; background: #fff7f6; }
+.feedback-cancel:disabled { color: #aaa5a2; border-color: #dedbd8; background: #f5f4f2; cursor: wait; }
+.feedback-submit { flex: 1; height: 46px; border: 0; border-radius: 12px; color: #fff; background: #30302d; font-size: 14px; font-weight: 650; cursor: pointer; }
 .feedback-submit:hover { background: #41413d; }
 .feedback-submit:disabled { color: #f1f1ef; background: #acaca8; cursor: wait; }
 

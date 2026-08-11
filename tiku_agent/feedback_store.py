@@ -143,6 +143,27 @@ class SQLiteFeedbackStore:
             for row in rows
         ]
 
+    def delete(
+        self,
+        *,
+        message_id: str,
+        identity_key: str,
+        session_key: str,
+    ) -> bool:
+        if not self.path.is_file():
+            return False
+        with self._lock:
+            with sqlite3.connect(self.path) as connection:
+                _create_schema(connection)
+                cursor = connection.execute(
+                    """
+                    DELETE FROM message_feedback
+                    WHERE identity_key = ? AND session_key = ? AND message_id = ?
+                    """,
+                    (identity_key, session_key, message_id),
+                )
+                return cursor.rowcount > 0
+
 
 def _create_schema(connection: sqlite3.Connection) -> None:
     connection.execute(

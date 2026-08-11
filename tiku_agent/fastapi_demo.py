@@ -284,6 +284,21 @@ def create_app(
             },
         })
 
+    @app.delete("/api/feedback/{message_id}")
+    def delete_feedback(message_id: str, request: Request) -> JSONResponse:
+        message_id = str(message_id or "").strip()
+        if not FEEDBACK_MESSAGE_ID_RE.fullmatch(message_id):
+            raise HTTPException(status_code=400, detail="invalid message id")
+        session_id = str(request.cookies.get(session_cookie) or "").strip()
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session is required")
+        removed = feedback_store.delete(
+            message_id=message_id,
+            identity_key=_identity_key(request) or "local",
+            session_key=session_key(session_id),
+        )
+        return JSONResponse({"ok": True, "message_id": message_id, "removed": removed})
+
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
         session_id = _session_id(request, cookie_name=session_cookie)

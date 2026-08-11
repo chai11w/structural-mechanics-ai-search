@@ -11,7 +11,9 @@
 - Focused reply actions: `F:\cc\7-题库检索\.tmp_feedback_preview\implementation-actions-focused.png`
 - Desktop feedback dialog: `F:\cc\7-题库检索\.tmp_feedback_preview\implementation-modal.png`
 - Mobile feedback sheet: `F:\cc\7-题库检索\.tmp_feedback_preview\implementation-mobile.png`
-- Local route: `http://127.0.0.1:8796/`
+- Desktop cancellation state: `F:\cc\7-题库检索\.tmp_feedback_cancel_preview\desktop-cancel-feedback.png`
+- Mobile cancellation state: `F:\cc\7-题库检索\.tmp_feedback_cancel_preview\mobile-cancel-feedback.png`
+- Current local route: `http://127.0.0.1:8797/`
 
 **Viewport and normalization**
 
@@ -26,16 +28,17 @@
 - Desktop dialog shown for positive feedback with no tags selected.
 - Mobile bottom sheet shown for negative feedback with `正确题没排前面` selected and detail text entered.
 - Persisted negative selection shown after reload.
+- Existing feedback shown with both `取消反馈` and `更新反馈`; positive/negative selections use distinct green/red states.
 
 **Findings**
 
 - No actionable P0, P1, or P2 differences remain.
 - Typography: the UI uses the existing product font stack and hierarchy. The action time is deliberately smaller than the source because the host chat is denser; labels, helper text, and button weights remain legible.
 - Spacing and layout: thumbs and time follow the source order and quiet spacing. Copy and fork were intentionally omitted per the product requirement. The dialog is compact on desktop and becomes a bottom sheet on mobile so controls remain reachable without overflow.
-- Colors and tokens: neutral gray actions, white dialog, subdued borders, dark selected pills, and dark submit action are consistent with both the Codex reference and the existing product palette.
+- Colors and tokens: unselected actions remain neutral gray; selected thumbs use restrained green/red semantic states so saved feedback is unmistakable. The white dialog, subdued borders, dark selected pills, and dark submit action remain consistent with the existing product palette.
 - Asset fidelity: thumbs and close icons use the official MIT-licensed Tabler Icons SVG assets; no emoji, text glyphs, or CSS-drawn substitutes are used.
 - Copy and content: positive and negative reason sets are tailored to structure-mechanics search quality. Optional detail, privacy copy, submit/update labels, and error states are present.
-- Interaction and accessibility: both thumbs open the correct form, multiple tags can be selected, feedback can be updated, Escape/backdrop/close dismiss the dialog, selected state uses `aria-pressed`, and controls have accessible names and keyboard focus styles.
+- Interaction and accessibility: both thumbs open the correct form, multiple tags can be selected, feedback can be updated or explicitly cancelled, Escape/backdrop/close dismiss the dialog, selected state uses `aria-pressed`, and controls have accessible names and keyboard focus styles.
 
 **Full-view comparison evidence**
 
@@ -53,6 +56,7 @@
 - Reload and verify the selected thumb persists from local history.
 - Open and dismiss the responsive mobile sheet.
 - Verify the feedback record is upserted rather than duplicated.
+- Cancel existing feedback on desktop and mobile; verify both the visible selection and the matching SQLite record are cleared.
 
 **Console check**
 
@@ -61,12 +65,14 @@
 **Comparison history**
 
 - Pass 1: no P0/P1/P2 visual issue found. Before final capture, the provisional locally drawn icons were replaced with official Tabler assets to meet asset-fidelity requirements; final desktop and focused screenshots show the sourced icons.
+- Pass 2: user testing showed the neutral selected state was too subtle and cancellation was undiscoverable. Selected thumbs now use semantic color, and edit mode exposes a dedicated cancellation action; desktop/mobile recapture found no overflow or control collision.
 
 **Implementation checklist**
 
 - [x] Only thumbs up, thumbs down, and time appear below assistant replies.
 - [x] Positive and negative feedback reasons are context appropriate.
 - [x] Optional detail and update flow work.
+- [x] Existing feedback can be cancelled and returns to an unselected state.
 - [x] Desktop and mobile states fit without clipped persistent controls.
 - [x] Feedback persists privately in local SQLite storage.
 

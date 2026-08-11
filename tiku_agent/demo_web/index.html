@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
   <title>力答 · 结构力学搜题</title>
-  <link rel="stylesheet" href="/assets/demo.css?v=20260811-message-feedback">
+  <link rel="stylesheet" href="/assets/demo.css?v=20260811-feedback-cancel">
 </head>
 <body>
   <div class="app-shell">
@@ -84,9 +84,12 @@
       <textarea class="feedback-detail" id="feedback-detail" maxlength="300" rows="5" placeholder="可以说说哪里有帮助，或者哪里需要改进…"></textarea>
       <p class="feedback-privacy">反馈只关联本次回复，不会保存题图或邀请码明文。</p>
       <p class="feedback-error" id="feedback-error" role="alert" hidden></p>
-      <button class="feedback-submit" id="feedback-submit" type="button">提交</button>
+      <div class="feedback-actions">
+        <button class="feedback-cancel" id="feedback-cancel" type="button" hidden>取消反馈</button>
+        <button class="feedback-submit" id="feedback-submit" type="button">提交</button>
+      </div>
     </section>
   </div>
-  <script src="/assets/demo.js?v=20260811-message-feedback" defer></script>
+  <script src="/assets/demo.js?v=20260811-feedback-cancel" defer></script>
 </body>
 </html>

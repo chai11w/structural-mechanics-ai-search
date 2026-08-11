@@ -123,6 +123,20 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(len(saved), 1)
         self.assertEqual(saved[0].rating, "negative")
         self.assertEqual(saved[0].tags, ("ranking_issue",))
+
+        outsider = TestClient(create_app(runtime=FakeRuntime(image_path), feedback_store=store))
+        outsider.get("/")
+        not_removed = outsider.delete("/api/feedback/message_12345678")
+        self.assertEqual(not_removed.status_code, 200)
+        self.assertFalse(not_removed.json()["removed"])
+        self.assertEqual(len(store.list_feedback()), 1)
+
+        removed = client.delete("/api/feedback/message_12345678")
+        self.assertEqual(removed.status_code, 200)
+        self.assertTrue(removed.json()["removed"])
+        self.assertEqual(store.list_feedback(), [])
+        self.assertFalse(client.delete("/api/feedback/message_12345678").json()["removed"])
+        self.assertEqual(client.delete("/api/feedback/bad").status_code, 400)
         self.assertEqual(
             client.post("/api/feedback", json={
                 "message_id": "message_abcdefgh",
@@ -216,13 +230,14 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260811-message-feedback"', 'src="/assets/demo.js?v=20260811-message-feedback"',
+            'href="/assets/demo.css?v=20260811-feedback-cancel"', 'src="/assets/demo.js?v=20260811-feedback-cancel"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
             'id="drop-overlay"', 'type="submit" aria-label="发送消息" disabled', '松开即可上传题图',
             '题图会用于云端模型识别', '请勿上传个人敏感信息',
             'id="feedback-backdrop"', 'id="feedback-tags"', 'id="feedback-detail"',
+            'id="feedback-cancel"', '取消反馈',
         ):
             self.assertIn(expected, page.text)
         for expected in (
@@ -246,6 +261,7 @@ class FastApiDemoTest(unittest.TestCase):
             "function syncVisualViewport()", "window.visualViewport?.addEventListener('resize', syncVisualViewport",
             "window.visualViewport?.addEventListener('scroll', syncVisualViewport", "syncVisualViewport();",
             "function createMessageActions", "function openFeedback", "request('/api/feedback'",
+            "function cancelFeedback", "method: 'DELETE'", "syncFeedbackButtons(context.article, '')",
             "['found_answer', '找到了正确答案']", "['not_found', '没找到正确题']",
         ):
             self.assertIn(expected, _SCRIPT)
