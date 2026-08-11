@@ -231,6 +231,108 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertEqual(result.data["candidates"][1]["rerank_score"], 0.95)
         self.assertEqual(result.data["candidates"][1]["final_score"], 0.975)
 
+    def test_global_symbolic_search_applies_dimension_filter_before_visual_rerank(self):
+        loads = [{"type": "集中", "raw": "P"}]
+        query = Path("query.jpg")
+        recognizer = Mock()
+        recognizer.recognize_dimensions.return_value = {
+            "normalized": {
+                "dimensions_verified": True,
+                "dimension_state": "full",
+                "long": "3L",
+                "width": "L",
+                "long_width": "3L×L",
+            },
+            "from_cache": False,
+        }
+
+        def complete_score(_query, candidate, **_kwargs):
+            item = dict(candidate)
+            item.update({"rerank_status": "completed", "rerank_score": 1.0, "final_score": 1.0})
+            return item
+
+        config = AgentToolConfig(
+            dimension_filter_enabled=True,
+            global_final_score_threshold=0.95,
+        )
+        with patch("tiku_agent.tools.CHAPTERS", ["4力法"]), patch(
+            "tiku_agent.tools.search.scan_chapter_candidates",
+            return_value=self._dimension_scan(21),
+        ), patch(
+            "tiku_agent.tools.search.resolve_question_path",
+            side_effect=lambda name, **_kwargs: (Path(name), name, False),
+        ), patch("tiku_agent.tools.Path.is_file", return_value=True), patch(
+            "tiku_agent.tools._file_sha256",
+            side_effect=lambda path: Path(path).name,
+        ), patch("tiku_agent.tools._make_qwen", return_value=recognizer), patch(
+            "tiku_agent.tools.search.score_rerank_candidate",
+            side_effect=complete_score,
+        ) as scorer:
+            result = global_search_tool(
+                loads,
+                query,
+                route="symbolic",
+                structure_type="钢架",
+                config=config,
+            )
+
+        self.assertTrue(result.ok, result.to_dict())
+        recognizer.recognize_dimensions.assert_called_once_with(query, "钢架")
+        self.assertEqual(result.data["coarse_candidate_count"], 21)
+        self.assertEqual(result.data["rerank_candidate_count"], 20)
+        self.assertEqual(result.data["model_calls"], 20)
+        self.assertEqual(scorer.call_count, 20)
+        self.assertTrue(result.data["dimension_filter"]["applied"])
+        self.assertEqual(result.data["dimension_filter"]["mismatches"], 1)
+        self.assertNotIn("q21.jpg", [item["name"] for item in result.data["candidates"]])
+
+    def test_global_duplicate_dimension_conflict_is_kept_as_unknown(self):
+        loads = [{"type": "集中", "raw": "P"}]
+        scans = {
+            "2静定结构": SimpleNamespace(
+                scored=[(1.0, "same-a.jpg")],
+                structure_filter_applied=True,
+                dimensions_by_name={"same-a.jpg": {"long_width": "3L×L", "single_side": ""}},
+            ),
+            "4力法": SimpleNamespace(
+                scored=[(1.0, "same-b.jpg")],
+                structure_filter_applied=True,
+                dimensions_by_name={"same-b.jpg": {"long_width": "4L×L", "single_side": ""}},
+            ),
+        }
+        with patch("tiku_agent.tools.CHAPTERS", list(scans)), patch(
+            "tiku_agent.tools.search.scan_chapter_candidates",
+            side_effect=lambda _loads, chapter, *_args, **_kwargs: scans[chapter],
+        ), patch(
+            "tiku_agent.tools.search.resolve_question_path",
+            side_effect=lambda name, **_kwargs: (Path(name), name, False),
+        ), patch("tiku_agent.tools.Path.is_file", return_value=True), patch(
+            "tiku_agent.tools._file_sha256", return_value="same"
+        ), patch(
+            "tiku_agent.tools.search.score_rerank_candidate",
+            side_effect=lambda _query, candidate, **_kwargs: {
+                **candidate,
+                "rerank_status": "completed",
+                "rerank_score": 1.0,
+                "final_score": 1.0,
+            },
+        ):
+            result = global_search_tool(
+                loads,
+                Path("query.jpg"),
+                route="symbolic",
+                structure_type="钢架",
+                config=AgentToolConfig(dimension_filter_enabled=True),
+            )
+
+        self.assertTrue(result.ok, result.to_dict())
+        self.assertEqual(result.data["rerank_candidate_count"], 1)
+        candidate = result.data["candidates"][0]
+        self.assertTrue(candidate["dimension_metadata_conflict"])
+        self.assertEqual(candidate["long_width"], "")
+        self.assertEqual(candidate["single_side"], "")
+        self.assertFalse(result.data["dimension_filter"]["triggered"])
+
     def test_global_search_accepts_final_score_equal_to_ninety_five_on_both_routes(self):
         loads = [{"type": "集中", "raw": "P"}]
         query = Path("query.jpg")
