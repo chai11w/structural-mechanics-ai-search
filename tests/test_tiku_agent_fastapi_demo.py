@@ -277,7 +277,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260811-feedback-cases"', 'src="/assets/demo.js?v=20260811-feedback-cases"',
+            'href="/assets/demo.css?v=20260811-feedback-cases"', 'src="/assets/demo.js?v=20260811-history-expiry"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -296,7 +296,11 @@ class FastApiDemoTest(unittest.TestCase):
             "['WAIT_CANDIDATE_CHOICE', 'ANSWERED'].includes(sessionContext.phase)",
             "event.key === 'Enter'", "!event.shiftKey", "!event.isComposing", "event.keyCode !== 229",
             "HISTORY_TTL_MS = 2 * 60 * 60 * 1000", "HISTORY_LIMIT = 50", "repairUploadedImageHistory()",
-            "data.uploaded_image", "Number.isFinite(savedAt)", "无法连接本地服务",
+            "lastActivityAt: historyLastActivityAt", "saveHistory({ refreshActivity: true })",
+            "function scheduleHistoryExpiry()", "function expireHistoryIfNeeded()",
+            "if (!data.session?.session_valid)", "window.addEventListener('focus', expireHistoryIfNeeded)",
+            "document.addEventListener('visibilitychange'",
+            "data.uploaded_image", "Number.isFinite(activityAt)", "无法连接本地服务",
             "canvas.toBlob(resolve, 'image/jpeg', 0.92)", "formData.append('file', prepared.blob, prepared.filename)",
             "const filename = `cropped_${Date.now()}.jpg`", "function retryUpload", "pendingUpload = prepared",
             "const uploadRow = addLocalUploadPreview(sourcePreview)", "setUploadRowStatus(uploadRow, '我发了一张题图。')",
@@ -317,6 +321,9 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertNotIn("题图处理中", _SCRIPT)
         self.assertNotIn("题图正在上传", _SCRIPT)
         self.assertNotIn("正在上传并识别题干", _SCRIPT)
+        restore_body = _SCRIPT[_SCRIPT.index("function restoreHistory()"):_SCRIPT.index("async function repairUploadedImageHistory()")]
+        self.assertIn("historyLastActivityAt = activityAt", restore_body)
+        self.assertNotIn("refreshActivity: true", restore_body)
         self.assertLess(
             _SCRIPT.index("const uploadRow = addLocalUploadPreview(sourcePreview)"),
             _SCRIPT.index("await normalizeImage(selected, sourcePreview)"),

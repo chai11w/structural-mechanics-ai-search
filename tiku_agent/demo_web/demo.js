@@ -59,6 +59,8 @@ let operationVersion = 0;
 let pendingUpload = null;
 let activeFeedback = null;
 let feedbackRequestPending = false;
+let historyLastActivityAt = 0;
+let historyExpiryTimer = null;
 let sessionContext = {
   session_valid: false, phase: 'IDLE', has_active_image: false,
   task_revision: 0, candidate_generation: '', candidate_count: 0,
@@ -78,12 +80,35 @@ function isPersistentImage(url) {
   return typeof url === 'string' && (url.startsWith('/api/media/') || url.startsWith('/api/upload/'));
 }
 
-function saveHistory() {
+function scheduleHistoryExpiry() {
+  if (historyExpiryTimer !== null) clearTimeout(historyExpiryTimer);
+  historyExpiryTimer = null;
+  if (!history.length || !Number.isFinite(historyLastActivityAt) || historyLastActivityAt <= 0) return;
+  const remaining = historyLastActivityAt + HISTORY_TTL_MS - Date.now();
+  if (remaining <= 0) {
+    expireHistoryIfNeeded();
+    return;
+  }
+  historyExpiryTimer = setTimeout(() => {
+    historyExpiryTimer = null;
+    expireHistoryIfNeeded();
+  }, remaining);
+}
+
+function saveHistory({ refreshActivity = false } = {}) {
+  if (refreshActivity || !Number.isFinite(historyLastActivityAt) || historyLastActivityAt <= 0) {
+    historyLastActivityAt = Date.now();
+  }
   try {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify({ savedAt: Date.now(), messages: history.slice(-HISTORY_LIMIT) }));
+    localStorage.setItem(HISTORY_KEY, JSON.stringify({
+      savedAt: historyLastActivityAt,
+      lastActivityAt: historyLastActivityAt,
+      messages: history.slice(-HISTORY_LIMIT),
+    }));
   } catch (_error) {
     // The demo remains usable when browser storage is unavailable.
   }
+  scheduleHistoryExpiry();
 }
 
 function releaseObjectUrl(url) {
@@ -117,7 +142,7 @@ function remember(item) {
     feedback: item.feedback || null,
   });
   history = history.slice(-HISTORY_LIMIT);
-  saveHistory();
+  saveHistory({ refreshActivity: true });
 }
 
 function scrollToLatest() {
@@ -462,18 +487,19 @@ function restoreHistory() {
   try {
     const raw = localStorage.getItem(HISTORY_KEY) || localStorage.getItem(LEGACY_HISTORY_KEY);
     const stored = JSON.parse(raw || 'null');
-    const savedAt = Number(stored?.savedAt);
+    const activityAt = Number(stored?.lastActivityAt ?? stored?.savedAt);
     const now = Date.now();
-    if (!stored || !Array.isArray(stored.messages) || !Number.isFinite(savedAt) || savedAt > now + 60000 || now - savedAt > HISTORY_TTL_MS) {
+    if (!stored || !Array.isArray(stored.messages) || !Number.isFinite(activityAt) || activityAt > now + 60000 || now - activityAt >= HISTORY_TTL_MS) {
       clearHistory();
       return;
     }
+    historyLastActivityAt = activityAt;
     history = stored.messages.slice(-HISTORY_LIMIT).map((item) => {
       if (item.me || item.variant) return item;
       return {
         ...item,
         messageId: item.messageId || createMessageId(),
-        createdAt: Number(item.createdAt || savedAt),
+        createdAt: Number(item.createdAt || activityAt),
       };
     });
     localStorage.removeItem(LEGACY_HISTORY_KEY);
@@ -489,6 +515,13 @@ async function repairUploadedImageHistory() {
     const data = await request('/api/session', {}, 5000, '会话恢复超时。', false);
     updateSessionContext(data);
     renderHistory();
+    if (!data.session?.session_valid) {
+      if (history.length) {
+        clearHistory();
+        renderHistory();
+      }
+      return;
+    }
     if (!isPersistentImage(data.uploaded_image)) return;
     for (let index = history.length - 1; index >= 0; index -= 1) {
       const item = history[index];
@@ -500,16 +533,36 @@ async function repairUploadedImageHistory() {
       }
     }
   } catch (_error) {
-    // An expired server session should not make the restored text unusable.
+    // A temporary network failure should not discard unexpired local history.
   }
 }
 
 function clearHistory() {
   history = [];
+  historyLastActivityAt = 0;
+  if (historyExpiryTimer !== null) clearTimeout(historyExpiryTimer);
+  historyExpiryTimer = null;
   clearPendingUpload();
   releaseAllObjectUrls();
   localStorage.removeItem(HISTORY_KEY);
   localStorage.removeItem(LEGACY_HISTORY_KEY);
+}
+
+function expireHistoryIfNeeded() {
+  if (!history.length || !Number.isFinite(historyLastActivityAt) || historyLastActivityAt <= 0) return false;
+  if (Date.now() - historyLastActivityAt < HISTORY_TTL_MS) {
+    scheduleHistoryExpiry();
+    return false;
+  }
+  clearHistory();
+  renderHistory();
+  sessionContext = {
+    session_valid: false, phase: 'IDLE', has_active_image: false,
+    task_revision: 0, candidate_generation: '', candidate_count: 0,
+  };
+  closeLightbox();
+  setStatus('ready', '临时会话已清理');
+  return true;
 }
 
 function replacePending(row, item) {
@@ -1002,12 +1055,14 @@ document.addEventListener('drop', (event) => {
 });
 window.addEventListener('blur', hideDropOverlay);
 window.addEventListener('pagehide', releaseAllObjectUrls);
+window.addEventListener('focus', expireHistoryIfNeeded);
 window.addEventListener('offline', () => setStatus('error', '当前网络已断开'));
 window.addEventListener('online', checkHealth);
 window.addEventListener('resize', syncVisualViewport, { passive: true });
 window.addEventListener('orientationchange', syncVisualViewport, { passive: true });
 window.visualViewport?.addEventListener('resize', syncVisualViewport, { passive: true });
 window.visualViewport?.addEventListener('scroll', syncVisualViewport, { passive: true });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) expireHistoryIfNeeded(); });
 
 syncVisualViewport();
 restoreHistory();
