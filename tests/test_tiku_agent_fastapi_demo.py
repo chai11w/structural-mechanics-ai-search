@@ -12,6 +12,7 @@ from PIL import Image
 
 from tiku_agent.agent import AgentResponse
 from tiku_agent.fastapi_demo import MAX_IMAGE_BYTES, SESSION_COOKIE, _SCRIPT, _STYLE, _write_incoming_image, create_app
+from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.invite_access import InviteAccess, build_invitation_config
 from tiku_agent.session_runtime import AgentBudgetExceededError, AgentRuntimeBusyError
 
@@ -87,6 +88,55 @@ class FakeRuntime:
 
 
 class FastApiDemoTest(unittest.TestCase):
+    def test_message_feedback_is_private_bounded_and_upserted(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        test_dir = runtime_dir / f"feedback_{uuid4().hex}"
+        test_dir.mkdir(parents=True)
+        self.addCleanup(lambda: shutil.rmtree(test_dir, ignore_errors=True))
+        image_path = test_dir / "image.jpg"
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        store = SQLiteFeedbackStore(test_dir / "feedback.sqlite3")
+        client = TestClient(create_app(runtime=FakeRuntime(image_path), feedback_store=store))
+        client.get("/")
+
+        first = client.post("/api/feedback", json={
+            "message_id": "message_12345678",
+            "rating": "positive",
+            "tags": ["found_answer", "fast"],
+            "detail": "很快找到了",
+        })
+        self.assertEqual(first.status_code, 200)
+        saved = store.list_feedback()
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0].identity_key, "local")
+        self.assertEqual(saved[0].rating, "positive")
+        self.assertNotEqual(saved[0].session_key, client.cookies.get(SESSION_COOKIE))
+
+        updated = client.post("/api/feedback", json={
+            "message_id": "message_12345678",
+            "rating": "negative",
+            "tags": ["ranking_issue"],
+            "detail": "正确题在后面",
+        })
+        self.assertEqual(updated.status_code, 200)
+        saved = store.list_feedback()
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0].rating, "negative")
+        self.assertEqual(saved[0].tags, ("ranking_issue",))
+        self.assertEqual(
+            client.post("/api/feedback", json={
+                "message_id": "message_abcdefgh",
+                "rating": "positive",
+                "tags": ["wrong_answer"],
+                "detail": "",
+            }).status_code,
+            400,
+        )
+        self.assertEqual(
+            client.post("/api/feedback", content=b"x" * 4097).status_code,
+            413,
+        )
+
     def test_invitation_gate_authenticates_and_passes_stable_identity(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
         test_dir = runtime_dir / f"invite_gate_{uuid4().hex}"
@@ -98,8 +148,13 @@ class FastApiDemoTest(unittest.TestCase):
         config_path = test_dir / "invites.json"
         config_path.write_text(json.dumps(config), encoding="utf-8")
         runtime = FakeRuntime(image_path)
+        feedback_store = SQLiteFeedbackStore(test_dir / "feedback.sqlite3")
         client = TestClient(
-            create_app(runtime=runtime, invite_access=InviteAccess(config_path))
+            create_app(
+                runtime=runtime,
+                invite_access=InviteAccess(config_path),
+                feedback_store=feedback_store,
+            )
         )
 
         self.assertEqual(client.get("/health").status_code, 200)
@@ -124,6 +179,14 @@ class FastApiDemoTest(unittest.TestCase):
         response = client.post("/api/message", json={"text": "你好"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(runtime.last_identity, codes[0][0])
+        feedback = client.post("/api/feedback", json={
+            "message_id": "invite_message_01",
+            "rating": "positive",
+            "tags": ["clear_reply"],
+            "detail": "",
+        })
+        self.assertEqual(feedback.status_code, 200)
+        self.assertEqual(feedback_store.list_feedback()[0].identity_key, codes[0][0])
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for JavaScript syntax validation")
     def test_javascript_has_valid_syntax(self):
@@ -153,12 +216,13 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260811-public-beta-guard"', 'src="/assets/demo.js?v=20260811-public-beta-guard"',
+            'href="/assets/demo.css?v=20260811-message-feedback"', 'src="/assets/demo.js?v=20260811-message-feedback"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
             'id="drop-overlay"', 'type="submit" aria-label="发送消息" disabled', '松开即可上传题图',
             '题图会用于云端模型识别', '请勿上传个人敏感信息',
+            'id="feedback-backdrop"', 'id="feedback-tags"', 'id="feedback-detail"',
         ):
             self.assertIn(expected, page.text)
         for expected in (
@@ -181,6 +245,8 @@ class FastApiDemoTest(unittest.TestCase):
             "textInput.focus({ preventScroll: true })",
             "function syncVisualViewport()", "window.visualViewport?.addEventListener('resize', syncVisualViewport",
             "window.visualViewport?.addEventListener('scroll', syncVisualViewport", "syncVisualViewport();",
+            "function createMessageActions", "function openFeedback", "request('/api/feedback'",
+            "['found_answer', '找到了正确答案']", "['not_found', '没找到正确题']",
         ):
             self.assertIn(expected, _SCRIPT)
         self.assertNotIn("new File(", _SCRIPT)

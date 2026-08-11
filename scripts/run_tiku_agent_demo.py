@@ -15,6 +15,7 @@ if str(BASE) not in sys.path:
 
 from tiku_agent.agent import TikuSearchAgent
 from tiku_agent.fastapi_demo import create_app
+from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.invite_access import InviteAccess
 from tiku_agent.safe_answer_generator_v0 import (
     SafeAnswerGeneratorV0,
@@ -113,6 +114,7 @@ def build_app(
         ),
         incoming_dir=root / "incoming",
         invite_access=InviteAccess(invite_config) if invite_config else None,
+        feedback_store=SQLiteFeedbackStore(root / "feedback.sqlite3"),
     )
 
 

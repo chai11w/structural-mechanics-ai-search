@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager, suppress
 from io import BytesIO
 import json
 import logging
+import re
 import secrets
 from pathlib import Path
 from typing import Callable
@@ -18,7 +19,9 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from tiku_agent.agent import AgentResponse
+from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.invite_access import InviteAccess, InviteIdentity
+from tiku_agent.session_artifacts import session_key
 from tiku_agent.session_runtime import (
     AgentBudgetExceededError,
     AgentRuntimeBusyError,
@@ -41,6 +44,16 @@ SUPPORTED_IMAGE_FORMATS = {
     "BMP": ("image/bmp", ".bmp"),
 }
 GENERIC_CONTENT_TYPES = {"", "application/octet-stream"}
+FEEDBACK_MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+FEEDBACK_TAGS = {
+    "positive": {
+        "found_answer", "relevant_results", "clear_reply", "fast", "other",
+    },
+    "negative": {
+        "not_found", "irrelevant_results", "ranking_issue", "wrong_answer",
+        "too_slow", "system_error", "other",
+    },
+}
 logger = logging.getLogger(__name__)
 _PAGE = (WEB_DIR / "index.html").read_text(encoding="utf-8")
 _STYLE = (WEB_DIR / "demo.css").read_text(encoding="utf-8")
@@ -65,6 +78,7 @@ def create_app(
     session_cookie: str = SESSION_COOKIE,
     cleanup_interval_seconds: float = 300.0,
     invite_access: InviteAccess | None = None,
+    feedback_store: SQLiteFeedbackStore | None = None,
 ) -> FastAPI:
     """Create a local-only demo app without any existing Feishu configuration."""
     session_cookie = str(session_cookie).strip()
@@ -97,6 +111,9 @@ def create_app(
         redoc_url=None,
         openapi_url=None,
         lifespan=lifespan,
+    )
+    feedback_store = feedback_store or SQLiteFeedbackStore(
+        DEFAULT_RUNTIME_DIR / "feedback.sqlite3"
     )
     app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
 
@@ -206,6 +223,66 @@ def create_app(
                 samesite="lax",
             )
         return result
+
+    @app.post("/api/feedback")
+    async def submit_feedback(request: Request) -> JSONResponse:
+        try:
+            content_length = int(request.headers.get("content-length") or 0)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid content length") from exc
+        if content_length > 4096:
+            raise HTTPException(status_code=413, detail="feedback is too large")
+        try:
+            raw_body = await request.body()
+            if len(raw_body) > 4096:
+                raise HTTPException(status_code=413, detail="feedback is too large")
+            payload = json.loads(raw_body)
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001 - malformed external input.
+            raise HTTPException(status_code=400, detail="invalid json") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="json object is required")
+        message_id = str(payload.get("message_id") or "").strip()
+        rating = str(payload.get("rating") or "").strip().lower()
+        raw_tags = payload.get("tags")
+        detail = str(payload.get("detail") or "").strip()
+        if not FEEDBACK_MESSAGE_ID_RE.fullmatch(message_id):
+            raise HTTPException(status_code=400, detail="invalid message id")
+        if rating not in FEEDBACK_TAGS:
+            raise HTTPException(status_code=400, detail="invalid rating")
+        if not isinstance(raw_tags, list) or len(raw_tags) > 8:
+            raise HTTPException(status_code=400, detail="invalid feedback tags")
+        tags = tuple(dict.fromkeys(str(tag).strip() for tag in raw_tags if str(tag).strip()))
+        if any(tag not in FEEDBACK_TAGS[rating] for tag in tags):
+            raise HTTPException(status_code=400, detail="invalid feedback tag")
+        if len(detail) > 300:
+            raise HTTPException(status_code=400, detail="feedback detail is too long")
+        session_id = str(request.cookies.get(session_cookie) or "").strip()
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session is required")
+        snapshot = runtime.session_snapshot(session_id)
+        identity_key = _identity_key(request) or "local"
+        saved = feedback_store.upsert(
+            message_id=message_id,
+            identity_key=identity_key,
+            session_key=session_key(session_id),
+            rating=rating,
+            tags=tags,
+            detail=detail,
+            task_revision=int(snapshot.get("task_revision") or 0),
+            phase=str(snapshot.get("phase") or ""),
+            candidate_count=int(snapshot.get("candidate_count") or 0),
+        )
+        return JSONResponse({
+            "ok": True,
+            "feedback": {
+                "message_id": saved.message_id,
+                "rating": saved.rating,
+                "tags": list(saved.tags),
+                "updated_at": saved.updated_at,
+            },
+        })
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:

@@ -20,6 +20,13 @@ const statusText = $('#status-text');
 const lightbox = $('#lightbox');
 const lightboxImage = $('#lightbox-image');
 const lightboxClose = $('#lightbox-close');
+const feedbackBackdrop = $('#feedback-backdrop');
+const feedbackClose = $('#feedback-close');
+const feedbackSubtitle = $('#feedback-subtitle');
+const feedbackTags = $('#feedback-tags');
+const feedbackDetail = $('#feedback-detail');
+const feedbackError = $('#feedback-error');
+const feedbackSubmit = $('#feedback-submit');
 
 const TEXT_TIMEOUT_MS = 60000;
 const IMAGE_TIMEOUT_MS = 90000;
@@ -30,6 +37,17 @@ const HISTORY_KEY = 'tiku-agent-current-chat-v2';
 const LEGACY_HISTORY_KEY = 'tiku-agent-current-chat-v1';
 const ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp']);
 const ALLOWED_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp']);
+const FEEDBACK_OPTIONS = {
+  positive: [
+    ['found_answer', '找到了正确答案'], ['relevant_results', '结果很相关'],
+    ['clear_reply', '回复很清楚'], ['fast', '速度很快'], ['other', '其他'],
+  ],
+  negative: [
+    ['not_found', '没找到正确题'], ['irrelevant_results', '结果不相关'],
+    ['ranking_issue', '正确题没排前面'], ['wrong_answer', '答案不对'],
+    ['too_slow', '搜索太慢'], ['system_error', '系统报错'], ['other', '其他'],
+  ],
+};
 
 let history = [];
 let isBusy = false;
@@ -38,6 +56,7 @@ let activeController = null;
 let focusBeforeModal = null;
 let operationVersion = 0;
 let pendingUpload = null;
+let activeFeedback = null;
 let sessionContext = {
   session_valid: false, phase: 'IDLE', has_active_image: false,
   task_revision: 0, candidate_generation: '', candidate_count: 0,
@@ -91,6 +110,9 @@ function remember(item) {
     variant: String(item.variant || ''),
     taskRevision: Number(item.taskRevision || 0),
     candidateGeneration: String(item.candidateGeneration || ''),
+    messageId: String(item.messageId || ''),
+    createdAt: Number(item.createdAt || 0),
+    feedback: item.feedback || null,
   });
   history = history.slice(-HISTORY_LIMIT);
   saveHistory();
@@ -121,6 +143,142 @@ function closeLightbox() {
   lightboxImage.removeAttribute('src');
   delete document.body.dataset.modal;
   focusBeforeModal?.focus();
+}
+
+function createMessageId() {
+  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID().replaceAll('-', '');
+  return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function formatMessageTime(value) {
+  const date = new Date(Number(value || Date.now()));
+  return new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(date);
+}
+
+function updateFeedbackHistory(messageId, feedback) {
+  const stored = history.find((entry) => entry.messageId === messageId);
+  if (stored) stored.feedback = feedback;
+  saveHistory();
+}
+
+function syncFeedbackButtons(article, rating) {
+  article.querySelectorAll('.message-action').forEach((button) => {
+    const selected = button.dataset.rating === rating;
+    button.classList.toggle('is-selected', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  });
+}
+
+function closeFeedback() {
+  if (feedbackBackdrop.hidden) return;
+  feedbackBackdrop.hidden = true;
+  activeFeedback = null;
+  feedbackTags.replaceChildren();
+  feedbackDetail.value = '';
+  feedbackError.hidden = true;
+  delete document.body.dataset.modal;
+  focusBeforeModal?.focus();
+}
+
+function renderFeedbackTags() {
+  feedbackTags.replaceChildren();
+  FEEDBACK_OPTIONS[activeFeedback.rating].forEach(([value, label]) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'feedback-tag';
+    button.textContent = label;
+    button.dataset.value = value;
+    button.setAttribute('aria-pressed', String(activeFeedback.tags.has(value)));
+    button.addEventListener('click', () => {
+      if (activeFeedback.tags.has(value)) activeFeedback.tags.delete(value);
+      else activeFeedback.tags.add(value);
+      button.setAttribute('aria-pressed', String(activeFeedback.tags.has(value)));
+    });
+    feedbackTags.append(button);
+  });
+}
+
+function openFeedback(item, article, rating) {
+  focusBeforeModal = document.activeElement;
+  const prior = item.feedback?.rating === rating ? item.feedback : null;
+  activeFeedback = {
+    item, article, rating, tags: new Set(prior?.tags || []),
+  };
+  feedbackSubtitle.textContent = rating === 'positive'
+    ? '告诉我们这条回复哪里做得好'
+    : '告诉我们这条回复哪里需要改进';
+  feedbackDetail.value = prior?.detail || '';
+  feedbackError.hidden = true;
+  feedbackSubmit.disabled = false;
+  feedbackSubmit.textContent = prior ? '更新反馈' : '提交';
+  renderFeedbackTags();
+  feedbackBackdrop.hidden = false;
+  document.body.dataset.modal = 'feedback';
+  feedbackDetail.focus();
+}
+
+function createMessageActions(item, article) {
+  const actions = document.createElement('div');
+  actions.className = 'message-actions';
+  actions.setAttribute('aria-label', '回复反馈');
+  [
+    ['positive', 'thumb-up.svg', '赞，这条回复有帮助'],
+    ['negative', 'thumb-down.svg', '踩，这条回复需要改进'],
+  ].forEach(([rating, icon, label]) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'message-action';
+    button.dataset.rating = rating;
+    button.setAttribute('aria-label', label);
+    button.setAttribute('aria-pressed', 'false');
+    const image = document.createElement('img');
+    image.src = `/assets/icons/${icon}`;
+    image.alt = '';
+    button.append(image);
+    button.addEventListener('click', () => openFeedback(item, article, rating));
+    actions.append(button);
+  });
+  const time = document.createElement('time');
+  time.className = 'message-time';
+  time.dateTime = new Date(item.createdAt).toISOString();
+  time.textContent = formatMessageTime(item.createdAt);
+  actions.append(time);
+  syncFeedbackButtons(actions, item.feedback?.rating || '');
+  return actions;
+}
+
+async function submitFeedback() {
+  if (!activeFeedback || feedbackSubmit.disabled) return;
+  feedbackSubmit.disabled = true;
+  feedbackSubmit.textContent = '正在提交…';
+  feedbackError.hidden = true;
+  try {
+    const payload = {
+      message_id: activeFeedback.item.messageId,
+      rating: activeFeedback.rating,
+      tags: Array.from(activeFeedback.tags),
+      detail: feedbackDetail.value.trim(),
+    };
+    await request('/api/feedback', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    }, 8000, '反馈提交超时，请稍后重试。', false, '暂时无法提交反馈，请检查网络。');
+    const feedback = { rating: payload.rating, tags: payload.tags, detail: payload.detail };
+    activeFeedback.item.feedback = feedback;
+    updateFeedbackHistory(activeFeedback.item.messageId, feedback);
+    syncFeedbackButtons(activeFeedback.article, payload.rating);
+    closeFeedback();
+    setStatus('ready', '感谢你的反馈');
+    setTimeout(() => { if (!isBusy) setStatus('ready', '准备就绪'); }, 2200);
+  } catch (error) {
+    feedbackError.textContent = error.message || '反馈提交失败，请稍后重试。';
+    feedbackError.hidden = false;
+    feedbackSubmit.disabled = false;
+    feedbackSubmit.textContent = '重新提交';
+  }
 }
 
 function createMediaCard(url, index, item) {
@@ -179,6 +337,14 @@ function createMediaCard(url, index, item) {
 }
 
 function addMessage(item, persist = true) {
+  const feedbackEligible = !item.me && !item.variant;
+  if (feedbackEligible) {
+    item = {
+      ...item,
+      messageId: item.messageId || createMessageId(),
+      createdAt: Number(item.createdAt || Date.now()),
+    };
+  }
   empty.hidden = true;
   const article = document.createElement('article');
   article.className = `message${item.me ? ' user' : ''}${item.variant ? ` ${item.variant}` : ''}`;
@@ -217,6 +383,7 @@ function addMessage(item, persist = true) {
     images.forEach((url, index) => grid.append(createMediaCard(url, index, { ...item, images })));
     content.append(grid);
   }
+  if (feedbackEligible) content.append(createMessageActions(item, article));
   article.append(content);
   chat.append(article);
   if (persist) remember(item);
@@ -240,7 +407,14 @@ function restoreHistory() {
       clearHistory();
       return;
     }
-    history = stored.messages.slice(-HISTORY_LIMIT);
+    history = stored.messages.slice(-HISTORY_LIMIT).map((item) => {
+      if (item.me || item.variant) return item;
+      return {
+        ...item,
+        messageId: item.messageId || createMessageId(),
+        createdAt: Number(item.createdAt || savedAt),
+      };
+    });
     localStorage.removeItem(LEGACY_HISTORY_KEY);
     saveHistory();
     renderHistory();
@@ -468,6 +642,8 @@ function responseItem(data) {
     intent: data.intent || '',
     taskRevision: Number(data.session?.task_revision || 0),
     candidateGeneration: String(data.session?.candidate_generation || ''),
+    messageId: createMessageId(),
+    createdAt: Date.now(),
   };
 }
 
@@ -722,9 +898,14 @@ newChatButton.addEventListener('click', resetConversation);
 topNewChatButton.addEventListener('click', resetConversation);
 lightboxClose.addEventListener('click', closeLightbox);
 lightbox.addEventListener('click', (event) => { if (event.target === lightbox) closeLightbox(); });
+feedbackClose.addEventListener('click', closeFeedback);
+feedbackBackdrop.addEventListener('click', (event) => { if (event.target === feedbackBackdrop) closeFeedback(); });
+feedbackSubmit.addEventListener('click', submitFeedback);
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
-  if (!lightbox.hidden) closeLightbox(); else closeDrawer();
+  if (!feedbackBackdrop.hidden) closeFeedback();
+  else if (!lightbox.hidden) closeLightbox();
+  else closeDrawer();
 });
 document.addEventListener('dragenter', (event) => {
   if (!hasDraggedFiles(event)) return;

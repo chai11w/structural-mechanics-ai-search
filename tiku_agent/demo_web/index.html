@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
   <title>力答 · 结构力学搜题</title>
-  <link rel="stylesheet" href="/assets/demo.css?v=20260811-public-beta-guard">
+  <link rel="stylesheet" href="/assets/demo.css?v=20260811-message-feedback">
 </head>
 <body>
   <div class="app-shell">
@@ -73,6 +73,20 @@
 
   <div class="drop-overlay" id="drop-overlay" aria-hidden="true"><div><span class="drop-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4 4 4M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></svg></span><strong>松开即可上传题图</strong><small>支持 PNG、JPG、WEBP 等图片，最大 15MB</small></div></div>
   <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="查看大图" hidden><button class="lightbox-close" id="lightbox-close" type="button" aria-label="关闭大图"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button><img id="lightbox-image" alt=""></div>
-  <script src="/assets/demo.js?v=20260811-public-beta-guard" defer></script>
+  <div class="feedback-backdrop" id="feedback-backdrop" hidden>
+    <section class="feedback-dialog" id="feedback-dialog" role="dialog" aria-modal="true" aria-labelledby="feedback-title">
+      <header class="feedback-header">
+        <div><h2 id="feedback-title">提交反馈</h2><p id="feedback-subtitle">告诉我们这条回复哪里做得好</p></div>
+        <button class="feedback-close" id="feedback-close" type="button" aria-label="关闭反馈"><img src="/assets/icons/x.svg" alt=""></button>
+      </header>
+      <div class="feedback-tags" id="feedback-tags" aria-label="反馈原因"></div>
+      <label class="feedback-detail-label" for="feedback-detail">补充说明 <span>选填</span></label>
+      <textarea class="feedback-detail" id="feedback-detail" maxlength="300" rows="5" placeholder="可以说说哪里有帮助，或者哪里需要改进…"></textarea>
+      <p class="feedback-privacy">反馈只关联本次回复，不会保存题图或邀请码明文。</p>
+      <p class="feedback-error" id="feedback-error" role="alert" hidden></p>
+      <button class="feedback-submit" id="feedback-submit" type="button">提交</button>
+    </section>
+  </div>
+  <script src="/assets/demo.js?v=20260811-message-feedback" defer></script>
 </body>
 </html>
