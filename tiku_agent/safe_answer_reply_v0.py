@@ -7,8 +7,11 @@ a later bounded model generator must satisfy.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Callable
 
+from tiku_agent.intent_contract import CHAPTERS
 from tiku_agent.safe_answer_contract_v0 import (
     MAX_SAFE_ANSWER_CHARS,
     validate_safe_answer_output_v0,
@@ -27,6 +30,51 @@ _SAFE_REPLIES = {
     "capability": "我可以根据题图从题库检索最相似的题目，并在你选择后定位对应答案。",
     "workflow": "我会先识别题图并尝试判断章节，再检索和复筛相似候选；你选定后，我再返回对应答案。",
 }
+
+
+_SUPPORTED_CHAPTERS_QUESTION_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"(?:你|力答|这个助手|这个机器人|题库)?(?:可以|能|支持|覆盖|包含|包括)(?:回答|处理|搜索|搜|查找|查|检索)?(?:哪些|哪几个|哪几|第几)(?:个)?(?:章节|章)(?:的)?(?:问题|题目|题|内容)?",
+        r"(?:你|力答|这个助手|这个机器人|题库)?(?:支持|覆盖|包含|包括)(?:的)?(?:章节|章)(?:有)?(?:哪些|哪几个|哪几)",
+        r"题库(?:里)?(?:有|收录)(?:哪些|哪几个|哪几)(?:个)?(?:章节|章)(?:的)?(?:问题|题目|题|内容)?",
+    )
+)
+
+
+def render_grounded_safe_answer_v0(text: str | None) -> str | None:
+    """Return a code-grounded fact reply for one narrowly recognized question.
+
+    This seam is deliberately stricter than model-backed safe conversation:
+    only a complete supported-chapter question matches, so mixed business
+    commands continue through the existing intent and tool route.
+    """
+
+    compact = re.sub(
+        r"[\s，。！？!?、,.：:；;“”\"'（）()]+",
+        "",
+        unicodedata.normalize("NFKC", str(text or "")).strip().lower(),
+    )
+    if not compact or not any(
+        pattern.fullmatch(compact)
+        for pattern in _SUPPORTED_CHAPTERS_QUESTION_PATTERNS
+    ):
+        return None
+
+    chapter_labels = []
+    for chapter in CHAPTERS:
+        match = re.fullmatch(r"(\d+)(.+)", chapter)
+        chapter_labels.append(
+            f"第{match.group(1)}章{match.group(2)}" if match else chapter
+        )
+    reply = "结构力学题库支持以下章节：" + "、".join(chapter_labels) + "。"
+    validation = validate_safe_answer_output_v0(reply, "capability")
+    if not validation.accepted:
+        raise ValueError(
+            "grounded safe-answer fact violates the response contract: "
+            f"{validation.reason}"
+        )
+    return validation.normalized_text
 
 
 # Phase-aware fallback copy, keyed by (category, phase).  The table is

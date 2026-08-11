@@ -5,8 +5,12 @@ import unittest
 from unittest.mock import Mock, patch
 
 from tiku_agent.agent import AgentToolbox, TikuSearchAgent
+from tiku_agent.intent_contract import CHAPTERS
 from tiku_agent.safe_answer_generator_v0 import SafeAnswerGeneratorV0
-from tiku_agent.safe_answer_reply_v0 import MAX_SAFE_ANSWER_CHARS
+from tiku_agent.safe_answer_reply_v0 import (
+    MAX_SAFE_ANSWER_CHARS,
+    render_grounded_safe_answer_v0,
+)
 from tiku_agent.state import (
     STATE_WAIT_CANDIDATE_CHOICE,
     AgentState,
@@ -148,6 +152,62 @@ class SafeAnswerRouteV0Test(unittest.TestCase):
                 response = agent.handle_text(text)
                 self.assertIn(phrase, response.text)
                 self.assertEqual(response.intent, "safe_answer")
+
+    def test_supported_chapter_fact_is_exact_zero_model_zero_tool_and_state_preserving(self):
+        expected = "结构力学题库支持以下章节：" + "、".join(
+            f"第{chapter[0]}章{chapter[1:]}" for chapter in CHAPTERS
+        ) + "。"
+        questions = (
+            "你可以回答哪些章节的问题",
+            "你支持哪些章节？",
+            "你能回答哪几章",
+            "题库覆盖的章节有哪些",
+            "题库里收录哪几个章节的题目",
+        )
+
+        for text in questions:
+            with self.subTest(text=text):
+                state = _representative_state()
+                before = deepcopy(state.to_dict())
+                toolbox, tool_mocks = _toolbox_that_must_not_run()
+                intent_model = Mock(
+                    side_effect=AssertionError("grounded fact called intent model")
+                )
+                answer_generator = Mock()
+                answer_generator.generate.side_effect = AssertionError(
+                    "grounded fact called answer model"
+                )
+                agent = TikuSearchAgent(
+                    state=state,
+                    tools=toolbox,
+                    use_llm_intent=True,
+                    llm_client=intent_model,
+                    enable_safe_answer_v0=True,
+                    safe_answer_generator_v0=answer_generator,
+                )
+
+                response = agent.handle_text(text)
+
+                self.assertEqual(response.text, expected)
+                self.assertEqual(response.intent, "safe_answer")
+                self.assertEqual(response.reply_source, "grounded_fact")
+                self.assertLessEqual(len(response.text), MAX_SAFE_ANSWER_CHARS)
+                self.assertEqual(agent.state.to_dict(), before)
+                self.assertEqual(response.state, before)
+                intent_model.assert_not_called()
+                answer_generator.generate.assert_not_called()
+                for tool_mock in tool_mocks.values():
+                    tool_mock.assert_not_called()
+
+    def test_supported_chapter_fact_does_not_intercept_business_or_mixed_text(self):
+        for text in (
+            "按第4章搜题",
+            "帮我搜第4章的题",
+            "你支持哪些章节，顺便帮我搜题",
+            "第4章",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(render_grounded_safe_answer_v0(text))
 
     def test_default_disabled_keeps_the_previous_safe_text_path(self):
         implicit = TikuSearchAgent(

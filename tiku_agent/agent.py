@@ -28,7 +28,10 @@ from tiku_agent.safe_answer_context_v0 import (
 )
 from tiku_agent.safe_answer_generator_v0 import SafeAnswerGeneratorV0
 from tiku_agent.safe_answer_policy_v0 import evaluate_safe_answer_policy
-from tiku_agent.safe_answer_reply_v0 import render_safe_answer_v0
+from tiku_agent.safe_answer_reply_v0 import (
+    render_grounded_safe_answer_v0,
+    render_safe_answer_v0,
+)
 from tiku_agent.state import (
     PHASE_ANSWERED,
     PHASE_ERROR,
@@ -110,6 +113,14 @@ class TikuSearchAgent:
 
     def handle_text(self, text: str) -> AgentResponse:
         if self.enable_safe_answer_v0:
+            grounded_reply = render_grounded_safe_answer_v0(text)
+            if grounded_reply is not None:
+                return AgentResponse(
+                    text=grounded_reply,
+                    state=self.state.to_dict(),
+                    intent="safe_answer",
+                    reply_source="grounded_fact",
+                )
             safe_decision = evaluate_safe_answer_policy(text)
             if safe_decision.eligible:
                 if safe_decision.category == "general":
