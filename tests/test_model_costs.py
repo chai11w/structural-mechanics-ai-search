@@ -93,7 +93,12 @@ class ModelCostTest(unittest.TestCase):
         directory = self.make_directory()
         database = directory / "costs.sqlite3"
         try:
-            collector = ModelCostCollector(run_id="run", session_key="hashed", task_kind="image")
+            collector = ModelCostCollector(
+                run_id="run",
+                session_key="hashed",
+                task_kind="image",
+                started_at="2026-08-02T00:00:00+00:00",
+            )
             with model_cost_scope(collector):
                 for _ in range(11):
                     timed_model_call(
@@ -103,7 +108,8 @@ class ModelCostTest(unittest.TestCase):
                         call_type="qwen_image_classification",
                         usage_getter=lambda value: value["usage"],
                     )
-            SQLiteModelCostLedger(database).write_run(
+            ledger = SQLiteModelCostLedger(database)
+            ledger.write_run(
                 collector, finished_at="2026-08-02T00:00:01+00:00", outcome="candidates"
             )
             with sqlite3.connect(database) as connection:
@@ -114,6 +120,14 @@ class ModelCostTest(unittest.TestCase):
             self.assertEqual(run[0], 11)
             self.assertIn("MODEL_CALLS_OVER_10", run[1])
             self.assertEqual(calls, 11)
+            self.assertGreater(
+                ledger.estimated_cost_micros_since("2026-08-01T00:00:00+00:00"),
+                0,
+            )
+            self.assertEqual(
+                ledger.estimated_cost_micros_since("2026-08-03T00:00:00+00:00"),
+                0,
+            )
         finally:
             shutil.rmtree(directory, ignore_errors=True)
 

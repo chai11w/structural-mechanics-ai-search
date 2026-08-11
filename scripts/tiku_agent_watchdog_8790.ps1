@@ -1,6 +1,10 @@
 param(
     [int]$Port = 8790,
-    [string]$RuntimeDir
+    [string]$RuntimeDir,
+    [int]$MaxConcurrentTasks = 1,
+    [int]$MaxQueuedTasks = 2,
+    [int]$QueueWaitSeconds = 55,
+    [double]$DailyBudgetCny = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,7 +64,13 @@ function Start-Bot {
         "--host", "127.0.0.1",
         "--port", "$Port",
         "--runtime-dir", "$RuntimeDir"
+        "--max-concurrent-tasks", "$MaxConcurrentTasks"
+        "--max-queued-tasks", "$MaxQueuedTasks"
+        "--queue-wait-seconds", "$QueueWaitSeconds"
     )
+    if ($DailyBudgetCny -gt 0) {
+        $arguments += @("--daily-budget-cny", "$DailyBudgetCny")
+    }
     $process = Start-Process python `
         -ArgumentList $arguments `
         -WorkingDirectory $ProjectDir `

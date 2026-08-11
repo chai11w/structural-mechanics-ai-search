@@ -341,6 +341,25 @@ class SQLiteModelCostLedger:
                     ],
                 )
 
+    def estimated_cost_micros_since(self, started_at: str) -> int:
+        """Return the recorded estimated cost at or after an ISO-8601 timestamp."""
+        if not self.path.is_file():
+            return 0
+        with self._lock:
+            with sqlite3.connect(self.path) as connection:
+                try:
+                    row = connection.execute(
+                        """
+                        SELECT COALESCE(SUM(estimated_cost_micros), 0)
+                        FROM model_cost_runs
+                        WHERE started_at >= ?
+                        """,
+                        (str(started_at),),
+                    ).fetchone()
+                except sqlite3.OperationalError:
+                    return 0
+        return max(0, int(row[0] if row else 0))
+
 
 def _warning_codes(records: list[ModelCallRecord]) -> list[str]:
     warnings = []

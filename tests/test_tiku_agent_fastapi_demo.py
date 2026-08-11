@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import time
 import unittest
 from uuid import uuid4
 
@@ -11,6 +12,7 @@ from PIL import Image
 
 from tiku_agent.agent import AgentResponse
 from tiku_agent.fastapi_demo import MAX_IMAGE_BYTES, SESSION_COOKIE, _SCRIPT, _STYLE, _write_incoming_image, create_app
+from tiku_agent.session_runtime import AgentBudgetExceededError, AgentRuntimeBusyError
 
 
 class FakeRuntime:
@@ -109,7 +111,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260801-candidate-reselect"', 'src="/assets/demo.js?v=20260801-candidate-reselect"',
+            'href="/assets/demo.css?v=20260811-public-beta-guard"', 'src="/assets/demo.js?v=20260811-public-beta-guard"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -276,6 +278,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertIn(SESSION_COOKIE, follow_up.cookies)
         media_url = text_response.json()["images"][0]
         self.assertEqual(client.get(media_url).status_code, 200)
+        self.assertEqual(client.get(media_url).headers["cache-control"], "private, no-store")
         other_client = TestClient(app)
         other_client.cookies.set(SESSION_COOKIE, "different-session")
         self.assertEqual(other_client.get(media_url).status_code, 404)
@@ -289,6 +292,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertTrue(uploaded_image_url.startswith("/api/upload/"))
         self.assertEqual(client.get("/api/session").json()["uploaded_image"], uploaded_image_url)
         self.assertEqual(client.get(uploaded_image_url).status_code, 200)
+        self.assertEqual(client.get(uploaded_image_url).headers["cache-control"], "private, no-store")
         other_upload_client = TestClient(app)
         other_upload_client.cookies.set(SESSION_COOKIE, "different-session")
         self.assertEqual(other_upload_client.get(uploaded_image_url).status_code, 404)
@@ -353,6 +357,53 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertIn("上一道题", events[0]["data"]["text"])
         self.assertEqual(events[0]["data"]["intent"], "stale_candidate")
         self.assertEqual(runtime.calls, [])
+
+    def test_busy_and_budget_guards_return_safe_public_errors(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"demo_guard_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+
+        class GuardedRuntime(FakeRuntime):
+            error = AgentRuntimeBusyError("当前请求较多，请稍后再试。")
+
+            def handle_text(self, session_id: str, text: str, *, progress=None) -> AgentResponse:
+                raise self.error
+
+        runtime = GuardedRuntime(image_path)
+        client = TestClient(create_app(runtime=runtime))
+        busy = client.post("/api/message", json={"text": "你好"})
+        self.assertEqual(busy.status_code, 429)
+        self.assertEqual(busy.headers["retry-after"], "15")
+        self.assertEqual(busy.headers["cache-control"], "no-store")
+
+        stream = client.post("/api/message/stream", json={"text": "你好"})
+        events = [json.loads(line) for line in stream.text.splitlines() if line]
+        self.assertEqual(events, [{"type": "error", "message": "当前请求较多，请稍后再试。"}])
+
+        runtime.error = AgentBudgetExceededError("今日服务额度已用完，请明天再试。")
+        budget = client.post("/api/message", json={"text": "你好"})
+        self.assertEqual(budget.status_code, 503)
+        self.assertEqual(budget.headers["retry-after"], "3600")
+
+    def test_lifespan_periodically_purges_expired_sessions(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"demo_cleanup_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+
+        class CleaningRuntime(FakeRuntime):
+            def __init__(self, path: Path):
+                super().__init__(path)
+                self.purge_count = 0
+
+            def purge_expired(self) -> None:
+                self.purge_count += 1
+
+        runtime = CleaningRuntime(image_path)
+        with TestClient(create_app(runtime=runtime, cleanup_interval_seconds=0.01)):
+            time.sleep(0.05)
+        self.assertGreaterEqual(runtime.purge_count, 1)
 
     def test_answered_question_can_select_another_candidate_from_same_generation(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"

@@ -1,10 +1,17 @@
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import threading
 from uuid import uuid4
 
-from tiku_agent.agent import AgentToolbox, TikuSearchAgent
+from tiku_agent.agent import AgentResponse, AgentToolbox, TikuSearchAgent
 from tiku_agent.session_artifacts import SessionArtifacts
-from tiku_agent.session_runtime import AgentSessionRuntime
+from tiku_agent.session_runtime import (
+    AgentBudgetExceededError,
+    AgentRuntimeBusyError,
+    AgentSessionRuntime,
+    _ExecutionGate,
+)
 from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_log import TaskLogEntry, TaskLogger
@@ -218,6 +225,127 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.assertEqual(searched.state["phase"], "WAIT_CANDIDATE_CHOICE")
         self.assertFalse(searched.state["global_search_offered"])
         self.assertFalse(self.store.load(session_id).global_search_offered)
+
+    def test_execution_gate_bounds_active_and_waiting_tasks(self):
+        gate = _ExecutionGate(max_concurrent=1, max_queued=1, wait_seconds=1)
+        active = threading.Event()
+        release = threading.Event()
+        queued = threading.Event()
+        completed = []
+
+        def first_task():
+            with gate.enter():
+                active.set()
+                release.wait(1)
+
+        def second_task():
+            with gate.enter(lambda stage, _message: queued.set() if stage == "queued" else None):
+                completed.append("second")
+
+        first = threading.Thread(target=first_task)
+        second = threading.Thread(target=second_task)
+        first.start()
+        self.assertTrue(active.wait(1))
+        second.start()
+        self.assertTrue(queued.wait(1))
+
+        with self.assertRaises(AgentRuntimeBusyError):
+            with gate.enter():
+                pass
+
+        release.set()
+        first.join(1)
+        second.join(1)
+        self.assertEqual(completed, ["second"])
+
+    def test_daily_budget_blocks_before_running_agent(self):
+        class SpentLedger:
+            def estimated_cost_micros_since(self, _started_at: str) -> int:
+                return 1_000_000
+
+        runtime = AgentSessionRuntime(
+            self.store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            cost_ledger=SpentLedger(),
+            daily_budget_cny=1,
+            agent_factory=lambda state: TikuSearchAgent(
+                state=state,
+                tools=FakeTools().toolbox(),
+                use_llm_intent=False,
+            ),
+        )
+
+        with self.assertRaises(AgentBudgetExceededError):
+            runtime.handle_text("budget-session", "你好")
+        self.assertEqual(self.logger.entries, [])
+
+    def test_current_image_lookup_purges_expired_session_files(self):
+        database_path = RUNTIME_DIR / f"session_expiry_test_{uuid4().hex}.db"
+        self.addCleanup(lambda: database_path.unlink(missing_ok=True))
+        current = [datetime(2026, 8, 11, tzinfo=UTC)]
+        store = SQLiteSessionStore(
+            database_path,
+            ttl=timedelta(seconds=1),
+            now=lambda: current[0],
+        )
+        session_id = "expired-session"
+        self.addCleanup(lambda: self.artifacts.clear_session(session_id))
+        runtime = AgentSessionRuntime(
+            store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            agent_factory=lambda state: TikuSearchAgent(
+                state=state,
+                tools=FakeTools().toolbox(),
+                use_llm_intent=False,
+            ),
+        )
+        runtime.handle_image(session_id, self.source_image)
+        self.assertTrue(self.artifacts.session_dir(session_id).exists())
+
+        current[0] += timedelta(seconds=2)
+
+        self.assertIsNone(runtime.current_image_path(session_id))
+        self.assertFalse(self.artifacts.session_dir(session_id).exists())
+
+    def test_clear_waits_for_same_session_task_then_removes_its_state(self):
+        started = threading.Event()
+        release = threading.Event()
+        cleared = threading.Event()
+
+        class BlockingAgent:
+            def __init__(self, state: AgentState):
+                self.state = state
+                self.progress_reporter = None
+
+            def handle_text(self, _text: str) -> AgentResponse:
+                started.set()
+                release.wait(1)
+                return AgentResponse(text="done", intent="clarification")
+
+        runtime = AgentSessionRuntime(
+            self.store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            agent_factory=BlockingAgent,
+        )
+        worker = threading.Thread(target=lambda: runtime.handle_text("locked-session", "run"))
+        worker.start()
+        self.assertTrue(started.wait(1))
+
+        def clear_session():
+            runtime.clear("locked-session")
+            cleared.set()
+
+        clearer = threading.Thread(target=clear_session)
+        clearer.start()
+        self.assertFalse(cleared.wait(0.05))
+        release.set()
+        worker.join(1)
+        clearer.join(1)
+        self.assertTrue(cleared.is_set())
+        self.assertIsNone(self.store.load("locked-session"))
 
 
 if __name__ == "__main__":

@@ -23,6 +23,24 @@ class MainlineLauncherTest(unittest.TestCase):
             parser.parse_args(["--disable-dimension-filter"]).enable_dimension_filter
         )
 
+    def test_public_beta_guards_are_explicit_and_configurable(self):
+        parser = build_argument_parser()
+        defaults = parser.parse_args([])
+        self.assertEqual(defaults.max_concurrent_tasks, 0)
+        self.assertEqual(defaults.max_queued_tasks, 0)
+        self.assertIsNone(defaults.daily_budget_cny)
+
+        guarded = parser.parse_args([
+            "--max-concurrent-tasks", "1",
+            "--max-queued-tasks", "2",
+            "--queue-wait-seconds", "55",
+            "--daily-budget-cny", "5.0",
+        ])
+        self.assertEqual(guarded.max_concurrent_tasks, 1)
+        self.assertEqual(guarded.max_queued_tasks, 2)
+        self.assertEqual(guarded.queue_wait_seconds, 55)
+        self.assertEqual(guarded.daily_budget_cny, 5.0)
+
     def test_enabled_runtime_uses_model_only_for_safe_conversation(self):
         root = Path(__file__).resolve().parents[1] / f".tmp_test_8790_{uuid4().hex}"
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))

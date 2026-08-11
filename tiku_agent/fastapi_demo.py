@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager, suppress
 from io import BytesIO
 import json
 import logging
@@ -17,7 +18,11 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from tiku_agent.agent import AgentResponse
-from tiku_agent.session_runtime import AgentSessionRuntime
+from tiku_agent.session_runtime import (
+    AgentBudgetExceededError,
+    AgentRuntimeBusyError,
+    AgentSessionRuntime,
+)
 from tiku_agent.session_store import SQLiteSessionStore
 from tiku_shared.model_costs import SQLiteModelCostLedger
 from tiku_agent.tools import DEFAULT_RUNTIME_DIR
@@ -46,6 +51,7 @@ def create_app(
     runtime: AgentSessionRuntime | None = None,
     incoming_dir: str | Path = INCOMING_DIR,
     session_cookie: str = SESSION_COOKIE,
+    cleanup_interval_seconds: float = 300.0,
 ) -> FastAPI:
     """Create a local-only demo app without any existing Feishu configuration."""
     session_cookie = str(session_cookie).strip()
@@ -55,8 +61,47 @@ def create_app(
         SQLiteSessionStore(DEFAULT_RUNTIME_DIR / "session.db"),
         cost_ledger=SQLiteModelCostLedger(DEFAULT_RUNTIME_DIR / "model_costs.sqlite3"),
     )
-    app = FastAPI(title="结构力学搜题 Agent", docs_url=None, redoc_url=None, openapi_url=None)
+    cleaner = getattr(runtime, "purge_expired", None)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        cleanup_task = None
+        if callable(cleaner) and cleanup_interval_seconds > 0:
+            cleanup_task = asyncio.create_task(
+                _periodic_session_cleanup(cleaner, cleanup_interval_seconds)
+            )
+        try:
+            yield
+        finally:
+            if cleanup_task is not None:
+                cleanup_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await cleanup_task
+
+    app = FastAPI(
+        title="结构力学搜题 Agent",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
     app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
+
+    @app.exception_handler(AgentRuntimeBusyError)
+    async def runtime_busy(_request: Request, exc: AgentRuntimeBusyError) -> JSONResponse:
+        return JSONResponse(
+            {"detail": str(exc)},
+            status_code=429,
+            headers={"Retry-After": "15", "Cache-Control": "no-store"},
+        )
+
+    @app.exception_handler(AgentBudgetExceededError)
+    async def runtime_budget(_request: Request, exc: AgentBudgetExceededError) -> JSONResponse:
+        return JSONResponse(
+            {"detail": str(exc)},
+            status_code=503,
+            headers={"Retry-After": "3600", "Cache-Control": "no-store"},
+        )
 
     @app.middleware("http")
     async def secure_public_requests(request: Request, call_next):
@@ -73,6 +118,8 @@ def create_app(
         result.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         if _is_secure_request(request):
             result.headers["Strict-Transport-Security"] = "max-age=31536000"
+        if request.url.path.startswith("/api/"):
+            result.headers.setdefault("Cache-Control", "private, no-store")
         return result
 
     @app.get("/", response_class=HTMLResponse)
@@ -239,7 +286,7 @@ def create_app(
         path = runtime.resolve_upload(session_id, filename) if session_id else None
         if path is None:
             raise HTTPException(status_code=404, detail="upload not found")
-        return FileResponse(path)
+        return FileResponse(path, headers={"Cache-Control": "private, no-store"})
 
     @app.get("/api/media/{media_id}")
     def get_media(media_id: str, request: Request) -> FileResponse:
@@ -247,7 +294,7 @@ def create_app(
         path = runtime.resolve_media(session_id, media_id) if session_id else None
         if path is None:
             raise HTTPException(status_code=404, detail="media not found")
-        return FileResponse(path)
+        return FileResponse(path, headers={"Cache-Control": "private, no-store"})
 
     return app
 
@@ -450,6 +497,8 @@ async def _stream_agent_events(
         try:
             payload = await asyncio.to_thread(execute, progress)
             await queue.put({"type": "result", "data": payload})
+        except (AgentRuntimeBusyError, AgentBudgetExceededError) as exc:
+            await queue.put({"type": "error", "message": str(exc)})
         except Exception:  # noqa: BLE001 - keep internal failures out of the public stream.
             logger.exception("streamed Agent request failed")
             await queue.put({"type": "error", "message": "服务端处理失败，请稍后重试。"})
@@ -463,3 +512,13 @@ async def _stream_agent_events(
             break
         yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
     await task
+
+
+async def _periodic_session_cleanup(cleaner: Callable[[], None], interval_seconds: float) -> None:
+    interval = max(0.01, float(interval_seconds))
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await asyncio.to_thread(cleaner)
+        except Exception:  # noqa: BLE001 - cleanup failure must not stop the web service.
+            logger.exception("periodic session cleanup failed")

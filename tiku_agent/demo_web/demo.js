@@ -379,6 +379,8 @@ function safeHttpError(status, data) {
   if (status >= 500) return '服务端处理失败，请稍后重试。';
   if (status === 400) return '提交的内容无法处理，请检查后重试。';
   if (status === 401 || status === 403) return '当前请求无权处理。';
+  if (status === 429) return data?.detail || '当前请求较多，请稍后再试。';
+  if (status === 503 && detail.includes('额度')) return data?.detail || '今日服务额度已用完，请稍后再试。';
   return `请求失败（HTTP ${status}），请稍后重试。`;
 }
 

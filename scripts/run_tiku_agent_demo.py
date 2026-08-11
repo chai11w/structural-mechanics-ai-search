@@ -38,6 +38,10 @@ def build_runtime(
     enable_safe_answer_v0: bool = True,
     enable_dimension_filter: bool = False,
     safe_answer_model_client: Callable[[SafeAnswerModelRequestV0], str] | None = None,
+    max_concurrent_tasks: int = 0,
+    max_queued_tasks: int = 0,
+    queue_wait_seconds: float = 90.0,
+    daily_budget_cny: float | None = None,
 ) -> AgentSessionRuntime:
     """Build the 8790 runtime with bounded safe answers enabled by default."""
     root = Path(runtime_dir).resolve()
@@ -69,6 +73,10 @@ def build_runtime(
         task_logger=JsonlTaskLogger(root / "task_logs.jsonl"),
         cost_ledger=SQLiteModelCostLedger(root / "model_costs.sqlite3"),
         agent_factory=agent_factory,
+        max_concurrent_tasks=max_concurrent_tasks,
+        max_queued_tasks=max_queued_tasks,
+        queue_wait_seconds=queue_wait_seconds,
+        daily_budget_cny=daily_budget_cny,
     )
 
 
@@ -79,6 +87,10 @@ def build_app(
     enable_safe_answer_v0: bool = True,
     enable_dimension_filter: bool = False,
     safe_answer_model_client: Callable[[SafeAnswerModelRequestV0], str] | None = None,
+    max_concurrent_tasks: int = 0,
+    max_queued_tasks: int = 0,
+    queue_wait_seconds: float = 90.0,
+    daily_budget_cny: float | None = None,
 ):
     root = Path(runtime_dir).resolve()
     return create_app(
@@ -88,6 +100,10 @@ def build_app(
             enable_safe_answer_v0=enable_safe_answer_v0,
             enable_dimension_filter=enable_dimension_filter,
             safe_answer_model_client=safe_answer_model_client,
+            max_concurrent_tasks=max_concurrent_tasks,
+            max_queued_tasks=max_queued_tasks,
+            queue_wait_seconds=queue_wait_seconds,
+            daily_budget_cny=daily_budget_cny,
         ),
         incoming_dir=root / "incoming",
     )
@@ -98,6 +114,29 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8790)
     parser.add_argument("--runtime-dir", type=Path)
+    parser.add_argument(
+        "--max-concurrent-tasks",
+        type=int,
+        default=0,
+        help="Maximum active web tasks; 0 keeps the local unbounded default",
+    )
+    parser.add_argument(
+        "--max-queued-tasks",
+        type=int,
+        default=0,
+        help="Maximum waiting web tasks when concurrency is bounded",
+    )
+    parser.add_argument(
+        "--queue-wait-seconds",
+        type=float,
+        default=90.0,
+        help="Maximum time a queued task waits before returning busy",
+    )
+    parser.add_argument(
+        "--daily-budget-cny",
+        type=float,
+        help="Hard daily estimated model-cost ceiling in CNY; omit to disable",
+    )
     dimension_filter_group = parser.add_mutually_exclusive_group()
     dimension_filter_group.add_argument(
         "--enable-dimension-filter",
@@ -136,6 +175,10 @@ def main() -> int:
             runtime_dir,
             enable_safe_answer_v0=args.enable_safe_answer_v0,
             enable_dimension_filter=args.enable_dimension_filter,
+            max_concurrent_tasks=args.max_concurrent_tasks,
+            max_queued_tasks=args.max_queued_tasks,
+            queue_wait_seconds=args.queue_wait_seconds,
+            daily_budget_cny=args.daily_budget_cny,
         ),
         host=args.host,
         port=args.port,

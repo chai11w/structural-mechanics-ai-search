@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
+from contextlib import contextmanager
+import threading
 import time
 from typing import Callable
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from tiku_agent.agent import AgentResponse, TikuSearchAgent
 from tiku_agent.session_artifacts import SessionArtifacts, session_key
@@ -25,6 +29,59 @@ AgentFactory = Callable[[AgentState], TikuSearchAgent]
 ProgressReporter = Callable[[str, str], None]
 
 
+class AgentRuntimeBusyError(RuntimeError):
+    """The bounded web runtime cannot accept another task right now."""
+
+
+class AgentBudgetExceededError(RuntimeError):
+    """The configured daily model-cost ceiling has already been reached."""
+
+
+class _ExecutionGate:
+    def __init__(self, max_concurrent: int, max_queued: int, wait_seconds: float) -> None:
+        self.max_concurrent = max(0, int(max_concurrent or 0))
+        self.max_queued = max(0, int(max_queued or 0))
+        self.wait_seconds = max(0.0, float(wait_seconds or 0.0))
+        self._active = 0
+        self._waiting = 0
+        self._condition = threading.Condition()
+
+    @contextmanager
+    def enter(self, progress: ProgressReporter | None = None):
+        if self.max_concurrent <= 0:
+            yield
+            return
+
+        queued = False
+        with self._condition:
+            if self._active >= self.max_concurrent:
+                if self._waiting >= self.max_queued:
+                    raise AgentRuntimeBusyError("当前请求较多，请稍后再试。")
+                queued = True
+                self._waiting += 1
+                if progress is not None:
+                    progress("queued", "前面有任务正在处理，已进入队列…")
+                deadline = time.monotonic() + self.wait_seconds
+                try:
+                    while self._active >= self.max_concurrent:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise AgentRuntimeBusyError("排队等待超时，请稍后重新提交。")
+                        self._condition.wait(remaining)
+                finally:
+                    self._waiting -= 1
+            self._active += 1
+
+        try:
+            if queued and progress is not None:
+                progress("dequeued", "轮到你的题目了，正在开始处理…")
+            yield
+        finally:
+            with self._condition:
+                self._active -= 1
+                self._condition.notify_all()
+
+
 class AgentSessionRuntime:
     """Restore, run, and checkpoint one Agent turn by a caller-owned session ID."""
 
@@ -36,12 +93,26 @@ class AgentSessionRuntime:
         task_logger: TaskLogger | None = None,
         cost_ledger: SQLiteModelCostLedger | None = None,
         agent_factory: AgentFactory | None = None,
+        max_concurrent_tasks: int = 0,
+        max_queued_tasks: int = 0,
+        queue_wait_seconds: float = 90.0,
+        daily_budget_cny: float | Decimal | None = None,
+        budget_timezone: str = "Asia/Shanghai",
     ) -> None:
         self.store = store
         self.artifacts = artifacts or SessionArtifacts()
         self.task_logger = task_logger or JsonlTaskLogger()
         self.cost_ledger = cost_ledger
         self.agent_factory = agent_factory
+        self._execution_gate = _ExecutionGate(
+            max_concurrent_tasks,
+            max_queued_tasks,
+            queue_wait_seconds,
+        )
+        self._session_locks = tuple(threading.Lock() for _ in range(64))
+        budget = Decimal(str(daily_budget_cny or 0))
+        self._daily_budget_micros = max(0, int(budget * Decimal("1000000")))
+        self._budget_timezone = ZoneInfo(budget_timezone)
 
     def handle_image(
         self,
@@ -51,14 +122,18 @@ class AgentSessionRuntime:
         progress: ProgressReporter | None = None,
     ) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
-        self._purge_expired()
-        persisted_image = self.artifacts.persist_image(clean_session_id, image_path)
-        return self._run(
-            clean_session_id,
-            "image",
-            lambda agent: agent.handle_image(persisted_image),
-            progress=progress,
-        )
+
+        def execute() -> AgentResponse:
+            self.purge_expired()
+            persisted_image = self.artifacts.persist_image(clean_session_id, image_path)
+            return self._run(
+                clean_session_id,
+                "image",
+                lambda agent: agent.handle_image(persisted_image),
+                progress=progress,
+            )
+
+        return self._admit(clean_session_id, execute, progress=progress)
 
     def handle_text(
         self,
@@ -67,17 +142,30 @@ class AgentSessionRuntime:
         *,
         progress: ProgressReporter | None = None,
     ) -> AgentResponse:
-        return self._run(session_id, "text", lambda agent: agent.handle_text(text), progress=progress)
+        clean_session_id = self._clean_session_id(session_id)
+        return self._admit(
+            clean_session_id,
+            lambda: self._run(
+                clean_session_id,
+                "text",
+                lambda agent: agent.handle_text(text),
+                progress=progress,
+            ),
+            progress=progress,
+        )
 
     def clear(self, session_id: str) -> None:
         """Explicitly start a fresh conversation and remove its temporary files."""
         clean_session_id = self._clean_session_id(session_id)
-        self.store.clear(clean_session_id)
-        self.artifacts.clear_session(clean_session_id)
+        lock = self._session_locks[hash(clean_session_id) % len(self._session_locks)]
+        with lock:
+            self.store.clear(clean_session_id)
+            self.artifacts.clear_session(clean_session_id)
 
     def current_image_path(self, session_id: str) -> Path | None:
         """Return the current persisted upload for a live session."""
         clean_session_id = self._clean_session_id(session_id)
+        self.purge_expired()
         state = self.store.load(clean_session_id)
         if state is None or not state.current_image_path:
             return None
@@ -87,7 +175,7 @@ class AgentSessionRuntime:
     def session_snapshot(self, session_id: str) -> dict[str, object]:
         """Return the small, non-sensitive state contract needed by the web client."""
         clean_session_id = self._clean_session_id(session_id)
-        self._purge_expired()
+        self.purge_expired()
         state = self.store.load(clean_session_id)
         if state is None:
             return {
@@ -143,7 +231,7 @@ class AgentSessionRuntime:
         progress: ProgressReporter | None = None,
     ) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
-        self._purge_expired()
+        self.purge_expired()
         state = self.store.load(clean_session_id) or AgentState(session_id=clean_session_id)
         phase_before = state.phase
         started_at = datetime.now(UTC)
@@ -216,8 +304,33 @@ class AgentSessionRuntime:
             ),
         )
 
-    def _purge_expired(self) -> None:
+    def purge_expired(self) -> None:
+        """Remove expired state and its session-scoped files."""
         self.artifacts.clear_sessions(self.store.purge_expired())
+
+    def _admit(
+        self,
+        session_id: str,
+        execute: Callable[[], AgentResponse],
+        *,
+        progress: ProgressReporter | None = None,
+    ) -> AgentResponse:
+        with self._execution_gate.enter(progress):
+            lock = self._session_locks[hash(session_id) % len(self._session_locks)]
+            with lock:
+                self._check_daily_budget()
+                return execute()
+
+    def _check_daily_budget(self) -> None:
+        if self._daily_budget_micros <= 0 or self.cost_ledger is None:
+            return
+        now = datetime.now(self._budget_timezone)
+        local_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        spent = self.cost_ledger.estimated_cost_micros_since(
+            local_start.astimezone(UTC).isoformat()
+        )
+        if spent >= self._daily_budget_micros:
+            raise AgentBudgetExceededError("今日服务额度已用完，请明天再试。")
 
     def _write_task_log(
         self,
