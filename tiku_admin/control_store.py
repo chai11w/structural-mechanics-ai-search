@@ -47,6 +47,49 @@ class BudgetLimits:
     identity_daily_micros: int
 
 
+@dataclass(frozen=True)
+class LegacyImportConflict:
+    kind: str
+    invite_id: str
+    existing_invite_id: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class LegacyImportReport:
+    source_count: int
+    existing_count: int
+    insert_count: int
+    unchanged_count: int
+    cookie_secret_action: str
+    conflicts: tuple[LegacyImportConflict, ...] = ()
+
+    @property
+    def can_apply(self) -> bool:
+        return not self.conflicts
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "source_count": self.source_count,
+            "existing_count": self.existing_count,
+            "insert_count": self.insert_count,
+            "unchanged_count": self.unchanged_count,
+            "cookie_secret_action": self.cookie_secret_action,
+            "conflict_count": len(self.conflicts),
+            "can_apply": self.can_apply,
+            "conflicts": [conflict.to_dict() for conflict in self.conflicts],
+        }
+
+
+@dataclass(frozen=True)
+class _LegacyInvitationEntry:
+    invite_id: str
+    code_hash: str
+    status: str
+
+
 class SQLiteControlStore:
     """Small shared SQLite control plane read by 8790 and written by 8795."""
 
@@ -376,27 +419,32 @@ class SQLiteControlStore:
             for row in rows
         ]
 
-    def import_legacy_config(self, config_path: str | Path, *, actor: str = "migration") -> int:
-        data = json.loads(Path(config_path).read_text(encoding="utf-8"))
-        invitations = data.get("invitations")
-        if int(data.get("version", 0)) != 1 or not isinstance(invitations, list):
-            raise ValueError("invalid legacy invitation configuration")
-        secret = _decode_secret(str(data.get("cookie_secret") or ""))
+    def preflight_legacy_config(self, config_path: str | Path) -> LegacyImportReport:
+        entries, secret = _load_legacy_config(config_path)
+        with self._connect() as connection:
+            return self._legacy_import_report(connection, entries, secret)
+
+    def import_legacy_config(
+        self, config_path: str | Path, *, actor: str = "migration"
+    ) -> LegacyImportReport:
+        entries, secret = _load_legacy_config(config_path)
         now = _utc_now()
-        imported = 0
         with self._lock, self._connect() as connection:
-            existing = int(connection.execute("SELECT COUNT(*) FROM invitations").fetchone()[0])
-            if existing:
-                raise ValueError("refusing to import over existing invitations")
-            connection.execute(
-                "UPDATE admin_meta SET meta_value = ? WHERE meta_key = 'invite_cookie_secret'",
-                (_encode_secret(secret),),
-            )
-            for item in invitations:
-                invite_id = str(item.get("id") or "").strip()
-                code_hash = str(item.get("code_hash") or "").strip().lower()
-                if not invite_id or len(code_hash) != 64:
-                    raise ValueError("invalid legacy invitation entry")
+            report = self._legacy_import_report(connection, entries, secret)
+            if not report.can_apply:
+                raise ValueError("legacy invitation import has conflicts")
+            if report.cookie_secret_action == "replace_with_legacy":
+                connection.execute(
+                    "UPDATE admin_meta SET meta_value = ? WHERE meta_key = 'invite_cookie_secret'",
+                    (_encode_secret(secret),),
+                )
+            existing_ids = {
+                str(row["invite_id"])
+                for row in connection.execute("SELECT invite_id FROM invitations")
+            }
+            for entry in entries:
+                if entry.invite_id in existing_ids:
+                    continue
                 connection.execute(
                     """
                     INSERT INTO invitations (
@@ -404,26 +452,71 @@ class SQLiteControlStore:
                         expires_at, auth_version, created_at, updated_at, last_used_at
                     ) VALUES (?, ?, ?, ?, NULL, '', 1, ?, ?, '')
                     """,
-                    (
-                        invite_id,
-                        code_hash,
-                        invite_id,
-                        "enabled" if item.get("enabled", True) is True else "disabled",
-                        now,
-                        now,
-                    ),
+                    (entry.invite_id, entry.code_hash, entry.invite_id, entry.status, now, now),
                 )
-                imported += 1
-            self._write_audit(
-                connection,
-                actor,
-                "invitation.import",
-                "invitation",
-                "legacy-config",
-                {},
-                {"count": imported},
-            )
-        return imported
+            if report.insert_count or report.cookie_secret_action == "replace_with_legacy":
+                self._write_audit(
+                    connection,
+                    actor,
+                    "invitation.import",
+                    "invitation",
+                    "legacy-config",
+                    {},
+                    {
+                        "inserted": report.insert_count,
+                        "unchanged": report.unchanged_count,
+                        "cookie_secret_action": report.cookie_secret_action,
+                    },
+                )
+        return report
+
+    def _legacy_import_report(
+        self,
+        connection: sqlite3.Connection,
+        entries: tuple[_LegacyInvitationEntry, ...],
+        secret: bytes,
+    ) -> LegacyImportReport:
+        rows = connection.execute("SELECT invite_id, code_hash FROM invitations").fetchall()
+        by_id = {str(row["invite_id"]): str(row["code_hash"]) for row in rows}
+        by_hash = {str(row["code_hash"]): str(row["invite_id"]) for row in rows}
+        insert_count = 0
+        unchanged_count = 0
+        conflicts: list[LegacyImportConflict] = []
+        for entry in entries:
+            existing_hash = by_id.get(entry.invite_id)
+            existing_owner = by_hash.get(entry.code_hash)
+            if existing_hash is not None:
+                if hmac.compare_digest(existing_hash, entry.code_hash):
+                    unchanged_count += 1
+                else:
+                    conflicts.append(
+                        LegacyImportConflict("invite_id_hash_mismatch", entry.invite_id)
+                    )
+                continue
+            if existing_owner is not None:
+                conflicts.append(
+                    LegacyImportConflict(
+                        "code_hash_owned_by_other_invitation",
+                        entry.invite_id,
+                        existing_owner,
+                    )
+                )
+                continue
+            insert_count += 1
+        current_secret = _decode_secret(self._meta_from_connection(connection, "invite_cookie_secret"))
+        secret_action = (
+            "unchanged"
+            if hmac.compare_digest(current_secret, secret)
+            else "replace_with_legacy"
+        )
+        return LegacyImportReport(
+            source_count=len(entries),
+            existing_count=len(rows),
+            insert_count=insert_count,
+            unchanged_count=unchanged_count,
+            cookie_secret_action=secret_action,
+            conflicts=tuple(conflicts),
+        )
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -499,9 +592,13 @@ class SQLiteControlStore:
 
     def _meta(self, key: str) -> str:
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT meta_value FROM admin_meta WHERE meta_key = ?", (key,)
-            ).fetchone()
+            return self._meta_from_connection(connection, key)
+
+    @staticmethod
+    def _meta_from_connection(connection: sqlite3.Connection, key: str) -> str:
+        row = connection.execute(
+            "SELECT meta_value FROM admin_meta WHERE meta_key = ?", (key,)
+        ).fetchone()
         if row is None:
             raise ValueError(f"missing control metadata: {key}")
         return str(row[0])
@@ -599,6 +696,51 @@ def _record(row: sqlite3.Row) -> InvitationRecord:
 
 def _public_invitation(row: sqlite3.Row) -> dict[str, object]:
     return _record(row).to_dict()
+
+
+def _load_legacy_config(
+    config_path: str | Path,
+) -> tuple[tuple[_LegacyInvitationEntry, ...], bytes]:
+    try:
+        data = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid legacy invitation configuration") from exc
+    if not isinstance(data, dict):
+        raise ValueError("invalid legacy invitation configuration")
+    invitations = data.get("invitations")
+    if int(data.get("version", 0)) != 1 or not isinstance(invitations, list) or not invitations:
+        raise ValueError("invalid legacy invitation configuration")
+    secret = _decode_secret(str(data.get("cookie_secret") or ""))
+    if len(secret) < 32:
+        raise ValueError("legacy invitation cookie secret is too short")
+    entries: list[_LegacyInvitationEntry] = []
+    seen_ids: set[str] = set()
+    seen_hashes: set[str] = set()
+    for item in invitations:
+        if not isinstance(item, dict):
+            raise ValueError("invalid legacy invitation entry")
+        invite_id = str(item.get("id") or "").strip()
+        code_hash = str(item.get("code_hash") or "").strip().lower()
+        if (
+            not invite_id
+            or len(code_hash) != 64
+            or any(character not in "0123456789abcdef" for character in code_hash)
+        ):
+            raise ValueError("invalid legacy invitation entry")
+        if invite_id in seen_ids:
+            raise ValueError("duplicate legacy invitation id")
+        if code_hash in seen_hashes:
+            raise ValueError("duplicate legacy invitation code hash")
+        seen_ids.add(invite_id)
+        seen_hashes.add(code_hash)
+        entries.append(
+            _LegacyInvitationEntry(
+                invite_id=invite_id,
+                code_hash=code_hash,
+                status="enabled" if item.get("enabled", True) is True else "disabled",
+            )
+        )
+    return tuple(entries), secret
 
 
 def _clean_label(value: str) -> str:

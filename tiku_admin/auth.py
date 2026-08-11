@@ -120,7 +120,13 @@ class SQLiteInviteAccess:
             ).digest()
             if not hmac.compare_digest(expected, _decode(supplied_signature)):
                 return None
-            invite_id, version_text, expires_text = _decode(encoded).decode("utf-8").rsplit(":", 2)
+            payload = _decode(encoded).decode("utf-8")
+            parts = payload.rsplit(":", 2)
+            if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+                invite_id, version_text, expires_text = parts
+            else:
+                invite_id, expires_text = payload.rsplit(":", 1)
+                version_text = "1"
             if int(expires_text) < int(now if now is not None else time.time()):
                 return None
             record = self.store.active_invitation(invite_id, int(version_text))

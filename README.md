@@ -64,20 +64,29 @@ python -B scripts/run_tiku_admin.py --port 8795 `
 
 首次只在服务所在电脑打开 `http://127.0.0.1:8795/setup` 设置独立管理员密码。需要长期本地运行时可使用 `scripts/tiku_admin_watchdog_8795.ps1`；控制库和后台日志位于 `.tmp_tiku_admin_8795/`，不得提交。
 
-当前 8790 在切换前仍使用原哈希邀请码配置，因此后台中的邀请码和额度修改不会自动影响正在运行的 8790。完成验收后，应先把原哈希配置导入控制库，再在维护窗口让 8790 改用同一个控制库；这是一次独立的受控迁移，不是把后台部署进 8790：
+当前 8790 在切换前仍使用原哈希邀请码配置，因此后台中的邀请码和额度修改不会自动影响正在运行的 8790。完成验收后，应先预检原哈希配置与控制库是否存在 ID/哈希冲突；默认命令只输出计数和冲突、不写数据库。确认后显式添加 `--apply-import`，它会保留后台已经创建的邀请码，只补入缺失的旧邀请码，并迁移旧 Cookie 签名密钥。导入可重复执行，不会重复创建记录：
 
 ```powershell
 python -B scripts/manage_tiku_admin.py `
   --control-db .tmp_tiku_admin_8795/control.sqlite3 `
   --import-invites <原哈希邀请码配置路径>
 
+python -B scripts/manage_tiku_admin.py `
+  --control-db .tmp_tiku_admin_8795/control.sqlite3 `
+  --import-invites <原哈希邀请码配置路径> `
+  --apply-import
+```
+
+导入完成后，再选择维护窗口让 8790 改用同一个控制库；这是认证与额度数据源的受控迁移，不是把后台部署进 8790：
+
+```powershell
 python -B scripts/run_tiku_agent_demo.py --port 8790 `
   --runtime-dir .tmp_tiku_agent_v2_prod_8790 `
   --max-concurrent-tasks 1 --max-queued-tasks 2 --queue-wait-seconds 55 `
   --control-db .tmp_tiku_admin_8795/control.sqlite3
 ```
 
-切换到控制库后，8790 会在每次请求前重新读取邀请码状态和全站/单码额度；停用或重置邀请码会使旧登录状态失效。不要同时传入旧的 `--invite-config` 或静态费用上限参数。
+切换到控制库后，8790 会在每次请求前重新读取邀请码状态和全站/单码额度；导入时保留的旧 Cookie 可继续使用，之后停用或重置邀请码会使对应旧登录状态失效。不要同时传入旧的 `--invite-config` 或静态费用上限参数。
 
 查看8790最近7天费用：
 

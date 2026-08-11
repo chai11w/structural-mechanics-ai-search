@@ -1,20 +1,28 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+import io
+import json
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 
+from scripts import manage_tiku_admin
 from tiku_admin.app import create_admin_app
 from tiku_admin.auth import SQLiteInviteAccess
 from tiku_admin.control_store import SQLiteControlStore, cny_to_micros
 from tiku_admin.reporting import AdminReporter
 from tiku_agent.feedback_store import SQLiteFeedbackStore
+from tiku_agent.invite_access import InviteAccess, build_invitation_config
 
 
 class TikuAdminTest(unittest.TestCase):
@@ -61,6 +69,97 @@ class TikuAdminTest(unittest.TestCase):
         self.assertEqual(values["global_daily_budget_micros"], 42_500_000)
         self.assertEqual(self.control.settings()["feedback_retention_days"], 45)
         self.assertEqual(self.control.list_audit()[0]["action"], "settings.update")
+
+    def test_legacy_import_merges_with_existing_invites_and_preserves_old_cookie(self):
+        current, current_code = self.control.create_invitation(label="后台新邀请码")
+        legacy_data, legacy_codes = build_invitation_config(2)
+        legacy_path = self.root / "legacy_invites.json"
+        legacy_path.write_text(json.dumps(legacy_data), encoding="utf-8")
+        legacy_access = InviteAccess(legacy_path, auth_max_age_seconds=60)
+        legacy_identity = legacy_access.authenticate_code(legacy_codes[0][1])
+        legacy_cookie = legacy_access.issue_cookie(legacy_identity, now=100)
+
+        preflight = self.control.preflight_legacy_config(legacy_path)
+        self.assertTrue(preflight.can_apply)
+        self.assertEqual(preflight.existing_count, 1)
+        self.assertEqual(preflight.insert_count, 2)
+        self.assertEqual(preflight.cookie_secret_action, "replace_with_legacy")
+
+        applied = self.control.import_legacy_config(legacy_path)
+        self.assertEqual(applied.insert_count, 2)
+        self.assertEqual(len(self.control.list_invitations(include_archived=True)), 3)
+        access = SQLiteInviteAccess(self.control, auth_max_age_seconds=60)
+        self.assertEqual(access.authenticate_code(current_code).invite_id, current.invite_id)
+        self.assertEqual(
+            access.authenticate_code(legacy_codes[0][1]).invite_id,
+            legacy_codes[0][0],
+        )
+        self.assertEqual(access.verify_cookie(legacy_cookie, now=120), legacy_identity)
+
+        repeated = self.control.import_legacy_config(legacy_path)
+        self.assertEqual(repeated.insert_count, 0)
+        self.assertEqual(repeated.unchanged_count, 2)
+        self.assertEqual(repeated.cookie_secret_action, "unchanged")
+        self.assertEqual(len(self.control.list_invitations(include_archived=True)), 3)
+
+        self.control.set_invitation_status(legacy_identity.invite_id, "disabled")
+        self.control.import_legacy_config(legacy_path)
+        self.assertEqual(self.control.get_invitation(legacy_identity.invite_id).status, "disabled")
+        self.assertIsNone(access.verify_cookie(legacy_cookie, now=120))
+
+    def test_legacy_import_reports_conflicts_without_mutating_control_store(self):
+        current, current_code = self.control.create_invitation(label="已有邀请码")
+        original_secret = self.control.invite_cookie_secret
+        legacy_data, _legacy_codes = build_invitation_config(1)
+        legacy_data["invitations"] = [
+            {
+                "id": current.invite_id,
+                "code_hash": sha256(b"different-code").hexdigest(),
+                "enabled": True,
+            },
+            {
+                "id": "different-invite-id",
+                "code_hash": sha256(current_code.encode("utf-8")).hexdigest(),
+                "enabled": True,
+            },
+        ]
+        legacy_path = self.root / "conflicting_legacy_invites.json"
+        legacy_path.write_text(json.dumps(legacy_data), encoding="utf-8")
+
+        report = self.control.preflight_legacy_config(legacy_path)
+        self.assertFalse(report.can_apply)
+        self.assertEqual(report.insert_count, 0)
+        self.assertEqual(
+            {conflict.kind for conflict in report.conflicts},
+            {"invite_id_hash_mismatch", "code_hash_owned_by_other_invitation"},
+        )
+        with self.assertRaisesRegex(ValueError, "has conflicts"):
+            self.control.import_legacy_config(legacy_path)
+        self.assertEqual(self.control.invite_cookie_secret, original_secret)
+        self.assertEqual(len(self.control.list_invitations(include_archived=True)), 1)
+
+    def test_manage_command_import_is_dry_run_unless_apply_is_explicit(self):
+        self.control.initialize_admin("a-secure-admin-password")
+        original_secret = self.control.invite_cookie_secret
+        legacy_data, _legacy_codes = build_invitation_config(1)
+        legacy_path = self.root / "legacy_invites.json"
+        legacy_path.write_text(json.dumps(legacy_data), encoding="utf-8")
+        arguments = [
+            "manage_tiku_admin.py",
+            "--control-db",
+            str(self.control.path),
+            "--import-invites",
+            str(legacy_path),
+        ]
+
+        output = io.StringIO()
+        with patch.object(sys, "argv", arguments), redirect_stdout(output):
+            result = manage_tiku_admin.main()
+
+        self.assertEqual(result, 0)
+        self.assertIn("no changes written", output.getvalue())
+        self.assertEqual(self.control.invite_cookie_secret, original_secret)
+        self.assertEqual(self.control.list_invitations(include_archived=True), [])
 
     def test_feedback_case_copies_visible_media_and_can_be_reviewed_and_purged(self):
         source = self.root / "question.png"
