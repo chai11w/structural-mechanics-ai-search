@@ -6,7 +6,8 @@ param(
     [int]$QueueWaitSeconds = 55,
     [double]$DailyBudgetCny = 0,
     [double]$PerInviteDailyBudgetCny = 0,
-    [string]$InviteConfig
+    [string]$InviteConfig,
+    [string]$ControlDb
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,11 +21,23 @@ if (-not $RuntimeDir) {
 if ($InviteConfig -and -not [System.IO.Path]::IsPathRooted($InviteConfig)) {
     $InviteConfig = Join-Path $ProjectDir $InviteConfig
 }
+if ($ControlDb -and -not [System.IO.Path]::IsPathRooted($ControlDb)) {
+    $ControlDb = Join-Path $ProjectDir $ControlDb
+}
+if ($ControlDb -and $InviteConfig) {
+    throw "Use either -ControlDb or -InviteConfig, not both."
+}
+if ($ControlDb -and ($DailyBudgetCny -gt 0 -or $PerInviteDailyBudgetCny -gt 0)) {
+    throw "ControlDb provides dynamic budgets; do not also set static budget arguments."
+}
 if ($PerInviteDailyBudgetCny -gt 0 -and -not $InviteConfig) {
     throw "Per-invitation budget requires -InviteConfig."
 }
 if ($InviteConfig -and -not (Test-Path -LiteralPath $InviteConfig -PathType Leaf)) {
     throw "Invitation config not found: $InviteConfig"
+}
+if ($ControlDb -and -not (Test-Path -LiteralPath $ControlDb -PathType Leaf)) {
+    throw "Administrator control database not found: $ControlDb"
 }
 $LogDir = $RuntimeDir
 $StatusFile = Join-Path $LogDir "watchdog_8790.status"
@@ -87,6 +100,9 @@ function Start-Bot {
     }
     if ($InviteConfig) {
         $arguments += @("--invite-config", "$InviteConfig")
+    }
+    if ($ControlDb) {
+        $arguments += @("--control-db", "$ControlDb")
     }
     $process = Start-Process python `
         -ArgumentList $arguments `

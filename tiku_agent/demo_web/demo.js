@@ -147,6 +147,22 @@ function closeLightbox() {
   focusBeforeModal?.focus();
 }
 
+function feedbackConversation(messageId) {
+  const target = history.findIndex((item) => item.messageId === messageId);
+  const visible = target >= 0 ? history.slice(0, target + 1) : history.slice();
+  return visible.map((item) => ({
+    message: String(item.message || ''),
+    me: Boolean(item.me),
+    images: (item.images || []).filter(isPersistentImage),
+    imageAlt: String(item.imageAlt || '题目图片'),
+    intent: String(item.intent || ''),
+    variant: String(item.variant || ''),
+    taskRevision: Number(item.taskRevision || 0),
+    messageId: String(item.messageId || ''),
+    createdAt: Number(item.createdAt || 0),
+  }));
+}
+
 function createMessageId() {
   if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID().replaceAll('-', '');
   return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
@@ -277,6 +293,7 @@ async function submitFeedback() {
       rating: context.rating,
       tags: Array.from(context.tags),
       detail: feedbackDetail.value.trim(),
+      conversation: feedbackConversation(context.item.messageId),
     };
     await request('/api/feedback', {
       method: 'POST',
@@ -380,12 +397,13 @@ function createMediaCard(url, index, item) {
 }
 
 function addMessage(item, persist = true) {
+  item = { ...item, createdAt: Number(item.createdAt || Date.now()) };
   const feedbackEligible = !item.me && !item.variant;
   if (feedbackEligible) {
     item = {
       ...item,
       messageId: item.messageId || createMessageId(),
-      createdAt: Number(item.createdAt || Date.now()),
+      createdAt: item.createdAt,
     };
   }
   empty.hidden = true;

@@ -2,6 +2,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import threading
+from types import SimpleNamespace
 from uuid import uuid4
 
 from tiku_agent.agent import AgentResponse, AgentToolbox, TikuSearchAgent
@@ -308,6 +309,47 @@ class AgentSessionRuntimeTest(unittest.TestCase):
             "fresh-session", "你好", identity_key="invite-fresh"
         )
         self.assertIsNotNone(response)
+
+    def test_dynamic_budget_policy_is_reloaded_for_every_request(self):
+        class SpentLedger:
+            def estimated_cost_micros_since(
+                self, _started_at: str, *, identity_key: str | None = None
+            ) -> int:
+                return 1_000_000
+
+        class MutablePolicy:
+            global_micros = 1_000_000
+            identity_micros = 2_000_000
+
+            def budget_limits_for(self, _identity_key: str):
+                return SimpleNamespace(
+                    global_daily_micros=self.global_micros,
+                    identity_daily_micros=self.identity_micros,
+                )
+
+        policy = MutablePolicy()
+        runtime = AgentSessionRuntime(
+            self.store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            cost_ledger=SpentLedger(),
+            budget_policy=policy,
+            agent_factory=lambda state: TikuSearchAgent(
+                state=state,
+                tools=FakeTools().toolbox(),
+                use_llm_intent=False,
+            ),
+        )
+
+        with self.assertRaisesRegex(AgentBudgetExceededError, "今日服务"):
+            runtime.handle_text("dynamic-budget", "你好", identity_key="invite-a")
+        policy.global_micros = 2_000_000
+        self.assertIsNotNone(
+            runtime.handle_text("dynamic-budget", "你好", identity_key="invite-a")
+        )
+        policy.identity_micros = 1_000_000
+        with self.assertRaisesRegex(AgentBudgetExceededError, "该邀请码"):
+            runtime.handle_text("dynamic-budget-2", "你好", identity_key="invite-a")
 
     def test_current_image_lookup_purges_expired_session_files(self):
         database_path = RUNTIME_DIR / f"session_expiry_test_{uuid4().hex}.db"

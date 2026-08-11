@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from tiku_agent.agent import AgentResponse
-from tiku_agent.fastapi_demo import MAX_IMAGE_BYTES, SESSION_COOKIE, _SCRIPT, _STYLE, _write_incoming_image, create_app
+from tiku_agent.fastapi_demo import MAX_FEEDBACK_BYTES, MAX_IMAGE_BYTES, SESSION_COOKIE, _SCRIPT, _STYLE, _write_incoming_image, create_app
 from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.invite_access import InviteAccess, build_invitation_config
 from tiku_agent.session_runtime import AgentBudgetExceededError, AgentRuntimeBusyError
@@ -88,6 +88,53 @@ class FakeRuntime:
 
 
 class FastApiDemoTest(unittest.TestCase):
+    def test_feedback_submission_captures_visible_conversation_and_session_media(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        test_dir = runtime_dir / f"feedback_case_{uuid4().hex}"
+        test_dir.mkdir(parents=True)
+        self.addCleanup(lambda: shutil.rmtree(test_dir, ignore_errors=True))
+        image_path = test_dir / "image.jpg"
+        Image.new("RGB", (8, 8), "white").save(image_path)
+        runtime = FakeRuntime(image_path)
+        store = SQLiteFeedbackStore(test_dir / "feedback.sqlite3")
+        client = TestClient(create_app(runtime=runtime, feedback_store=store))
+
+        upload_bytes = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(upload_bytes, format="PNG")
+        uploaded = client.post(
+            "/api/image",
+            files={"file": ("question.png", upload_bytes.getvalue(), "image/png")},
+        )
+        self.assertEqual(uploaded.status_code, 200)
+        uploaded_url = uploaded.json()["uploaded_image"]
+        response = client.post("/api/feedback", json={
+            "message_id": "message_case_123",
+            "rating": "negative",
+            "tags": ["not_found"],
+            "detail": "没有合适候选",
+            "conversation": [
+                {
+                    "me": True,
+                    "message": "我发了一张题图。",
+                    "images": [uploaded_url],
+                    "createdAt": 1000,
+                },
+                {
+                    "me": False,
+                    "message": "我正在帮你找。",
+                    "messageId": "message_case_123",
+                    "createdAt": 2000,
+                },
+            ],
+        })
+
+        self.assertEqual(response.status_code, 200, response.text)
+        saved = store.list_feedback()[0]
+        self.assertEqual(saved.search_key, f"{saved.session_key}:1")
+        self.assertEqual(len(saved.conversation), 2)
+        media_name = saved.conversation[0]["images"][0]
+        self.assertTrue(store.resolve_case_media(saved.feedback_id, media_name).is_file())
+
     def test_message_feedback_is_private_bounded_and_upserted(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
         test_dir = runtime_dir / f"feedback_{uuid4().hex}"
@@ -147,7 +194,7 @@ class FastApiDemoTest(unittest.TestCase):
             400,
         )
         self.assertEqual(
-            client.post("/api/feedback", content=b"x" * 4097).status_code,
+            client.post("/api/feedback", content=b"x" * (MAX_FEEDBACK_BYTES + 1)).status_code,
             413,
         )
 
@@ -230,7 +277,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260811-feedback-cancel"', 'src="/assets/demo.js?v=20260811-feedback-cancel"',
+            'href="/assets/demo.css?v=20260811-feedback-cases"', 'src="/assets/demo.js?v=20260811-feedback-cases"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',

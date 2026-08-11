@@ -3,7 +3,8 @@ import shutil
 import unittest
 from uuid import uuid4
 
-from scripts.run_tiku_agent_demo import build_argument_parser, build_runtime
+from scripts.run_tiku_agent_demo import build_app, build_argument_parser, build_runtime
+from tiku_admin.control_store import SQLiteControlStore
 
 
 class MainlineLauncherTest(unittest.TestCase):
@@ -31,6 +32,7 @@ class MainlineLauncherTest(unittest.TestCase):
         self.assertIsNone(defaults.daily_budget_cny)
         self.assertIsNone(defaults.per_invite_daily_budget_cny)
         self.assertIsNone(defaults.invite_config)
+        self.assertIsNone(defaults.control_db)
 
         guarded = parser.parse_args([
             "--max-concurrent-tasks", "1",
@@ -46,6 +48,27 @@ class MainlineLauncherTest(unittest.TestCase):
         self.assertEqual(guarded.daily_budget_cny, 5.0)
         self.assertEqual(guarded.per_invite_daily_budget_cny, 3.0)
         self.assertEqual(guarded.invite_config, Path("invites.json"))
+
+        dynamic = parser.parse_args(["--control-db", "admin/control.sqlite3"])
+        self.assertEqual(dynamic.control_db, Path("admin/control.sqlite3"))
+
+    def test_dynamic_control_database_must_exist_and_replaces_static_guards(self):
+        root = Path(__file__).resolve().parents[1] / f".tmp_test_8790_{uuid4().hex}"
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        control_path = root / "admin" / "control.sqlite3"
+
+        with self.assertRaisesRegex(ValueError, "control database not found"):
+            build_app(root / "runtime", control_db=control_path)
+
+        SQLiteControlStore(control_path)
+        with self.assertRaisesRegex(ValueError, "either control_db or invite_config"):
+            build_app(
+                root / "runtime",
+                control_db=control_path,
+                invite_config=root / "invites.json",
+            )
+        with self.assertRaisesRegex(ValueError, "omit static budget arguments"):
+            build_app(root / "runtime", control_db=control_path, daily_budget_cny=30)
 
     def test_enabled_runtime_uses_model_only_for_safe_conversation(self):
         root = Path(__file__).resolve().parents[1] / f".tmp_test_8790_{uuid4().hex}"

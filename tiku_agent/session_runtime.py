@@ -8,7 +8,7 @@ from pathlib import Path
 from contextlib import contextmanager
 import threading
 import time
-from typing import Callable
+from typing import Any, Callable, Protocol
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -27,6 +27,10 @@ from tiku_shared.model_costs import (
 
 AgentFactory = Callable[[AgentState], TikuSearchAgent]
 ProgressReporter = Callable[[str, str], None]
+
+
+class BudgetPolicy(Protocol):
+    def budget_limits_for(self, identity_key: str) -> Any: ...
 
 
 class AgentRuntimeBusyError(RuntimeError):
@@ -99,6 +103,7 @@ class AgentSessionRuntime:
         daily_budget_cny: float | Decimal | None = None,
         per_identity_daily_budget_cny: float | Decimal | None = None,
         budget_timezone: str = "Asia/Shanghai",
+        budget_policy: BudgetPolicy | None = None,
     ) -> None:
         self.store = store
         self.artifacts = artifacts or SessionArtifacts()
@@ -118,6 +123,7 @@ class AgentSessionRuntime:
             0, int(identity_budget * Decimal("1000000"))
         )
         self._budget_timezone = ZoneInfo(budget_timezone)
+        self._budget_policy = budget_policy
 
     def handle_image(
         self,
@@ -197,6 +203,7 @@ class AgentSessionRuntime:
                 "task_revision": 0,
                 "candidate_generation": "",
                 "candidate_count": 0,
+                "chapter": "",
             }
         return {
             "session_valid": True,
@@ -205,6 +212,7 @@ class AgentSessionRuntime:
             "task_revision": state.task_revision,
             "candidate_generation": state.candidate_generation,
             "candidate_count": state.candidate_count,
+            "chapter": state.chapter,
         }
 
     def resolve_upload(self, session_id: str, filename: str) -> Path | None:
@@ -339,22 +347,28 @@ class AgentSessionRuntime:
     def _check_daily_budget(self, identity_key: str = "") -> None:
         if self.cost_ledger is None:
             return
+        global_budget_micros = self._daily_budget_micros
+        identity_budget_micros = self._per_identity_daily_budget_micros
+        if self._budget_policy is not None:
+            limits = self._budget_policy.budget_limits_for(str(identity_key).strip())
+            global_budget_micros = max(0, int(limits.global_daily_micros))
+            identity_budget_micros = max(0, int(limits.identity_daily_micros))
         now = datetime.now(self._budget_timezone)
         local_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         started_at = local_start.astimezone(UTC).isoformat()
-        if self._daily_budget_micros > 0 and self.cost_ledger.estimated_cost_micros_since(
+        if global_budget_micros > 0 and self.cost_ledger.estimated_cost_micros_since(
             started_at
-        ) >= self._daily_budget_micros:
+        ) >= global_budget_micros:
             raise AgentBudgetExceededError("今日服务额度已用完，请明天再试。")
         clean_identity = str(identity_key).strip()
-        if self._per_identity_daily_budget_micros <= 0:
+        if identity_budget_micros <= 0:
             return
         if not clean_identity:
             raise AgentBudgetExceededError("当前请求缺少有效邀请码，请重新登录。")
         spent = self.cost_ledger.estimated_cost_micros_since(
             started_at, identity_key=clean_identity
         )
-        if spent >= self._per_identity_daily_budget_micros:
+        if spent >= identity_budget_micros:
             raise AgentBudgetExceededError("该邀请码今日额度已用完，请明天再试。")
 
     def _write_task_log(

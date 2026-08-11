@@ -28,6 +28,8 @@ from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_log import JsonlTaskLogger
 from tiku_agent.tools import AgentToolConfig
+from tiku_admin.auth import SQLiteInviteAccess
+from tiku_admin.control_store import SQLiteControlStore
 from tiku_shared.model_costs import SQLiteModelCostLedger
 
 
@@ -45,6 +47,7 @@ def build_runtime(
     queue_wait_seconds: float = 90.0,
     daily_budget_cny: float | None = None,
     per_invite_daily_budget_cny: float | None = None,
+    control_store: SQLiteControlStore | None = None,
 ) -> AgentSessionRuntime:
     """Build the 8790 runtime with bounded safe answers enabled by default."""
     root = Path(runtime_dir).resolve()
@@ -81,6 +84,7 @@ def build_runtime(
         queue_wait_seconds=queue_wait_seconds,
         daily_budget_cny=daily_budget_cny,
         per_identity_daily_budget_cny=per_invite_daily_budget_cny,
+        budget_policy=control_store,
     )
 
 
@@ -97,8 +101,19 @@ def build_app(
     daily_budget_cny: float | None = None,
     per_invite_daily_budget_cny: float | None = None,
     invite_config: str | Path | None = None,
+    control_db: str | Path | None = None,
 ):
     root = Path(runtime_dir).resolve()
+    if control_db is not None and invite_config is not None:
+        raise ValueError("use either control_db or invite_config, not both")
+    if control_db is not None and (
+        daily_budget_cny is not None or per_invite_daily_budget_cny is not None
+    ):
+        raise ValueError("control_db provides dynamic budgets; omit static budget arguments")
+    control_path = Path(control_db).resolve() if control_db is not None else None
+    if control_path is not None and not control_path.is_file():
+        raise ValueError(f"control database not found: {control_path}")
+    control_store = SQLiteControlStore(control_path) if control_path is not None else None
     return create_app(
         runtime=runtime
         or build_runtime(
@@ -111,10 +126,20 @@ def build_app(
             queue_wait_seconds=queue_wait_seconds,
             daily_budget_cny=daily_budget_cny,
             per_invite_daily_budget_cny=per_invite_daily_budget_cny,
+            control_store=control_store,
         ),
         incoming_dir=root / "incoming",
-        invite_access=InviteAccess(invite_config) if invite_config else None,
+        invite_access=(
+            SQLiteInviteAccess(control_store)
+            if control_store is not None
+            else InviteAccess(invite_config) if invite_config else None
+        ),
         feedback_store=SQLiteFeedbackStore(root / "feedback.sqlite3"),
+        feedback_retention_days_provider=(
+            lambda: int(control_store.settings()["feedback_retention_days"])
+            if control_store is not None
+            else 30
+        ),
     )
 
 
@@ -155,6 +180,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--invite-config",
         type=Path,
         help="Hash-only invitation configuration; omit to disable the invitation gate",
+    )
+    parser.add_argument(
+        "--control-db",
+        type=Path,
+        help="Shared invitation and budget database managed by the 8795 console",
     )
     dimension_filter_group = parser.add_mutually_exclusive_group()
     dimension_filter_group.add_argument(
@@ -200,6 +230,7 @@ def main() -> int:
             daily_budget_cny=args.daily_budget_cny,
             per_invite_daily_budget_cny=args.per_invite_daily_budget_cny,
             invite_config=args.invite_config,
+            control_db=args.control_db,
         ),
         host=args.host,
         port=args.port,

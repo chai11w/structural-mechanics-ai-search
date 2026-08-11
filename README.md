@@ -50,6 +50,35 @@ python -B scripts/run_tiku_agent_demo.py --port 8790 `
 
 本地开发默认仍保持不限制并发且不启用费用上限，避免改变测试和单人调试语义。邀请用户前还必须在 8790 外层配置独立 Cloudflare Tunnel 和 Access 白名单；不得复用 8788 飞书隧道，也不得直接做路由器端口映射。
 
+### 独立管理后台（8795）
+
+管理员后台是独立服务，不部署到 8790，也不复用用户的邀请码登录状态。第一版提供管理员登录、今日搜题量和估算费用、每个邀请码的用量与额度、邀请码新增/停用/重置/归档、反馈筛选、完整对话详情、反馈处理备注及全站设置。邀请码明文只在创建或重置时显示一次；后台长期只保存哈希。反馈案例默认保留 30 天，包含用户当时可见的对话和题目/结果图片，不保存隐藏 Prompt、模型内部推理、密钥或本地路径。
+
+先在本机运行和验收，确认后再创建 `admin.<你的域名>` 子域名并把它反向代理到 8795；公网入口必须额外启用 Cloudflare Access。无需提前购买或创建新域名，也不要把 8795 直接暴露到公网：
+
+```powershell
+python -B scripts/run_tiku_admin.py --port 8795 `
+  --admin-runtime .tmp_tiku_admin_8795 `
+  --source-runtime .tmp_tiku_agent_v2_prod_8790
+```
+
+首次只在服务所在电脑打开 `http://127.0.0.1:8795/setup` 设置独立管理员密码。需要长期本地运行时可使用 `scripts/tiku_admin_watchdog_8795.ps1`；控制库和后台日志位于 `.tmp_tiku_admin_8795/`，不得提交。
+
+当前 8790 在切换前仍使用原哈希邀请码配置，因此后台中的邀请码和额度修改不会自动影响正在运行的 8790。完成验收后，应先把原哈希配置导入控制库，再在维护窗口让 8790 改用同一个控制库；这是一次独立的受控迁移，不是把后台部署进 8790：
+
+```powershell
+python -B scripts/manage_tiku_admin.py `
+  --control-db .tmp_tiku_admin_8795/control.sqlite3 `
+  --import-invites <原哈希邀请码配置路径>
+
+python -B scripts/run_tiku_agent_demo.py --port 8790 `
+  --runtime-dir .tmp_tiku_agent_v2_prod_8790 `
+  --max-concurrent-tasks 1 --max-queued-tasks 2 --queue-wait-seconds 55 `
+  --control-db .tmp_tiku_admin_8795/control.sqlite3
+```
+
+切换到控制库后，8790 会在每次请求前重新读取邀请码状态和全站/单码额度；停用或重置邀请码会使旧登录状态失效。不要同时传入旧的 `--invite-config` 或静态费用上限参数。
+
 查看8790最近7天费用：
 
 ```powershell

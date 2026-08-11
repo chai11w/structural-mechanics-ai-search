@@ -6,12 +6,14 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+import shutil
 import sqlite3
 from threading import Lock
+from typing import Callable
 from uuid import uuid4
 
 
-FEEDBACK_SCHEMA_VERSION = 1
+FEEDBACK_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,13 @@ class MessageFeedback:
     task_revision: int
     phase: str
     candidate_count: int
+    search_key: str
+    chapter: str
+    conversation: tuple[dict[str, object], ...]
+    review_status: str
+    admin_note: str
+    case_expires_at: str
+    case_purged_at: str
     created_at: str
     updated_at: str
 
@@ -34,8 +43,9 @@ class MessageFeedback:
 
 
 class SQLiteFeedbackStore:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, cases_root: str | Path | None = None) -> None:
         self.path = Path(path)
+        self.cases_root = Path(cases_root or self.path.with_name("feedback_cases")).resolve()
         self._lock = Lock()
 
     def upsert(
@@ -50,6 +60,11 @@ class SQLiteFeedbackStore:
         task_revision: int,
         phase: str,
         candidate_count: int,
+        search_key: str = "",
+        chapter: str = "",
+        conversation: list[dict[str, object]] | None = None,
+        media_resolver: Callable[[str], Path | None] | None = None,
+        retention_days: int = 30,
     ) -> MessageFeedback:
         now = datetime.now(UTC).isoformat()
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -59,7 +74,8 @@ class SQLiteFeedbackStore:
                 _create_schema(connection)
                 existing = connection.execute(
                     """
-                    SELECT feedback_id, created_at
+                    SELECT feedback_id, created_at, conversation_json, case_expires_at,
+                           case_purged_at, review_status, admin_note
                     FROM message_feedback
                     WHERE identity_key = ? AND session_key = ? AND message_id = ?
                     """,
@@ -67,13 +83,29 @@ class SQLiteFeedbackStore:
                 ).fetchone()
                 feedback_id = str(existing["feedback_id"]) if existing else uuid4().hex
                 created_at = str(existing["created_at"]) if existing else now
+                conversation_json = str(existing["conversation_json"]) if existing else "[]"
+                case_expires_at = str(existing["case_expires_at"]) if existing else ""
+                case_purged_at = str(existing["case_purged_at"]) if existing else ""
+                review_status = str(existing["review_status"]) if existing else "pending"
+                admin_note = str(existing["admin_note"]) if existing else ""
+                if conversation is not None:
+                    sanitized = self._capture_conversation(
+                        feedback_id, conversation, media_resolver=media_resolver
+                    )
+                    conversation_json = json.dumps(
+                        sanitized, ensure_ascii=False, separators=(",", ":")
+                    )
+                    expiry = datetime.now(UTC).timestamp() + max(1, min(365, int(retention_days))) * 86400
+                    case_expires_at = datetime.fromtimestamp(expiry, UTC).isoformat()
+                    case_purged_at = ""
                 connection.execute(
                     """
                     INSERT INTO message_feedback (
                         feedback_id, message_id, identity_key, session_key, rating,
                         tags_json, detail, task_revision, phase, candidate_count,
-                        created_at, updated_at, schema_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        search_key, chapter, conversation_json, review_status, admin_note,
+                        case_expires_at, case_purged_at, created_at, updated_at, schema_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(identity_key, session_key, message_id) DO UPDATE SET
                         rating = excluded.rating,
                         tags_json = excluded.tags_json,
@@ -81,6 +113,11 @@ class SQLiteFeedbackStore:
                         task_revision = excluded.task_revision,
                         phase = excluded.phase,
                         candidate_count = excluded.candidate_count,
+                        search_key = excluded.search_key,
+                        chapter = excluded.chapter,
+                        conversation_json = excluded.conversation_json,
+                        case_expires_at = excluded.case_expires_at,
+                        case_purged_at = excluded.case_purged_at,
                         updated_at = excluded.updated_at,
                         schema_version = excluded.schema_version
                     """,
@@ -95,6 +132,13 @@ class SQLiteFeedbackStore:
                         max(0, int(task_revision)),
                         phase,
                         max(0, int(candidate_count)),
+                        str(search_key).strip(),
+                        str(chapter).strip()[:80],
+                        conversation_json,
+                        review_status,
+                        admin_note,
+                        case_expires_at,
+                        case_purged_at,
                         created_at,
                         now,
                         FEEDBACK_SCHEMA_VERSION,
@@ -111,6 +155,13 @@ class SQLiteFeedbackStore:
             task_revision=max(0, int(task_revision)),
             phase=phase,
             candidate_count=max(0, int(candidate_count)),
+            search_key=str(search_key).strip(),
+            chapter=str(chapter).strip()[:80],
+            conversation=tuple(json.loads(conversation_json)),
+            review_status=review_status,
+            admin_note=admin_note,
+            case_expires_at=case_expires_at,
+            case_purged_at=case_purged_at,
             created_at=created_at,
             updated_at=now,
         )
@@ -125,23 +176,140 @@ class SQLiteFeedbackStore:
                 rows = connection.execute(
                     "SELECT * FROM message_feedback ORDER BY updated_at DESC"
                 ).fetchall()
-        return [
-            MessageFeedback(
-                feedback_id=str(row["feedback_id"]),
-                message_id=str(row["message_id"]),
-                identity_key=str(row["identity_key"]),
-                session_key=str(row["session_key"]),
-                rating=str(row["rating"]),
-                tags=tuple(json.loads(str(row["tags_json"]))),
-                detail=str(row["detail"]),
-                task_revision=int(row["task_revision"]),
-                phase=str(row["phase"]),
-                candidate_count=int(row["candidate_count"]),
-                created_at=str(row["created_at"]),
-                updated_at=str(row["updated_at"]),
+        return [_feedback_from_row(row) for row in rows]
+
+    def query_feedback(
+        self,
+        *,
+        rating: str = "",
+        identity_key: str = "",
+        chapter: str = "",
+        review_status: str = "",
+        tag: str = "",
+        created_from: str = "",
+        created_before: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[MessageFeedback], int]:
+        clauses: list[str] = []
+        parameters: list[object] = []
+        for column, value in (
+            ("rating", rating),
+            ("identity_key", identity_key),
+            ("chapter", chapter),
+            ("review_status", review_status),
+        ):
+            clean = str(value or "").strip()
+            if clean:
+                clauses.append(f"{column} = ?")
+                parameters.append(clean)
+        clean_tag = str(tag or "").strip()
+        if clean_tag:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM json_each(message_feedback.tags_json) "
+                "WHERE json_each.value = ?)"
             )
-            for row in rows
-        ]
+            parameters.append(clean_tag)
+        if str(created_from or "").strip():
+            clauses.append("created_at >= ?")
+            parameters.append(str(created_from).strip())
+        if str(created_before or "").strip():
+            clauses.append("created_at < ?")
+            parameters.append(str(created_before).strip())
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        safe_limit = min(100, max(1, int(limit)))
+        safe_offset = max(0, int(offset))
+        if not self.path.is_file():
+            return [], 0
+        with self._lock, sqlite3.connect(self.path) as connection:
+            connection.row_factory = sqlite3.Row
+            _create_schema(connection)
+            total = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM message_feedback {where}", parameters
+                ).fetchone()[0]
+            )
+            rows = connection.execute(
+                f"SELECT * FROM message_feedback {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                [*parameters, safe_limit, safe_offset],
+            ).fetchall()
+        return [_feedback_from_row(row) for row in rows], total
+
+    def get_feedback(self, feedback_id: str) -> MessageFeedback | None:
+        if not self.path.is_file():
+            return None
+        with self._lock, sqlite3.connect(self.path) as connection:
+            connection.row_factory = sqlite3.Row
+            _create_schema(connection)
+            row = connection.execute(
+                "SELECT * FROM message_feedback WHERE feedback_id = ?",
+                (str(feedback_id),),
+            ).fetchone()
+        return _feedback_from_row(row) if row else None
+
+    def update_review(
+        self, feedback_id: str, *, review_status: str, admin_note: str
+    ) -> MessageFeedback:
+        clean_status = str(review_status).strip()
+        if clean_status not in {"pending", "resolved", "no_action"}:
+            raise ValueError("invalid feedback review status")
+        clean_note = str(admin_note or "").strip()
+        if len(clean_note) > 2000:
+            raise ValueError("administrator note is too long")
+        with self._lock, sqlite3.connect(self.path) as connection:
+            connection.row_factory = sqlite3.Row
+            _create_schema(connection)
+            cursor = connection.execute(
+                """
+                UPDATE message_feedback
+                SET review_status = ?, admin_note = ?, updated_at = ?
+                WHERE feedback_id = ?
+                """,
+                (clean_status, clean_note, datetime.now(UTC).isoformat(), str(feedback_id)),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError("feedback not found")
+            row = connection.execute(
+                "SELECT * FROM message_feedback WHERE feedback_id = ?", (str(feedback_id),)
+            ).fetchone()
+        return _feedback_from_row(row)
+
+    def resolve_case_media(self, feedback_id: str, media_name: str) -> Path | None:
+        name = Path(str(media_name)).name
+        if name != str(media_name) or not name:
+            return None
+        case_dir = (self.cases_root / str(feedback_id)).resolve()
+        candidate = (case_dir / name).resolve()
+        return candidate if candidate.parent == case_dir and candidate.is_file() else None
+
+    def purge_expired_cases(self, *, now: datetime | None = None) -> int:
+        if not self.path.is_file():
+            return 0
+        cutoff = (now or datetime.now(UTC)).astimezone(UTC).isoformat()
+        purged = 0
+        with self._lock, sqlite3.connect(self.path) as connection:
+            connection.row_factory = sqlite3.Row
+            _create_schema(connection)
+            rows = connection.execute(
+                """
+                SELECT feedback_id FROM message_feedback
+                WHERE case_expires_at != '' AND case_expires_at <= ? AND case_purged_at = ''
+                """,
+                (cutoff,),
+            ).fetchall()
+            for row in rows:
+                feedback_id = str(row["feedback_id"])
+                self._clear_case(feedback_id)
+                connection.execute(
+                    """
+                    UPDATE message_feedback
+                    SET conversation_json = '[]', case_purged_at = ?, updated_at = ?
+                    WHERE feedback_id = ?
+                    """,
+                    (cutoff, cutoff, feedback_id),
+                )
+                purged += 1
+        return purged
 
     def delete(
         self,
@@ -152,9 +320,19 @@ class SQLiteFeedbackStore:
     ) -> bool:
         if not self.path.is_file():
             return False
+        feedback_id = ""
         with self._lock:
             with sqlite3.connect(self.path) as connection:
+                connection.row_factory = sqlite3.Row
                 _create_schema(connection)
+                row = connection.execute(
+                    """
+                    SELECT feedback_id FROM message_feedback
+                    WHERE identity_key = ? AND session_key = ? AND message_id = ?
+                    """,
+                    (identity_key, session_key, message_id),
+                ).fetchone()
+                feedback_id = str(row["feedback_id"]) if row else ""
                 cursor = connection.execute(
                     """
                     DELETE FROM message_feedback
@@ -162,8 +340,63 @@ class SQLiteFeedbackStore:
                     """,
                     (identity_key, session_key, message_id),
                 )
-                return cursor.rowcount > 0
+                removed = cursor.rowcount > 0
+        if removed and feedback_id:
+            self._clear_case(feedback_id)
+        return removed
 
+    def _capture_conversation(
+        self,
+        feedback_id: str,
+        conversation: list[dict[str, object]],
+        *,
+        media_resolver: Callable[[str], Path | None] | None,
+    ) -> list[dict[str, object]]:
+        if not isinstance(conversation, list) or len(conversation) > 50:
+            raise ValueError("conversation must contain no more than 50 messages")
+        self._clear_case(feedback_id)
+        case_dir = (self.cases_root / feedback_id).resolve()
+        if case_dir.parent != self.cases_root:
+            raise ValueError("invalid feedback case directory")
+        sanitized: list[dict[str, object]] = []
+        total_text = 0
+        for raw in conversation:
+            if not isinstance(raw, dict):
+                continue
+            text = str(raw.get("message") or "")[:5000]
+            total_text += len(text)
+            if total_text > 60_000:
+                raise ValueError("conversation text is too large")
+            images: list[str] = []
+            raw_images = raw.get("images") if isinstance(raw.get("images"), list) else []
+            for url in raw_images[:8]:
+                source = media_resolver(str(url)) if media_resolver is not None else None
+                if source is None or not source.is_file():
+                    continue
+                case_dir.mkdir(parents=True, exist_ok=True)
+                suffix = source.suffix.lower() if len(source.suffix) <= 8 else ".bin"
+                target = case_dir / f"{uuid4().hex}{suffix or '.bin'}"
+                shutil.copy2(source, target)
+                images.append(target.name)
+            sanitized.append({
+                "role": "user" if bool(raw.get("me")) else "assistant",
+                "message": text,
+                "images": images,
+                "image_alt": str(raw.get("imageAlt") or "题目图片")[:100],
+                "intent": str(raw.get("intent") or "")[:80],
+                "variant": str(raw.get("variant") or "")[:40],
+                "task_revision": max(0, int(raw.get("taskRevision") or 0)),
+                "message_id": str(raw.get("messageId") or "")[:80],
+                "created_at": max(0, int(raw.get("createdAt") or 0)),
+            })
+        return sanitized
+
+    def _clear_case(self, feedback_id: str) -> None:
+        target = (self.cases_root / str(feedback_id)).resolve()
+        if target.parent != self.cases_root:
+            raise ValueError("invalid feedback case directory")
+        if target.is_dir():
+            shutil.rmtree(target)
 
 def _create_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
@@ -179,6 +412,13 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             task_revision INTEGER NOT NULL,
             phase TEXT NOT NULL,
             candidate_count INTEGER NOT NULL,
+            search_key TEXT NOT NULL DEFAULT '',
+            chapter TEXT NOT NULL DEFAULT '',
+            conversation_json TEXT NOT NULL DEFAULT '[]',
+            review_status TEXT NOT NULL DEFAULT 'pending',
+            admin_note TEXT NOT NULL DEFAULT '',
+            case_expires_at TEXT NOT NULL DEFAULT '',
+            case_purged_at TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             schema_version INTEGER NOT NULL,
@@ -186,7 +426,50 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(message_feedback)")
+    }
+    migrations = {
+        "search_key": "TEXT NOT NULL DEFAULT ''",
+        "chapter": "TEXT NOT NULL DEFAULT ''",
+        "conversation_json": "TEXT NOT NULL DEFAULT '[]'",
+        "review_status": "TEXT NOT NULL DEFAULT 'pending'",
+        "admin_note": "TEXT NOT NULL DEFAULT ''",
+        "case_expires_at": "TEXT NOT NULL DEFAULT ''",
+        "case_purged_at": "TEXT NOT NULL DEFAULT ''",
+    }
+    for name, definition in migrations.items():
+        if name not in columns:
+            connection.execute(f"ALTER TABLE message_feedback ADD COLUMN {name} {definition}")
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_feedback_identity_updated "
         "ON message_feedback(identity_key, updated_at)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_feedback_review_updated "
+        "ON message_feedback(review_status, updated_at)"
+    )
+
+
+def _feedback_from_row(row: sqlite3.Row) -> MessageFeedback:
+    return MessageFeedback(
+        feedback_id=str(row["feedback_id"]),
+        message_id=str(row["message_id"]),
+        identity_key=str(row["identity_key"]),
+        session_key=str(row["session_key"]),
+        rating=str(row["rating"]),
+        tags=tuple(json.loads(str(row["tags_json"]))),
+        detail=str(row["detail"]),
+        task_revision=int(row["task_revision"]),
+        phase=str(row["phase"]),
+        candidate_count=int(row["candidate_count"]),
+        search_key=str(row["search_key"]),
+        chapter=str(row["chapter"]),
+        conversation=tuple(json.loads(str(row["conversation_json"]))),
+        review_status=str(row["review_status"]),
+        admin_note=str(row["admin_note"]),
+        case_expires_at=str(row["case_expires_at"]),
+        case_purged_at=str(row["case_purged_at"]),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
     )

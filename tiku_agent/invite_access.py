@@ -21,6 +21,7 @@ DEFAULT_AUTH_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 @dataclass(frozen=True)
 class InviteIdentity:
     invite_id: str
+    auth_version: int = 1
 
 
 class InviteAccess:

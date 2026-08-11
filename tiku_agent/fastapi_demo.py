@@ -45,6 +45,7 @@ SUPPORTED_IMAGE_FORMATS = {
 }
 GENERIC_CONTENT_TYPES = {"", "application/octet-stream"}
 FEEDBACK_MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+MAX_FEEDBACK_BYTES = 128 * 1024
 FEEDBACK_TAGS = {
     "positive": {
         "found_answer", "relevant_results", "clear_reply", "fast", "other",
@@ -79,6 +80,7 @@ def create_app(
     cleanup_interval_seconds: float = 300.0,
     invite_access: InviteAccess | None = None,
     feedback_store: SQLiteFeedbackStore | None = None,
+    feedback_retention_days_provider: Callable[[], int] | None = None,
 ) -> FastAPI:
     """Create a local-only demo app without any existing Feishu configuration."""
     session_cookie = str(session_cookie).strip()
@@ -230,11 +232,11 @@ def create_app(
             content_length = int(request.headers.get("content-length") or 0)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="invalid content length") from exc
-        if content_length > 4096:
+        if content_length > MAX_FEEDBACK_BYTES:
             raise HTTPException(status_code=413, detail="feedback is too large")
         try:
             raw_body = await request.body()
-            if len(raw_body) > 4096:
+            if len(raw_body) > MAX_FEEDBACK_BYTES:
                 raise HTTPException(status_code=413, detail="feedback is too large")
             payload = json.loads(raw_body)
         except HTTPException:
@@ -247,6 +249,7 @@ def create_app(
         rating = str(payload.get("rating") or "").strip().lower()
         raw_tags = payload.get("tags")
         detail = str(payload.get("detail") or "").strip()
+        conversation = payload.get("conversation")
         if not FEEDBACK_MESSAGE_ID_RE.fullmatch(message_id):
             raise HTTPException(status_code=400, detail="invalid message id")
         if rating not in FEEDBACK_TAGS:
@@ -258,22 +261,40 @@ def create_app(
             raise HTTPException(status_code=400, detail="invalid feedback tag")
         if len(detail) > 300:
             raise HTTPException(status_code=400, detail="feedback detail is too long")
+        if conversation is not None and not isinstance(conversation, list):
+            raise HTTPException(status_code=400, detail="invalid feedback conversation")
         session_id = str(request.cookies.get(session_cookie) or "").strip()
         if not session_id:
             raise HTTPException(status_code=400, detail="session is required")
         snapshot = runtime.session_snapshot(session_id)
         identity_key = _identity_key(request) or "local"
-        saved = feedback_store.upsert(
-            message_id=message_id,
-            identity_key=identity_key,
-            session_key=session_key(session_id),
-            rating=rating,
-            tags=tags,
-            detail=detail,
-            task_revision=int(snapshot.get("task_revision") or 0),
-            phase=str(snapshot.get("phase") or ""),
-            candidate_count=int(snapshot.get("candidate_count") or 0),
-        )
+        revision = int(snapshot.get("task_revision") or 0)
+        clean_session_key = session_key(session_id)
+        try:
+            saved = feedback_store.upsert(
+                message_id=message_id,
+                identity_key=identity_key,
+                session_key=clean_session_key,
+                rating=rating,
+                tags=tags,
+                detail=detail,
+                task_revision=revision,
+                phase=str(snapshot.get("phase") or ""),
+                candidate_count=int(snapshot.get("candidate_count") or 0),
+                search_key=f"{clean_session_key}:{revision}" if revision > 0 else "",
+                chapter=str(snapshot.get("chapter") or ""),
+                conversation=conversation,
+                media_resolver=lambda url: _resolve_feedback_media(
+                    runtime, session_id, url
+                ),
+                retention_days=(
+                    int(feedback_retention_days_provider())
+                    if feedback_retention_days_provider is not None
+                    else 30
+                ),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse({
             "ok": True,
             "feedback": {
@@ -488,6 +509,23 @@ def _session_id(request: Request, *, cookie_name: str = SESSION_COOKIE) -> str:
 def _identity_key(request: Request) -> str:
     identity = getattr(request.state, "invite_identity", None)
     return identity.invite_id if isinstance(identity, InviteIdentity) else ""
+
+
+def _resolve_feedback_media(
+    runtime: AgentSessionRuntime, session_id: str, url: str
+) -> Path | None:
+    clean = str(url or "").split("?", 1)[0]
+    for prefix, resolver in (
+        ("/api/upload/", runtime.resolve_upload),
+        ("/api/media/", runtime.resolve_media),
+    ):
+        if not clean.startswith(prefix):
+            continue
+        name = clean[len(prefix):]
+        if Path(name).name != name or not name:
+            return None
+        return resolver(session_id, name)
+    return None
 
 
 def _handle_text(
