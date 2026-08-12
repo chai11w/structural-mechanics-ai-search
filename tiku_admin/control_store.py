@@ -498,10 +498,13 @@ class SQLiteControlStore:
         require_status_match: bool = False,
     ) -> LegacyImportReport:
         rows = connection.execute(
-            "SELECT invite_id, code_hash, status FROM invitations"
+            "SELECT invite_id, code_hash, status, auth_version FROM invitations"
         ).fetchall()
         by_id = {str(row["invite_id"]): str(row["code_hash"]) for row in rows}
         status_by_id = {str(row["invite_id"]): str(row["status"]) for row in rows}
+        auth_version_by_id = {
+            str(row["invite_id"]): int(row["auth_version"]) for row in rows
+        }
         by_hash = {str(row["code_hash"]): str(row["invite_id"]) for row in rows}
         insert_count = 0
         unchanged_count = 0
@@ -517,6 +520,15 @@ class SQLiteControlStore:
                     ):
                         conflicts.append(
                             LegacyImportConflict("invitation_status_mismatch", entry.invite_id)
+                        )
+                    elif (
+                        require_status_match
+                        and auth_version_by_id[entry.invite_id] != 1
+                    ):
+                        conflicts.append(
+                            LegacyImportConflict(
+                                "invitation_auth_version_mismatch", entry.invite_id
+                            )
                         )
                     else:
                         unchanged_count += 1

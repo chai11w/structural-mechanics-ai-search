@@ -27,7 +27,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--require-status-match",
         action="store_true",
-        help="Reject existing invitation records whose status differs from the legacy config",
+        help="Reject existing records whose status or auth version differs from the legacy config",
     )
     return parser
 

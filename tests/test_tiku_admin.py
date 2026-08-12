@@ -116,8 +116,17 @@ class TikuAdminTest(unittest.TestCase):
             self.control.import_legacy_config(
                 legacy_path, require_status_match=True
             )
+        self.control.set_invitation_status(legacy_identity.invite_id, "enabled")
+        version_strict = self.control.preflight_legacy_config(
+            legacy_path, require_status_match=True
+        )
+        self.assertFalse(version_strict.can_apply)
+        self.assertEqual(
+            [conflict.kind for conflict in version_strict.conflicts],
+            ["invitation_auth_version_mismatch"],
+        )
         self.control.import_legacy_config(legacy_path)
-        self.assertEqual(self.control.get_invitation(legacy_identity.invite_id).status, "disabled")
+        self.assertEqual(self.control.get_invitation(legacy_identity.invite_id).status, "enabled")
         self.assertIsNone(access.verify_cookie(legacy_cookie, now=120))
 
     def test_legacy_import_reports_conflicts_without_mutating_control_store(self):
