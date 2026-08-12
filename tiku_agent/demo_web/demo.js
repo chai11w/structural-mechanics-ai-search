@@ -32,6 +32,10 @@ const feedbackSubmit = $('#feedback-submit');
 const TEXT_TIMEOUT_MS = 60000;
 const IMAGE_TIMEOUT_MS = 90000;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
+const IMAGE_TARGET_BYTES = 1024 * 1024;
+const IMAGE_MAX_DIMENSION = 2560;
+const IMAGE_FALLBACK_DIMENSION = 2048;
+const IMAGE_QUALITY_STEPS = [0.88, 0.82, 0.76, 0.70];
 const HISTORY_TTL_MS = 2 * 60 * 60 * 1000;
 const HISTORY_LIMIT = 50;
 const HISTORY_KEY = 'tiku-agent-current-chat-v2';
@@ -667,17 +671,29 @@ async function normalizeImage(selected, sourceUrl) {
   debugUploadMetadata('selected', selected);
   const image = await imageFromObjectUrl(sourceUrl);
   if (!image.naturalWidth || !image.naturalHeight) throw new Error('裁剪处理失败，请重新选择图片。');
-  const canvas = document.createElement('canvas');
-  canvas.width = image.naturalWidth;
-  canvas.height = image.naturalHeight;
-  const context = canvas.getContext('2d');
-  if (!context) throw new Error('裁剪处理失败，请重新选择图片。');
-  context.fillStyle = '#fff';
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  context.drawImage(image, 0, 0);
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92));
-  if (!blob) throw new Error('裁剪处理失败，请重新选择图片。');
-  if (blob.size > MAX_IMAGE_BYTES) throw new Error('图片太大，请上传不超过 15MB 的图片。');
+  const encode = async (maxDimension, qualities) => {
+    const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('裁剪处理失败，请重新选择图片。');
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    for (const quality of qualities) {
+      const encoded = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+      if (!encoded) throw new Error('裁剪处理失败，请重新选择图片。');
+      debugUploadMetadata('encoded', encoded, `dimension=${canvas.width}x${canvas.height};quality=${quality}`);
+      if (encoded.size <= IMAGE_TARGET_BYTES || quality === qualities[qualities.length - 1]) return encoded;
+    }
+    return null;
+  };
+  let blob = await encode(IMAGE_MAX_DIMENSION, IMAGE_QUALITY_STEPS);
+  if (blob && blob.size > IMAGE_TARGET_BYTES) {
+    blob = await encode(IMAGE_FALLBACK_DIMENSION, IMAGE_QUALITY_STEPS.slice(1));
+  }
+  if (!blob || blob.size > MAX_IMAGE_BYTES) throw new Error('图片太大，请上传不超过 15MB 的图片。');
   const filename = `cropped_${Date.now()}.jpg`;
   const preview = URL.createObjectURL(blob);
   objectUrls.add(preview);

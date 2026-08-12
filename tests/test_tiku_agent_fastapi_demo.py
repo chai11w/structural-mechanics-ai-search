@@ -280,7 +280,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260811-feedback-cases"', 'src="/assets/demo.js?v=20260811-history-expiry"',
+            'href="/assets/demo.css?v=20260811-feedback-cases"', 'src="/assets/demo.js?v=20260812-image-compression"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -304,7 +304,8 @@ class FastApiDemoTest(unittest.TestCase):
             "if (!data.session?.session_valid)", "window.addEventListener('focus', expireHistoryIfNeeded)",
             "document.addEventListener('visibilitychange'",
             "data.uploaded_image", "Number.isFinite(activityAt)", "无法连接本地服务",
-            "canvas.toBlob(resolve, 'image/jpeg', 0.92)", "formData.append('file', prepared.blob, prepared.filename)",
+            "IMAGE_TARGET_BYTES = 1024 * 1024", "IMAGE_MAX_DIMENSION = 2560", "IMAGE_FALLBACK_DIMENSION = 2048",
+            "canvas.toBlob(resolve, 'image/jpeg', quality)", "formData.append('file', prepared.blob, prepared.filename)",
             "const filename = `cropped_${Date.now()}.jpg`", "function retryUpload", "pendingUpload = prepared",
             "const uploadRow = addLocalUploadPreview(sourcePreview)", "setUploadRowStatus(uploadRow, '我发了一张题图。')",
             "message: '正在识别题目'", "setStatus('working', '正在识别题目…')",
