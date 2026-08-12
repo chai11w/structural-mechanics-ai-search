@@ -88,6 +88,15 @@ python -B scripts/run_tiku_agent_demo.py --port 8790 `
 
 切换到控制库后，8790 会在每次请求前重新读取邀请码状态和全站/单码额度；导入时保留的旧 Cookie 可继续使用，之后停用或重置邀请码会使对应旧登录状态失效。不要同时传入旧的 `--invite-config` 或静态费用上限参数。
 
+正式切换使用专用脚本。默认调用只做健康、路径、导入冲突和当前看门狗唯一性预检，不会停止进程；维护窗口确认后才添加 `-Apply`。脚本会再次备份、精确停止已验证的看门狗与 8790 子进程、启动控制库模式并验证临时邀请码登录和动态停用；任一步失败都会恢复旧哈希配置模式：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/switch_tiku_agent_8790_control.ps1
+
+powershell -ExecutionPolicy Bypass -File scripts/switch_tiku_agent_8790_control.ps1 `
+  -Apply
+```
+
 查看8790最近7天费用：
 
 ```powershell

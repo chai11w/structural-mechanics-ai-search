@@ -11,7 +11,7 @@
 - 8790 可通过 `--control-db` 动态读取邀请码状态与全站/单码额度；控制库认证兼容迁移前旧 Cookie，之后停用或重置会递增认证版本并使其失效。
 - 8790 保持 1 个活动任务、2 个排队任务、最长等待 55 秒；费用按 Asia/Shanghai 自然日，金额是项目估算，不等同供应商账单实扣。
 - 当前题库共 280 行，只有 24 行满足 >20，均属“4力法—钢架—均布 q”组；真实覆盖仍窄。
-- 完整 444 项测试通过；8795 已完成 1440×1000 与 390×844 浏览器验收，邀请码全流程、反馈日期/原因筛选、单题费用、完整对话、设置保存均通过，浏览器错误和警告为 0。
+- 完整 446 项测试通过；8795 已完成 1440×1000 与 390×844 浏览器验收，邀请码全流程、反馈日期/原因筛选、单题费用、完整对话、设置保存均通过，浏览器错误和警告为 0。
 
 ## Implemented
 
@@ -28,6 +28,7 @@
 - 8795 概览显示今日搜题、估算总费用、启用邀请码、待处理点踩和每码费用；反馈可按日期、评价、原因、邀请码、章节、处理状态筛选并跳转完整对话。
 - `scripts/run_tiku_admin.py`、`manage_tiku_admin.py`、`tiku_admin_watchdog_8795.ps1`：提供启动和独立保活；旧邀请码导入默认只预检，必须显式 `--apply-import` 才写入。
 - `scripts/run_tiku_agent_demo.py` 与 8790 看门狗支持可选 `--control-db` / `-ControlDb`；控制库模式拒绝同时使用旧邀请码配置或静态额度参数。
+- `scripts/switch_tiku_agent_8790_control.ps1` 默认只读预检并唯一定位当前看门狗；显式 `-Apply` 才备份、切换、联动验收，失败自动恢复旧哈希配置。`verify_tiku_control_runtime.py` 不展示临时明文并在验证后归档临时邀请码。
 
 ## In Progress
 
@@ -79,7 +80,7 @@
 
 ## Next Best Step
 
-1. 用户确认维护窗口后，让 8790 使用已导入的 `control.sqlite3`；切换前再次确认 8790/8795 健康和仓库外回退备份可用。
+1. 用户确认维护窗口后，运行 `scripts/switch_tiku_agent_8790_control.ps1 -Apply`；默认只读预检已确认 8790/8795 健康、控制库无冲突并唯一定位当前看门狗。
 2. 切换后逐项验证旧/新邀请码、动态额度、停用/重置和新反馈完整对话；异常时按备份回退旧配置。
 3. 迁移稳定后创建独立 `admin` 子域名并启用 Cloudflare Access，再邀请 5–10 名真实用户内测。
 
@@ -89,6 +90,8 @@
 - `python scripts/run_tiku_admin.py --help`
 - `python scripts/manage_tiku_admin.py --control-db .tmp_tiku_admin_8795/control.sqlite3 --import-invites <原哈希配置>`（只读预检）
 - 上一命令确认无冲突后添加 `--apply-import`（显式写入）
+- `powershell -ExecutionPolicy Bypass -File scripts/switch_tiku_agent_8790_control.ps1`（只读预检）
+- 上一命令确认后添加 `-Apply`（维护窗口内切换，失败自动回退）
 - `powershell -ExecutionPolicy Bypass -File scripts/tiku_admin_watchdog_8795.ps1`
 - `python scripts/run_tiku_agent_demo.py --help`
 - `python scripts/manage_tiku_invites.py --help`

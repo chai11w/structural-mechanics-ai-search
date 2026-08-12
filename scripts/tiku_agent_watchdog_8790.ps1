@@ -7,7 +7,8 @@ param(
     [double]$DailyBudgetCny = 0,
     [double]$PerInviteDailyBudgetCny = 0,
     [string]$InviteConfig,
-    [string]$ControlDb
+    [string]$ControlDb,
+    [string]$PythonExe = "python"
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,6 +42,7 @@ if ($ControlDb -and -not (Test-Path -LiteralPath $ControlDb -PathType Leaf)) {
 }
 $LogDir = $RuntimeDir
 $StatusFile = Join-Path $LogDir "watchdog_8790.status"
+$WatchdogPidFile = Join-Path $LogDir "watchdog_8790.pid"
 $BotPidFile = Join-Path $LogDir "tiku_8790.pid"
 $BotOutLog = Join-Path $LogDir "tiku_8790.out.log"
 $BotErrLog = Join-Path $LogDir "tiku_8790.err.log"
@@ -104,7 +106,7 @@ function Start-Bot {
     if ($ControlDb) {
         $arguments += @("--control-db", "$ControlDb")
     }
-    $process = Start-Process python `
+    $process = Start-Process $PythonExe `
         -ArgumentList $arguments `
         -WorkingDirectory $ProjectDir `
         -RedirectStandardOutput $BotOutLog `
@@ -116,6 +118,7 @@ function Start-Bot {
     return $process
 }
 
+Set-Content -LiteralPath $WatchdogPidFile -Value $PID -Encoding ASCII
 Set-Content -LiteralPath $StatusFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Watchdog started. Project=$ProjectDir Port=$Port RuntimeDir=$RuntimeDir" -Encoding UTF8
 foreach ($path in @($BotOutLog, $BotErrLog)) {
     if (-not (Test-Path -LiteralPath $path)) { New-Item -ItemType File -Path $path -Force | Out-Null }
