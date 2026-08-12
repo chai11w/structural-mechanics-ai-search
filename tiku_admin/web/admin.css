@@ -137,6 +137,16 @@ svg.icon { width: 18px; height: 18px; flex: 0 0 18px; fill: none; stroke: curren
 .cell-sub { display: block; max-width: 250px; margin-top: 3px; overflow: hidden; color: var(--subtle); font-size: 10px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .cell-actions { display: flex; align-items: center; justify-content: flex-end; gap: 2px; white-space: nowrap; }
 .invitation-table { min-width: 980px; }
+.invitation-table th:last-child, .invitation-table td:last-child { width: 148px; min-width: 148px; }
+.feedback-table th:last-child, .feedback-table td:last-child { min-width: 262px; }
+.archived-actions { gap: 8px; }
+.archive-delete-button, .archive-restore-button { height: 36px; border: 0; border-radius: 7px; cursor: pointer; transition: color .15s, background .15s, transform .1s; }
+.archive-delete-button { width: 36px; flex: 0 0 36px; display: inline-grid; place-items: center; padding: 0; color: #898983; background: transparent; }
+.archive-delete-button .icon { width: 19px; height: 19px; }
+.archive-delete-button:hover { color: var(--danger); background: var(--danger-soft); }
+.archive-restore-button { min-width: 84px; padding: 0 13px; color: #2f2f2c; background: #f0f0ed; font-size: 13px; font-weight: 550; }
+.archive-restore-button:hover { background: #e5e5e1; }
+.archive-delete-button:active, .archive-restore-button:active { transform: translateY(1px); }
 .feedback-table { min-width: 1080px; }
 .feedback-number { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; white-space: nowrap; }
 .masked-code { min-width: 190px; display: flex; align-items: center; gap: 5px; }

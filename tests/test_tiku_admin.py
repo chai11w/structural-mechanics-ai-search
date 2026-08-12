@@ -95,6 +95,12 @@ class TikuAdminTest(unittest.TestCase):
         self.assertIn("全部用户", script)
         self.assertIn("未命名用户", script)
         self.assertNotIn("未填写备注", script)
+        self.assertIn('class="archive-delete-button"', script)
+        self.assertIn('class="archive-restore-button"', script)
+        self.assertLess(
+            script.index('class="archive-delete-button"'),
+            script.index('class="archive-restore-button"'),
+        )
 
     def test_admin_feedback_ui_uses_real_chapter_options_and_archive_actions(self):
         script = (
@@ -108,6 +114,8 @@ class TikuAdminTest(unittest.TestCase):
         self.assertIn("搜题耗时", script)
         self.assertIn("取消归档", script)
         self.assertIn("永久删除反馈", script)
+        self.assertIn('data-feedback-action="delete"', script)
+        self.assertIn('data-feedback-action="restore"', script)
         self.assertIn("data.audit.slice(0, 10)", script)
 
     def test_dynamic_settings_and_audit_are_persisted(self):
