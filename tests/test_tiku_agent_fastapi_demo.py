@@ -112,6 +112,7 @@ class FastApiDemoTest(unittest.TestCase):
             "rating": "negative",
             "tags": ["not_found"],
             "detail": "没有合适候选",
+            "search_duration_ms": 1450,
             "conversation": [
                 {
                     "me": True,
@@ -131,6 +132,8 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         saved = store.list_feedback()[0]
         self.assertEqual(saved.search_key, f"{saved.session_key}:1")
+        self.assertEqual(saved.search_duration_ms, 1450)
+        self.assertRegex(saved.feedback_number, r"^FB-\d{8}-[0-9A-F]{10}$")
         self.assertEqual(len(saved.conversation), 2)
         media_name = saved.conversation[0]["images"][0]
         self.assertTrue(store.resolve_case_media(saved.feedback_id, media_name).is_file())

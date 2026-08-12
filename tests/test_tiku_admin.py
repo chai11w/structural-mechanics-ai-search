@@ -96,6 +96,20 @@ class TikuAdminTest(unittest.TestCase):
         self.assertIn("未命名用户", script)
         self.assertNotIn("未填写备注", script)
 
+    def test_admin_feedback_ui_uses_real_chapter_options_and_archive_actions(self):
+        script = (
+            Path(__file__).resolve().parents[1] / "tiku_admin" / "web" / "admin.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("<th>反馈编号</th><th>用户</th>", script)
+        self.assertIn('for="filter-chapter">章节</label><select', script)
+        self.assertIn('<option value="">全部章节</option>${chapterOptions}', script)
+        self.assertNotIn('for="filter-tag">反馈原因</label>', script)
+        self.assertIn("显示已归档", script)
+        self.assertIn("搜题耗时", script)
+        self.assertIn("取消归档", script)
+        self.assertIn("永久删除反馈", script)
+        self.assertIn("data.audit.slice(0, 10)", script)
+
     def test_dynamic_settings_and_audit_are_persisted(self):
         values = self.control.update_settings(
             global_daily_budget_micros=cny_to_micros("42.50"),
@@ -237,6 +251,7 @@ class TikuAdminTest(unittest.TestCase):
             task_revision=2,
             phase="ANSWER_SHOWN",
             candidate_count=3,
+            search_duration_ms=12_340,
             search_key="session-hash:2",
             chapter="4力法",
             conversation=[
@@ -257,13 +272,24 @@ class TikuAdminTest(unittest.TestCase):
             retention_days=30,
         )
         self.assertEqual(len(saved.conversation), 2)
+        self.assertRegex(saved.feedback_number, r"^FB-\d{8}-[0-9A-F]{10}$")
+        self.assertEqual(saved.search_duration_ms, 12_340)
+        self.assertEqual(store.list_chapters(), ["4力法"])
         media_name = saved.conversation[0]["images"][0]
         self.assertTrue(store.resolve_case_media(saved.feedback_id, media_name).is_file())
         reviewed = store.update_review(
-            saved.feedback_id, review_status="resolved", admin_note="已记录排序问题"
+            saved.feedback_number, review_status="resolved", admin_note="已记录排序问题"
         )
         self.assertEqual(reviewed.review_status, "resolved")
         self.assertEqual(store.query_feedback(rating="negative")[1], 1)
+        archived = store.set_archived(saved.feedback_number, archived=True)
+        self.assertTrue(archived.archived_at)
+        self.assertEqual(store.query_feedback(rating="negative")[1], 0)
+        self.assertEqual(
+            store.query_feedback(rating="negative", include_archived=True)[1], 1
+        )
+        restored = store.set_archived(saved.feedback_number, archived=False)
+        self.assertEqual(restored.archived_at, "")
 
         purged = store.purge_expired_cases(
             now=datetime.now(UTC) + timedelta(days=31)
@@ -271,6 +297,9 @@ class TikuAdminTest(unittest.TestCase):
         self.assertEqual(purged, 1)
         self.assertEqual(store.get_feedback(saved.feedback_id).conversation, ())
         self.assertIsNone(store.resolve_case_media(saved.feedback_id, media_name))
+        store.set_archived(saved.feedback_number, archived=True)
+        self.assertTrue(store.delete_archived(saved.feedback_number))
+        self.assertIsNone(store.get_feedback(saved.feedback_number))
 
     def test_admin_http_flow_covers_setup_invites_overview_feedback_and_settings(self):
         feedback = SQLiteFeedbackStore(self.root / "feedback.sqlite3")
@@ -345,6 +374,7 @@ class TikuAdminTest(unittest.TestCase):
             task_revision=1,
             phase="WAIT_CANDIDATE_CHOICE",
             candidate_count=3,
+            search_duration_ms=8_765,
             search_key="search-one",
             chapter="4力法",
             conversation=[{
@@ -362,16 +392,21 @@ class TikuAdminTest(unittest.TestCase):
         filtered = client.get(
             "/api/admin/feedback",
             params={
-                "tag": "ranking_issue",
+                "chapter": "4力法",
                 "date": datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat(),
             },
         )
         self.assertEqual(filtered.status_code, 200, filtered.text)
         self.assertEqual(filtered.json()["total"], 1)
         self.assertEqual(filtered.json()["items"][0]["invite_label"], "真实用户 A")
+        self.assertEqual(filtered.json()["chapters"], ["4力法"])
+        self.assertRegex(
+            filtered.json()["items"][0]["feedback_number"],
+            r"^FB-\d{8}-[0-9A-F]{10}$",
+        )
         self.assertEqual(filtered.json()["items"][0]["cost"]["estimated_cost_cny"], "1.25")
         self.assertEqual(
-            client.get("/api/admin/feedback", params={"tag": "wrong_answer"}).json()["total"],
+            client.get("/api/admin/feedback", params={"chapter": "不存在"}).json()["total"],
             0,
         )
         self.assertEqual(
@@ -389,12 +424,55 @@ class TikuAdminTest(unittest.TestCase):
         detail = client.get(f"/api/admin/feedback/{saved.feedback_id}")
         self.assertEqual(detail.status_code, 200)
         self.assertEqual(detail.json()["conversation"][0]["message"], "请选择候选题。")
+        self.assertEqual(detail.json()["search_duration_ms"], 8_765)
+        self.assertEqual(
+            client.get(f"/api/admin/feedback/{saved.feedback_number}").status_code,
+            200,
+        )
         reviewed = client.patch(
-            f"/api/admin/feedback/{saved.feedback_id}/review",
+            f"/api/admin/feedback/{saved.feedback_number}/review",
             headers={"x-csrf-token": csrf},
             json={"review_status": "resolved", "admin_note": "已复核"},
         )
         self.assertEqual(reviewed.status_code, 200)
+
+        archived = client.post(
+            f"/api/admin/feedback/{saved.feedback_number}/archive",
+            headers={"x-csrf-token": csrf},
+        )
+        self.assertEqual(archived.status_code, 200, archived.text)
+        self.assertEqual(client.get("/api/admin/feedback").json()["total"], 0)
+        archived_list = client.get(
+            "/api/admin/feedback", params={"include_archived": "true"}
+        ).json()
+        self.assertEqual(archived_list["total"], 1)
+        self.assertTrue(archived_list["items"][0]["archived_at"])
+        restored = client.post(
+            f"/api/admin/feedback/{saved.feedback_number}/restore",
+            headers={"x-csrf-token": csrf},
+        )
+        self.assertEqual(restored.status_code, 200, restored.text)
+
+        self.control.set_invitation_status(invite_id, "archived")
+        blocked_delete = client.delete(
+            f"/api/admin/invitations/{invite_id}", headers={"x-csrf-token": csrf}
+        )
+        self.assertEqual(blocked_delete.status_code, 409)
+        restored_invite = client.post(
+            f"/api/admin/invitations/{invite_id}/status",
+            headers={"x-csrf-token": csrf},
+            json={"status": "enabled"},
+        )
+        self.assertEqual(restored_invite.status_code, 200)
+
+        unused, _unused_code = self.control.create_invitation(label="未使用用户")
+        self.control.set_invitation_status(unused.invite_id, "archived")
+        deleted_invite = client.delete(
+            f"/api/admin/invitations/{unused.invite_id}",
+            headers={"x-csrf-token": csrf},
+        )
+        self.assertEqual(deleted_invite.status_code, 200, deleted_invite.text)
+        self.assertIsNone(self.control.get_invitation(unused.invite_id))
 
         settings = client.patch(
             "/api/admin/settings",

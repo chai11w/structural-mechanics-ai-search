@@ -13,12 +13,13 @@ from typing import Callable
 from uuid import uuid4
 
 
-FEEDBACK_SCHEMA_VERSION = 2
+FEEDBACK_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
 class MessageFeedback:
     feedback_id: str
+    feedback_number: str
     message_id: str
     identity_key: str
     session_key: str
@@ -28,11 +29,13 @@ class MessageFeedback:
     task_revision: int
     phase: str
     candidate_count: int
+    search_duration_ms: int
     search_key: str
     chapter: str
     conversation: tuple[dict[str, object], ...]
     review_status: str
     admin_note: str
+    archived_at: str
     case_expires_at: str
     case_purged_at: str
     created_at: str
@@ -60,6 +63,7 @@ class SQLiteFeedbackStore:
         task_revision: int,
         phase: str,
         candidate_count: int,
+        search_duration_ms: int = 0,
         search_key: str = "",
         chapter: str = "",
         conversation: list[dict[str, object]] | None = None,
@@ -74,8 +78,9 @@ class SQLiteFeedbackStore:
                 _create_schema(connection)
                 existing = connection.execute(
                     """
-                    SELECT feedback_id, created_at, conversation_json, case_expires_at,
-                           case_purged_at, review_status, admin_note
+                    SELECT feedback_id, feedback_number, created_at, conversation_json,
+                           case_expires_at, case_purged_at, review_status, admin_note,
+                           archived_at
                     FROM message_feedback
                     WHERE identity_key = ? AND session_key = ? AND message_id = ?
                     """,
@@ -83,11 +88,17 @@ class SQLiteFeedbackStore:
                 ).fetchone()
                 feedback_id = str(existing["feedback_id"]) if existing else uuid4().hex
                 created_at = str(existing["created_at"]) if existing else now
+                feedback_number = (
+                    str(existing["feedback_number"])
+                    if existing
+                    else _feedback_number(feedback_id, created_at)
+                )
                 conversation_json = str(existing["conversation_json"]) if existing else "[]"
                 case_expires_at = str(existing["case_expires_at"]) if existing else ""
                 case_purged_at = str(existing["case_purged_at"]) if existing else ""
                 review_status = str(existing["review_status"]) if existing else "pending"
                 admin_note = str(existing["admin_note"]) if existing else ""
+                archived_at = str(existing["archived_at"]) if existing else ""
                 if conversation is not None:
                     sanitized = self._capture_conversation(
                         feedback_id, conversation, media_resolver=media_resolver
@@ -101,11 +112,12 @@ class SQLiteFeedbackStore:
                 connection.execute(
                     """
                     INSERT INTO message_feedback (
-                        feedback_id, message_id, identity_key, session_key, rating,
+                        feedback_id, feedback_number, message_id, identity_key, session_key, rating,
                         tags_json, detail, task_revision, phase, candidate_count,
-                        search_key, chapter, conversation_json, review_status, admin_note,
+                        search_duration_ms, search_key, chapter, conversation_json,
+                        review_status, admin_note, archived_at,
                         case_expires_at, case_purged_at, created_at, updated_at, schema_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(identity_key, session_key, message_id) DO UPDATE SET
                         rating = excluded.rating,
                         tags_json = excluded.tags_json,
@@ -113,6 +125,7 @@ class SQLiteFeedbackStore:
                         task_revision = excluded.task_revision,
                         phase = excluded.phase,
                         candidate_count = excluded.candidate_count,
+                        search_duration_ms = excluded.search_duration_ms,
                         search_key = excluded.search_key,
                         chapter = excluded.chapter,
                         conversation_json = excluded.conversation_json,
@@ -123,6 +136,7 @@ class SQLiteFeedbackStore:
                     """,
                     (
                         feedback_id,
+                        feedback_number,
                         message_id,
                         identity_key,
                         session_key,
@@ -132,11 +146,13 @@ class SQLiteFeedbackStore:
                         max(0, int(task_revision)),
                         phase,
                         max(0, int(candidate_count)),
+                        max(0, min(86_400_000, int(search_duration_ms or 0))),
                         str(search_key).strip(),
                         str(chapter).strip()[:80],
                         conversation_json,
                         review_status,
                         admin_note,
+                        archived_at,
                         case_expires_at,
                         case_purged_at,
                         created_at,
@@ -146,6 +162,7 @@ class SQLiteFeedbackStore:
                 )
         return MessageFeedback(
             feedback_id=feedback_id,
+            feedback_number=feedback_number,
             message_id=message_id,
             identity_key=identity_key,
             session_key=session_key,
@@ -155,26 +172,29 @@ class SQLiteFeedbackStore:
             task_revision=max(0, int(task_revision)),
             phase=phase,
             candidate_count=max(0, int(candidate_count)),
+            search_duration_ms=max(0, min(86_400_000, int(search_duration_ms or 0))),
             search_key=str(search_key).strip(),
             chapter=str(chapter).strip()[:80],
             conversation=tuple(json.loads(conversation_json)),
             review_status=review_status,
             admin_note=admin_note,
+            archived_at=archived_at,
             case_expires_at=case_expires_at,
             case_purged_at=case_purged_at,
             created_at=created_at,
             updated_at=now,
         )
 
-    def list_feedback(self) -> list[MessageFeedback]:
+    def list_feedback(self, *, include_archived: bool = False) -> list[MessageFeedback]:
         if not self.path.is_file():
             return []
         with self._lock:
             with sqlite3.connect(self.path) as connection:
                 connection.row_factory = sqlite3.Row
                 _create_schema(connection)
+                where = "" if include_archived else "WHERE archived_at = ''"
                 rows = connection.execute(
-                    "SELECT * FROM message_feedback ORDER BY updated_at DESC"
+                    f"SELECT * FROM message_feedback {where} ORDER BY updated_at DESC"
                 ).fetchall()
         return [_feedback_from_row(row) for row in rows]
 
@@ -185,7 +205,7 @@ class SQLiteFeedbackStore:
         identity_key: str = "",
         chapter: str = "",
         review_status: str = "",
-        tag: str = "",
+        include_archived: bool = False,
         created_from: str = "",
         created_before: str = "",
         limit: int = 50,
@@ -203,13 +223,8 @@ class SQLiteFeedbackStore:
             if clean:
                 clauses.append(f"{column} = ?")
                 parameters.append(clean)
-        clean_tag = str(tag or "").strip()
-        if clean_tag:
-            clauses.append(
-                "EXISTS (SELECT 1 FROM json_each(message_feedback.tags_json) "
-                "WHERE json_each.value = ?)"
-            )
-            parameters.append(clean_tag)
+        if not include_archived:
+            clauses.append("archived_at = ''")
         if str(created_from or "").strip():
             clauses.append("created_at >= ?")
             parameters.append(str(created_from).strip())
@@ -242,10 +257,32 @@ class SQLiteFeedbackStore:
             connection.row_factory = sqlite3.Row
             _create_schema(connection)
             row = connection.execute(
-                "SELECT * FROM message_feedback WHERE feedback_id = ?",
-                (str(feedback_id),),
+                "SELECT * FROM message_feedback WHERE feedback_id = ? OR feedback_number = ?",
+                (str(feedback_id), str(feedback_id).upper()),
             ).fetchone()
         return _feedback_from_row(row) if row else None
+
+    def list_chapters(self) -> list[str]:
+        if not self.path.is_file():
+            return []
+        with self._lock, sqlite3.connect(self.path) as connection:
+            _create_schema(connection)
+            rows = connection.execute(
+                "SELECT DISTINCT chapter FROM message_feedback "
+                "WHERE TRIM(chapter) != '' ORDER BY chapter COLLATE NOCASE"
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def count_for_identity(self, identity_key: str) -> int:
+        if not self.path.is_file():
+            return 0
+        with self._lock, sqlite3.connect(self.path) as connection:
+            _create_schema(connection)
+            row = connection.execute(
+                "SELECT COUNT(*) FROM message_feedback WHERE identity_key = ?",
+                (str(identity_key),),
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     def update_review(
         self, feedback_id: str, *, review_status: str, admin_note: str
@@ -263,16 +300,64 @@ class SQLiteFeedbackStore:
                 """
                 UPDATE message_feedback
                 SET review_status = ?, admin_note = ?, updated_at = ?
-                WHERE feedback_id = ?
+                WHERE feedback_id = ? OR feedback_number = ?
                 """,
-                (clean_status, clean_note, datetime.now(UTC).isoformat(), str(feedback_id)),
+                (
+                    clean_status,
+                    clean_note,
+                    datetime.now(UTC).isoformat(),
+                    str(feedback_id),
+                    str(feedback_id).upper(),
+                ),
             )
             if cursor.rowcount != 1:
                 raise KeyError("feedback not found")
             row = connection.execute(
-                "SELECT * FROM message_feedback WHERE feedback_id = ?", (str(feedback_id),)
+                "SELECT * FROM message_feedback WHERE feedback_id = ? OR feedback_number = ?",
+                (str(feedback_id), str(feedback_id).upper()),
             ).fetchone()
         return _feedback_from_row(row)
+
+    def set_archived(self, feedback_id: str, *, archived: bool) -> MessageFeedback:
+        now = datetime.now(UTC).isoformat()
+        with self._lock, sqlite3.connect(self.path) as connection:
+            connection.row_factory = sqlite3.Row
+            _create_schema(connection)
+            cursor = connection.execute(
+                "UPDATE message_feedback SET archived_at = ?, updated_at = ? "
+                "WHERE feedback_id = ? OR feedback_number = ?",
+                (now if archived else "", now, str(feedback_id), str(feedback_id).upper()),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError("feedback not found")
+            row = connection.execute(
+                "SELECT * FROM message_feedback WHERE feedback_id = ? OR feedback_number = ?",
+                (str(feedback_id), str(feedback_id).upper()),
+            ).fetchone()
+        return _feedback_from_row(row)
+
+    def delete_archived(self, feedback_id: str) -> bool:
+        if not self.path.is_file():
+            return False
+        removed_id = ""
+        with self._lock, sqlite3.connect(self.path) as connection:
+            connection.row_factory = sqlite3.Row
+            _create_schema(connection)
+            row = connection.execute(
+                "SELECT feedback_id, archived_at FROM message_feedback "
+                "WHERE feedback_id = ? OR feedback_number = ?",
+                (str(feedback_id), str(feedback_id).upper()),
+            ).fetchone()
+            if row is None:
+                return False
+            if not str(row["archived_at"]):
+                raise ValueError("feedback must be archived before deletion")
+            removed_id = str(row["feedback_id"])
+            connection.execute(
+                "DELETE FROM message_feedback WHERE feedback_id = ?", (removed_id,)
+            )
+        self._clear_case(removed_id)
+        return True
 
     def resolve_case_media(self, feedback_id: str, media_name: str) -> Path | None:
         name = Path(str(media_name)).name
@@ -403,6 +488,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS message_feedback (
             feedback_id TEXT PRIMARY KEY,
+            feedback_number TEXT NOT NULL UNIQUE,
             message_id TEXT NOT NULL,
             identity_key TEXT NOT NULL,
             session_key TEXT NOT NULL,
@@ -412,11 +498,13 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             task_revision INTEGER NOT NULL,
             phase TEXT NOT NULL,
             candidate_count INTEGER NOT NULL,
+            search_duration_ms INTEGER NOT NULL DEFAULT 0,
             search_key TEXT NOT NULL DEFAULT '',
             chapter TEXT NOT NULL DEFAULT '',
             conversation_json TEXT NOT NULL DEFAULT '[]',
             review_status TEXT NOT NULL DEFAULT 'pending',
             admin_note TEXT NOT NULL DEFAULT '',
+            archived_at TEXT NOT NULL DEFAULT '',
             case_expires_at TEXT NOT NULL DEFAULT '',
             case_purged_at TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
@@ -430,17 +518,32 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         str(row[1]) for row in connection.execute("PRAGMA table_info(message_feedback)")
     }
     migrations = {
+        "feedback_number": "TEXT NOT NULL DEFAULT ''",
+        "search_duration_ms": "INTEGER NOT NULL DEFAULT 0",
         "search_key": "TEXT NOT NULL DEFAULT ''",
         "chapter": "TEXT NOT NULL DEFAULT ''",
         "conversation_json": "TEXT NOT NULL DEFAULT '[]'",
         "review_status": "TEXT NOT NULL DEFAULT 'pending'",
         "admin_note": "TEXT NOT NULL DEFAULT ''",
+        "archived_at": "TEXT NOT NULL DEFAULT ''",
         "case_expires_at": "TEXT NOT NULL DEFAULT ''",
         "case_purged_at": "TEXT NOT NULL DEFAULT ''",
     }
     for name, definition in migrations.items():
         if name not in columns:
             connection.execute(f"ALTER TABLE message_feedback ADD COLUMN {name} {definition}")
+    rows = connection.execute(
+        "SELECT feedback_id, created_at FROM message_feedback WHERE feedback_number = ''"
+    ).fetchall()
+    for row in rows:
+        connection.execute(
+            "UPDATE message_feedback SET feedback_number = ? WHERE feedback_id = ?",
+            (_feedback_number(str(row[0]), str(row[1])), str(row[0])),
+        )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_number "
+        "ON message_feedback(feedback_number)"
+    )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_feedback_identity_updated "
         "ON message_feedback(identity_key, updated_at)"
@@ -454,6 +557,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
 def _feedback_from_row(row: sqlite3.Row) -> MessageFeedback:
     return MessageFeedback(
         feedback_id=str(row["feedback_id"]),
+        feedback_number=str(row["feedback_number"]),
         message_id=str(row["message_id"]),
         identity_key=str(row["identity_key"]),
         session_key=str(row["session_key"]),
@@ -463,13 +567,22 @@ def _feedback_from_row(row: sqlite3.Row) -> MessageFeedback:
         task_revision=int(row["task_revision"]),
         phase=str(row["phase"]),
         candidate_count=int(row["candidate_count"]),
+        search_duration_ms=int(row["search_duration_ms"]),
         search_key=str(row["search_key"]),
         chapter=str(row["chapter"]),
         conversation=tuple(json.loads(str(row["conversation_json"]))),
         review_status=str(row["review_status"]),
         admin_note=str(row["admin_note"]),
+        archived_at=str(row["archived_at"]),
         case_expires_at=str(row["case_expires_at"]),
         case_purged_at=str(row["case_purged_at"]),
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
     )
+
+
+def _feedback_number(feedback_id: str, created_at: str) -> str:
+    date_part = str(created_at)[:10].replace("-", "")
+    if len(date_part) != 8 or not date_part.isdigit():
+        date_part = "00000000"
+    return f"FB-{date_part}-{str(feedback_id)[:10].upper()}"

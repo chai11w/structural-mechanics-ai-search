@@ -280,6 +280,8 @@ class SQLiteControlStore:
         values.append(str(invite_id))
         with self._lock, self._connect() as connection:
             before = self._invitation_row(connection, invite_id)
+            if str(before["status"]) == "archived":
+                raise ValueError("archived invitation cannot be edited")
             connection.execute(
                 f"UPDATE invitations SET {', '.join(updates)} WHERE invite_id = ?", values
             )
@@ -324,6 +326,27 @@ class SQLiteControlStore:
                 _public_invitation(after),
             )
         return _record(after)
+
+    def delete_archived_invitation(
+        self, invite_id: str, *, actor: str = "owner"
+    ) -> None:
+        with self._lock, self._connect() as connection:
+            before = self._invitation_row(connection, invite_id)
+            if str(before["status"]) != "archived":
+                raise ValueError("invitation must be archived before deletion")
+            public_before = _public_invitation(before)
+            connection.execute(
+                "DELETE FROM invitations WHERE invite_id = ?", (str(invite_id),)
+            )
+            self._write_audit(
+                connection,
+                actor,
+                "invitation.delete",
+                "invitation",
+                str(invite_id),
+                public_before,
+                {"deleted": True},
+            )
 
     def reset_invitation_code(
         self, invite_id: str, *, actor: str = "owner"

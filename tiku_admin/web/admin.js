@@ -5,6 +5,7 @@ const ICONS = {
   overview: 'layout-dashboard', invitations: 'key-round', feedback: 'message-square',
   settings: 'settings', logout: 'log-out', add: 'plus', view: 'eye', edit: 'pencil',
   reset: 'refresh-cw', pause: 'circle-pause', enable: 'circle-play', archive: 'archive',
+  restore: 'archive-restore', delete: 'trash-2',
   copy: 'copy', close: 'x', menu: 'menu', back: 'chevron-left', next: 'chevron-right',
   up: 'thumbs-up', down: 'thumbs-down', image: 'image', save: 'save', alert: 'alert-circle',
 };
@@ -20,6 +21,7 @@ const AUDIT_LABELS = {
   'invitation.create': '新增邀请码', 'invitation.update': '修改邀请码',
   'invitation.enabled': '启用邀请码', 'invitation.disabled': '停用邀请码',
   'invitation.archived': '归档邀请码', 'invitation.reset': '重置邀请码',
+  'invitation.delete': '永久删除邀请码',
   'invitation.reveal': '复制邀请码',
   'invitation.import': '导入邀请码', 'settings.update': '修改全局设置',
 };
@@ -67,6 +69,14 @@ function statusText(status) {
 }
 
 function ratingText(rating) { return rating === 'positive' ? '点赞' : '点踩'; }
+
+function formatDuration(milliseconds) {
+  const value = Number(milliseconds || 0);
+  if (!Number.isFinite(value) || value <= 0) return '暂无数据';
+  if (value < 1000) return `${Math.round(value)} 毫秒`;
+  const seconds = value / 1000;
+  return seconds < 60 ? `${seconds.toFixed(seconds < 10 ? 1 : 0)} 秒` : `${Math.floor(seconds / 60)} 分 ${Math.round(seconds % 60)} 秒`;
+}
 
 function statusBadge(status, label = '') {
   return `<span class="status ${attr(status)}">${escapeHtml(label || statusText(status))}</span>`;
@@ -192,16 +202,24 @@ function inviteUsageRows(items, limit = items.length) {
   return rows || '<tr><td class="empty-row" colspan="6">还没有用户使用记录</td></tr>';
 }
 
-function feedbackSummaryRows(items) {
-  const rows = items.map((item) => `<tr><td><div class="feedback-topic"><span class="feedback-preview">${item.preview_image ? `<img src="${attr(item.preview_image)}" alt="题目缩略图">` : icon('image')}</span><span class="feedback-copy"><span class="cell-main">${escapeHtml(feedbackUserLabel(item))}</span><span class="cell-sub">${formatDateTime(item.created_at)}</span></span></div></td><td>${statusBadge(item.rating, ratingText(item.rating))}</td><td><div class="tag-list">${item.tags.map((tag) => `<span class="tag">${escapeHtml(TAG_LABELS[tag] || tag)}</span>`).join('') || '<span class="cell-sub">未选择原因</span>'}</div></td><td><div class="feedback-detail-text">${escapeHtml(item.detail || item.preview_text || '未填写补充说明')}</div></td><td class="numeric">¥${escapeHtml(item.cost?.estimated_cost_cny || '0.00')}</td><td>${statusBadge(item.review_status)}</td><td class="numeric"><a class="button button-secondary" href="/feedback/${attr(item.feedback_id)}" data-feedback-link="${attr(item.feedback_id)}">${icon('view')}查看详情</a></td></tr>`).join('');
-  return rows || '<tr><td class="empty-row" colspan="7">暂无反馈</td></tr>';
+function feedbackSummaryRows(items, { manageable = false } = {}) {
+  const rows = items.map((item) => {
+    let actions = '';
+    if (manageable) {
+      actions = item.archived_at
+        ? `<button class="icon-button" data-feedback-action="restore" data-feedback-id="${attr(item.feedback_number)}" type="button" title="取消归档" aria-label="取消归档反馈">${icon('restore')}</button><button class="icon-button danger" data-feedback-action="delete" data-feedback-id="${attr(item.feedback_number)}" type="button" title="永久删除" aria-label="永久删除反馈">${icon('delete')}</button>`
+        : `<button class="icon-button" data-feedback-action="archive" data-feedback-id="${attr(item.feedback_number)}" type="button" title="归档" aria-label="归档反馈">${icon('archive')}</button>`;
+    }
+    return `<tr><td><span class="cell-main feedback-number">${escapeHtml(item.feedback_number)}</span></td><td><div class="feedback-topic"><span class="feedback-preview">${item.preview_image ? `<img src="${attr(item.preview_image)}" alt="题目缩略图">` : icon('image')}</span><span class="feedback-copy"><span class="cell-main">${escapeHtml(feedbackUserLabel(item))}</span><span class="cell-sub">${formatDateTime(item.created_at)}</span></span></div></td><td>${statusBadge(item.rating, ratingText(item.rating))}</td><td><div class="tag-list">${item.tags.map((tag) => `<span class="tag">${escapeHtml(TAG_LABELS[tag] || tag)}</span>`).join('') || '<span class="cell-sub">未选择原因</span>'}</div></td><td><div class="feedback-detail-text">${escapeHtml(item.detail || item.preview_text || '未填写补充说明')}</div></td><td class="numeric">¥${escapeHtml(item.cost?.estimated_cost_cny || '0.00')}</td><td>${item.archived_at ? statusBadge('archived') : statusBadge(item.review_status)}</td><td><div class="cell-actions"><a class="button button-secondary" href="/feedback/${attr(item.feedback_number)}" data-feedback-link="${attr(item.feedback_number)}">${icon('view')}查看详情</a>${actions}</div></td></tr>`;
+  }).join('');
+  return rows || '<tr><td class="empty-row" colspan="8">暂无反馈</td></tr>';
 }
 
 async function renderOverview() {
   const body = mountShell('overview', '今日概览', '了解今天的搜题量、估算费用和待处理反馈。');
   try {
     const data = await api('/api/admin/overview');
-    body.innerHTML = `<section class="metrics" aria-label="今日运营指标"><div class="metric"><span class="metric-label">${icon('activity')}今日搜题</span><strong class="metric-value">${Number(data.today_searches)}</strong><span class="metric-note">按独立题目计算</span></div><div class="metric"><span class="metric-label">${icon('wallet')}估算总费用</span><strong class="metric-value">¥${escapeHtml(data.today_cost_cny)}</strong><span class="metric-note">全站剩余 ¥${escapeHtml(data.global_remaining_cny)}</span></div><div class="metric"><span class="metric-label">${icon('users')}启用用户</span><strong class="metric-value">${Number(data.active_invites)}</strong><span class="metric-note">当前可登录使用</span></div><div class="metric"><span class="metric-label">${icon('down')}待处理点踩</span><strong class="metric-value">${Number(data.pending_negative_feedback)}</strong><span class="metric-note">需要复盘的反馈</span></div></section><section class="section"><div class="section-head"><div class="section-title"><h2>用户今日使用</h2><p>额度是模型费用估算，不等同供应商账单实扣。</p></div><a class="text-link" href="/invitations">管理邀请码 ${icon('next')}</a></div><div class="table-tool"><div class="table-scroll"><table class="data-table"><thead><tr><th>用户</th><th>状态</th><th class="numeric">搜题数</th><th class="numeric">今日费用</th><th class="numeric">剩余额度</th><th>最后活动</th></tr></thead><tbody>${inviteUsageRows(data.invites, 10)}</tbody></table></div></div></section><section class="section"><div class="section-head"><div class="section-title"><h2>最近反馈</h2><p>点开详情可查看截至反馈时的完整对话。</p></div><a class="text-link" href="/feedback">查看全部 ${icon('next')}</a></div><div class="table-tool"><div class="table-scroll"><table class="data-table"><thead><tr><th>用户</th><th>评价</th><th>原因</th><th>说明</th><th class="numeric">本题费用</th><th>状态</th><th></th></tr></thead><tbody>${feedbackSummaryRows(data.recent_feedback)}</tbody></table></div></div></section>`;
+    body.innerHTML = `<section class="metrics" aria-label="今日运营指标"><div class="metric"><span class="metric-label">${icon('activity')}今日搜题</span><strong class="metric-value">${Number(data.today_searches)}</strong><span class="metric-note">按独立题目计算</span></div><div class="metric"><span class="metric-label">${icon('wallet')}估算总费用</span><strong class="metric-value">¥${escapeHtml(data.today_cost_cny)}</strong><span class="metric-note">全站剩余 ¥${escapeHtml(data.global_remaining_cny)}</span></div><div class="metric"><span class="metric-label">${icon('users')}启用用户</span><strong class="metric-value">${Number(data.active_invites)}</strong><span class="metric-note">当前可登录使用</span></div><div class="metric"><span class="metric-label">${icon('down')}待处理点踩</span><strong class="metric-value">${Number(data.pending_negative_feedback)}</strong><span class="metric-note">需要复盘的反馈</span></div></section><section class="section"><div class="section-head"><div class="section-title"><h2>用户今日使用</h2><p>额度是模型费用估算，不等同供应商账单实扣。</p></div><a class="text-link" href="/invitations">管理邀请码 ${icon('next')}</a></div><div class="table-tool"><div class="table-scroll"><table class="data-table"><thead><tr><th>用户</th><th>状态</th><th class="numeric">搜题数</th><th class="numeric">今日费用</th><th class="numeric">剩余额度</th><th>最后活动</th></tr></thead><tbody>${inviteUsageRows(data.invites, 10)}</tbody></table></div></div></section><section class="section"><div class="section-head"><div class="section-title"><h2>最近反馈</h2><p>点开详情可查看截至反馈时的完整对话。</p></div><a class="text-link" href="/feedback">查看全部 ${icon('next')}</a></div><div class="table-tool"><div class="table-scroll"><table class="data-table"><thead><tr><th>反馈编号</th><th>用户</th><th>评价</th><th>原因</th><th>说明</th><th class="numeric">本题费用</th><th>状态</th><th></th></tr></thead><tbody>${feedbackSummaryRows(data.recent_feedback)}</tbody></table></div></div></section>`;
     bindFeedbackLinks();
   } catch (error) { body.innerHTML = errorState(error.message); }
 }
@@ -287,9 +305,15 @@ async function invitationAction(item, action) {
     try { const data = await api(`/api/admin/invitations/${encodeURIComponent(item.invite_id)}/reset`, { method: 'POST' }); showCode(data.code, '邀请码已重置'); await renderInvitations(); } catch (error) { showToast(error.message, 'error'); }
     return;
   }
+  if (action === 'delete') {
+    if (!await confirmAction('永久删除邀请码', '只有从未产生费用和反馈的已归档邀请码才能删除。删除后无法恢复。', '永久删除')) return;
+    try { await api(`/api/admin/invitations/${encodeURIComponent(item.invite_id)}`, { method: 'DELETE' }); showToast('邀请码已永久删除'); await renderInvitations(); } catch (error) { showToast(error.message, 'error'); }
+    return;
+  }
   const nextStatus = action === 'enable' ? 'enabled' : action === 'archive' ? 'archived' : 'disabled';
-  const actionText = nextStatus === 'archived' ? '归档' : statusText(nextStatus);
-  const message = nextStatus === 'enabled' ? '启用后该邀请码可以重新登录；此前登录状态仍保持失效。' : nextStatus === 'archived' ? '归档后不再出现在默认列表中，历史费用和反馈会继续保留。' : '停用后该邀请码与现有登录状态会立即失效。';
+  const restoring = action === 'enable' && item.status === 'archived';
+  const actionText = restoring ? '取消归档' : nextStatus === 'archived' ? '归档' : statusText(nextStatus);
+  const message = restoring ? '取消归档后该邀请码会恢复为启用状态；此前登录状态仍保持失效。' : nextStatus === 'enabled' ? '启用后该邀请码可以重新登录；此前登录状态仍保持失效。' : nextStatus === 'archived' ? '归档后不再出现在默认列表中，历史费用和反馈会继续保留。' : '停用后该邀请码与现有登录状态会立即失效。';
   if (!await confirmAction(`${actionText}邀请码`, message, `确认${actionText}`)) return;
   try { await api(`/api/admin/invitations/${encodeURIComponent(item.invite_id)}/status`, { method: 'POST', body: JSON.stringify({ status: nextStatus }) }); showToast(nextStatus === 'archived' ? '邀请码已归档' : `邀请码已${statusText(nextStatus)}`); await renderInvitations(); } catch (error) { showToast(error.message, 'error'); }
 }
@@ -302,7 +326,10 @@ function invitationRows(items, query = '') {
     const code = item.code_recoverable
       ? `<div class="masked-code"><code>${escapeHtml(item.code_preview)}</code><button class="icon-button" data-action="copy" data-id="${attr(item.invite_id)}" type="button" title="复制完整邀请码" aria-label="复制完整邀请码">${icon('copy')}</button></div>`
       : '<span class="legacy-code">旧邀请码不可查看</span>';
-    return `<tr><td><span class="cell-main">${escapeHtml(label)}</span><span class="cell-sub">${escapeHtml(item.invite_id)}</span></td><td>${statusBadge(item.status)}</td><td>${code}</td><td><span class="cell-main">¥${escapeHtml(item.effective_budget_cny || '0.00')} / 天</span><span class="cell-sub">${item.daily_budget_micros == null ? '继承默认额度' : '独立额度'}</span></td><td class="numeric"><span class="cell-main">${Number(item.today_searches || 0)} 次 · ¥${escapeHtml(item.today_cost_cny || '0.00')}</span>${progress(item.today_cost_micros || 0, item.effective_budget_micros || 0)}</td><td><span class="cell-main">${formatFullDate(item.expires_at)}</span><span class="cell-sub">最近登录 ${formatDateTime(item.last_used_at)}</span></td><td><div class="cell-actions"><button class="icon-button" data-action="edit" data-id="${attr(item.invite_id)}" type="button" title="编辑" aria-label="编辑邀请码">${icon('edit')}</button>${item.status === 'enabled' ? `<button class="icon-button" data-action="disable" data-id="${attr(item.invite_id)}" type="button" title="停用" aria-label="停用邀请码">${icon('pause')}</button>` : item.status === 'disabled' ? `<button class="icon-button" data-action="enable" data-id="${attr(item.invite_id)}" type="button" title="启用" aria-label="启用邀请码">${icon('enable')}</button>` : ''}${item.status !== 'archived' ? `<button class="icon-button" data-action="reset" data-id="${attr(item.invite_id)}" type="button" title="重置" aria-label="重置邀请码">${icon('reset')}</button><button class="icon-button danger" data-action="archive" data-id="${attr(item.invite_id)}" type="button" title="归档" aria-label="归档邀请码">${icon('archive')}</button>` : ''}</div></td></tr>`;
+    const actions = item.status === 'archived'
+      ? `<button class="icon-button" data-action="enable" data-id="${attr(item.invite_id)}" type="button" title="取消归档" aria-label="取消归档邀请码">${icon('restore')}</button><button class="icon-button danger" data-action="delete" data-id="${attr(item.invite_id)}" type="button" title="永久删除" aria-label="永久删除邀请码">${icon('delete')}</button>`
+      : `<button class="icon-button" data-action="edit" data-id="${attr(item.invite_id)}" type="button" title="编辑" aria-label="编辑邀请码">${icon('edit')}</button>${item.status === 'enabled' ? `<button class="icon-button" data-action="disable" data-id="${attr(item.invite_id)}" type="button" title="停用" aria-label="停用邀请码">${icon('pause')}</button>` : `<button class="icon-button" data-action="enable" data-id="${attr(item.invite_id)}" type="button" title="启用" aria-label="启用邀请码">${icon('enable')}</button>`}<button class="icon-button" data-action="reset" data-id="${attr(item.invite_id)}" type="button" title="重置" aria-label="重置邀请码">${icon('reset')}</button><button class="icon-button danger" data-action="archive" data-id="${attr(item.invite_id)}" type="button" title="归档" aria-label="归档邀请码">${icon('archive')}</button>`;
+    return `<tr><td><span class="cell-main">${escapeHtml(label)}</span><span class="cell-sub">${escapeHtml(item.invite_id)}</span></td><td>${statusBadge(item.status)}</td><td>${code}</td><td><span class="cell-main">¥${escapeHtml(item.effective_budget_cny || '0.00')} / 天</span><span class="cell-sub">${item.daily_budget_micros == null ? '继承默认额度' : '独立额度'}</span></td><td class="numeric"><span class="cell-main">${Number(item.today_searches || 0)} 次 · ¥${escapeHtml(item.today_cost_cny || '0.00')}</span>${progress(item.today_cost_micros || 0, item.effective_budget_micros || 0)}</td><td><span class="cell-main">${formatFullDate(item.expires_at)}</span><span class="cell-sub">最近登录 ${formatDateTime(item.last_used_at)}</span></td><td><div class="cell-actions">${actions}</div></td></tr>`;
   }).join('') || '<tr><td class="empty-row" colspan="7">没有符合条件的邀请码</td></tr>';
 }
 
@@ -327,38 +354,66 @@ function bindFeedbackLinks() {
   }));
 }
 
+async function feedbackAction(feedbackNumber, action) {
+  const labels = {
+    archive: ['归档反馈', '归档后默认列表将不再显示，但仍可恢复。', '确认归档'],
+    restore: ['取消归档', '恢复后这条反馈会重新出现在默认列表中。', '确认恢复'],
+    delete: ['永久删除反馈', '反馈记录和保存的对话图片都会被永久删除，无法恢复。', '永久删除'],
+  };
+  const [title, message, confirmLabel] = labels[action];
+  if (!await confirmAction(title, message, confirmLabel)) return;
+  try {
+    const method = action === 'delete' ? 'DELETE' : 'POST';
+    const suffix = action === 'delete' ? '' : `/${action}`;
+    await api(`/api/admin/feedback/${encodeURIComponent(feedbackNumber)}${suffix}`, { method });
+    showToast(action === 'archive' ? '反馈已归档' : action === 'restore' ? '反馈已恢复' : '反馈已永久删除');
+    if (location.pathname.startsWith('/feedback/')) location.assign(sessionStorage.getItem('tiku-admin-feedback-return') || '/feedback');
+    else await renderFeedback();
+  } catch (error) { showToast(error.message, 'error'); }
+}
+
+function bindFeedbackActions() {
+  document.querySelectorAll('[data-feedback-action][data-feedback-id]').forEach((button) => {
+    button.addEventListener('click', () => feedbackAction(button.dataset.feedbackId, button.dataset.feedbackAction));
+  });
+}
+
 async function renderFeedback() {
   const params = new URLSearchParams(location.search);
   const filters = {
     rating: params.get('rating') || '', identity_key: params.get('identity_key') || '',
     chapter: params.get('chapter') || '', review_status: params.get('review_status') || '',
-    tag: params.get('tag') || '', date: params.get('date') || '',
+    date: params.get('date') || '', include_archived: params.get('archived') === '1',
     offset: Math.max(0, Number(params.get('offset') || 0)), limit: 50,
   };
   const body = mountShell('feedback', '用户反馈', '筛选反馈并打开完整对话，判断问题是否需要改进。');
   try {
     const requestParams = new URLSearchParams({offset: String(filters.offset), limit: String(filters.limit)});
-    for (const key of ['rating', 'identity_key', 'chapter', 'review_status', 'tag', 'date']) {
+    for (const key of ['rating', 'identity_key', 'chapter', 'review_status', 'date']) {
       if (filters[key]) requestParams.set(key, filters[key]);
     }
+    if (filters.include_archived) requestParams.set('include_archived', 'true');
     const [data, invites] = await Promise.all([
       api(`/api/admin/feedback?${requestParams.toString()}`),
       api('/api/admin/invitations?include_archived=true'),
     ]);
     const inviteOptions = invites.items.map((item) => `<option value="${attr(item.invite_id)}" ${filters.identity_key === item.invite_id ? 'selected' : ''}>${escapeHtml(userLabel(item))} · ${escapeHtml(item.invite_id)}</option>`).join('');
-    const tagOptions = Object.entries(TAG_LABELS).map(([value, label]) => `<option value="${attr(value)}" ${filters.tag === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('');
-    body.innerHTML = `<form class="toolbar feedback-filters" id="feedback-filters"><div class="field"><label class="field-label" for="filter-date">日期</label><input class="input" id="filter-date" name="date" type="date" value="${attr(filters.date)}"></div><div class="field"><label class="field-label" for="filter-rating">评价</label><select class="select" id="filter-rating" name="rating"><option value="">全部</option><option value="negative" ${filters.rating === 'negative' ? 'selected' : ''}>点踩</option><option value="positive" ${filters.rating === 'positive' ? 'selected' : ''}>点赞</option></select></div><div class="field"><label class="field-label" for="filter-tag">反馈原因</label><select class="select" id="filter-tag" name="tag"><option value="">全部原因</option>${tagOptions}</select></div><div class="field"><label class="field-label" for="filter-invite">用户</label><select class="select" id="filter-invite" name="identity_key"><option value="">全部用户</option>${inviteOptions}</select></div><div class="field"><label class="field-label" for="filter-chapter">章节</label><input class="input" id="filter-chapter" name="chapter" value="${attr(filters.chapter)}" placeholder="全部章节"></div><div class="field"><label class="field-label" for="filter-status">处理状态</label><select class="select" id="filter-status" name="review_status"><option value="">全部</option><option value="pending" ${filters.review_status === 'pending' ? 'selected' : ''}>待处理</option><option value="resolved" ${filters.review_status === 'resolved' ? 'selected' : ''}>已处理</option><option value="no_action" ${filters.review_status === 'no_action' ? 'selected' : ''}>无需处理</option></select></div><button class="button button-secondary" type="submit">${icon('search')}筛选</button></form><div class="table-tool"><div class="table-scroll"><table class="data-table"><thead><tr><th>用户</th><th>评价</th><th>原因</th><th>说明</th><th class="numeric">本题费用</th><th>状态</th><th></th></tr></thead><tbody>${feedbackSummaryRows(data.items)}</tbody></table></div><div class="pagination"><span>共 ${Number(data.total)} 条</span><button class="icon-button" id="prev-page" type="button" aria-label="上一页" ${filters.offset <= 0 ? 'disabled' : ''}>${icon('back')}</button><button class="icon-button" id="next-page" type="button" aria-label="下一页" ${filters.offset + filters.limit >= data.total ? 'disabled' : ''}>${icon('next')}</button></div></div>`;
+    const chapterOptions = data.chapters.map((chapter) => `<option value="${attr(chapter)}" ${filters.chapter === chapter ? 'selected' : ''}>${escapeHtml(chapter)}</option>`).join('');
+    body.innerHTML = `<form class="toolbar feedback-filters" id="feedback-filters"><div class="field"><label class="field-label" for="filter-date">日期</label><input class="input" id="filter-date" name="date" type="date" value="${attr(filters.date)}"></div><div class="field"><label class="field-label" for="filter-rating">评价</label><select class="select" id="filter-rating" name="rating"><option value="">全部</option><option value="negative" ${filters.rating === 'negative' ? 'selected' : ''}>点踩</option><option value="positive" ${filters.rating === 'positive' ? 'selected' : ''}>点赞</option></select></div><div class="field"><label class="field-label" for="filter-invite">用户</label><select class="select" id="filter-invite" name="identity_key"><option value="">全部用户</option>${inviteOptions}</select></div><div class="field"><label class="field-label" for="filter-chapter">章节</label><select class="select" id="filter-chapter" name="chapter"><option value="">全部章节</option>${chapterOptions}</select></div><div class="field"><label class="field-label" for="filter-status">处理状态</label><select class="select" id="filter-status" name="review_status"><option value="">全部</option><option value="pending" ${filters.review_status === 'pending' ? 'selected' : ''}>待处理</option><option value="resolved" ${filters.review_status === 'resolved' ? 'selected' : ''}>已处理</option><option value="no_action" ${filters.review_status === 'no_action' ? 'selected' : ''}>无需处理</option></select></div><button class="button button-secondary" type="submit">${icon('search')}筛选</button><label class="toggle-row feedback-archive-toggle"><span class="switch"><input id="show-archived-feedback" type="checkbox" ${filters.include_archived ? 'checked' : ''}><span></span></span>显示已归档</label></form><div class="table-tool"><div class="table-scroll"><table class="data-table feedback-table"><thead><tr><th>反馈编号</th><th>用户</th><th>评价</th><th>原因</th><th>说明</th><th class="numeric">本题费用</th><th>状态</th><th></th></tr></thead><tbody>${feedbackSummaryRows(data.items, { manageable: true })}</tbody></table></div><div class="pagination"><span>共 ${Number(data.total)} 条</span><button class="icon-button" id="prev-page" type="button" aria-label="上一页" ${filters.offset <= 0 ? 'disabled' : ''}>${icon('back')}</button><button class="icon-button" id="next-page" type="button" aria-label="下一页" ${filters.offset + filters.limit >= data.total ? 'disabled' : ''}>${icon('next')}</button></div></div>`;
     document.querySelector('#feedback-filters').addEventListener('submit', (event) => {
       event.preventDefault();
       const form = new FormData(event.currentTarget);
       const next = new URLSearchParams();
       for (const [key, value] of form.entries()) if (String(value).trim()) next.set(key, String(value).trim());
+      if (filters.include_archived) next.set('archived', '1');
       location.search = next.toString();
     });
     const page = (offset) => { const next = new URLSearchParams(location.search); next.set('offset', String(Math.max(0, offset))); location.search = next.toString(); };
     document.querySelector('#prev-page').addEventListener('click', () => page(filters.offset - filters.limit));
     document.querySelector('#next-page').addEventListener('click', () => page(filters.offset + filters.limit));
+    document.querySelector('#show-archived-feedback').addEventListener('change', (event) => { const next = new URLSearchParams(location.search); if (event.target.checked) next.set('archived', '1'); else next.delete('archived'); next.delete('offset'); location.search = next.toString(); });
     bindFeedbackLinks();
+    bindFeedbackActions();
   } catch (error) { body.innerHTML = errorState(error.message); }
 }
 
@@ -376,7 +431,12 @@ async function renderFeedbackDetail(feedbackId) {
   try {
     const data = await api(`/api/admin/feedback/${encodeURIComponent(feedbackId)}`);
     const back = sessionStorage.getItem('tiku-admin-feedback-return') || '/feedback';
-    body.innerHTML = `<a class="back-link" href="${attr(back)}">${icon('back')}返回反馈列表</a><div class="detail-layout"><section><header class="conversation-head"><h2>完整对话</h2>${statusBadge(data.rating, ratingText(data.rating))}</header><div class="conversation">${conversationHtml(data)}</div></section><aside class="detail-side"><section class="detail-section"><h2>反馈信息</h2><dl class="facts"><dt>用户</dt><dd>${escapeHtml(feedbackUserLabel(data))}</dd><dt>提交时间</dt><dd>${formatFullDate(data.created_at)}</dd><dt>章节</dt><dd>${escapeHtml(data.chapter || '未确定')}</dd><dt>反馈原因</dt><dd>${data.tags.map((tag) => escapeHtml(TAG_LABELS[tag] || tag)).join('、') || '未选择'}</dd><dt>补充说明</dt><dd>${escapeHtml(data.detail || '未填写')}</dd></dl></section><section class="detail-section"><h2>本题运行</h2><dl class="facts"><dt>估算费用</dt><dd>¥${escapeHtml(data.cost.estimated_cost_cny)}</dd><dt>模型调用</dt><dd>${Number(data.cost.model_call_count)} 次</dd><dt>开始时间</dt><dd>${formatDateTime(data.cost.started_at)}</dd><dt>结束时间</dt><dd>${formatDateTime(data.cost.finished_at)}</dd><dt>候选数量</dt><dd>${Number(data.candidate_count)} 个</dd></dl></section><section class="detail-section"><h2>处理记录</h2><form class="review-form" id="review-form"><div class="field"><label for="review-status">处理状态</label><select class="select" id="review-status" name="review_status"><option value="pending" ${data.review_status === 'pending' ? 'selected' : ''}>待处理</option><option value="resolved" ${data.review_status === 'resolved' ? 'selected' : ''}>已处理</option><option value="no_action" ${data.review_status === 'no_action' ? 'selected' : ''}>无需处理</option></select></div><div class="field"><label for="admin-note">内部备注</label><textarea class="textarea" id="admin-note" name="admin_note" maxlength="2000" placeholder="记录判断、原因或后续动作…">${escapeHtml(data.admin_note || '')}</textarea></div><button class="button button-primary" type="submit">${icon('save')}保存处理结果</button></form></section></aside></div>`;
+    const archiveAction = data.archived_at
+      ? `<button class="button button-secondary" id="detail-restore" type="button">${icon('restore')}取消归档</button>`
+      : `<button class="button button-secondary" id="detail-archive" type="button">${icon('archive')}归档</button>`;
+    body.innerHTML = `<div class="detail-topbar"><a class="back-link" href="${attr(back)}">${icon('back')}返回反馈列表</a>${archiveAction}</div><div class="detail-layout"><section><header class="conversation-head"><h2>完整对话</h2>${statusBadge(data.rating, ratingText(data.rating))}</header><div class="conversation">${conversationHtml(data)}</div></section><aside class="detail-side"><section class="detail-section"><h2>反馈信息</h2><dl class="facts"><dt>反馈编号</dt><dd class="feedback-number">${escapeHtml(data.feedback_number)}</dd><dt>用户</dt><dd>${escapeHtml(feedbackUserLabel(data))}</dd><dt>提交时间</dt><dd>${formatFullDate(data.created_at)}</dd><dt>章节</dt><dd>${escapeHtml(data.chapter || '未确定')}</dd><dt>反馈原因</dt><dd>${data.tags.map((tag) => escapeHtml(TAG_LABELS[tag] || tag)).join('、') || '未选择'}</dd><dt>补充说明</dt><dd>${escapeHtml(data.detail || '未填写')}</dd></dl></section><section class="detail-section"><h2>本题运行</h2><dl class="facts"><dt>估算费用</dt><dd>¥${escapeHtml(data.cost.estimated_cost_cny)}</dd><dt>模型调用</dt><dd>${Number(data.cost.model_call_count)} 次</dd><dt>开始时间</dt><dd>${formatDateTime(data.cost.started_at)}</dd><dt>结束时间</dt><dd>${formatDateTime(data.cost.finished_at)}</dd><dt>候选数量</dt><dd>${Number(data.candidate_count)} 个</dd><dt>搜题耗时</dt><dd>${formatDuration(data.search_duration_ms)}</dd></dl></section><section class="detail-section"><h2>处理记录</h2><form class="review-form" id="review-form"><div class="field"><label for="review-status">处理状态</label><select class="select" id="review-status" name="review_status"><option value="pending" ${data.review_status === 'pending' ? 'selected' : ''}>待处理</option><option value="resolved" ${data.review_status === 'resolved' ? 'selected' : ''}>已处理</option><option value="no_action" ${data.review_status === 'no_action' ? 'selected' : ''}>无需处理</option></select></div><div class="field"><label for="admin-note">内部备注</label><textarea class="textarea" id="admin-note" name="admin_note" maxlength="2000" placeholder="记录判断、原因或后续动作…">${escapeHtml(data.admin_note || '')}</textarea></div><button class="button button-primary" type="submit">${icon('save')}保存处理结果</button></form></section></aside></div>`;
+    document.querySelector('#detail-archive')?.addEventListener('click', () => feedbackAction(data.feedback_number, 'archive'));
+    document.querySelector('#detail-restore')?.addEventListener('click', () => feedbackAction(data.feedback_number, 'restore'));
     document.querySelector('#review-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const form = event.currentTarget;
@@ -394,11 +454,24 @@ function auditHtml(items) {
   return items.map((item) => `<div class="audit-item"><strong>${escapeHtml(AUDIT_LABELS[item.action] || item.action)}</strong><span>${escapeHtml(item.target_id)} · ${formatFullDate(item.created_at)}</span></div>`).join('') || '<p class="cell-sub">暂无操作记录</p>';
 }
 
+function renderAuditList(items, expanded = false) {
+  const visible = expanded ? items : items.slice(0, 10);
+  const list = document.querySelector('#audit-list');
+  if (list) list.innerHTML = auditHtml(visible);
+  const toggle = document.querySelector('#audit-toggle');
+  if (toggle) {
+    toggle.hidden = items.length <= 10;
+    toggle.textContent = expanded ? '收起' : `查看全部（${items.length}）`;
+    toggle.dataset.expanded = String(expanded);
+  }
+}
+
 async function renderSettings() {
   const body = mountShell('settings', '后台设置', '调整全站费用保护、默认单码额度和反馈案例保留期限。');
   try {
     const data = await api('/api/admin/settings');
-    body.innerHTML = `<div class="settings-grid"><div><section class="settings-section"><h2>费用与反馈</h2><p>8790 会在每次请求前读取这里的额度。降低到今日已用金额以下时，新任务会立即停止。</p><form class="form-stack" id="settings-form"><div class="field-row"><div class="field"><label for="global-budget">全站每日费用上限</label><input class="input" id="global-budget" name="global_daily_budget_cny" type="number" min="0.01" max="10000" step="0.01" value="${attr(data.global_daily_budget_cny)}"><span class="field-hint">人民币估算费用，不是供应商余额。</span></div><div class="field"><label for="invite-budget-default">默认单码每日上限</label><input class="input" id="invite-budget-default" name="default_invite_daily_budget_cny" type="number" min="0.01" max="10000" step="0.01" value="${attr(data.default_invite_daily_budget_cny)}"><span class="field-hint">未单独设置的邀请码继承此值。</span></div></div><div class="field"><label for="retention">反馈案例保留天数</label><input class="input" id="retention" name="feedback_retention_days" type="number" min="1" max="365" step="1" value="${Number(data.feedback_retention_days)}"><span class="field-hint">到期后清理对话和图片，反馈评分与处理状态继续保留。</span></div><div class="settings-actions"><button class="button button-primary" type="submit">${icon('save')}保存设置</button></div></form></section><section class="settings-section"><h2>修改管理员密码</h2><p>修改后所有现有后台登录状态都会立即失效。</p><form class="form-stack" id="password-form"><div class="field"><label for="current-password">当前密码</label><input class="input" id="current-password" name="current_password" type="password" autocomplete="current-password" required></div><div class="field-row"><div class="field"><label for="new-password">新密码</label><input class="input" id="new-password" name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></div><div class="field"><label for="confirm-password">确认新密码</label><input class="input" id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></div></div><div class="settings-actions"><button class="button button-secondary" type="submit">修改密码</button></div></form></section></div><aside><div class="section-title settings-aside-title"><h2>最近操作</h2><p>保留后台关键管理动作。</p></div><div class="audit-list">${auditHtml(data.audit)}</div></aside></div>`;
+    body.innerHTML = `<div class="settings-grid"><div><section class="settings-section"><h2>费用与反馈</h2><p>8790 会在每次请求前读取这里的额度。降低到今日已用金额以下时，新任务会立即停止。</p><form class="form-stack" id="settings-form"><div class="field-row"><div class="field"><label for="global-budget">全站每日费用上限</label><input class="input" id="global-budget" name="global_daily_budget_cny" type="number" min="0.01" max="10000" step="0.01" value="${attr(data.global_daily_budget_cny)}"><span class="field-hint">人民币估算费用，不是供应商余额。</span></div><div class="field"><label for="invite-budget-default">默认单码每日上限</label><input class="input" id="invite-budget-default" name="default_invite_daily_budget_cny" type="number" min="0.01" max="10000" step="0.01" value="${attr(data.default_invite_daily_budget_cny)}"><span class="field-hint">未单独设置的邀请码继承此值。</span></div></div><div class="field"><label for="retention">反馈案例保留天数</label><input class="input" id="retention" name="feedback_retention_days" type="number" min="1" max="365" step="1" value="${Number(data.feedback_retention_days)}"><span class="field-hint">到期后清理对话和图片，反馈评分与处理状态继续保留。</span></div><div class="settings-actions"><button class="button button-primary" type="submit">${icon('save')}保存设置</button></div></form></section><section class="settings-section"><h2>修改管理员密码</h2><p>修改后所有现有后台登录状态都会立即失效。</p><form class="form-stack" id="password-form"><div class="field"><label for="current-password">当前密码</label><input class="input" id="current-password" name="current_password" type="password" autocomplete="current-password" required></div><div class="field-row"><div class="field"><label for="new-password">新密码</label><input class="input" id="new-password" name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></div><div class="field"><label for="confirm-password">确认新密码</label><input class="input" id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></div></div><div class="settings-actions"><button class="button button-secondary" type="submit">修改密码</button></div></form></section></div><aside><div class="section-title settings-aside-title"><h2>最近操作</h2><p>默认显示最近 10 条，完整记录仍会保留。</p></div><div class="audit-list" id="audit-list">${auditHtml(data.audit.slice(0, 10))}</div><button class="button button-quiet audit-toggle" id="audit-toggle" type="button" ${data.audit.length <= 10 ? 'hidden' : ''}>查看全部（${data.audit.length}）</button></aside></div>`;
+    document.querySelector('#audit-toggle')?.addEventListener('click', (event) => renderAuditList(data.audit, event.currentTarget.dataset.expanded !== 'true'));
     document.querySelector('#settings-form').addEventListener('submit', async (event) => {
       event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('[type="submit"]'); button.disabled = true;
       try { await api('/api/admin/settings', { method: 'PATCH', body: JSON.stringify({ global_daily_budget_cny: form.global_daily_budget_cny.value, default_invite_daily_budget_cny: form.default_invite_daily_budget_cny.value, feedback_retention_days: Number(form.feedback_retention_days.value) }) }); showToast('设置已保存'); await renderSettings(); }

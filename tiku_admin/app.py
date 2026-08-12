@@ -219,6 +219,24 @@ def create_admin_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"invitation": item.to_dict()}
 
+    @app.delete("/api/admin/invitations/{invite_id}")
+    def delete_invitation(invite_id: str) -> dict[str, object]:
+        invitation = control_store.get_invitation(invite_id)
+        if invitation is None:
+            raise HTTPException(status_code=404, detail="邀请码不存在。")
+        if invitation.status != "archived":
+            raise HTTPException(status_code=409, detail="请先归档邀请码，再永久删除。")
+        blockers = reporter.invitation_delete_blockers(invite_id)
+        if blockers["cost_runs"] or blockers["feedback"]:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "该邀请码已有费用或反馈历史，不能永久删除；可继续保留为已归档。"
+                ),
+            )
+        control_store.delete_archived_invitation(invite_id)
+        return {"deleted": True}
+
     @app.post("/api/admin/invitations/{invite_id}/reset")
     def reset_invitation(invite_id: str) -> dict[str, object]:
         try:
@@ -253,7 +271,7 @@ def create_admin_app(
         identity_key: str = "",
         chapter: str = "",
         review_status: str = "",
-        tag: str = "",
+        include_archived: bool = False,
         date: str = "",
         limit: int = 50,
         offset: int = 0,
@@ -264,7 +282,7 @@ def create_admin_app(
                 identity_key=identity_key,
                 chapter=chapter,
                 review_status=review_status,
-                tag=tag,
+                include_archived=include_archived,
                 date=date,
                 limit=limit,
                 offset=offset,
@@ -293,6 +311,32 @@ def create_admin_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"feedback": item.to_dict()}
+
+    @app.post("/api/admin/feedback/{feedback_id}/archive")
+    def archive_feedback(feedback_id: str) -> dict[str, object]:
+        try:
+            item = feedback_store.set_archived(feedback_id, archived=True)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="反馈不存在。") from exc
+        return {"feedback": item.to_dict()}
+
+    @app.post("/api/admin/feedback/{feedback_id}/restore")
+    def restore_feedback(feedback_id: str) -> dict[str, object]:
+        try:
+            item = feedback_store.set_archived(feedback_id, archived=False)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="反馈不存在。") from exc
+        return {"feedback": item.to_dict()}
+
+    @app.delete("/api/admin/feedback/{feedback_id}")
+    def delete_archived_feedback(feedback_id: str) -> dict[str, object]:
+        try:
+            removed = feedback_store.delete_archived(feedback_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="请先归档反馈，再永久删除。") from exc
+        if not removed:
+            raise HTTPException(status_code=404, detail="反馈不存在。")
+        return {"deleted": True}
 
     @app.get("/api/admin/feedback/{feedback_id}/media/{media_name}")
     def feedback_media(feedback_id: str, media_name: str) -> FileResponse:

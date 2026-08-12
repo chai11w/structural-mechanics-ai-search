@@ -108,13 +108,33 @@ class AdminReporter:
             identity_key=str(filters.get("identity_key") or ""),
             chapter=str(filters.get("chapter") or ""),
             review_status=str(filters.get("review_status") or ""),
-            tag=str(filters.get("tag") or ""),
+            include_archived=bool(filters.get("include_archived")),
             created_from=created_from,
             created_before=created_before,
             limit=int(filters.get("limit") or 50),
             offset=int(filters.get("offset") or 0),
         )
-        return {"items": self._feedback_summaries(items), "total": total}
+        return {
+            "items": self._feedback_summaries(items),
+            "total": total,
+            "chapters": self.feedback_store.list_chapters(),
+        }
+
+    def invitation_delete_blockers(self, invite_id: str) -> dict[str, int]:
+        cost_runs = -1
+        if self.cost_database.is_file():
+            try:
+                with sqlite3.connect(self.cost_database) as connection:
+                    cost_runs = int(connection.execute(
+                        "SELECT COUNT(*) FROM model_cost_runs WHERE identity_key = ?",
+                        (str(invite_id),),
+                    ).fetchone()[0])
+            except sqlite3.Error:
+                cost_runs = -1
+        return {
+            "cost_runs": cost_runs,
+            "feedback": self.feedback_store.count_for_identity(invite_id),
+        }
 
     def feedback_detail(self, feedback_id: str) -> dict[str, object] | None:
         item = self.feedback_store.get_feedback(feedback_id)
@@ -257,6 +277,7 @@ def _feedback_summary(item: MessageFeedback) -> dict[str, object]:
     images = list(preview.get("images", [])) if isinstance(preview, dict) else []
     return {
         "feedback_id": item.feedback_id,
+        "feedback_number": item.feedback_number,
         "message_id": item.message_id,
         "identity_key": item.identity_key,
         "rating": item.rating,
@@ -265,8 +286,10 @@ def _feedback_summary(item: MessageFeedback) -> dict[str, object]:
         "task_revision": item.task_revision,
         "phase": item.phase,
         "candidate_count": item.candidate_count,
+        "search_duration_ms": item.search_duration_ms,
         "chapter": item.chapter,
         "review_status": item.review_status,
+        "archived_at": item.archived_at,
         "created_at": item.created_at,
         "updated_at": item.updated_at,
         "has_case": bool(item.conversation),

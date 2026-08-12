@@ -136,6 +136,7 @@ function remember(item) {
     intent: String(item.intent || ''),
     variant: String(item.variant || ''),
     taskRevision: Number(item.taskRevision || 0),
+    candidateCount: Number(item.candidateCount || 0),
     candidateGeneration: String(item.candidateGeneration || ''),
     messageId: String(item.messageId || ''),
     createdAt: Number(item.createdAt || 0),
@@ -183,9 +184,33 @@ function feedbackConversation(messageId) {
     intent: String(item.intent || ''),
     variant: String(item.variant || ''),
     taskRevision: Number(item.taskRevision || 0),
+    candidateCount: Number(item.candidateCount || 0),
     messageId: String(item.messageId || ''),
     createdAt: Number(item.createdAt || 0),
   }));
+}
+
+function searchDurationForFeedback(messageId) {
+  const target = history.findIndex((item) => item.messageId === messageId);
+  if (target < 0) return 0;
+  const revision = Number(history[target].taskRevision || 0);
+  if (!revision) return 0;
+  let upload = null;
+  for (let index = target; index >= 0; index -= 1) {
+    const item = history[index];
+    if (item.me && item.message === '我发了一张题图。' && Number(item.taskRevision || 0) === revision) {
+      upload = item;
+      break;
+    }
+  }
+  const candidateReply = history.slice(0, target + 1).find((item) => (
+    !item.me
+    && Number(item.taskRevision || 0) === revision
+    && Number(item.candidateCount || 0) > 0
+  ));
+  const startedAt = Number(upload?.createdAt || 0);
+  const finishedAt = Number(candidateReply?.createdAt || 0);
+  return startedAt > 0 && finishedAt >= startedAt ? finishedAt - startedAt : 0;
 }
 
 function createMessageId() {
@@ -319,6 +344,7 @@ async function submitFeedback() {
       tags: Array.from(context.tags),
       detail: feedbackDetail.value.trim(),
       conversation: feedbackConversation(context.item.messageId),
+      search_duration_ms: searchDurationForFeedback(context.item.messageId),
     };
     await request('/api/feedback', {
       method: 'POST',
@@ -755,6 +781,7 @@ function responseItem(data) {
     imageAlt: data.intent === 'select_candidate' || data.intent === 'resend_answer' ? '题库答案' : '相似题候选',
     intent: data.intent || '',
     taskRevision: Number(data.session?.task_revision || 0),
+    candidateCount: Number(data.session?.candidate_count || 0),
     candidateGeneration: String(data.session?.candidate_generation || ''),
     messageId: createMessageId(),
     createdAt: Date.now(),
@@ -815,12 +842,14 @@ async function sendText() {
 }
 
 function addLocalUploadPreview(preview) {
-  return addMessage({
+  const row = addMessage({
     message: '我发了一张题图。',
     me: true,
     images: [preview],
     imageAlt: '待上传的题图',
   }, false);
+  row.dataset.startedAt = String(Date.now());
+  return row;
 }
 
 function setUploadRowStatus(row, message, variant = '') {
@@ -870,10 +899,15 @@ async function submitPreparedImage(prepared, uploadRow) {
     pending.remove();
     setUploadRowPreview(uploadRow, data.uploaded_image);
     setUploadRowStatus(uploadRow, '我发了一张题图。');
-    remember({ message: '我发了一张题图。', me: true, images: [data.uploaded_image], imageAlt: '已上传题图' });
+    const response = responseItem(data);
+    remember({
+      message: '我发了一张题图。', me: true, images: [data.uploaded_image],
+      imageAlt: '已上传题图', taskRevision: response.taskRevision,
+      createdAt: Number(uploadRow.dataset.startedAt || Date.now()),
+    });
     releaseObjectUrl(prepared.preview);
     clearPendingUpload({ releasePreview: false });
-    addMessage(responseItem(data));
+    addMessage(response);
     setStatus('ready', '准备就绪');
   } catch (error) {
     if (operation !== operationVersion) return;

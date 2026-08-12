@@ -250,6 +250,12 @@ def create_app(
         raw_tags = payload.get("tags")
         detail = str(payload.get("detail") or "").strip()
         conversation = payload.get("conversation")
+        try:
+            search_duration_ms = int(payload.get("search_duration_ms") or 0)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="invalid search duration") from exc
+        if not 0 <= search_duration_ms <= 86_400_000:
+            raise HTTPException(status_code=400, detail="invalid search duration")
         if not FEEDBACK_MESSAGE_ID_RE.fullmatch(message_id):
             raise HTTPException(status_code=400, detail="invalid message id")
         if rating not in FEEDBACK_TAGS:
@@ -281,6 +287,7 @@ def create_app(
                 task_revision=revision,
                 phase=str(snapshot.get("phase") or ""),
                 candidate_count=int(snapshot.get("candidate_count") or 0),
+                search_duration_ms=search_duration_ms,
                 search_key=f"{clean_session_key}:{revision}" if revision > 0 else "",
                 chapter=str(snapshot.get("chapter") or ""),
                 conversation=conversation,
