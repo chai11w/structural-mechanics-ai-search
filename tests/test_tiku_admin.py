@@ -126,11 +126,15 @@ class TikuAdminTest(unittest.TestCase):
         self.assertNotIn("data.audit.slice(0, 10)", script)
         self.assertIn("filters.date || '选择日期'", script)
         self.assertIn("date-filter-value", script)
+        self.assertIn("feedback-filter-select", script)
+        self.assertIn("select.classList.toggle('is-placeholder', !select.value)", script)
         styles = (
             Path(__file__).resolve().parents[1] / "tiku_admin" / "web" / "admin.css"
         ).read_text(encoding="utf-8")
         self.assertIn(".feedback-filters .input, .feedback-filters .select { min-width: 0;", styles)
         self.assertIn(".date-filter-input { position: absolute;", styles)
+        self.assertIn(".feedback-filter-select { font-size: 13px; }", styles)
+        self.assertIn(".feedback-filter-select.is-placeholder { color: #8b8b84; }", styles)
         icons = (
             Path(__file__).resolve().parents[1] / "tiku_admin" / "web" / "lucide.svg"
         ).read_text(encoding="utf-8")

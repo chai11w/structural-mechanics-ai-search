@@ -180,6 +180,9 @@ svg.icon { width: 18px; height: 18px; flex: 0 0 18px; fill: none; stroke: curren
 .date-filter-value { min-width: 0; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .date-filter-value.is-placeholder { color: #8b8b84; }
 .date-filter-icon { position: absolute; right: 11px; width: 16px; height: 16px; color: var(--muted); pointer-events: none; }
+.feedback-filter-select { font-size: 13px; }
+.feedback-filter-select.is-placeholder { color: #8b8b84; }
+.feedback-filter-select option { color: var(--ink); }
 .feedback-archive-toggle { margin-left: auto; }
 .toolbar-spacer { flex: 1; }
 .search-wrap { position: relative; }
