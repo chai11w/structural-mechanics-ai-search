@@ -28,7 +28,7 @@ const AUDIT_LABELS = {
 
 function icon(name, className = '') {
   const id = ICONS[name] || name;
-  return `<svg class="icon ${className}" aria-hidden="true"><use href="/assets/lucide.svg#${id}"></use></svg>`;
+  return `<svg class="icon ${className}" aria-hidden="true"><use href="/assets/lucide.svg?v=20260812-2#${id}"></use></svg>`;
 }
 
 function escapeHtml(value) {
@@ -207,7 +207,7 @@ function feedbackSummaryRows(items, { manageable = false } = {}) {
     let actions = '';
     if (manageable) {
       actions = item.archived_at
-        ? `<button class="archive-delete-button" data-feedback-action="delete" data-feedback-id="${attr(item.feedback_number)}" type="button" title="永久删除" aria-label="永久删除反馈">${icon('delete')}</button><button class="archive-restore-button" data-feedback-action="restore" data-feedback-id="${attr(item.feedback_number)}" type="button">取消归档</button>`
+        ? `<button class="icon-button danger" data-feedback-action="delete" data-feedback-id="${attr(item.feedback_number)}" type="button" title="永久删除" aria-label="永久删除反馈">${icon('delete')}</button><button class="archive-restore-button" data-feedback-action="restore" data-feedback-id="${attr(item.feedback_number)}" type="button">取消归档</button>`
         : `<button class="icon-button" data-feedback-action="archive" data-feedback-id="${attr(item.feedback_number)}" type="button" title="归档" aria-label="归档反馈">${icon('archive')}</button>`;
     }
     const detailLink = item.archived_at ? '' : `<a class="button button-secondary" href="/feedback/${attr(item.feedback_number)}" data-feedback-link="${attr(item.feedback_number)}">${icon('view')}查看详情</a>`;
@@ -328,7 +328,7 @@ function invitationRows(items, query = '') {
       ? `<div class="masked-code"><code>${escapeHtml(item.code_preview)}</code><button class="icon-button" data-action="copy" data-id="${attr(item.invite_id)}" type="button" title="复制完整邀请码" aria-label="复制完整邀请码">${icon('copy')}</button></div>`
       : '<span class="legacy-code">旧邀请码不可查看</span>';
     const actions = item.status === 'archived'
-      ? `<button class="archive-delete-button" data-action="delete" data-id="${attr(item.invite_id)}" type="button" title="永久删除" aria-label="永久删除邀请码">${icon('delete')}</button><button class="archive-restore-button" data-action="enable" data-id="${attr(item.invite_id)}" type="button">取消归档</button>`
+      ? `<button class="icon-button danger" data-action="delete" data-id="${attr(item.invite_id)}" type="button" title="永久删除" aria-label="永久删除邀请码">${icon('delete')}</button><button class="archive-restore-button" data-action="enable" data-id="${attr(item.invite_id)}" type="button">取消归档</button>`
       : `<button class="icon-button" data-action="edit" data-id="${attr(item.invite_id)}" type="button" title="编辑" aria-label="编辑邀请码">${icon('edit')}</button>${item.status === 'enabled' ? `<button class="icon-button" data-action="disable" data-id="${attr(item.invite_id)}" type="button" title="停用" aria-label="停用邀请码">${icon('pause')}</button>` : `<button class="icon-button" data-action="enable" data-id="${attr(item.invite_id)}" type="button" title="启用" aria-label="启用邀请码">${icon('enable')}</button>`}<button class="icon-button" data-action="reset" data-id="${attr(item.invite_id)}" type="button" title="重置" aria-label="重置邀请码">${icon('reset')}</button><button class="icon-button danger" data-action="archive" data-id="${attr(item.invite_id)}" type="button" title="归档" aria-label="归档邀请码">${icon('archive')}</button>`;
     return `<tr><td><span class="cell-main">${escapeHtml(label)}</span><span class="cell-sub">${escapeHtml(item.invite_id)}</span></td><td>${statusBadge(item.status)}</td><td>${code}</td><td><span class="cell-main">¥${escapeHtml(item.effective_budget_cny || '0.00')} / 天</span><span class="cell-sub">${item.daily_budget_micros == null ? '继承默认额度' : '独立额度'}</span></td><td class="numeric"><span class="cell-main">${Number(item.today_searches || 0)} 次 · ¥${escapeHtml(item.today_cost_cny || '0.00')}</span>${progress(item.today_cost_micros || 0, item.effective_budget_micros || 0)}</td><td><span class="cell-main">${formatFullDate(item.expires_at)}</span><span class="cell-sub">最近登录 ${formatDateTime(item.last_used_at)}</span></td><td><div class="cell-actions ${item.status === 'archived' ? 'archived-actions' : ''}">${actions}</div></td></tr>`;
   }).join('') || '<tr><td class="empty-row" colspan="7">没有符合条件的邀请码</td></tr>';

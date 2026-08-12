@@ -98,12 +98,13 @@ class TikuAdminTest(unittest.TestCase):
         self.assertIn("identity_status", script)
         self.assertNotIn("} · ${escapeHtml(item.invite_id)}", script)
         self.assertNotIn("未填写备注", script)
-        self.assertIn('class="archive-delete-button"', script)
+        self.assertIn('class="icon-button danger"', script)
         self.assertIn('class="archive-restore-button"', script)
-        self.assertLess(
-            script.index('class="archive-delete-button"'),
-            script.index('class="archive-restore-button"'),
-        )
+        icons = (
+            Path(__file__).resolve().parents[1] / "tiku_admin" / "web" / "lucide.svg"
+        ).read_text(encoding="utf-8")
+        self.assertIn('<symbol id="trash-2"', icons)
+        self.assertIn('/assets/lucide.svg?v=20260812-2#${id}', script)
 
     def test_admin_feedback_ui_uses_real_chapter_options_and_archive_actions(self):
         script = (
