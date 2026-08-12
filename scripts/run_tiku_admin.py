@@ -14,6 +14,7 @@ if str(BASE) not in sys.path:
 
 from tiku_admin.app import create_admin_app
 from tiku_admin.control_store import SQLiteControlStore
+from tiku_admin.invite_vault import InvitationCodeVault
 from tiku_admin.reporting import AdminReporter
 from tiku_agent.feedback_store import SQLiteFeedbackStore
 
@@ -30,7 +31,13 @@ def build_app(
 ):
     admin_root = Path(admin_runtime).resolve()
     source_root = Path(source_runtime).resolve()
-    control_store = SQLiteControlStore(admin_root / "control.sqlite3")
+    invitation_vault = InvitationCodeVault.load_or_create(
+        admin_root / "invite_code_encryption.key"
+    )
+    control_store = SQLiteControlStore(
+        admin_root / "control.sqlite3",
+        invitation_vault=invitation_vault,
+    )
     feedback_store = SQLiteFeedbackStore(
         source_root / "feedback.sqlite3", cases_root=source_root / "feedback_cases"
     )

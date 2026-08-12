@@ -14,10 +14,12 @@ from pathlib import Path
 import secrets
 import sqlite3
 from threading import Lock
-from typing import Any, Iterator
+from typing import Any, Iterator, Protocol
+
+from tiku_admin.invite_vault import mask_invitation_code
 
 
-CONTROL_SCHEMA_VERSION = 1
+CONTROL_SCHEMA_VERSION = 2
 DEFAULT_GLOBAL_DAILY_BUDGET_MICROS = 30_000_000
 DEFAULT_INVITE_DAILY_BUDGET_MICROS = 3_000_000
 DEFAULT_FEEDBACK_RETENTION_DAYS = 30
@@ -36,6 +38,8 @@ class InvitationRecord:
     created_at: str
     updated_at: str
     last_used_at: str
+    code_preview: str
+    code_recoverable: bool
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -90,13 +94,25 @@ class _LegacyInvitationEntry:
     status: str
 
 
+class InvitationCodeVault(Protocol):
+    def seal(self, invite_id: str, code: str) -> str: ...
+
+    def open(self, invite_id: str, token: str) -> str: ...
+
+
 class SQLiteControlStore:
     """Small shared SQLite control plane read by 8790 and written by 8795."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        invitation_vault: InvitationCodeVault | None = None,
+    ) -> None:
         self.path = Path(path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
+        self._invitation_vault = invitation_vault
         self._initialize()
 
     @property
@@ -180,15 +196,32 @@ class SQLiteControlStore:
         code = f"{INVITE_CODE_PREFIX}{secrets.token_urlsafe(12)}"
         code_hash = sha256(code.encode("utf-8")).hexdigest()
         invite_id = f"invite-{datetime.now(UTC).strftime('%Y%m%d')}-{secrets.token_hex(3)}"
+        encrypted_code = (
+            self._invitation_vault.seal(invite_id, code)
+            if self._invitation_vault is not None
+            else ""
+        )
+        code_preview = mask_invitation_code(code) if encrypted_code else ""
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO invitations (
                     invite_id, code_hash, label, status, daily_budget_micros, expires_at,
-                    auth_version, created_at, updated_at, last_used_at
-                ) VALUES (?, ?, ?, 'enabled', ?, ?, 1, ?, ?, '')
+                    auth_version, created_at, updated_at, last_used_at,
+                    encrypted_code, code_preview
+                ) VALUES (?, ?, ?, 'enabled', ?, ?, 1, ?, ?, '', ?, ?)
                 """,
-                (invite_id, code_hash, clean_label, clean_budget, clean_expiry, now, now),
+                (
+                    invite_id,
+                    code_hash,
+                    clean_label,
+                    clean_budget,
+                    clean_expiry,
+                    now,
+                    now,
+                    encrypted_code,
+                    code_preview,
+                ),
             )
             after = self._invitation_row(connection, invite_id)
             self._write_audit(
@@ -297,6 +330,12 @@ class SQLiteControlStore:
     ) -> tuple[InvitationRecord, str]:
         code = f"{INVITE_CODE_PREFIX}{secrets.token_urlsafe(12)}"
         now = _utc_now()
+        encrypted_code = (
+            self._invitation_vault.seal(str(invite_id), code)
+            if self._invitation_vault is not None
+            else ""
+        )
+        code_preview = mask_invitation_code(code) if encrypted_code else ""
         with self._lock, self._connect() as connection:
             before = self._invitation_row(connection, invite_id)
             if before["status"] == "archived":
@@ -304,10 +343,17 @@ class SQLiteControlStore:
             connection.execute(
                 """
                 UPDATE invitations
-                SET code_hash = ?, auth_version = auth_version + 1, updated_at = ?
+                SET code_hash = ?, encrypted_code = ?, code_preview = ?,
+                    auth_version = auth_version + 1, updated_at = ?
                 WHERE invite_id = ?
                 """,
-                (sha256(code.encode("utf-8")).hexdigest(), now, str(invite_id)),
+                (
+                    sha256(code.encode("utf-8")).hexdigest(),
+                    encrypted_code,
+                    code_preview,
+                    now,
+                    str(invite_id),
+                ),
             )
             after = self._invitation_row(connection, invite_id)
             self._write_audit(
@@ -320,6 +366,31 @@ class SQLiteControlStore:
                 _public_invitation(after),
             )
         return _record(after), code
+
+    def reveal_invitation_code(
+        self, invite_id: str, *, actor: str = "owner"
+    ) -> str | None:
+        if self._invitation_vault is None:
+            return None
+        with self._lock, self._connect() as connection:
+            row = self._invitation_row(connection, invite_id)
+            encrypted = str(row["encrypted_code"] or "")
+            if not encrypted:
+                return None
+            code = self._invitation_vault.open(str(invite_id), encrypted)
+            candidate = sha256(code.encode("utf-8")).hexdigest()
+            if not hmac.compare_digest(candidate, str(row["code_hash"])):
+                raise RuntimeError("stored invitation code failed integrity verification")
+            self._write_audit(
+                connection,
+                actor,
+                "invitation.reveal",
+                "invitation",
+                str(invite_id),
+                {},
+                {"revealed": True},
+            )
+        return code
 
     def authenticate_invitation(self, code: str) -> InvitationRecord | None:
         candidate = sha256(str(code or "").strip().encode("utf-8")).hexdigest()
@@ -592,7 +663,9 @@ class SQLiteControlStore:
                     auth_version INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    last_used_at TEXT NOT NULL
+                    last_used_at TEXT NOT NULL,
+                    encrypted_code TEXT NOT NULL DEFAULT '',
+                    code_preview TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_invitations_status ON invitations(status);
                 CREATE TABLE IF NOT EXISTS admin_audit (
@@ -608,6 +681,18 @@ class SQLiteControlStore:
                 CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit(created_at);
                 """
             )
+            invitation_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(invitations)").fetchall()
+            }
+            if "encrypted_code" not in invitation_columns:
+                connection.execute(
+                    "ALTER TABLE invitations ADD COLUMN encrypted_code TEXT NOT NULL DEFAULT ''"
+                )
+            if "code_preview" not in invitation_columns:
+                connection.execute(
+                    "ALTER TABLE invitations ADD COLUMN code_preview TEXT NOT NULL DEFAULT ''"
+                )
             now = _utc_now()
             defaults = {
                 "schema_version": str(CONTROL_SCHEMA_VERSION),
@@ -619,6 +704,10 @@ class SQLiteControlStore:
                     "INSERT OR IGNORE INTO admin_meta (meta_key, meta_value) VALUES (?, ?)",
                     (key, value),
                 )
+            connection.execute(
+                "UPDATE admin_meta SET meta_value = ? WHERE meta_key = 'schema_version'",
+                (str(CONTROL_SCHEMA_VERSION),),
+            )
             settings = {
                 "global_daily_budget_micros": str(DEFAULT_GLOBAL_DAILY_BUDGET_MICROS),
                 "default_invite_daily_budget_micros": str(DEFAULT_INVITE_DAILY_BUDGET_MICROS),
@@ -735,6 +824,8 @@ def _record(row: sqlite3.Row) -> InvitationRecord:
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
         last_used_at=str(row["last_used_at"]),
+        code_preview=str(row["code_preview"] or ""),
+        code_recoverable=bool(row["encrypted_code"]),
     )
 
 

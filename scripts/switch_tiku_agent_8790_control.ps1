@@ -163,6 +163,7 @@ if (-not $backupDir.StartsWith($boundary, [System.StringComparison]::OrdinalIgno
 if (Test-Path -LiteralPath $backupDir) { throw "Backup directory already exists: $backupDir" }
 New-Item -ItemType Directory -Path $backupDir -ErrorAction Stop | Out-Null
 $sqliteBackup = Join-Path $backupDir "control.sqlite3"
+$inviteEncryptionKey = Join-Path (Split-Path $ControlDb -Parent) "invite_code_encryption.key"
 $backupCode = @'
 import sqlite3
 import sys
@@ -180,6 +181,9 @@ finally:
 & $PythonExe -c $backupCode $ControlDb $sqliteBackup
 if ($LASTEXITCODE -ne 0) { throw "Control database backup failed." }
 Copy-Item -LiteralPath $LegacyInviteConfig -Destination (Join-Path $backupDir "invite_access.json") -ErrorAction Stop
+if (Test-Path -LiteralPath $inviteEncryptionKey -PathType Leaf) {
+    Copy-Item -LiteralPath $inviteEncryptionKey -Destination (Join-Path $backupDir "invite_code_encryption.key") -ErrorAction Stop
+}
 
 $newWatchdog = $null
 $oldWatchdogStopped = $false

@@ -136,6 +136,11 @@ svg.icon { width: 18px; height: 18px; flex: 0 0 18px; fill: none; stroke: curren
 .cell-main { display: block; color: #292926; font-weight: 600; line-height: 1.45; }
 .cell-sub { display: block; max-width: 250px; margin-top: 3px; overflow: hidden; color: var(--subtle); font-size: 10px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .cell-actions { display: flex; align-items: center; justify-content: flex-end; gap: 2px; white-space: nowrap; }
+.invitation-table { min-width: 980px; }
+.masked-code { min-width: 190px; display: flex; align-items: center; gap: 5px; }
+.masked-code code { color: #3d3d39; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; white-space: nowrap; }
+.masked-code .icon-button { width: 30px; height: 30px; flex: 0 0 30px; }
+.legacy-code { display: block; color: var(--subtle); font-size: 11px; white-space: nowrap; }
 .empty-row { padding: 42px 20px !important; color: var(--muted) !important; text-align: center; }
 .status { display: inline-flex; align-items: center; gap: 6px; min-height: 24px; padding: 0 8px; border-radius: 12px; color: #555550; background: #efefeb; font-size: 10px; font-weight: 600; white-space: nowrap; }
 .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #9b9b94; }

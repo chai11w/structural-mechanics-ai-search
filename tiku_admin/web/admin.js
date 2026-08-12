@@ -20,6 +20,7 @@ const AUDIT_LABELS = {
   'invitation.create': '新增邀请码', 'invitation.update': '修改邀请码',
   'invitation.enabled': '启用邀请码', 'invitation.disabled': '停用邀请码',
   'invitation.archived': '归档邀请码', 'invitation.reset': '重置邀请码',
+  'invitation.reveal': '复制邀请码',
   'invitation.import': '导入邀请码', 'settings.update': '修改全局设置',
 };
 
@@ -105,6 +106,23 @@ function showToast(message, type = 'success') {
   toast.innerHTML = `${icon(type === 'error' ? 'alert' : 'check')}<span>${escapeHtml(message)}</span>`;
   region.append(toast);
   setTimeout(() => toast.remove(), 3600);
+}
+
+async function copyText(value) {
+  try {
+    await navigator.clipboard.writeText(value);
+  } catch (_error) {
+    const input = document.createElement('textarea');
+    input.value = value;
+    input.setAttribute('readonly', '');
+    input.style.position = 'fixed';
+    input.style.opacity = '0';
+    document.body.append(input);
+    input.select();
+    const copied = document.execCommand('copy');
+    input.remove();
+    if (!copied) throw new Error('浏览器未允许复制，请使用创建或重置弹窗手动复制。');
+  }
 }
 
 function authPreview() {
@@ -210,16 +228,16 @@ function confirmAction(title, message, confirmLabel = '确认') {
 }
 
 function showCode(code, title = '邀请码已创建') {
-  const root = modal(`<section class="modal" role="dialog" aria-modal="true" aria-labelledby="code-title"><header class="modal-head"><div><h2 id="code-title">${escapeHtml(title)}</h2><p>明文只显示这一次</p></div><button class="icon-button" type="button" data-close-modal aria-label="关闭">${icon('close')}</button></header><div class="modal-body"><div class="code-reveal"><span class="code-reveal-label">请立即复制并安全发放</span><div class="code-row"><code class="code-value" id="invite-code">${escapeHtml(code)}</code><button class="icon-button" id="copy-code" type="button" title="复制邀请码" aria-label="复制邀请码">${icon('copy')}</button></div><p class="code-warning">关闭后后台无法再次查看。需要新明文时只能重置邀请码，旧登录状态也会同时失效。</p></div></div><footer class="modal-actions"><button class="button button-primary" type="button" data-close-modal>我已保存</button></footer></section>`);
+  const root = modal(`<section class="modal" role="dialog" aria-modal="true" aria-labelledby="code-title"><header class="modal-head"><div><h2 id="code-title">${escapeHtml(title)}</h2><p>后台已加密保存</p></div><button class="icon-button" type="button" data-close-modal aria-label="关闭">${icon('close')}</button></header><div class="modal-body"><div class="code-reveal"><span class="code-reveal-label">可以立即复制并发给用户</span><div class="code-row"><code class="code-value" id="invite-code">${escapeHtml(code)}</code><button class="icon-button" id="copy-code" type="button" title="复制邀请码" aria-label="复制邀请码">${icon('copy')}</button></div><p class="code-warning">关闭后仍可在邀请码列表中点击复制；列表只显示脱敏内容。</p></div></div><footer class="modal-actions"><button class="button button-primary" type="button" data-close-modal>完成</button></footer></section>`);
   root.querySelector('#copy-code').addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(code); showToast('邀请码已复制'); }
+    try { await copyText(code); showToast('邀请码已复制'); }
     catch (_error) { window.getSelection()?.selectAllChildren(root.querySelector('#invite-code')); showToast('请手动复制选中的邀请码'); }
   });
 }
 
 function invitationForm(item = null) {
   const edit = Boolean(item);
-  const root = modal(`<section class="modal" role="dialog" aria-modal="true" aria-labelledby="invite-form-title"><header class="modal-head"><div><h2 id="invite-form-title">${edit ? '编辑邀请码' : '新增邀请码'}</h2><p>${edit ? '修改备注、额度或有效期' : '创建后明文仅显示一次'}</p></div><button class="icon-button" type="button" data-close-modal aria-label="关闭">${icon('close')}</button></header><form id="invite-form"><div class="modal-body form-stack"><div class="field"><label for="invite-label">备注名称</label><input class="input" id="invite-label" name="label" maxlength="80" required value="${attr(item?.label || '')}" placeholder="例如：张三内测"></div><div class="field"><label for="invite-budget">每日估算费用上限</label><input class="input" id="invite-budget" name="daily_budget_cny" type="number" min="0.01" max="10000" step="0.01" value="${item?.daily_budget_micros == null ? '' : attr((item.daily_budget_micros / 1000000).toFixed(2))}" placeholder="留空则继承默认额度"><span class="field-hint">留空后跟随设置页的默认单码额度。</span></div><div class="field"><label for="invite-expiry">有效期</label><input class="input" id="invite-expiry" name="expires_at" type="datetime-local" value="${attr(toLocalInput(item?.expires_at || ''))}"><span class="field-hint">留空表示长期有效。</span></div><p class="form-error" id="invite-error" role="alert"></p></div><footer class="modal-actions"><button class="button button-secondary" type="button" data-close-modal>取消</button><button class="button button-primary" type="submit">${edit ? '保存修改' : '创建邀请码'}</button></footer></form></section>`);
+  const root = modal(`<section class="modal" role="dialog" aria-modal="true" aria-labelledby="invite-form-title"><header class="modal-head"><div><h2 id="invite-form-title">${edit ? '编辑邀请码' : '新增邀请码'}</h2><p>${edit ? '修改备注、额度或有效期' : '创建后可在列表中脱敏显示并复制'}</p></div><button class="icon-button" type="button" data-close-modal aria-label="关闭">${icon('close')}</button></header><form id="invite-form"><div class="modal-body form-stack"><div class="field"><label for="invite-label">备注</label><input class="input" id="invite-label" name="label" maxlength="80" required value="${attr(item?.label || '')}" placeholder="例如：张三内测"></div><div class="field"><label for="invite-budget">每日估算费用上限</label><input class="input" id="invite-budget" name="daily_budget_cny" type="number" min="0.01" max="10000" step="0.01" value="${item?.daily_budget_micros == null ? '' : attr((item.daily_budget_micros / 1000000).toFixed(2))}" placeholder="留空则继承默认额度"><span class="field-hint">留空后跟随设置页的默认单码额度。</span></div><div class="field"><label for="invite-expiry">有效期</label><input class="input" id="invite-expiry" name="expires_at" type="datetime-local" value="${attr(toLocalInput(item?.expires_at || ''))}"><span class="field-hint">留空表示长期有效。</span></div><p class="form-error" id="invite-error" role="alert"></p></div><footer class="modal-actions"><button class="button button-secondary" type="button" data-close-modal>取消</button><button class="button button-primary" type="submit">${edit ? '保存修改' : '创建邀请码'}</button></footer></form></section>`);
   const form = root.querySelector('#invite-form');
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -247,6 +265,14 @@ function invitationForm(item = null) {
 
 async function invitationAction(item, action) {
   if (action === 'edit') return invitationForm(item);
+  if (action === 'copy') {
+    try {
+      const data = await api(`/api/admin/invitations/${encodeURIComponent(item.invite_id)}/reveal`, { method: 'POST' });
+      await copyText(data.code);
+      showToast('邀请码已复制');
+    } catch (error) { showToast(error.message, 'error'); }
+    return;
+  }
   if (action === 'reset') {
     if (!await confirmAction('重置邀请码', '旧邀请码和已经签发的登录状态都会立即失效。', '确认重置')) return;
     try { const data = await api(`/api/admin/invitations/${encodeURIComponent(item.invite_id)}/reset`, { method: 'POST' }); showCode(data.code, '邀请码已重置'); await renderInvitations(); } catch (error) { showToast(error.message, 'error'); }
@@ -261,8 +287,14 @@ async function invitationAction(item, action) {
 
 function invitationRows(items, query = '') {
   const clean = query.trim().toLowerCase();
-  const visible = clean ? items.filter((item) => `${item.label} ${item.invite_id}`.toLowerCase().includes(clean)) : items;
-  return visible.map((item) => `<tr><td><span class="cell-main">${escapeHtml(item.label)}</span><span class="cell-sub">${escapeHtml(item.invite_id)}</span></td><td>${statusBadge(item.status)}</td><td><span class="cell-main">¥${escapeHtml(item.effective_budget_cny || '0.00')} / 天</span><span class="cell-sub">${item.daily_budget_micros == null ? '继承默认额度' : '独立额度'}</span></td><td class="numeric"><span class="cell-main">${Number(item.today_searches || 0)} 次 · ¥${escapeHtml(item.today_cost_cny || '0.00')}</span>${progress(item.today_cost_micros || 0, item.effective_budget_micros || 0)}</td><td><span class="cell-main">${formatFullDate(item.expires_at)}</span><span class="cell-sub">最近登录 ${formatDateTime(item.last_used_at)}</span></td><td><div class="cell-actions"><button class="icon-button" data-action="edit" data-id="${attr(item.invite_id)}" type="button" title="编辑" aria-label="编辑邀请码">${icon('edit')}</button>${item.status === 'enabled' ? `<button class="icon-button" data-action="disable" data-id="${attr(item.invite_id)}" type="button" title="停用" aria-label="停用邀请码">${icon('pause')}</button>` : item.status === 'disabled' ? `<button class="icon-button" data-action="enable" data-id="${attr(item.invite_id)}" type="button" title="启用" aria-label="启用邀请码">${icon('enable')}</button>` : ''}${item.status !== 'archived' ? `<button class="icon-button" data-action="reset" data-id="${attr(item.invite_id)}" type="button" title="重置" aria-label="重置邀请码">${icon('reset')}</button><button class="icon-button danger" data-action="archive" data-id="${attr(item.invite_id)}" type="button" title="归档" aria-label="归档邀请码">${icon('archive')}</button>` : ''}</div></td></tr>`).join('') || '<tr><td class="empty-row" colspan="6">没有符合条件的邀请码</td></tr>';
+  const visible = clean ? items.filter((item) => `${item.label} ${item.invite_id} ${item.code_preview || ''}`.toLowerCase().includes(clean)) : items;
+  return visible.map((item) => {
+    const label = item.label === item.invite_id ? '未填写备注' : item.label;
+    const code = item.code_recoverable
+      ? `<div class="masked-code"><code>${escapeHtml(item.code_preview)}</code><button class="icon-button" data-action="copy" data-id="${attr(item.invite_id)}" type="button" title="复制完整邀请码" aria-label="复制完整邀请码">${icon('copy')}</button></div>`
+      : '<span class="legacy-code">旧邀请码不可查看</span>';
+    return `<tr><td><span class="cell-main">${escapeHtml(label)}</span><span class="cell-sub">${escapeHtml(item.invite_id)}</span></td><td>${statusBadge(item.status)}</td><td>${code}</td><td><span class="cell-main">¥${escapeHtml(item.effective_budget_cny || '0.00')} / 天</span><span class="cell-sub">${item.daily_budget_micros == null ? '继承默认额度' : '独立额度'}</span></td><td class="numeric"><span class="cell-main">${Number(item.today_searches || 0)} 次 · ¥${escapeHtml(item.today_cost_cny || '0.00')}</span>${progress(item.today_cost_micros || 0, item.effective_budget_micros || 0)}</td><td><span class="cell-main">${formatFullDate(item.expires_at)}</span><span class="cell-sub">最近登录 ${formatDateTime(item.last_used_at)}</span></td><td><div class="cell-actions"><button class="icon-button" data-action="edit" data-id="${attr(item.invite_id)}" type="button" title="编辑" aria-label="编辑邀请码">${icon('edit')}</button>${item.status === 'enabled' ? `<button class="icon-button" data-action="disable" data-id="${attr(item.invite_id)}" type="button" title="停用" aria-label="停用邀请码">${icon('pause')}</button>` : item.status === 'disabled' ? `<button class="icon-button" data-action="enable" data-id="${attr(item.invite_id)}" type="button" title="启用" aria-label="启用邀请码">${icon('enable')}</button>` : ''}${item.status !== 'archived' ? `<button class="icon-button" data-action="reset" data-id="${attr(item.invite_id)}" type="button" title="重置" aria-label="重置邀请码">${icon('reset')}</button><button class="icon-button danger" data-action="archive" data-id="${attr(item.invite_id)}" type="button" title="归档" aria-label="归档邀请码">${icon('archive')}</button>` : ''}</div></td></tr>`;
+  }).join('') || '<tr><td class="empty-row" colspan="7">没有符合条件的邀请码</td></tr>';
 }
 
 async function renderInvitations() {
@@ -272,7 +304,7 @@ async function renderInvitations() {
   try {
     const data = await api(`/api/admin/invitations?include_archived=${includeArchived ? 'true' : 'false'}`);
     const items = data.items;
-    body.innerHTML = `<div class="toolbar"><div class="field search-field"><label class="field-label" for="invite-search">搜索邀请码</label><div class="search-wrap">${icon('search')}<input class="input" id="invite-search" type="search" placeholder="按备注或 ID 搜索"></div></div><div class="toolbar-spacer"></div><label class="toggle-row"><span class="switch"><input id="show-archived" type="checkbox" ${includeArchived ? 'checked' : ''}><span></span></span>显示已归档</label></div><div class="table-tool"><div class="table-scroll"><table class="data-table"><thead><tr><th>邀请码</th><th>状态</th><th>每日额度</th><th class="numeric">今日使用</th><th>有效期</th><th></th></tr></thead><tbody id="invite-rows">${invitationRows(items)}</tbody></table></div></div>`;
+    body.innerHTML = `<div class="toolbar"><div class="field search-field"><label class="field-label" for="invite-search">搜索邀请码</label><div class="search-wrap">${icon('search')}<input class="input" id="invite-search" type="search" placeholder="按备注、编号或邀请码搜索"></div></div><div class="toolbar-spacer"></div><label class="toggle-row"><span class="switch"><input id="show-archived" type="checkbox" ${includeArchived ? 'checked' : ''}><span></span></span>显示已归档</label></div><div class="table-tool"><div class="table-scroll"><table class="data-table invitation-table"><thead><tr><th>备注</th><th>状态</th><th>邀请码</th><th>每日额度</th><th class="numeric">今日使用</th><th>有效期</th><th></th></tr></thead><tbody id="invite-rows">${invitationRows(items)}</tbody></table></div></div>`;
     const bindRows = () => document.querySelectorAll('[data-action][data-id]').forEach((button) => button.addEventListener('click', () => invitationAction(items.find((item) => item.invite_id === button.dataset.id), button.dataset.action)));
     bindRows();
     document.querySelector('#invite-search').addEventListener('input', (event) => { document.querySelector('#invite-rows').innerHTML = invitationRows(items, event.target.value); bindRows(); });

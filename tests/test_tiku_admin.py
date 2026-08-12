@@ -20,6 +20,7 @@ from scripts import manage_tiku_admin
 from tiku_admin.app import create_admin_app
 from tiku_admin.auth import SQLiteInviteAccess
 from tiku_admin.control_store import SQLiteControlStore, cny_to_micros
+from tiku_admin.invite_vault import InvitationCodeVault, mask_invitation_code
 from tiku_admin.reporting import AdminReporter
 from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.invite_access import InviteAccess, build_invitation_config
@@ -34,7 +35,12 @@ class TikuAdminTest(unittest.TestCase):
         )
         self.root.mkdir(parents=True)
         self.addCleanup(lambda: shutil.rmtree(self.root, ignore_errors=True))
-        self.control = SQLiteControlStore(self.root / "control.sqlite3")
+        self.key_path = self.root / "invite_code_encryption.key"
+        self.vault = InvitationCodeVault.load_or_create(self.key_path)
+        self.control = SQLiteControlStore(
+            self.root / "control.sqlite3",
+            invitation_vault=self.vault,
+        )
 
     def test_control_store_hashes_credentials_and_revokes_old_invite_sessions(self):
         self.control.initialize_admin("a-secure-admin-password")
@@ -43,6 +49,10 @@ class TikuAdminTest(unittest.TestCase):
 
         invitation, code = self.control.create_invitation(label="首位内测用户")
         self.assertNotIn(code.encode("utf-8"), (self.root / "control.sqlite3").read_bytes())
+        self.assertTrue(invitation.code_recoverable)
+        self.assertEqual(invitation.code_preview, mask_invitation_code(code))
+        self.assertEqual(self.control.reveal_invitation_code(invitation.invite_id), code)
+        self.assertNotIn(self.key_path.read_bytes(), (self.root / "control.sqlite3").read_bytes())
         access = SQLiteInviteAccess(self.control, auth_max_age_seconds=60)
         identity = access.authenticate_code(code)
         self.assertEqual(identity.invite_id, invitation.invite_id)
@@ -59,6 +69,21 @@ class TikuAdminTest(unittest.TestCase):
         self.assertGreater(reset.auth_version, invitation.auth_version)
         self.assertIsNone(access.authenticate_code(code))
         self.assertEqual(access.authenticate_code(new_code).invite_id, invitation.invite_id)
+        self.assertEqual(self.control.reveal_invitation_code(invitation.invite_id), new_code)
+
+    def test_invitation_vault_binds_ciphertext_to_invitation_and_key(self):
+        invitation, code = self.control.create_invitation(label="加密邀请码")
+        other_vault = InvitationCodeVault.load_or_create(self.root / "other.key")
+        with sqlite3.connect(self.control.path) as connection:
+            encrypted = connection.execute(
+                "SELECT encrypted_code FROM invitations WHERE invite_id = ?",
+                (invitation.invite_id,),
+            ).fetchone()[0]
+        with self.assertRaisesRegex(ValueError, "invalid invitation ciphertext"):
+            other_vault.open(invitation.invite_id, encrypted)
+        with self.assertRaisesRegex(ValueError, "invalid invitation ciphertext"):
+            self.vault.open("different-invite", encrypted)
+        self.assertEqual(self.vault.open(invitation.invite_id, encrypted), code)
 
     def test_dynamic_settings_and_audit_are_persisted(self):
         values = self.control.update_settings(
@@ -88,6 +113,10 @@ class TikuAdminTest(unittest.TestCase):
         applied = self.control.import_legacy_config(legacy_path)
         self.assertEqual(applied.insert_count, 2)
         self.assertEqual(len(self.control.list_invitations(include_archived=True)), 3)
+        legacy_record = self.control.get_invitation(legacy_codes[0][0])
+        self.assertFalse(legacy_record.code_recoverable)
+        self.assertEqual(legacy_record.code_preview, "")
+        self.assertIsNone(self.control.reveal_invitation_code(legacy_record.invite_id))
         access = SQLiteInviteAccess(self.control, auth_max_age_seconds=60)
         self.assertEqual(access.authenticate_code(current_code).invite_id, current.invite_id)
         self.assertEqual(
@@ -276,7 +305,23 @@ class TikuAdminTest(unittest.TestCase):
         payload = created.json()
         invite_id = payload["invitation"]["invite_id"]
         self.assertTrue(payload["code"].startswith("TIKU-"))
-        self.assertNotIn(payload["code"], client.get("/api/admin/invitations").text)
+        invitation_list = client.get("/api/admin/invitations")
+        self.assertNotIn(payload["code"], invitation_list.text)
+        listed = invitation_list.json()["items"][0]
+        self.assertTrue(listed["code_recoverable"])
+        self.assertEqual(listed["code_preview"], mask_invitation_code(payload["code"]))
+        self.assertEqual(
+            client.post(f"/api/admin/invitations/{invite_id}/reveal").status_code,
+            403,
+        )
+        revealed = client.post(
+            f"/api/admin/invitations/{invite_id}/reveal",
+            headers={"x-csrf-token": csrf},
+        )
+        self.assertEqual(revealed.status_code, 200, revealed.text)
+        self.assertEqual(revealed.json()["code"], payload["code"])
+        self.assertEqual(revealed.headers["cache-control"], "private, no-store")
+        self.assertEqual(self.control.list_audit()[0]["action"], "invitation.reveal")
 
         self._insert_cost(costs, identity_key=invite_id, search_key="search-one")
         saved = feedback.upsert(

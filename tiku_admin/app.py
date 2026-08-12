@@ -229,6 +229,24 @@ def create_admin_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"invitation": invitation.to_dict(), "code": code}
 
+    @app.post("/api/admin/invitations/{invite_id}/reveal")
+    def reveal_invitation(invite_id: str) -> Response:
+        try:
+            code = control_store.reveal_invitation_code(invite_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="邀请码不存在。") from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail="邀请码解密失败，请检查后台密钥。") from exc
+        if code is None:
+            raise HTTPException(
+                status_code=409,
+                detail="旧邀请码未保存可恢复明文，请重置后再复制。",
+            )
+        return JSONResponse(
+            {"code": code},
+            headers={"Cache-Control": "private, no-store"},
+        )
+
     @app.get("/api/admin/feedback")
     def feedback_list(
         rating: str = "",
