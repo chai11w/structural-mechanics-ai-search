@@ -85,6 +85,17 @@ class TikuAdminTest(unittest.TestCase):
             self.vault.open("different-invite", encrypted)
         self.assertEqual(self.vault.open(invitation.invite_id, encrypted), code)
 
+    def test_admin_ui_uses_user_for_invitation_labels(self):
+        script = (
+            Path(__file__).resolve().parents[1] / "tiku_admin" / "web" / "admin.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("<th>用户</th><th>状态</th><th>邀请码</th>", script)
+        self.assertIn('<dt>用户</dt><dd>${escapeHtml(feedbackUserLabel(data))}</dd>', script)
+        self.assertIn('for="filter-invite">用户</label>', script)
+        self.assertIn("全部用户", script)
+        self.assertIn("未命名用户", script)
+        self.assertNotIn("未填写备注", script)
+
     def test_dynamic_settings_and_audit_are_persisted(self):
         values = self.control.update_settings(
             global_daily_budget_micros=cny_to_micros("42.50"),
