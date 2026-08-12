@@ -119,7 +119,10 @@ class TikuAdminTest(unittest.TestCase):
         self.assertIn("永久删除反馈", script)
         self.assertIn('data-feedback-action="delete"', script)
         self.assertIn('data-feedback-action="restore"', script)
-        self.assertIn("data.audit.slice(0, 10)", script)
+        self.assertIn("const detailLink = item.archived_at ? ''", script)
+        self.assertIn("data.total > filters.limit", script)
+        self.assertIn("audit-pagination", script)
+        self.assertNotIn("data.audit.slice(0, 10)", script)
 
     def test_dynamic_settings_and_audit_are_persisted(self):
         values = self.control.update_settings(
@@ -299,6 +302,28 @@ class TikuAdminTest(unittest.TestCase):
         self.assertEqual(
             store.query_feedback(rating="negative", include_archived=True)[1], 1
         )
+        newer = store.upsert(
+            message_id="message_87654321",
+            identity_key="invite-001",
+            session_key="newer-session",
+            rating="positive",
+            tags=("found_answer",),
+            detail="较新的反馈",
+            task_revision=3,
+            phase="ANSWER_SHOWN",
+            candidate_count=1,
+            search_key="newer-session:3",
+            chapter="4力法",
+            conversation=[],
+            retention_days=365,
+        )
+        with sqlite3.connect(store.path) as connection:
+            connection.execute(
+                "UPDATE message_feedback SET created_at = ? WHERE feedback_id = ?",
+                ((datetime.now(UTC) + timedelta(seconds=1)).isoformat(), newer.feedback_id),
+            )
+        ordered, _total = store.query_feedback(include_archived=True)
+        self.assertEqual(ordered[0].detail, "较新的反馈")
         restored = store.set_archived(saved.feedback_number, archived=False)
         self.assertEqual(restored.archived_at, "")
 
@@ -458,6 +483,10 @@ class TikuAdminTest(unittest.TestCase):
         ).json()
         self.assertEqual(archived_list["total"], 1)
         self.assertTrue(archived_list["items"][0]["archived_at"])
+        self.assertEqual(
+            client.get(f"/api/admin/feedback/{saved.feedback_number}").status_code,
+            409,
+        )
         restored = client.post(
             f"/api/admin/feedback/{saved.feedback_number}/restore",
             headers={"x-csrf-token": csrf},
@@ -510,6 +539,13 @@ class TikuAdminTest(unittest.TestCase):
         )
         self.assertEqual(settings.status_code, 200, settings.text)
         self.assertEqual(self.control.settings()["global_daily_budget_micros"], 40_000_000)
+        settings_page = client.get(
+            "/api/admin/settings", params={"audit_limit": 2, "audit_offset": 1}
+        )
+        self.assertEqual(settings_page.status_code, 200)
+        self.assertEqual(settings_page.json()["audit_limit"], 2)
+        self.assertEqual(settings_page.json()["audit_offset"], 1)
+        self.assertGreaterEqual(settings_page.json()["audit_total"], 2)
 
     @staticmethod
     def _create_cost_schema(path: Path) -> None:

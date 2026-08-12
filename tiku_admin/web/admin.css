@@ -141,7 +141,7 @@ svg.icon { width: 18px; height: 18px; flex: 0 0 18px; fill: none; stroke: curren
 .feedback-table th:last-child, .feedback-table td:last-child { min-width: 262px; }
 .archived-actions { gap: 8px; }
 .archive-delete-button, .archive-restore-button { height: 36px; border: 0; border-radius: 7px; cursor: pointer; transition: color .15s, background .15s, transform .1s; }
-.archive-delete-button { width: 36px; flex: 0 0 36px; display: inline-grid; place-items: center; padding: 0; color: #898983; background: transparent; }
+.archive-delete-button { width: 36px; flex: 0 0 36px; display: inline-grid; place-items: center; padding: 0; border: 1px solid #d8d8d2; color: #696963; background: #fff; }
 .archive-delete-button .icon { width: 19px; height: 19px; }
 .archive-delete-button:hover { color: var(--danger); background: var(--danger-soft); }
 .archive-restore-button { min-width: 84px; padding: 0 13px; color: #2f2f2c; background: #f0f0ed; font-size: 13px; font-weight: 550; }
@@ -240,7 +240,8 @@ svg.icon { width: 18px; height: 18px; flex: 0 0 18px; fill: none; stroke: curren
 .audit-item { padding: 13px 0; border-bottom: 1px solid var(--line); }
 .audit-item strong { display: block; margin-bottom: 4px; font-size: 11px; font-weight: 600; }
 .audit-item span { display: block; color: var(--subtle); font-size: 10px; line-height: 1.45; }
-.audit-toggle { width: 100%; margin-top: 8px; font-size: 11px; }
+.audit-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 8px; color: var(--muted); font-size: 11px; }
+.audit-pagination .icon-button { width: 30px; height: 30px; }
 
 .modal-backdrop { position: fixed; z-index: 80; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(28,28,25,.34); backdrop-filter: blur(2px); }
 .modal { width: min(470px, 100%); max-height: calc(100dvh - 40px); overflow-y: auto; border: 1px solid var(--line-strong); border-radius: 8px; background: #fff; box-shadow: 0 24px 70px rgba(30,30,25,.20); }

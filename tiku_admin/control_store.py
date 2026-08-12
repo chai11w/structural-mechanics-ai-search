@@ -493,11 +493,13 @@ class SQLiteControlStore:
             identity_daily_micros=identity_budget,
         )
 
-    def list_audit(self, *, limit: int = 50) -> list[dict[str, object]]:
+    def list_audit(self, *, limit: int = 50, offset: int = 0) -> list[dict[str, object]]:
         safe_limit = min(200, max(1, int(limit)))
+        safe_offset = max(0, int(offset))
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM admin_audit ORDER BY created_at DESC LIMIT ?", (safe_limit,)
+                "SELECT * FROM admin_audit ORDER BY created_at DESC, audit_id DESC LIMIT ? OFFSET ?",
+                (safe_limit, safe_offset),
             ).fetchall()
         return [
             {
@@ -512,6 +514,10 @@ class SQLiteControlStore:
             }
             for row in rows
         ]
+
+    def count_audit(self) -> int:
+        with self._connect() as connection:
+            return int(connection.execute("SELECT COUNT(*) FROM admin_audit").fetchone()[0])
 
     def preflight_legacy_config(
         self,

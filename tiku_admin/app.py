@@ -296,6 +296,11 @@ def create_admin_app(
 
     @app.get("/api/admin/feedback/{feedback_id}")
     def feedback_detail(feedback_id: str) -> dict[str, object]:
+        item = feedback_store.get_feedback(feedback_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="反馈不存在。")
+        if item.archived_at:
+            raise HTTPException(status_code=409, detail="请先取消归档反馈，再查看详情。")
         result = reporter.feedback_detail(feedback_id)
         if result is None:
             raise HTTPException(status_code=404, detail="反馈不存在。")
@@ -344,21 +349,31 @@ def create_admin_app(
 
     @app.get("/api/admin/feedback/{feedback_id}/media/{media_name}")
     def feedback_media(feedback_id: str, media_name: str) -> FileResponse:
+        item = feedback_store.get_feedback(feedback_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="反馈图片不存在或已过期。")
+        if item.archived_at:
+            raise HTTPException(status_code=409, detail="请先取消归档反馈，再查看详情。")
         path = feedback_store.resolve_case_media(feedback_id, media_name)
         if path is None:
             raise HTTPException(status_code=404, detail="反馈图片不存在或已过期。")
         return FileResponse(path, headers={"Cache-Control": "private, no-store"})
 
     @app.get("/api/admin/settings")
-    def settings() -> dict[str, object]:
+    def settings(audit_limit: int = 10, audit_offset: int = 0) -> dict[str, object]:
         values = control_store.settings()
+        safe_limit = min(50, max(1, int(audit_limit)))
+        safe_offset = max(0, int(audit_offset))
         return {
             **values,
             "global_daily_budget_cny": micros_to_cny(int(values["global_daily_budget_micros"])),
             "default_invite_daily_budget_cny": micros_to_cny(
                 int(values["default_invite_daily_budget_micros"])
             ),
-            "audit": control_store.list_audit(limit=30),
+            "audit": control_store.list_audit(limit=safe_limit, offset=safe_offset),
+            "audit_total": control_store.count_audit(),
+            "audit_limit": safe_limit,
+            "audit_offset": safe_offset,
         }
 
     @app.patch("/api/admin/settings")

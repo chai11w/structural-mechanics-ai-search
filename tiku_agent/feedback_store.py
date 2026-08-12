@@ -194,7 +194,7 @@ class SQLiteFeedbackStore:
                 _create_schema(connection)
                 where = "" if include_archived else "WHERE archived_at = ''"
                 rows = connection.execute(
-                    f"SELECT * FROM message_feedback {where} ORDER BY updated_at DESC"
+                    f"SELECT * FROM message_feedback {where} ORDER BY created_at DESC, updated_at DESC, feedback_id DESC"
                 ).fetchall()
         return [_feedback_from_row(row) for row in rows]
 
@@ -255,7 +255,7 @@ class SQLiteFeedbackStore:
                 ).fetchone()[0]
             )
             rows = connection.execute(
-                f"SELECT * FROM message_feedback {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                f"SELECT * FROM message_feedback {where} ORDER BY created_at DESC, updated_at DESC, feedback_id DESC LIMIT ? OFFSET ?",
                 [*parameters, safe_limit, safe_offset],
             ).fetchall()
         return [_feedback_from_row(row) for row in rows], total
