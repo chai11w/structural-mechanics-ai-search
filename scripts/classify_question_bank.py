@@ -9,7 +9,6 @@ writes review artifacts under an output directory.
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import random
@@ -18,7 +17,6 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from io import BytesIO
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +24,7 @@ import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 
 from tiku_shared.model_costs import timed_model_call
+from tiku_shared.image_payload import image_to_model_data_url
 
 try:
     import cv2
@@ -443,22 +442,7 @@ def scan_images(root: Path, chapters: list[str] | None = None) -> list[Path]:
 
 
 def image_to_data_url(path: Path, upscale_min_side: int = 900) -> str:
-    mime = "image/jpeg"
-    try:
-        img = Image.open(path).convert("RGB")
-        shortest = min(img.size)
-        if shortest and shortest < upscale_min_side:
-            scale = upscale_min_side / shortest
-            new_size = (int(img.width * scale), int(img.height * scale))
-            img = img.resize(new_size, Image.Resampling.LANCZOS)
-        buf = BytesIO()
-        img.save(buf, format="JPEG", quality=94)
-        raw = buf.getvalue()
-    except Exception:  # noqa: BLE001
-        mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
-        raw = path.read_bytes()
-    data = base64.b64encode(raw).decode("ascii")
-    return f"data:{mime};base64,{data}"
+    return image_to_model_data_url(path, upscale_min_side=upscale_min_side)
 
 
 def request_json_with_retry(
