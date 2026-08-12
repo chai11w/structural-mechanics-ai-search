@@ -42,6 +42,17 @@ function Test-Health {
     }
 }
 
+function Stop-PortProcess {
+    $processIds = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty OwningProcess -Unique
+    foreach ($processId in $processIds) {
+        if ($processId -and $processId -ne 0) {
+            Write-Status "Stopping stale tiku bot listener on port ${Port}: PID $processId"
+            Stop-Process -Id $processId -Force -ErrorAction Stop
+        }
+    }
+}
+
 function Start-Bot {
     $arguments = @(
         "scripts\feishu_tiku_bot.py",
@@ -131,8 +142,9 @@ $lastUrl = ""
 while ($true) {
     if (-not $botProcess -or $botProcess.HasExited -or -not (Test-Health)) {
         if ($botProcess -and -not $botProcess.HasExited) {
-            Stop-Process -Id $botProcess.Id -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $botProcess.Id -Force -ErrorAction Stop
         }
+        Stop-PortProcess
         Write-Status "Bot health check failed; restarting bot."
         $botProcess = Start-Bot
         Start-Sleep -Seconds 4
