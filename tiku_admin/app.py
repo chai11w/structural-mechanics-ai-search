@@ -269,6 +269,7 @@ def create_admin_app(
     def feedback_list(
         rating: str = "",
         identity_key: str = "",
+        identity_status: str = "",
         chapter: str = "",
         review_status: str = "",
         include_archived: bool = False,
@@ -276,10 +277,13 @@ def create_admin_app(
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, object]:
+        if identity_status and identity_status != "archived":
+            raise HTTPException(status_code=400, detail="用户分组筛选无效。")
         try:
             return reporter.feedback_list(
                 rating=rating,
                 identity_key=identity_key,
+                identity_status=identity_status,
                 chapter=chapter,
                 review_status=review_status,
                 include_archived=include_archived,

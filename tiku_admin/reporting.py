@@ -103,9 +103,20 @@ class AdminReporter:
             str(filters.get("date") or ""),
             str(self.control_store.settings()["budget_timezone"]),
         )
+        identity_status = str(filters.get("identity_status") or "").strip().lower()
+        identity_keys = None
+        if identity_status:
+            if identity_status != "archived":
+                raise ValueError("invalid identity status")
+            identity_keys = [
+                invitation.invite_id
+                for invitation in self.control_store.list_invitations(include_archived=True)
+                if invitation.status == "archived"
+            ]
         items, total = self.feedback_store.query_feedback(
             rating=str(filters.get("rating") or ""),
             identity_key=str(filters.get("identity_key") or ""),
+            identity_keys=identity_keys,
             chapter=str(filters.get("chapter") or ""),
             review_status=str(filters.get("review_status") or ""),
             include_archived=bool(filters.get("include_archived")),

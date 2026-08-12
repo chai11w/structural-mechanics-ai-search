@@ -9,7 +9,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 from threading import Lock
-from typing import Callable
+from typing import Callable, Sequence
 from uuid import uuid4
 
 
@@ -203,6 +203,7 @@ class SQLiteFeedbackStore:
         *,
         rating: str = "",
         identity_key: str = "",
+        identity_keys: Sequence[str] | None = None,
         chapter: str = "",
         review_status: str = "",
         include_archived: bool = False,
@@ -223,6 +224,15 @@ class SQLiteFeedbackStore:
             if clean:
                 clauses.append(f"{column} = ?")
                 parameters.append(clean)
+        clean_identity_keys = [
+            str(value).strip() for value in (identity_keys or []) if str(value).strip()
+        ]
+        if clean_identity_keys:
+            placeholders = ", ".join("?" for _ in clean_identity_keys)
+            clauses.append(f"identity_key IN ({placeholders})")
+            parameters.extend(clean_identity_keys)
+        elif identity_keys is not None:
+            clauses.append("1 = 0")
         if not include_archived:
             clauses.append("archived_at = ''")
         if str(created_from or "").strip():

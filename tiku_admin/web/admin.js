@@ -382,6 +382,7 @@ async function renderFeedback() {
   const params = new URLSearchParams(location.search);
   const filters = {
     rating: params.get('rating') || '', identity_key: params.get('identity_key') || '',
+    identity_status: params.get('identity_status') || '',
     chapter: params.get('chapter') || '', review_status: params.get('review_status') || '',
     date: params.get('date') || '', include_archived: params.get('archived') === '1',
     offset: Math.max(0, Number(params.get('offset') || 0)), limit: 50,
@@ -389,7 +390,7 @@ async function renderFeedback() {
   const body = mountShell('feedback', '用户反馈', '筛选反馈并打开完整对话，判断问题是否需要改进。');
   try {
     const requestParams = new URLSearchParams({offset: String(filters.offset), limit: String(filters.limit)});
-    for (const key of ['rating', 'identity_key', 'chapter', 'review_status', 'date']) {
+    for (const key of ['rating', 'identity_key', 'identity_status', 'chapter', 'review_status', 'date']) {
       if (filters[key]) requestParams.set(key, filters[key]);
     }
     if (filters.include_archived) requestParams.set('include_archived', 'true');
@@ -397,14 +398,21 @@ async function renderFeedback() {
       api(`/api/admin/feedback?${requestParams.toString()}`),
       api('/api/admin/invitations?include_archived=true'),
     ]);
-    const inviteOptions = invites.items.map((item) => `<option value="${attr(item.invite_id)}" ${filters.identity_key === item.invite_id ? 'selected' : ''}>${escapeHtml(userLabel(item))} · ${escapeHtml(item.invite_id)}</option>`).join('');
+    const activeInviteOptions = invites.items.filter((item) => item.status !== 'archived').map((item) => `<option value="${attr(item.invite_id)}" ${filters.identity_key === item.invite_id ? 'selected' : ''}>${escapeHtml(userLabel(item))}</option>`).join('');
+    const archivedInviteOption = invites.items.some((item) => item.status === 'archived') ? `<option value="__archived__" ${filters.identity_status === 'archived' ? 'selected' : ''}>已归档用户</option>` : '';
+    const inviteOptions = `${activeInviteOptions}${archivedInviteOption}`;
     const chapterOptions = data.chapters.map((chapter) => `<option value="${attr(chapter)}" ${filters.chapter === chapter ? 'selected' : ''}>${escapeHtml(chapter)}</option>`).join('');
     body.innerHTML = `<form class="toolbar feedback-filters" id="feedback-filters"><div class="field"><label class="field-label" for="filter-date">日期</label><input class="input" id="filter-date" name="date" type="date" value="${attr(filters.date)}"></div><div class="field"><label class="field-label" for="filter-rating">评价</label><select class="select" id="filter-rating" name="rating"><option value="">全部</option><option value="negative" ${filters.rating === 'negative' ? 'selected' : ''}>点踩</option><option value="positive" ${filters.rating === 'positive' ? 'selected' : ''}>点赞</option></select></div><div class="field"><label class="field-label" for="filter-invite">用户</label><select class="select" id="filter-invite" name="identity_key"><option value="">全部用户</option>${inviteOptions}</select></div><div class="field"><label class="field-label" for="filter-chapter">章节</label><select class="select" id="filter-chapter" name="chapter"><option value="">全部章节</option>${chapterOptions}</select></div><div class="field"><label class="field-label" for="filter-status">处理状态</label><select class="select" id="filter-status" name="review_status"><option value="">全部</option><option value="pending" ${filters.review_status === 'pending' ? 'selected' : ''}>待处理</option><option value="resolved" ${filters.review_status === 'resolved' ? 'selected' : ''}>已处理</option><option value="no_action" ${filters.review_status === 'no_action' ? 'selected' : ''}>无需处理</option></select></div><button class="button button-secondary" type="submit">${icon('search')}筛选</button><label class="toggle-row feedback-archive-toggle"><span class="switch"><input id="show-archived-feedback" type="checkbox" ${filters.include_archived ? 'checked' : ''}><span></span></span>显示已归档</label></form><div class="table-tool"><div class="table-scroll"><table class="data-table feedback-table"><thead><tr><th>反馈编号</th><th>用户</th><th>评价</th><th>原因</th><th>说明</th><th class="numeric">本题费用</th><th>状态</th><th></th></tr></thead><tbody>${feedbackSummaryRows(data.items, { manageable: true })}</tbody></table></div><div class="pagination"><span>共 ${Number(data.total)} 条</span><button class="icon-button" id="prev-page" type="button" aria-label="上一页" ${filters.offset <= 0 ? 'disabled' : ''}>${icon('back')}</button><button class="icon-button" id="next-page" type="button" aria-label="下一页" ${filters.offset + filters.limit >= data.total ? 'disabled' : ''}>${icon('next')}</button></div></div>`;
     document.querySelector('#feedback-filters').addEventListener('submit', (event) => {
       event.preventDefault();
       const form = new FormData(event.currentTarget);
       const next = new URLSearchParams();
-      for (const [key, value] of form.entries()) if (String(value).trim()) next.set(key, String(value).trim());
+      for (const [key, value] of form.entries()) {
+        const clean = String(value).trim();
+        if (!clean) continue;
+        if (key === 'identity_key' && clean === '__archived__') next.set('identity_status', 'archived');
+        else next.set(key, clean);
+      }
       if (filters.include_archived) next.set('archived', '1');
       location.search = next.toString();
     });

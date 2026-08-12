@@ -94,6 +94,9 @@ class TikuAdminTest(unittest.TestCase):
         self.assertIn('for="filter-invite">用户</label>', script)
         self.assertIn("全部用户", script)
         self.assertIn("未命名用户", script)
+        self.assertIn("已归档用户", script)
+        self.assertIn("identity_status", script)
+        self.assertNotIn("} · ${escapeHtml(item.invite_id)}", script)
         self.assertNotIn("未填写备注", script)
         self.assertIn('class="archive-delete-button"', script)
         self.assertIn('class="archive-restore-button"', script)
@@ -462,6 +465,20 @@ class TikuAdminTest(unittest.TestCase):
         self.assertEqual(restored.status_code, 200, restored.text)
 
         self.control.set_invitation_status(invite_id, "archived")
+        archived_user_feedback = client.get(
+            "/api/admin/feedback", params={"identity_status": "archived"}
+        )
+        self.assertEqual(archived_user_feedback.status_code, 200)
+        self.assertEqual(archived_user_feedback.json()["total"], 1)
+        self.assertEqual(
+            archived_user_feedback.json()["items"][0]["identity_key"], invite_id
+        )
+        self.assertEqual(
+            client.get(
+                "/api/admin/feedback", params={"identity_status": "invalid"}
+            ).status_code,
+            400,
+        )
         blocked_delete = client.delete(
             f"/api/admin/invitations/{invite_id}", headers={"x-csrf-token": csrf}
         )
