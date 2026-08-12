@@ -34,12 +34,15 @@ function Write-Status {
 }
 
 function Test-Health {
-    try {
-        $response = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 3
-        return [bool]$response.ok
-    } catch {
-        return $false
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+            $response = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 3
+            if ([bool]$response.ok) { return $true }
+        } catch {
+            if ($attempt -lt 2) { Start-Sleep -Milliseconds 400 }
+        }
     }
+    return $false
 }
 
 function Stop-PortProcess {
@@ -51,6 +54,15 @@ function Stop-PortProcess {
             Stop-Process -Id $processId -Force -ErrorAction Stop
         }
     }
+}
+
+function Wait-PortFree {
+    for ($attempt = 1; $attempt -le 20; $attempt++) {
+        $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+        if ($listeners.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "Port $Port did not become free before restart."
 }
 
 function Start-Bot {
@@ -145,6 +157,7 @@ while ($true) {
             Stop-Process -Id $botProcess.Id -Force -ErrorAction Stop
         }
         Stop-PortProcess
+        Wait-PortFree
         Write-Status "Bot health check failed; restarting bot."
         $botProcess = Start-Bot
         Start-Sleep -Seconds 4

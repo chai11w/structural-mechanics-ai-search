@@ -9,12 +9,15 @@ class TikuBotWatchdogTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("function Stop-PortProcess", script)
+        self.assertIn("for ($attempt = 1; $attempt -le 2; $attempt++)", script)
+        self.assertIn("function Wait-PortFree", script)
         self.assertIn("Get-NetTCPConnection -LocalPort $Port -State Listen", script)
         self.assertIn("Stop-Process -Id $processId -Force -ErrorAction Stop", script)
         restart = script.index("if (-not $botProcess -or $botProcess.HasExited")
         cleanup = script.index("Stop-PortProcess", restart)
         start = script.index("$botProcess = Start-Bot", restart)
         self.assertLess(cleanup, start)
+        self.assertLess(script.index("Wait-PortFree", cleanup), start)
 
 
 if __name__ == "__main__":
