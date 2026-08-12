@@ -419,18 +419,37 @@ class SQLiteControlStore:
             for row in rows
         ]
 
-    def preflight_legacy_config(self, config_path: str | Path) -> LegacyImportReport:
+    def preflight_legacy_config(
+        self,
+        config_path: str | Path,
+        *,
+        require_status_match: bool = False,
+    ) -> LegacyImportReport:
         entries, secret = _load_legacy_config(config_path)
         with self._connect() as connection:
-            return self._legacy_import_report(connection, entries, secret)
+            return self._legacy_import_report(
+                connection,
+                entries,
+                secret,
+                require_status_match=require_status_match,
+            )
 
     def import_legacy_config(
-        self, config_path: str | Path, *, actor: str = "migration"
+        self,
+        config_path: str | Path,
+        *,
+        actor: str = "migration",
+        require_status_match: bool = False,
     ) -> LegacyImportReport:
         entries, secret = _load_legacy_config(config_path)
         now = _utc_now()
         with self._lock, self._connect() as connection:
-            report = self._legacy_import_report(connection, entries, secret)
+            report = self._legacy_import_report(
+                connection,
+                entries,
+                secret,
+                require_status_match=require_status_match,
+            )
             if not report.can_apply:
                 raise ValueError("legacy invitation import has conflicts")
             if report.cookie_secret_action == "replace_with_legacy":
@@ -475,9 +494,14 @@ class SQLiteControlStore:
         connection: sqlite3.Connection,
         entries: tuple[_LegacyInvitationEntry, ...],
         secret: bytes,
+        *,
+        require_status_match: bool = False,
     ) -> LegacyImportReport:
-        rows = connection.execute("SELECT invite_id, code_hash FROM invitations").fetchall()
+        rows = connection.execute(
+            "SELECT invite_id, code_hash, status FROM invitations"
+        ).fetchall()
         by_id = {str(row["invite_id"]): str(row["code_hash"]) for row in rows}
+        status_by_id = {str(row["invite_id"]): str(row["status"]) for row in rows}
         by_hash = {str(row["code_hash"]): str(row["invite_id"]) for row in rows}
         insert_count = 0
         unchanged_count = 0
@@ -487,7 +511,15 @@ class SQLiteControlStore:
             existing_owner = by_hash.get(entry.code_hash)
             if existing_hash is not None:
                 if hmac.compare_digest(existing_hash, entry.code_hash):
-                    unchanged_count += 1
+                    if (
+                        require_status_match
+                        and status_by_id[entry.invite_id] != entry.status
+                    ):
+                        conflicts.append(
+                            LegacyImportConflict("invitation_status_mismatch", entry.invite_id)
+                        )
+                    else:
+                        unchanged_count += 1
                 else:
                     conflicts.append(
                         LegacyImportConflict("invite_id_hash_mismatch", entry.invite_id)

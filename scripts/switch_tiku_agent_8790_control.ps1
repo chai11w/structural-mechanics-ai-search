@@ -135,7 +135,7 @@ $adminHealth = Invoke-RestMethod -Uri "http://127.0.0.1:8795/health" -TimeoutSec
 if ($adminHealth.status -ne "ok") { throw "8795 is not healthy before the switch." }
 
 & $PythonExe -B (Join-Path $PSScriptRoot "manage_tiku_admin.py") `
-    --control-db $ControlDb --import-invites $LegacyInviteConfig
+    --control-db $ControlDb --import-invites $LegacyInviteConfig --require-status-match
 if ($LASTEXITCODE -ne 0) { throw "Control database preflight failed." }
 
 $detectedWatchdogPid = Resolve-CurrentWatchdogPid

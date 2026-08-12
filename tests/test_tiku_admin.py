@@ -103,6 +103,19 @@ class TikuAdminTest(unittest.TestCase):
         self.assertEqual(len(self.control.list_invitations(include_archived=True)), 3)
 
         self.control.set_invitation_status(legacy_identity.invite_id, "disabled")
+        strict = self.control.preflight_legacy_config(
+            legacy_path, require_status_match=True
+        )
+        self.assertFalse(strict.can_apply)
+        self.assertEqual(strict.unchanged_count, 1)
+        self.assertEqual(
+            [conflict.kind for conflict in strict.conflicts],
+            ["invitation_status_mismatch"],
+        )
+        with self.assertRaisesRegex(ValueError, "has conflicts"):
+            self.control.import_legacy_config(
+                legacy_path, require_status_match=True
+            )
         self.control.import_legacy_config(legacy_path)
         self.assertEqual(self.control.get_invitation(legacy_identity.invite_id).status, "disabled")
         self.assertIsNone(access.verify_cookie(legacy_cookie, now=120))

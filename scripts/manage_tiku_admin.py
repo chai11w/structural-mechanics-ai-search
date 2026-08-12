@@ -24,6 +24,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Apply a compatible legacy invitation import after printing its preflight",
     )
+    parser.add_argument(
+        "--require-status-match",
+        action="store_true",
+        help="Reject existing invitation records whose status differs from the legacy config",
+    )
     return parser
 
 
@@ -50,7 +55,10 @@ def main() -> int:
         raise SystemExit("--apply-import requires --import-invites")
     store = SQLiteControlStore(args.control_db)
     if args.import_invites:
-        report = store.preflight_legacy_config(args.import_invites)
+        report = store.preflight_legacy_config(
+            args.import_invites,
+            require_status_match=args.require_status_match,
+        )
         _print_import_report(report)
         if not report.can_apply:
             print("no changes written because conflicts must be resolved first")
@@ -58,7 +66,10 @@ def main() -> int:
         if not args.apply_import:
             print("no changes written; rerun with --apply-import after reviewing this report")
             return 0
-        applied = store.import_legacy_config(args.import_invites)
+        applied = store.import_legacy_config(
+            args.import_invites,
+            require_status_match=args.require_status_match,
+        )
         print(f"imported {applied.insert_count} hash-only invitations")
         print(f"preserved {applied.unchanged_count} matching invitations")
     if not store.has_admin():
