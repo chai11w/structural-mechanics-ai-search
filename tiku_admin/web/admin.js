@@ -7,6 +7,7 @@ const ICONS = {
   reset: 'refresh-cw', pause: 'circle-pause', enable: 'circle-play', archive: 'archive',
   restore: 'archive-restore', delete: 'trash-2',
   copy: 'copy', close: 'x', menu: 'menu', back: 'chevron-left', next: 'chevron-right',
+  calendar: 'calendar-days',
   up: 'thumbs-up', down: 'thumbs-down', image: 'image', save: 'save', alert: 'alert-circle',
 };
 
@@ -28,7 +29,7 @@ const AUDIT_LABELS = {
 
 function icon(name, className = '') {
   const id = ICONS[name] || name;
-  return `<svg class="icon ${className}" aria-hidden="true"><use href="/assets/lucide.svg?v=20260812-2#${id}"></use></svg>`;
+  return `<svg class="icon ${className}" aria-hidden="true"><use href="/assets/lucide.svg?v=20260812-3#${id}"></use></svg>`;
 }
 
 function escapeHtml(value) {
@@ -404,7 +405,15 @@ async function renderFeedback() {
     const inviteOptions = `${activeInviteOptions}${archivedInviteOption}`;
     const chapterOptions = data.chapters.map((chapter) => `<option value="${attr(chapter)}" ${filters.chapter === chapter ? 'selected' : ''}>${escapeHtml(chapter)}</option>`).join('');
     const feedbackPagination = data.total > filters.limit ? `<button class="icon-button" id="prev-page" type="button" aria-label="上一页" ${filters.offset <= 0 ? 'disabled' : ''}>${icon('back')}</button><button class="icon-button" id="next-page" type="button" aria-label="下一页" ${filters.offset + filters.limit >= data.total ? 'disabled' : ''}>${icon('next')}</button>` : '';
-    body.innerHTML = `<form class="toolbar feedback-filters" id="feedback-filters"><div class="field"><label class="field-label" for="filter-date">日期</label><input class="input" id="filter-date" name="date" type="date" value="${attr(filters.date)}"></div><div class="field"><label class="field-label" for="filter-rating">评价</label><select class="select" id="filter-rating" name="rating"><option value="">全部</option><option value="negative" ${filters.rating === 'negative' ? 'selected' : ''}>点踩</option><option value="positive" ${filters.rating === 'positive' ? 'selected' : ''}>点赞</option></select></div><div class="field"><label class="field-label" for="filter-invite">用户</label><select class="select" id="filter-invite" name="identity_key"><option value="">全部用户</option>${inviteOptions}</select></div><div class="field"><label class="field-label" for="filter-chapter">章节</label><select class="select" id="filter-chapter" name="chapter"><option value="">全部章节</option>${chapterOptions}</select></div><div class="field"><label class="field-label" for="filter-status">处理状态</label><select class="select" id="filter-status" name="review_status"><option value="">全部</option><option value="pending" ${filters.review_status === 'pending' ? 'selected' : ''}>待处理</option><option value="resolved" ${filters.review_status === 'resolved' ? 'selected' : ''}>已处理</option><option value="no_action" ${filters.review_status === 'no_action' ? 'selected' : ''}>无需处理</option></select></div><button class="button button-secondary" type="submit">${icon('search')}筛选</button><label class="toggle-row feedback-archive-toggle"><span class="switch"><input id="show-archived-feedback" type="checkbox" ${filters.include_archived ? 'checked' : ''}><span></span></span>显示已归档</label></form><div class="table-tool"><div class="table-scroll"><table class="data-table feedback-table"><thead><tr><th>反馈编号</th><th>用户</th><th>评价</th><th>原因</th><th>说明</th><th class="numeric">本题费用</th><th>状态</th><th></th></tr></thead><tbody>${feedbackSummaryRows(data.items, { manageable: true })}</tbody></table></div><div class="pagination"><span>共 ${Number(data.total)} 条</span>${feedbackPagination}</div></div>`;
+    body.innerHTML = `<form class="toolbar feedback-filters" id="feedback-filters"><div class="field"><label class="field-label" for="filter-date">日期</label><div class="input date-filter"><input class="date-filter-input" id="filter-date" name="date" type="date" value="${attr(filters.date)}"><span class="date-filter-value ${filters.date ? '' : 'is-placeholder'}" data-date-value>${escapeHtml(filters.date || '选择日期')}</span>${icon('calendar', 'date-filter-icon')}</div></div><div class="field"><label class="field-label" for="filter-rating">评价</label><select class="select" id="filter-rating" name="rating"><option value="">全部</option><option value="negative" ${filters.rating === 'negative' ? 'selected' : ''}>点踩</option><option value="positive" ${filters.rating === 'positive' ? 'selected' : ''}>点赞</option></select></div><div class="field"><label class="field-label" for="filter-invite">用户</label><select class="select" id="filter-invite" name="identity_key"><option value="">全部用户</option>${inviteOptions}</select></div><div class="field"><label class="field-label" for="filter-chapter">章节</label><select class="select" id="filter-chapter" name="chapter"><option value="">全部章节</option>${chapterOptions}</select></div><div class="field"><label class="field-label" for="filter-status">处理状态</label><select class="select" id="filter-status" name="review_status"><option value="">全部</option><option value="pending" ${filters.review_status === 'pending' ? 'selected' : ''}>待处理</option><option value="resolved" ${filters.review_status === 'resolved' ? 'selected' : ''}>已处理</option><option value="no_action" ${filters.review_status === 'no_action' ? 'selected' : ''}>无需处理</option></select></div><button class="button button-secondary" type="submit">${icon('search')}筛选</button><label class="toggle-row feedback-archive-toggle"><span class="switch"><input id="show-archived-feedback" type="checkbox" ${filters.include_archived ? 'checked' : ''}><span></span></span>显示已归档</label></form><div class="table-tool"><div class="table-scroll"><table class="data-table feedback-table"><thead><tr><th>反馈编号</th><th>用户</th><th>评价</th><th>原因</th><th>说明</th><th class="numeric">本题费用</th><th>状态</th><th></th></tr></thead><tbody>${feedbackSummaryRows(data.items, { manageable: true })}</tbody></table></div><div class="pagination"><span>共 ${Number(data.total)} 条</span>${feedbackPagination}</div></div>`;
+    const dateInput = document.querySelector('#filter-date');
+    const dateValue = document.querySelector('[data-date-value]');
+    const updateDateValue = () => {
+      dateValue.textContent = dateInput.value || '选择日期';
+      dateValue.classList.toggle('is-placeholder', !dateInput.value);
+    };
+    dateInput.addEventListener('input', updateDateValue);
+    dateInput.addEventListener('change', updateDateValue);
     document.querySelector('#feedback-filters').addEventListener('submit', (event) => {
       event.preventDefault();
       const form = new FormData(event.currentTarget);

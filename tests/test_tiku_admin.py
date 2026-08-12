@@ -104,7 +104,7 @@ class TikuAdminTest(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "tiku_admin" / "web" / "lucide.svg"
         ).read_text(encoding="utf-8")
         self.assertIn('<symbol id="trash-2"', icons)
-        self.assertIn('/assets/lucide.svg?v=20260812-2#${id}', script)
+        self.assertIn('/assets/lucide.svg?v=20260812-3#${id}', script)
 
     def test_admin_feedback_ui_uses_real_chapter_options_and_archive_actions(self):
         script = (
@@ -124,6 +124,17 @@ class TikuAdminTest(unittest.TestCase):
         self.assertIn("data.total > filters.limit", script)
         self.assertIn("audit-pagination", script)
         self.assertNotIn("data.audit.slice(0, 10)", script)
+        self.assertIn("filters.date || '选择日期'", script)
+        self.assertIn("date-filter-value", script)
+        styles = (
+            Path(__file__).resolve().parents[1] / "tiku_admin" / "web" / "admin.css"
+        ).read_text(encoding="utf-8")
+        self.assertIn(".feedback-filters .input, .feedback-filters .select { min-width: 0;", styles)
+        self.assertIn(".date-filter-input { position: absolute;", styles)
+        icons = (
+            Path(__file__).resolve().parents[1] / "tiku_admin" / "web" / "lucide.svg"
+        ).read_text(encoding="utf-8")
+        self.assertIn('<symbol id="calendar-days"', icons)
 
     def test_dynamic_settings_and_audit_are_persisted(self):
         values = self.control.update_settings(

@@ -172,7 +172,14 @@ svg.icon { width: 18px; height: 18px; flex: 0 0 18px; fill: none; stroke: curren
 .toolbar .field { width: 170px; }
 .toolbar .field.search-field { width: min(300px, 100%); }
 .feedback-filters { flex-wrap: wrap; }
-.feedback-filters .field { width: 150px; }
+.feedback-filters .field { width: 150px; min-width: 0; }
+.feedback-filters .input, .feedback-filters .select { min-width: 0; max-width: 100%; }
+.date-filter { position: relative; display: flex; align-items: center; padding-right: 36px; cursor: pointer; }
+.date-filter:focus-within { border-color: #6f8f89; box-shadow: 0 0 0 3px rgba(15,118,110,.10); }
+.date-filter-input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.date-filter-value { min-width: 0; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.date-filter-value.is-placeholder { color: #8b8b84; }
+.date-filter-icon { position: absolute; right: 11px; width: 16px; height: 16px; color: var(--muted); pointer-events: none; }
 .feedback-archive-toggle { margin-left: auto; }
 .toolbar-spacer { flex: 1; }
 .search-wrap { position: relative; }
