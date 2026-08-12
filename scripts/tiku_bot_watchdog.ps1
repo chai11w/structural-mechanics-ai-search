@@ -65,6 +65,14 @@ function Wait-PortFree {
     throw "Port $Port did not become free before restart."
 }
 
+function Wait-BotHealthy {
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        if (Test-Health) { return $true }
+        Start-Sleep -Seconds 2
+    }
+    return $false
+}
+
 function Start-Bot {
     $arguments = @(
         "scripts\feishu_tiku_bot.py",
@@ -160,9 +168,16 @@ while ($true) {
         Wait-PortFree
         Write-Status "Bot health check failed; restarting bot."
         $botProcess = Start-Bot
-        Start-Sleep -Seconds 4
-        if (Test-Health) {
+        if (Wait-BotHealthy) {
             Write-Status "Bot health check passed."
+        } else {
+            Write-Status "Bot failed to become healthy after startup; stopping it."
+            if ($botProcess -and -not $botProcess.HasExited) {
+                Stop-Process -Id $botProcess.Id -Force -ErrorAction Stop
+                Wait-Process -Id $botProcess.Id -Timeout 5 -ErrorAction SilentlyContinue
+            }
+            Stop-PortProcess
+            Wait-PortFree
         }
     }
 
