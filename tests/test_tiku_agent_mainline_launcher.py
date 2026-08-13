@@ -4,6 +4,7 @@ import unittest
 from uuid import uuid4
 
 from scripts.run_tiku_agent_demo import build_app, build_argument_parser, build_runtime
+from tiku_agent.external_load_screen import ZhipuExternalLoadScreen
 from tiku_admin.control_store import SQLiteControlStore
 
 
@@ -22,6 +23,18 @@ class MainlineLauncherTest(unittest.TestCase):
         self.assertTrue(parser.parse_args([]).enable_dimension_filter)
         self.assertFalse(
             parser.parse_args(["--disable-dimension-filter"]).enable_dimension_filter
+        )
+
+    def test_external_load_screen_is_enabled_by_default_with_explicit_rollback(self):
+        parser = build_argument_parser()
+
+        defaults = parser.parse_args([])
+        self.assertTrue(defaults.enable_external_load_screen)
+        self.assertEqual(defaults.external_load_timeout_seconds, 15.0)
+        self.assertFalse(
+            parser.parse_args(
+                ["--disable-external-load-screen"]
+            ).enable_external_load_screen
         )
 
     def test_public_beta_guards_are_explicit_and_configurable(self):
@@ -89,13 +102,21 @@ class MainlineLauncherTest(unittest.TestCase):
         self.assertNotEqual(business_response.intent, "safe_answer")
         self.assertEqual(runtime.session_snapshot("safe-session")["phase"], "IDLE")
 
-    def test_mainline_does_not_enable_experimental_external_load_screen(self):
+    def test_mainline_enables_external_load_screen_with_injectable_rollback(self):
         root = Path(__file__).resolve().parents[1] / f".tmp_test_8790_{uuid4().hex}"
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
 
         runtime = build_runtime(root)
+        disabled = build_runtime(
+            root / "disabled", enable_external_load_screen=False
+        )
+        screen = lambda _path: "yes"
+        injected = build_runtime(root / "injected", external_load_screen=screen)
 
-        self.assertIsNone(runtime.external_load_screen)
+        self.assertIsInstance(runtime.external_load_screen, ZhipuExternalLoadScreen)
+        self.assertEqual(runtime.external_load_timeout_seconds, 15.0)
+        self.assertIsNone(disabled.external_load_screen)
+        self.assertIs(injected.external_load_screen, screen)
 
 
 if __name__ == "__main__":

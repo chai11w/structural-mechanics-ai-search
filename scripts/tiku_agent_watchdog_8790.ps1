@@ -8,6 +8,7 @@ param(
     [double]$PerInviteDailyBudgetCny = 0,
     [string]$InviteConfig,
     [string]$ControlDb,
+    [switch]$DisableExternalLoadScreen,
     [string]$PythonExe = "python"
 )
 
@@ -105,6 +106,9 @@ function Start-Bot {
     }
     if ($ControlDb) {
         $arguments += @("--control-db", "$ControlDb")
+    }
+    if ($DisableExternalLoadScreen) {
+        $arguments += "--disable-external-load-screen"
     }
     $process = Start-Process $PythonExe `
         -ArgumentList $arguments `

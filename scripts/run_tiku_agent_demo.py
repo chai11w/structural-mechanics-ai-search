@@ -14,6 +14,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from tiku_agent.agent import TikuSearchAgent
+from tiku_agent.external_load_screen import ZhipuExternalLoadScreen
 from tiku_agent.fastapi_demo import create_app
 from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.invite_access import InviteAccess
@@ -48,6 +49,9 @@ def build_runtime(
     daily_budget_cny: float | None = None,
     per_invite_daily_budget_cny: float | None = None,
     control_store: SQLiteControlStore | None = None,
+    enable_external_load_screen: bool = True,
+    external_load_timeout_seconds: float = 15.0,
+    external_load_screen: Callable[[str | Path], str] | None = None,
 ) -> AgentSessionRuntime:
     """Build the 8790 runtime with bounded safe answers enabled by default."""
     root = Path(runtime_dir).resolve()
@@ -85,6 +89,15 @@ def build_runtime(
         daily_budget_cny=daily_budget_cny,
         per_identity_daily_budget_cny=per_invite_daily_budget_cny,
         budget_policy=control_store,
+        external_load_screen=(
+            external_load_screen
+            or ZhipuExternalLoadScreen(
+                timeout_seconds=external_load_timeout_seconds
+            )
+            if enable_external_load_screen
+            else None
+        ),
+        external_load_timeout_seconds=external_load_timeout_seconds,
     )
 
 
@@ -102,6 +115,9 @@ def build_app(
     per_invite_daily_budget_cny: float | None = None,
     invite_config: str | Path | None = None,
     control_db: str | Path | None = None,
+    enable_external_load_screen: bool = True,
+    external_load_timeout_seconds: float = 15.0,
+    external_load_screen: Callable[[str | Path], str] | None = None,
 ):
     root = Path(runtime_dir).resolve()
     if control_db is not None and invite_config is not None:
@@ -127,6 +143,9 @@ def build_app(
             daily_budget_cny=daily_budget_cny,
             per_invite_daily_budget_cny=per_invite_daily_budget_cny,
             control_store=control_store,
+            enable_external_load_screen=enable_external_load_screen,
+            external_load_timeout_seconds=external_load_timeout_seconds,
+            external_load_screen=external_load_screen,
         ),
         incoming_dir=root / "incoming",
         invite_access=(
@@ -212,7 +231,30 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Temporarily use the original fixed Intent V2 replies",
     )
-    parser.set_defaults(enable_safe_answer_v0=True, enable_dimension_filter=True)
+    external_load_group = parser.add_mutually_exclusive_group()
+    external_load_group.add_argument(
+        "--enable-external-load-screen",
+        dest="enable_external_load_screen",
+        action="store_true",
+        help="Run the parallel Zhipu external-load gate for uploaded images (default)",
+    )
+    external_load_group.add_argument(
+        "--disable-external-load-screen",
+        dest="enable_external_load_screen",
+        action="store_false",
+        help="Temporarily roll back to the original image search flow",
+    )
+    parser.add_argument(
+        "--external-load-timeout-seconds",
+        type=float,
+        default=15.0,
+        help="Maximum time an empty/non-candidate result waits for the gate (default: 15)",
+    )
+    parser.set_defaults(
+        enable_safe_answer_v0=True,
+        enable_dimension_filter=True,
+        enable_external_load_screen=True,
+    )
     return parser
 
 
@@ -231,6 +273,8 @@ def main() -> int:
             per_invite_daily_budget_cny=args.per_invite_daily_budget_cny,
             invite_config=args.invite_config,
             control_db=args.control_db,
+            enable_external_load_screen=args.enable_external_load_screen,
+            external_load_timeout_seconds=args.external_load_timeout_seconds,
         ),
         host=args.host,
         port=args.port,
