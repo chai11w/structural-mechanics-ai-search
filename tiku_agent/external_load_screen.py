@@ -17,8 +17,8 @@ DEFAULT_ENDPOINT = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 DEFAULT_MODEL = "glm-4.6v"
 DEFAULT_TIMEOUT_SECONDS = 15.0
 NO_EXTERNAL_LOAD_MESSAGE = (
-    "未识别到作用在结构上的外荷载。力答目前只能搜索含明确外荷载的结构力学大题，"
-    "请重新拍清楚题图，确保结构和荷载箭头完整可见。"
+    "未识别到图片中的外荷载，暂时无法检索。"
+    "请重新上传外荷载清晰可见的题图。"
 )
 EXTERNAL_LOAD_PROMPT = """你是结构力学图片入口筛查器。判断图中是否有作用在梁、柱、桁架等结构杆件或节点上的真实外部荷载。
 真实外荷载包括：直接作用于结构的单个直箭头、成排分布箭头、弧形力偶箭头。必须看见荷载图形与结构相连，不能只凭 P、F、q、M、kN 等文字或单位。

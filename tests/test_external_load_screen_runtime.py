@@ -128,6 +128,10 @@ class ExternalLoadScreenRuntimeTest(unittest.TestCase):
 
         self.assertEqual(response.intent, "external_load_screen")
         self.assertEqual(response.text, NO_EXTERNAL_LOAD_MESSAGE)
+        self.assertEqual(
+            response.text,
+            "未识别到图片中的外荷载，暂时无法检索。请重新上传外荷载清晰可见的题图。",
+        )
         self.assertEqual(runtime.store.load("no-first").candidate_count, 0)
         self.assertTrue(logger.event.wait(1))
         self.assertEqual(runtime.store.load("no-first").candidate_count, 0)
