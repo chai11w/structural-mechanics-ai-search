@@ -14,6 +14,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from tiku_agent.agent import TikuSearchAgent
+from tiku_agent.external_load_screen import ZhipuExternalLoadScreen
 from tiku_agent.fastapi_demo import create_app
 from tiku_agent.safe_answer_generator_v0 import (
     SafeAnswerGeneratorV0,
@@ -39,6 +40,9 @@ def build_runtime(
     enable_safe_answer_v0: bool = False,
     enable_dimension_filter: bool = False,
     safe_answer_model_client: Callable[[SafeAnswerModelRequestV0], str] | None = None,
+    enable_external_load_screen: bool = True,
+    external_load_timeout_seconds: float = 15.0,
+    external_load_screen: Callable[[str | Path], str] | None = None,
 ) -> AgentSessionRuntime:
     """Build the 8794 runtime with all writable state under one isolated root."""
     root = Path(runtime_dir).resolve()
@@ -67,6 +71,15 @@ def build_runtime(
         artifacts=artifacts,
         task_logger=JsonlTaskLogger(root / "task_logs.jsonl"),
         agent_factory=agent_factory,
+        external_load_screen=(
+            external_load_screen
+            or ZhipuExternalLoadScreen(
+                timeout_seconds=external_load_timeout_seconds
+            )
+            if enable_external_load_screen
+            else None
+        ),
+        external_load_timeout_seconds=external_load_timeout_seconds,
     )
 
 
@@ -77,6 +90,9 @@ def build_app(
     enable_safe_answer_v0: bool = False,
     enable_dimension_filter: bool = False,
     safe_answer_model_client: Callable[[SafeAnswerModelRequestV0], str] | None = None,
+    enable_external_load_screen: bool = True,
+    external_load_timeout_seconds: float = 15.0,
+    external_load_screen: Callable[[str | Path], str] | None = None,
 ):
     """Create the behavior-equivalent 8794 app with isolated state and cookie."""
     root = Path(runtime_dir).resolve()
@@ -87,6 +103,9 @@ def build_app(
             enable_safe_answer_v0=enable_safe_answer_v0,
             enable_dimension_filter=enable_dimension_filter,
             safe_answer_model_client=safe_answer_model_client,
+            enable_external_load_screen=enable_external_load_screen,
+            external_load_timeout_seconds=external_load_timeout_seconds,
+            external_load_screen=external_load_screen,
         ),
         incoming_dir=root / "incoming",
         session_cookie=SESSION_COOKIE,
@@ -130,7 +149,30 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Temporarily disable safe answers and use the original Intent V2 replies",
     )
-    parser.set_defaults(enable_safe_answer_v0=True, enable_dimension_filter=True)
+    external_load_group = parser.add_mutually_exclusive_group()
+    external_load_group.add_argument(
+        "--enable-external-load-screen",
+        dest="enable_external_load_screen",
+        action="store_true",
+        help="Run the parallel Zhipu external-load gate for uploaded images (default)",
+    )
+    external_load_group.add_argument(
+        "--disable-external-load-screen",
+        dest="enable_external_load_screen",
+        action="store_false",
+        help="Roll back to the original image search flow",
+    )
+    parser.add_argument(
+        "--external-load-timeout-seconds",
+        type=float,
+        default=15.0,
+        help="Maximum time an empty/non-candidate B result waits for A (default: 15)",
+    )
+    parser.set_defaults(
+        enable_safe_answer_v0=True,
+        enable_dimension_filter=True,
+        enable_external_load_screen=True,
+    )
     return parser
 
 
@@ -141,6 +183,8 @@ def main() -> int:
             args.runtime_dir,
             enable_safe_answer_v0=args.enable_safe_answer_v0,
             enable_dimension_filter=args.enable_dimension_filter,
+            enable_external_load_screen=args.enable_external_load_screen,
+            external_load_timeout_seconds=args.external_load_timeout_seconds,
         ),
         host=args.host,
         port=args.port,

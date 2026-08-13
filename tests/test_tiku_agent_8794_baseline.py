@@ -67,12 +67,19 @@ class Candidate8794BaselineTest(unittest.TestCase):
         self.assertFalse(
             parser.parse_args(["--disable-dimension-filter"]).enable_dimension_filter
         )
+        self.assertTrue(parser.parse_args([]).enable_external_load_screen)
+        self.assertFalse(
+            parser.parse_args(
+                ["--disable-external-load-screen"]
+            ).enable_external_load_screen
+        )
+        self.assertEqual(parser.parse_args([]).external_load_timeout_seconds, 15.0)
 
     def test_runtime_uses_only_the_candidate_root(self):
         root = Path(__file__).resolve().parents[1] / f".tmp_test_8794_{uuid4().hex}"
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
 
-        runtime = build_runtime(root)
+        runtime = build_runtime(root, enable_external_load_screen=False)
 
         self.assertEqual(runtime.store.database_path.resolve(), (root / "session.db").resolve())
         self.assertEqual(runtime.artifacts.root, (root / "sessions").resolve())
@@ -97,6 +104,7 @@ class Candidate8794BaselineTest(unittest.TestCase):
             root,
             enable_safe_answer_v0=True,
             safe_answer_model_client=model_client,
+            enable_external_load_screen=False,
         )
 
         safe_response = runtime.handle_text("safe-session", "你是谁")
@@ -112,7 +120,11 @@ class Candidate8794BaselineTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / f".tmp_test_8794_{uuid4().hex}"
         self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
 
-        runtime = build_runtime(root, enable_dimension_filter=True)
+        runtime = build_runtime(
+            root,
+            enable_dimension_filter=True,
+            enable_external_load_screen=False,
+        )
         agent = runtime._make_agent(AgentState(session_id="dimension-on"))
 
         self.assertTrue(agent.config.dimension_filter_enabled)
@@ -121,6 +133,16 @@ class Candidate8794BaselineTest(unittest.TestCase):
             agent.config.session_dir.resolve(),
             runtime.artifacts.session_dir("dimension-on").resolve(),
         )
+
+    def test_external_load_screen_is_isolated_to_8794_and_can_be_injected(self):
+        root = Path(__file__).resolve().parents[1] / f".tmp_test_8794_{uuid4().hex}"
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        screen = lambda _path: "yes"
+
+        runtime = build_runtime(root, external_load_screen=screen)
+
+        self.assertIs(runtime.external_load_screen, screen)
+        self.assertEqual(runtime.external_load_timeout_seconds, 15.0)
 
     def test_candidate_http_behavior_matches_mainline_with_separate_cookie(self):
         mainline_runtime = RecordingRuntime()

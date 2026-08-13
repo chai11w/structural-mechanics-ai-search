@@ -89,6 +89,14 @@ class MainlineLauncherTest(unittest.TestCase):
         self.assertNotEqual(business_response.intent, "safe_answer")
         self.assertEqual(runtime.session_snapshot("safe-session")["phase"], "IDLE")
 
+    def test_mainline_does_not_enable_experimental_external_load_screen(self):
+        root = Path(__file__).resolve().parents[1] / f".tmp_test_8790_{uuid4().hex}"
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+
+        runtime = build_runtime(root)
+
+        self.assertIsNone(runtime.external_load_screen)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from contextlib import contextmanager
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 import threading
 import time
 from typing import Any, Callable, Protocol
@@ -13,6 +14,10 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from tiku_agent.agent import AgentResponse, TikuSearchAgent
+from tiku_agent.external_load_screen import (
+    ImageSearchCancelled,
+    NO_EXTERNAL_LOAD_MESSAGE,
+)
 from tiku_agent.session_artifacts import SessionArtifacts, session_key
 from tiku_agent.session_store import SessionStore
 from tiku_agent.state import AgentState
@@ -22,11 +27,51 @@ from tiku_shared.model_costs import (
     ModelCostCollector,
     SQLiteModelCostLedger,
     model_cost_scope,
+    submit_with_model_cost_context,
 )
 
 
 AgentFactory = Callable[[AgentState], TikuSearchAgent]
 ProgressReporter = Callable[[str, str], None]
+ExternalLoadScreen = Callable[[str | Path], str]
+
+
+class _ImageRace:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._winner = ""
+        self.cancel_search = threading.Event()
+
+    def claim_no_load(self) -> bool:
+        with self._lock:
+            if self._winner:
+                return self._winner == "no_load"
+            self._winner = "no_load"
+            self.cancel_search.set()
+            return True
+
+    def claim_candidates(self) -> bool:
+        with self._lock:
+            if self._winner == "no_load":
+                return False
+            if self._winner in {"", "screen_expired"}:
+                self._winner = "candidates"
+            return self._winner == "candidates"
+
+    def expire_screen(self) -> None:
+        with self._lock:
+            if not self._winner:
+                self._winner = "screen_expired"
+
+    @property
+    def candidates_committed(self) -> bool:
+        with self._lock:
+            return self._winner == "candidates"
+
+    @property
+    def no_load_committed(self) -> bool:
+        with self._lock:
+            return self._winner == "no_load"
 
 
 class BudgetPolicy(Protocol):
@@ -104,6 +149,8 @@ class AgentSessionRuntime:
         per_identity_daily_budget_cny: float | Decimal | None = None,
         budget_timezone: str = "Asia/Shanghai",
         budget_policy: BudgetPolicy | None = None,
+        external_load_screen: ExternalLoadScreen | None = None,
+        external_load_timeout_seconds: float = 15.0,
     ) -> None:
         self.store = store
         self.artifacts = artifacts or SessionArtifacts()
@@ -124,6 +171,22 @@ class AgentSessionRuntime:
         )
         self._budget_timezone = ZoneInfo(budget_timezone)
         self._budget_policy = budget_policy
+        self.external_load_screen = external_load_screen
+        self.external_load_timeout_seconds = max(
+            0.01, float(external_load_timeout_seconds)
+        )
+        self._image_executor = (
+            ThreadPoolExecutor(max_workers=8, thread_name_prefix="tiku-image-race")
+            if external_load_screen is not None
+            else None
+        )
+        self._observer_executor = (
+            ThreadPoolExecutor(max_workers=2, thread_name_prefix="tiku-image-observer")
+            if external_load_screen is not None
+            else None
+        )
+        self._background_image_lock = threading.Lock()
+        self._background_image_futures: dict[str, set[Future]] = {}
 
     def handle_image(
         self,
@@ -138,6 +201,13 @@ class AgentSessionRuntime:
         def execute() -> AgentResponse:
             self.purge_expired()
             persisted_image = self.artifacts.persist_image(clean_session_id, image_path)
+            if self.external_load_screen is not None:
+                return self._run_screened_image(
+                    clean_session_id,
+                    persisted_image,
+                    identity_key=identity_key,
+                    progress=progress,
+                )
             return self._run(
                 clean_session_id,
                 "image",
@@ -149,6 +219,253 @@ class AgentSessionRuntime:
         return self._admit(
             clean_session_id, execute, identity_key=identity_key, progress=progress
         )
+
+    def _run_screened_image(
+        self,
+        session_id: str,
+        image_path: Path,
+        *,
+        identity_key: str,
+        progress: ProgressReporter | None,
+    ) -> AgentResponse:
+        baseline_state = self.store.load(session_id) or AgentState(session_id=session_id)
+        phase_before = baseline_state.phase
+        started_at = datetime.now(UTC)
+        started = time.perf_counter()
+        task_id = uuid4().hex
+        collector = ModelCostCollector(
+            run_id=task_id,
+            session_key=session_key(session_id),
+            identity_key=str(identity_key).strip(),
+            task_kind="image",
+            started_at=started_at.isoformat(),
+        )
+        race = _ImageRace()
+        agent = self._make_agent(
+            AgentState.from_dict(baseline_state.to_dict()), progress=progress
+        )
+        agent.image_search_cancelled = race.cancel_search.is_set
+        agent.commit_image_candidates = race.claim_candidates
+        assert self._image_executor is not None
+
+        with model_cost_scope(collector):
+            screen_future = submit_with_model_cost_context(
+                self._image_executor,
+                self._run_external_load_screen,
+                self.external_load_screen,
+                image_path,
+                race,
+            )
+            search_future = submit_with_model_cost_context(
+                self._image_executor, agent.handle_image, image_path
+            )
+
+        deadline = time.monotonic() + self.external_load_timeout_seconds
+        response: AgentResponse | None = None
+        response_state: AgentState | None = None
+        search_error: BaseException | None = None
+
+        while response is None:
+            pending = [
+                future
+                for future in (screen_future, search_future)
+                if not future.done()
+            ]
+            if pending:
+                remaining = max(0.0, deadline - time.monotonic())
+                done, _ = wait(
+                    pending,
+                    timeout=remaining,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done and remaining <= 0:
+                    break
+
+            if screen_future.done():
+                verdict = self._screen_verdict(screen_future)
+                if verdict == "no" and race.claim_no_load():
+                    response_state, response = self._no_load_response(
+                        baseline_state, image_path
+                    )
+                    break
+
+            if search_future.done():
+                try:
+                    search_response = search_future.result()
+                except ImageSearchCancelled:
+                    if race.cancel_search.is_set():
+                        response_state, response = self._no_load_response(
+                            baseline_state, image_path
+                        )
+                        break
+                    raise
+                except BaseException as exc:  # Re-raised if A does not override it.
+                    search_error = exc
+                else:
+                    if race.candidates_committed:
+                        response_state, response = agent.state, search_response
+                        break
+                    if screen_future.done() or time.monotonic() >= deadline:
+                        response_state, response = agent.state, search_response
+                        break
+
+            if search_error is not None and screen_future.done():
+                raise search_error
+
+            if time.monotonic() >= deadline:
+                break
+
+        if response is None:
+            race.expire_screen()
+            if race.no_load_committed:
+                response_state, response = self._no_load_response(
+                    baseline_state, image_path
+                )
+            elif search_future.done():
+                if search_error is not None:
+                    raise search_error
+                response_state, response = agent.state, search_future.result()
+            else:
+                try:
+                    response = search_future.result()
+                except ImageSearchCancelled:
+                    response_state, response = self._no_load_response(
+                        baseline_state, image_path
+                    )
+                else:
+                    response_state = agent.state
+
+        assert response is not None and response_state is not None
+        self.store.save(response_state)
+        duration_ms = round((time.perf_counter() - started) * 1000)
+        futures = (screen_future, search_future)
+        if all(future.done() for future in futures):
+            self._finish_screened_observability(
+                futures,
+                task_id=task_id,
+                session_id=session_id,
+                started_at=started_at,
+                duration_ms=duration_ms,
+                phase_before=phase_before,
+                state=response_state,
+                response=response,
+                collector=collector,
+            )
+        else:
+            if not search_future.done():
+                self._track_background_image_future(session_id, search_future)
+            assert self._observer_executor is not None
+            self._observer_executor.submit(
+                self._finish_screened_observability,
+                futures,
+                task_id=task_id,
+                session_id=session_id,
+                started_at=started_at,
+                duration_ms=duration_ms,
+                phase_before=phase_before,
+                state=response_state,
+                response=response,
+                collector=collector,
+            )
+        return response
+
+    @staticmethod
+    def _run_external_load_screen(
+        screen: ExternalLoadScreen, image_path: Path, race: _ImageRace
+    ) -> str:
+        verdict = str(screen(image_path)).strip().lower()
+        if verdict == "no":
+            race.claim_no_load()
+        return verdict
+
+    def _track_background_image_future(
+        self, session_id: str, future: Future
+    ) -> None:
+        with self._background_image_lock:
+            self._background_image_futures.setdefault(session_id, set()).add(future)
+
+        def remove(completed: Future) -> None:
+            with self._background_image_lock:
+                futures = self._background_image_futures.get(session_id)
+                if futures is None:
+                    return
+                futures.discard(completed)
+                if not futures:
+                    self._background_image_futures.pop(session_id, None)
+
+        future.add_done_callback(remove)
+
+    def _await_background_image_work(self, session_id: str) -> None:
+        with self._background_image_lock:
+            futures = tuple(self._background_image_futures.get(session_id, ()))
+        if futures:
+            wait(futures)
+
+    @staticmethod
+    def _screen_verdict(future: Future) -> str:
+        try:
+            verdict = str(future.result()).strip().lower()
+        except Exception:  # A failure must preserve the existing search behavior.
+            return "error"
+        return verdict if verdict in {"yes", "no"} else "error"
+
+    @staticmethod
+    def _no_load_response(
+        state_before: AgentState, image_path: Path
+    ) -> tuple[AgentState, AgentResponse]:
+        state = AgentState.from_dict(state_before.to_dict())
+        state.start_search(str(image_path))
+        state.set_candidates([])
+        state.last_error = NO_EXTERNAL_LOAD_MESSAGE
+        return state, AgentResponse(
+            text=NO_EXTERNAL_LOAD_MESSAGE,
+            state=state.to_dict(),
+            intent="external_load_screen",
+        )
+
+    def _finish_screened_observability(
+        self,
+        futures: tuple[Future, Future],
+        *,
+        task_id: str,
+        session_id: str,
+        started_at: datetime,
+        duration_ms: int,
+        phase_before: str,
+        state: AgentState,
+        response: AgentResponse,
+        collector: ModelCostCollector,
+    ) -> None:
+        wait(futures)
+        for future in futures:
+            try:
+                future.result()
+            except BaseException:
+                pass
+        self._write_task_log(
+            task_id=task_id,
+            session_id=session_id,
+            kind="image",
+            started_at=started_at,
+            duration_ms=duration_ms,
+            phase_before=phase_before,
+            state=state,
+            response=response,
+            error_kind="",
+        )
+        if self.cost_ledger is not None:
+            try:
+                if state.task_revision > 0:
+                    collector.search_key = (
+                        f"{collector.session_key}:{state.task_revision}"
+                    )
+                self.cost_ledger.write_run(
+                    collector,
+                    finished_at=datetime.now(UTC).isoformat(),
+                    outcome=_task_outcome(state, response, ""),
+                )
+            except Exception:
+                pass
 
     def handle_text(
         self,
@@ -177,6 +494,7 @@ class AgentSessionRuntime:
         clean_session_id = self._clean_session_id(session_id)
         lock = self._session_locks[hash(clean_session_id) % len(self._session_locks)]
         with lock:
+            self._await_background_image_work(clean_session_id)
             self.store.clear(clean_session_id)
             self.artifacts.clear_session(clean_session_id)
 
@@ -341,6 +659,7 @@ class AgentSessionRuntime:
         with self._execution_gate.enter(progress):
             lock = self._session_locks[hash(session_id) % len(self._session_locks)]
             with lock:
+                self._await_background_image_work(session_id)
                 self._check_daily_budget(identity_key)
                 return execute()
 

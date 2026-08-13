@@ -13,6 +13,7 @@ from tiku_agent.action_decision_v2 import (
     ActionDecisionV2,
 )
 from tiku_agent.conversation_context_v2 import ConversationContextV2
+from tiku_agent.external_load_screen import ImageSearchCancelled
 from tiku_agent.intent_contract import IntentResult
 from tiku_agent.intent_runtime_v2 import (
     adapt_decision_v2,
@@ -91,6 +92,8 @@ class TikuSearchAgent:
         progress_reporter: Callable[[str, str], None] | None = None,
         enable_safe_answer_v0: bool = False,
         safe_answer_generator_v0: SafeAnswerGeneratorV0 | None = None,
+        image_search_cancelled: Callable[[], bool] | None = None,
+        commit_image_candidates: Callable[[], bool] | None = None,
     ) -> None:
         self.state = state or AgentState()
         self.tools = tools or AgentToolbox()
@@ -100,6 +103,8 @@ class TikuSearchAgent:
         self.progress_reporter = progress_reporter
         self.enable_safe_answer_v0 = enable_safe_answer_v0
         self.safe_answer_generator_v0 = safe_answer_generator_v0
+        self.image_search_cancelled = image_search_cancelled
+        self.commit_image_candidates = commit_image_candidates
 
     def handle_image(self, image_path: str | Path) -> AgentResponse:
         context = build_runtime_context_v2(self.state, trusted_image_event=True)
@@ -269,11 +274,13 @@ class TikuSearchAgent:
     ) -> AgentResponse:
         if not image_path:
             return self._fail("没有收到图片路径。")
+        self._raise_if_image_search_cancelled()
         pending_chapter = chapter_override or self.state.pending_chapter
         self.state.start_search(image_path)
         if pending_chapter:
             self.state.set_pending_chapter(pending_chapter)
         multi = self.tools.analyze_multi_image(image_path, config=self.config)
+        self._raise_if_image_search_cancelled()
         stopped = self._stop_for_tool_result(multi, allow_partial=True)
         if stopped is not None:
             return stopped
@@ -283,6 +290,7 @@ class TikuSearchAgent:
                 list(multi.data.get("questions") or []),
                 config=self.config,
             )
+            self._raise_if_image_search_cancelled()
             stopped = self._stop_for_tool_result(prepared, allow_partial=True)
             if stopped is not None:
                 return stopped
@@ -307,6 +315,7 @@ class TikuSearchAgent:
             )
         else:
             analyzed = self.tools.analyze_image(image_path, chapter="auto", config=self.config)
+        self._raise_if_image_search_cancelled()
         stopped = self._stop_for_tool_result(analyzed, allow_needs_input=True)
         if stopped is not None:
             return stopped
@@ -319,6 +328,7 @@ class TikuSearchAgent:
             self.state.consume_pending_chapter()
         if self.state.phase == "WAIT_CHAPTER":
             self.state.offer_global_search()
+            self._raise_if_image_search_cancelled()
             return self._response(render.render_chapter_prompt(self.state), IntentResult("search_image"))
         return self._run_search()
 
@@ -372,11 +382,13 @@ class TikuSearchAgent:
         chapter = self.state.current_chapter
         message = f"正在按「{chapter}」搜索题目…" if chapter else "正在搜索题目…"
         self._report_progress("searching", message)
+        self._raise_if_image_search_cancelled()
         if continuing and self.state.current_route:
             route = self.state.current_route
             structure_type = self.state.current_structure_type
         else:
             routed = self.tools.route_bank(self.state.current_loads)
+            self._raise_if_image_search_cancelled()
             stopped = self._stop_for_tool_result(routed)
             if stopped is not None:
                 return stopped
@@ -389,6 +401,7 @@ class TikuSearchAgent:
                 classified=classified,
                 config=self.config,
             )
+            self._raise_if_image_search_cancelled()
             stopped = self._stop_for_tool_result(structured, allow_partial=True)
             if stopped is not None:
                 return stopped
@@ -407,6 +420,7 @@ class TikuSearchAgent:
         if continuing:
             coarse_kwargs["exclude_candidate_keys"] = list(self.state.attempted_candidate_keys)
         coarse = self.tools.coarse_search(self.state.current_loads, **coarse_kwargs)
+        self._raise_if_image_search_cancelled()
         stopped = self._stop_for_tool_result(coarse)
         if stopped is not None:
             return stopped
@@ -423,6 +437,7 @@ class TikuSearchAgent:
             route=route,
             rerank_top=self.config.rerank_top,
         )
+        self._raise_if_image_search_cancelled()
         stopped = self._stop_for_tool_result(reranked, allow_partial=True)
         if stopped is not None:
             return stopped
@@ -434,6 +449,9 @@ class TikuSearchAgent:
             )
         visible = list(reranked.data.get("visible_candidates") or candidates)
         self.state.set_candidates(visible)
+        if visible and self.commit_image_candidates is not None:
+            if not self.commit_image_candidates():
+                raise ImageSearchCancelled("external-load screen won before candidates committed")
         text = render.render_candidates(
             self.state,
             reranked=bool(reranked.data.get("reranked")),
@@ -544,3 +562,7 @@ class TikuSearchAgent:
     def _report_progress(self, stage: str, message: str) -> None:
         if self.progress_reporter is not None:
             self.progress_reporter(stage, message)
+
+    def _raise_if_image_search_cancelled(self) -> None:
+        if self.image_search_cancelled is not None and self.image_search_cancelled():
+            raise ImageSearchCancelled("external-load screen stopped the image search")
