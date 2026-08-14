@@ -184,6 +184,7 @@ button:focus-visible, [role="button"]:focus-visible, textarea:focus-visible { ou
 
 @media (max-width: 640px) {
   .topbar { padding: 0 10px; }
+  #top-new-chat { display: none; }
   .session-chip { display: none; }
   .conversation { padding: 24px 14px 175px; }
   .empty { justify-content: flex-start; padding-top: max(72px, 14vh); }
