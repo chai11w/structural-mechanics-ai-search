@@ -140,6 +140,19 @@ class AgentSessionRuntimeTest(unittest.TestCase):
             self.artifacts.session_dir("isolated"),
         )
 
+    def test_missing_candidate_is_logged_as_needs_input_instead_of_success(self):
+        response = self.runtime.handle_text("missing-candidate", "选第1个候选题")
+
+        self.assertEqual(response.protocol["status"], "NEEDS_INPUT")
+        self.assertEqual(response.protocol["layer"], "session")
+        self.assertEqual(response.protocol["code"], "CANDIDATE_LIST_UNAVAILABLE")
+        self.assertEqual(response.protocol["action"], "retry_upload")
+        self.assertEqual(len(self.logger.entries), 1)
+        entry = self.logger.entries[0]
+        self.assertEqual(entry.status, "NEEDS_INPUT")
+        self.assertEqual(entry.layer, "session")
+        self.assertEqual(entry.code, "CANDIDATE_LIST_UNAVAILABLE")
+
     def test_cancel_clears_persisted_session(self):
         session_id = "cancel-session"
         self.runtime.handle_image(session_id, self.source_image)
@@ -279,7 +292,12 @@ class AgentSessionRuntimeTest(unittest.TestCase):
 
         with self.assertRaises(AgentBudgetExceededError):
             runtime.handle_text("budget-session", "你好")
-        self.assertEqual(self.logger.entries, [])
+        self.assertEqual(len(self.logger.entries), 1)
+        blocked = self.logger.entries[0]
+        self.assertEqual(blocked.status, "NEEDS_INPUT")
+        self.assertEqual(blocked.layer, "quota")
+        self.assertEqual(blocked.code, "GLOBAL_DAILY_QUOTA_EXCEEDED")
+        self.assertTrue(blocked.request_id.startswith("req_"))
 
     def test_per_identity_daily_budget_only_blocks_the_spent_invitation(self):
         class IdentityLedger:

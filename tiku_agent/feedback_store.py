@@ -13,7 +13,7 @@ from typing import Callable, Sequence
 from uuid import uuid4
 
 
-FEEDBACK_SCHEMA_VERSION = 3
+FEEDBACK_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,11 @@ class MessageFeedback:
     candidate_count: int
     search_duration_ms: int
     search_key: str
+    request_id: str
+    search_id: str
+    status: str
+    layer: str
+    code: str
     chapter: str
     conversation: tuple[dict[str, object], ...]
     review_status: str
@@ -65,6 +70,11 @@ class SQLiteFeedbackStore:
         candidate_count: int,
         search_duration_ms: int = 0,
         search_key: str = "",
+        request_id: str = "",
+        search_id: str = "",
+        status: str = "SUCCESS",
+        layer: str = "tool",
+        code: str = "REQUEST_SUCCEEDED",
         chapter: str = "",
         conversation: list[dict[str, object]] | None = None,
         media_resolver: Callable[[str], Path | None] | None = None,
@@ -114,10 +124,11 @@ class SQLiteFeedbackStore:
                     INSERT INTO message_feedback (
                         feedback_id, feedback_number, message_id, identity_key, session_key, rating,
                         tags_json, detail, task_revision, phase, candidate_count,
-                        search_duration_ms, search_key, chapter, conversation_json,
+                        search_duration_ms, search_key, request_id, search_id,
+                        status, layer, code, chapter, conversation_json,
                         review_status, admin_note, archived_at,
                         case_expires_at, case_purged_at, created_at, updated_at, schema_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(identity_key, session_key, message_id) DO UPDATE SET
                         rating = excluded.rating,
                         tags_json = excluded.tags_json,
@@ -127,6 +138,11 @@ class SQLiteFeedbackStore:
                         candidate_count = excluded.candidate_count,
                         search_duration_ms = excluded.search_duration_ms,
                         search_key = excluded.search_key,
+                        request_id = excluded.request_id,
+                        search_id = excluded.search_id,
+                        status = excluded.status,
+                        layer = excluded.layer,
+                        code = excluded.code,
                         chapter = excluded.chapter,
                         conversation_json = excluded.conversation_json,
                         case_expires_at = excluded.case_expires_at,
@@ -148,6 +164,11 @@ class SQLiteFeedbackStore:
                         max(0, int(candidate_count)),
                         max(0, min(86_400_000, int(search_duration_ms or 0))),
                         str(search_key).strip(),
+                        str(request_id).strip(),
+                        str(search_id or search_key).strip(),
+                        str(status or "SUCCESS").strip().upper(),
+                        str(layer or "tool").strip().lower(),
+                        str(code or "REQUEST_SUCCEEDED").strip().upper(),
                         str(chapter).strip()[:80],
                         conversation_json,
                         review_status,
@@ -174,6 +195,11 @@ class SQLiteFeedbackStore:
             candidate_count=max(0, int(candidate_count)),
             search_duration_ms=max(0, min(86_400_000, int(search_duration_ms or 0))),
             search_key=str(search_key).strip(),
+            request_id=str(request_id).strip(),
+            search_id=str(search_id or search_key).strip(),
+            status=str(status or "SUCCESS").strip().upper(),
+            layer=str(layer or "tool").strip().lower(),
+            code=str(code or "REQUEST_SUCCEEDED").strip().upper(),
             chapter=str(chapter).strip()[:80],
             conversation=tuple(json.loads(conversation_json)),
             review_status=review_status,
@@ -206,6 +232,11 @@ class SQLiteFeedbackStore:
         identity_keys: Sequence[str] | None = None,
         chapter: str = "",
         review_status: str = "",
+        status: str = "",
+        layer: str = "",
+        code: str = "",
+        request_id: str = "",
+        search_id: str = "",
         include_archived: bool = False,
         created_from: str = "",
         created_before: str = "",
@@ -219,6 +250,11 @@ class SQLiteFeedbackStore:
             ("identity_key", identity_key),
             ("chapter", chapter),
             ("review_status", review_status),
+            ("status", status),
+            ("layer", layer),
+            ("code", code),
+            ("request_id", request_id),
+            ("search_id", search_id),
         ):
             clean = str(value or "").strip()
             if clean:
@@ -510,6 +546,11 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             candidate_count INTEGER NOT NULL,
             search_duration_ms INTEGER NOT NULL DEFAULT 0,
             search_key TEXT NOT NULL DEFAULT '',
+            request_id TEXT NOT NULL DEFAULT '',
+            search_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'SUCCESS',
+            layer TEXT NOT NULL DEFAULT 'tool',
+            code TEXT NOT NULL DEFAULT 'REQUEST_SUCCEEDED',
             chapter TEXT NOT NULL DEFAULT '',
             conversation_json TEXT NOT NULL DEFAULT '[]',
             review_status TEXT NOT NULL DEFAULT 'pending',
@@ -531,6 +572,11 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         "feedback_number": "TEXT NOT NULL DEFAULT ''",
         "search_duration_ms": "INTEGER NOT NULL DEFAULT 0",
         "search_key": "TEXT NOT NULL DEFAULT ''",
+        "request_id": "TEXT NOT NULL DEFAULT ''",
+        "search_id": "TEXT NOT NULL DEFAULT ''",
+        "status": "TEXT NOT NULL DEFAULT 'SUCCESS'",
+        "layer": "TEXT NOT NULL DEFAULT 'tool'",
+        "code": "TEXT NOT NULL DEFAULT 'REQUEST_SUCCEEDED'",
         "chapter": "TEXT NOT NULL DEFAULT ''",
         "conversation_json": "TEXT NOT NULL DEFAULT '[]'",
         "review_status": "TEXT NOT NULL DEFAULT 'pending'",
@@ -562,6 +608,14 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_feedback_review_updated "
         "ON message_feedback(review_status, updated_at)"
     )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_feedback_protocol "
+        "ON message_feedback(status, layer, code, updated_at)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_feedback_search_id "
+        "ON message_feedback(search_id, updated_at)"
+    )
 
 
 def _feedback_from_row(row: sqlite3.Row) -> MessageFeedback:
@@ -579,6 +633,11 @@ def _feedback_from_row(row: sqlite3.Row) -> MessageFeedback:
         candidate_count=int(row["candidate_count"]),
         search_duration_ms=int(row["search_duration_ms"]),
         search_key=str(row["search_key"]),
+        request_id=str(row["request_id"]),
+        search_id=str(row["search_id"] or row["search_key"]),
+        status=str(row["status"]),
+        layer=str(row["layer"]),
+        code=str(row["code"]),
         chapter=str(row["chapter"]),
         conversation=tuple(json.loads(str(row["conversation_json"]))),
         review_status=str(row["review_status"]),

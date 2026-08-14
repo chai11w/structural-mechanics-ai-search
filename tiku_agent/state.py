@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from uuid import uuid4
 
+from tiku_shared.request_protocol import new_search_id
+
 from tiku_agent.intent_contract import (
     CHAPTERS,
     STATE_IDLE,
@@ -61,6 +63,7 @@ class AgentState:
     current_chapter: str = ""
     current_route: str = ""
     current_structure_type: str = ""
+    current_search_id: str = ""
 
     questions: list[dict] = field(default_factory=list)
     selected_question: int | None = None
@@ -94,6 +97,7 @@ class AgentState:
         current_chapter: str = "",
         current_route: str = "",
         current_structure_type: str = "",
+        current_search_id: str = "",
         questions: list[dict] | None = None,
         selected_question: int | None = None,
         previous_question: int | None = None,
@@ -129,6 +133,7 @@ class AgentState:
         self.current_chapter = current_chapter or chapter
         self.current_route = current_route or route
         self.current_structure_type = current_structure_type or structure_type
+        self.current_search_id = str(current_search_id or "")
         self.questions = list(questions or [])
         self.selected_question = selected_question
         self.previous_question = previous_question
@@ -238,9 +243,14 @@ class AgentState:
     def remember_intent(self, intent: dict) -> None:
         self.last_intent = dict(intent)
 
-    def start_search(self, image_path: str) -> None:
+    def start_search(self, image_path: str, *, search_id: str | None = None) -> None:
+        previous_image = self.current_image_path
         self.task_revision += 1
         self.current_image_path = str(image_path)
+        if search_id is not None:
+            self.current_search_id = str(search_id).strip() or new_search_id()
+        elif not self.current_search_id or previous_image != self.current_image_path:
+            self.current_search_id = new_search_id()
         self.current_question_image_path = ""
         self.current_loads = []
         self.current_chapter = ""

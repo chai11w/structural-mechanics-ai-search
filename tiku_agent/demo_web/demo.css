@@ -54,6 +54,7 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .message.user .message-content { max-width: min(76%, 590px); display: flex; flex-direction: column; align-items: flex-end; }
 .message.user .message-text { padding: 10px 15px; border-radius: 18px; background: #f2f2ef; }
 .message.error .message-text { color: #991b1b; }
+.message.partial .message-text { color: #8a4b08; }
 .message-actions { min-height: 30px; display: flex; align-items: center; gap: 2px; margin-top: 8px; color: #92928d; }
 .message-action { width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 8px; background: transparent; cursor: pointer; transition: background .15s, transform .15s; }
 .message-action:hover { background: #f1f1ee; }

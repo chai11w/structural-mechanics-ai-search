@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from enum import Enum
 from typing import Any
 
+from tiku_shared.request_protocol import (
+    RequestAction,
+    RequestLayer,
+    RequestStatus,
+    normalize_status,
+)
 
-class ToolOutcome(str, Enum):
-    """Semantic result of one completed tool boundary."""
 
-    SUCCESS = "SUCCESS"
-    NO_MATCH = "NO_MATCH"
-    NEEDS_INPUT = "NEEDS_INPUT"
-    PARTIAL = "PARTIAL"
-    TOOL_ERROR = "TOOL_ERROR"
+ToolOutcome = RequestStatus
 
 
 @dataclass
@@ -23,7 +22,7 @@ class ToolResult:
 
     ``completed`` means the tool reached a final semantic result.  A complete
     search that found no reliable candidate is therefore ``NO_MATCH`` with
-    ``completed=True``.  ``NEEDS_INPUT``, ``PARTIAL`` and ``TOOL_ERROR`` are
+    ``completed=True``.  ``NEEDS_INPUT``, ``PARTIAL`` and ``ERROR`` are
     incomplete until the caller supplies input, accepts partial data, or
     performs an allowed retry.
     """
@@ -38,18 +37,24 @@ class ToolResult:
     completed: bool | None = None
     retryable: bool = False
     error_category: str = ""
+    layer: RequestLayer | str = RequestLayer.TOOL
+    action: RequestAction | str = RequestAction.NONE
+    request_id: str = ""
+    search_id: str = ""
 
     def __post_init__(self) -> None:
         if self.outcome is None:
             if self.ok is None:
                 raise ValueError("ToolResult requires outcome or legacy ok")
             self.outcome = (
-                ToolOutcome.SUCCESS if self.ok else ToolOutcome.TOOL_ERROR
+                ToolOutcome.SUCCESS if self.ok else ToolOutcome.ERROR
             )
         else:
-            self.outcome = ToolOutcome(self.outcome)
+            self.outcome = normalize_status(self.outcome)
 
-        semantic_ok = self.outcome is not ToolOutcome.TOOL_ERROR
+        self.layer = RequestLayer(self.layer)
+        self.action = RequestAction(self.action)
+        semantic_ok = self.outcome is not ToolOutcome.ERROR
         if self.ok is None:
             self.ok = semantic_ok
         elif bool(self.ok) != semantic_ok:
@@ -159,7 +164,7 @@ class ToolResult:
         error_category: str,
     ) -> "ToolResult":
         return cls(
-            outcome=ToolOutcome.TOOL_ERROR,
+            outcome=ToolOutcome.ERROR,
             tool=tool,
             code=code,
             data=dict(data or {}),
@@ -184,4 +189,7 @@ class ToolResult:
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["outcome"] = self.outcome.value
+        payload["status"] = self.outcome.value
+        payload["layer"] = self.layer.value
+        payload["action"] = self.action.value
         return payload

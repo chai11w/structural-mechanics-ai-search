@@ -26,6 +26,7 @@ class TikuAgentStateTest(unittest.TestCase):
                 "current_chapter",
                 "current_route",
                 "current_structure_type",
+                "current_search_id",
                 "questions",
                 "selected_question",
                 "previous_question",

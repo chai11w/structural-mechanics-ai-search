@@ -53,6 +53,22 @@ from tiku_agent.tools import (
     route_bank_tool,
     prepare_question_units_tool,
 )
+from tiku_shared.request_protocol import (
+    RequestAction,
+    RequestProtocol,
+    RequestStatus,
+)
+
+
+_CLARIFICATION_PROTOCOL_CODES = {
+    "missing_image": "UPLOAD_REQUIRED",
+    "missing_chapter": "CHAPTER_REQUIRED",
+    "missing_question_index": "QUESTION_INDEX_REQUIRED",
+    "missing_candidate_rank": "CANDIDATE_RANK_REQUIRED",
+    "candidate_list_unavailable": "CANDIDATE_LIST_UNAVAILABLE",
+    "out_of_range": "SELECTION_OUT_OF_RANGE",
+    "no_more_candidates": "NO_MORE_CANDIDATES",
+}
 
 
 @dataclass
@@ -63,6 +79,7 @@ class AgentResponse:
     intent: str = ""
     reply_source: str = ""
     fallback_reason: str = ""
+    protocol: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -105,8 +122,14 @@ class TikuSearchAgent:
         self.safe_answer_generator_v0 = safe_answer_generator_v0
         self.image_search_cancelled = image_search_cancelled
         self.commit_image_candidates = commit_image_candidates
+        self._incoming_search_id = ""
+        self._turn_protocol: dict[str, Any] = {}
 
-    def handle_image(self, image_path: str | Path) -> AgentResponse:
+    def handle_image(
+        self, image_path: str | Path, *, search_id: str = ""
+    ) -> AgentResponse:
+        self._incoming_search_id = str(search_id or "").strip()
+        self._turn_protocol = {}
         context = build_runtime_context_v2(self.state, trusted_image_event=True)
         decision = decide_intent_v2(
             None,
@@ -117,6 +140,8 @@ class TikuSearchAgent:
         return self._dispatch_v2(decision, context, image_path=image_path)
 
     def handle_text(self, text: str) -> AgentResponse:
+        self._incoming_search_id = ""
+        self._turn_protocol = {}
         if self.enable_safe_answer_v0:
             grounded_reply = render_grounded_safe_answer_v0(text)
             if grounded_reply is not None:
@@ -205,6 +230,7 @@ class TikuSearchAgent:
                 text=render_reply_shell_v2(decision, context),
                 state=self.state.to_dict(),
                 intent=decision.action,
+                protocol=self._reply_shell_protocol(decision),
             )
         return self._dispatch(
             adapt_decision_v2(decision, image_path=image_path),
@@ -277,7 +303,10 @@ class TikuSearchAgent:
         notices: list[str] = []
         self._raise_if_image_search_cancelled()
         pending_chapter = chapter_override or self.state.pending_chapter
-        self.state.start_search(image_path)
+        self.state.start_search(
+            image_path,
+            search_id=self._incoming_search_id or None,
+        )
         if pending_chapter:
             self.state.set_pending_chapter(pending_chapter)
         multi = self.tools.analyze_multi_image(image_path, config=self.config)
@@ -555,14 +584,33 @@ class TikuSearchAgent:
             return self._response(
                 answered.error or "未找到该候选题对应的答案文件。",
                 intent,
+                protocol=self._protocol_from_tool_result(answered),
             )
         paths = list(answered.data.get("copied_paths") or answered.data.get("answer_paths") or [])
         self.state.set_answer_paths([str(path) for path in paths])
         return self._response(render.render_answer(self.state), intent, images=self.state.last_answer_paths)
 
-    def _fail(self, error: str) -> AgentResponse:
+    def _fail(self, error: str, result: ToolResult | None = None) -> AgentResponse:
         self.state.fail(error)
-        return self._response(render.render_error(error), IntentResult("unsupported", ok=False, error=error))
+        protocol = None
+        if result is not None:
+            protocol = RequestProtocol(
+                status=RequestStatus.ERROR,
+                layer=result.layer,
+                code=result.code or "TOOL_FAILED",
+                retryable=result.retryable,
+                action=(
+                    result.action
+                    if result.action is not RequestAction.NONE
+                    else RequestAction.RETRY_SEARCH
+                ),
+                search_id=self.state.current_search_id,
+            ).to_dict()
+        return self._response(
+            render.render_error(error),
+            IntentResult("unsupported", ok=False, error=error),
+            protocol=protocol,
+        )
 
     def _stop_for_tool_result(
         self,
@@ -573,19 +621,29 @@ class TikuSearchAgent:
     ) -> AgentResponse | None:
         """Apply the five-state contract before consuming tool data."""
 
-        if result.outcome is ToolOutcome.TOOL_ERROR:
-            return self._fail(result.error or "工具执行失败，请稍后重试。")
+        if result.outcome is ToolOutcome.ERROR:
+            return self._fail(result.error or "工具执行失败，请稍后重试。", result)
         if result.outcome is ToolOutcome.NEEDS_INPUT and not allow_needs_input:
             message = result.error or "需要补充信息后才能继续。"
-            return self._response(message, IntentResult("clarification"))
+            return self._response(
+                message,
+                IntentResult("clarification"),
+                protocol=self._protocol_from_tool_result(result),
+            )
         if result.outcome is ToolOutcome.PARTIAL and not allow_partial:
-            return self._fail(result.error or "工具只完成了部分处理，请稍后重试。")
+            self.state.fail(result.error or "工具只完成了部分处理，请稍后重试。")
+            return self._response(
+                render.render_error(self.state.last_error),
+                IntentResult("unsupported", ok=False, error=self.state.last_error),
+                protocol=self._protocol_from_tool_result(result),
+            )
         return None
 
-    @staticmethod
-    def _collect_partial_notice(notices: list[str], result: ToolResult) -> None:
+    def _collect_partial_notice(self, notices: list[str], result: ToolResult) -> None:
         if result.outcome is not ToolOutcome.PARTIAL:
             return
+        if not self._turn_protocol:
+            self._turn_protocol = self._protocol_from_tool_result(result)
         note = str(result.error or result.data.get("rerank_note") or "").strip()
         if note and note not in notices:
             notices.append(note)
@@ -594,8 +652,73 @@ class TikuSearchAgent:
     def _join_notices(notices: list[str]) -> str:
         return "；".join(dict.fromkeys(note.strip() for note in notices if note.strip()))
 
-    def _response(self, text: str, intent: IntentResult, *, images: list[str] | None = None) -> AgentResponse:
-        return AgentResponse(text=text, images=list(images or []), state=self.state.to_dict(), intent=intent.intent)
+    def _response(
+        self,
+        text: str,
+        intent: IntentResult,
+        *,
+        images: list[str] | None = None,
+        protocol: dict[str, Any] | None = None,
+    ) -> AgentResponse:
+        derived_protocol = protocol
+        if derived_protocol is None and self.state.phase in {
+            PHASE_ERROR,
+            PHASE_NO_MATCH,
+            "WAIT_CHAPTER",
+        }:
+            derived_protocol = self._default_protocol()
+        if derived_protocol is None:
+            derived_protocol = self._turn_protocol or self._default_protocol()
+        return AgentResponse(
+            text=text,
+            images=list(images or []),
+            state=self.state.to_dict(),
+            intent=intent.intent,
+            protocol=dict(derived_protocol),
+        )
+
+    def _protocol_from_tool_result(self, result: ToolResult) -> dict[str, Any]:
+        action = result.action
+        if action is RequestAction.NONE and result.outcome is RequestStatus.ERROR:
+            action = RequestAction.RETRY_SEARCH
+        return RequestProtocol(
+            status=result.outcome,
+            layer=result.layer,
+            code=result.code or "TOOL_FAILED",
+            retryable=result.retryable,
+            action=action,
+            search_id=self.state.current_search_id,
+        ).to_dict()
+
+    def _reply_shell_protocol(self, decision: ActionDecisionV2) -> dict[str, Any]:
+        if decision.action == "clarification":
+            code = _CLARIFICATION_PROTOCOL_CODES.get(
+                decision.clarification_reason or "",
+                "CLARIFICATION_REQUIRED",
+            )
+        elif decision.action == "out_of_scope":
+            code = "REQUEST_OUT_OF_SCOPE"
+        elif decision.action == "reject":
+            code = "ACTION_NOT_ALLOWED"
+        else:
+            code = "REQUEST_SUCCEEDED"
+        return RequestProtocol.from_code(
+            code,
+            search_id=self.state.current_search_id,
+        ).to_dict()
+
+    def _default_protocol(self) -> dict[str, Any]:
+        if self.state.phase == PHASE_ERROR:
+            code = "AGENT_FAILED"
+        elif self.state.phase == PHASE_NO_MATCH:
+            code = "NO_MATCH"
+        elif self.state.phase == "WAIT_CHAPTER":
+            code = "CHAPTER_REQUIRED"
+        else:
+            code = "REQUEST_SUCCEEDED"
+        return RequestProtocol.from_code(
+            code, search_id=self.state.current_search_id
+        ).to_dict()
 
     def _report_progress(self, stage: str, message: str) -> None:
         if self.progress_reporter is not None:

@@ -59,11 +59,12 @@ const RECOVERY_ACTION_LABELS = {
 };
 
 class UserVisibleError extends Error {
-  constructor(message, recoveryActions = [], { retryable = true } = {}) {
+  constructor(message, recoveryActions = [], { retryable = true, protocol = {} } = {}) {
     super(message);
     this.name = 'UserVisibleError';
     this.recoveryActions = normalizeRecoveryActions(recoveryActions);
     this.retryable = Boolean(retryable);
+    Object.assign(this, protocolFields(protocol));
   }
 }
 
@@ -84,7 +85,7 @@ let pendingSessionExpiredNotice = false;
 let pendingHistoryStorageNotice = '';
 let sessionContext = {
   session_valid: false, phase: 'IDLE', has_active_image: false,
-  task_revision: 0, candidate_generation: '', candidate_count: 0,
+  task_revision: 0, candidate_generation: '', candidate_count: 0, search_id: '',
 };
 const objectUrls = new Set();
 
@@ -114,6 +115,39 @@ function scheduleHistoryExpiry() {
     historyExpiryTimer = null;
     expireHistoryIfNeeded();
   }, remaining);
+}
+
+function createRequestId() {
+  const value = globalThis.crypto?.randomUUID?.().replaceAll('-', '');
+  return `req_${value || `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`.padEnd(32, '0').slice(0, 32)}`;
+}
+
+function protocolFields(source = {}) {
+  return {
+    status: String(source.status || ''),
+    layer: String(source.layer || ''),
+    code: String(source.code || ''),
+    retryable: Boolean(source.retryable),
+    action: String(source.action || ''),
+    requestId: String(source.request_id || source.requestId || ''),
+    searchId: String(source.search_id || source.searchId || ''),
+  };
+}
+
+function protocolRecoveryAction(action) {
+  const value = String(action || '');
+  if (value === 'retry_upload') return 'reupload';
+  return Object.hasOwn(RECOVERY_ACTION_LABELS, value) ? value : '';
+}
+
+function clientProtocolError(message, code, requestId, recoveryActions = ['retry_request']) {
+  return new UserVisibleError(message, recoveryActions, {
+    protocol: {
+      status: 'ERROR', layer: 'network', code, retryable: true,
+      action: recoveryActions.includes('retry_connection') ? 'retry_connection' : 'retry_request',
+      request_id: requestId, search_id: sessionContext.search_id || '',
+    },
+  });
 }
 
 function saveHistory({ refreshActivity = false } = {}) {
@@ -170,6 +204,7 @@ function remember(item) {
     feedback: item.feedback || null,
     recoveryActions: normalizeRecoveryActions(item.recoveryActions),
     retryAction: normalizeRetryAction(item.retryAction),
+    ...protocolFields(item),
   });
   history = history.slice(-HISTORY_LIMIT);
   saveHistory({ refreshActivity: true });
@@ -310,12 +345,12 @@ function closeFeedback() {
   focusBeforeModal?.focus();
 }
 
-function showFailureNotice(key, message, recoveryActions = []) {
+function showFailureNotice(key, message, recoveryActions = [], protocol = {}) {
   const noticeKey = String(key || '').trim();
   if (!noticeKey || activeFailureNotices.has(noticeKey)) return null;
   activeFailureNotices.add(noticeKey);
   return addMessage({
-    message, variant: 'error', recoveryActions,
+    message, variant: 'error', recoveryActions, ...protocolFields(protocol),
   });
 }
 
@@ -440,6 +475,13 @@ async function submitFeedback() {
       detail: feedbackDetail.value.trim(),
       conversation: feedbackConversation(context.item.messageId),
       search_duration_ms: searchDurationForFeedback(context.item.messageId),
+      status: context.item.status || 'SUCCESS',
+      layer: context.item.layer || 'tool',
+      code: context.item.code || 'REQUEST_SUCCEEDED',
+      retryable: Boolean(context.item.retryable),
+      action: context.item.action || '',
+      request_id: context.item.requestId || '',
+      search_id: context.item.searchId || sessionContext.search_id || '',
     };
     await request('/api/feedback', {
       method: 'POST',
@@ -511,6 +553,10 @@ function createMediaCard(url, index, item) {
       'expired-media',
       '题图或结果图片已失效，请重新上传题图；如果问题反复出现，可以点踩告诉我们。',
       ['reupload'],
+      {
+        status: 'ERROR', layer: 'media', code: 'MEDIA_NOT_FOUND', retryable: true,
+        action: 'retry_upload', request_id: createRequestId(), search_id: item.searchId || sessionContext.search_id || '',
+      },
     );
   }, { once: true });
   openButton.append(image);
@@ -696,6 +742,7 @@ async function repairUploadedImageHistory() {
       'connection',
       '暂时无法连接服务。当前对话仍保留在本机，请检查网络后重新连接。',
       ['retry_connection'],
+      { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: createRequestId(), search_id: sessionContext.search_id || '' },
     );
   }
 }
@@ -839,9 +886,27 @@ async function normalizeImage(selected, sourceUrl) {
   return { blob, filename, preview };
 }
 
-function safeHttpError(status, data) {
+function safeHttpError(status, data, requestId = '') {
   const rawDetail = typeof data?.detail === 'string' ? data.detail : '';
   const detail = rawDetail.toLowerCase();
+  const protocol = { ...data, request_id: data?.request_id || requestId };
+  const action = protocolRecoveryAction(data?.action);
+  if (data?.status) {
+    const messages = {
+      UPLOAD_REQUIRED: '没有读取到图片，请重新选择。',
+      UPLOAD_TOO_LARGE: '图片太大，请上传不超过 15MB 的图片。',
+      UPLOAD_UNSUPPORTED_FORMAT: '图片格式不支持，请上传 PNG、JPG、WEBP、GIF 或 BMP 图片。',
+      UPLOAD_DECODE_FAILED: '服务端无法读取该图片，请重新选择清晰、完整的题图。',
+      MESSAGE_INVALID: '这条消息无法处理，请重新输入后提交。',
+      FEEDBACK_INVALID: '反馈内容无法提交，请修改后重试。',
+      FEEDBACK_TOO_LARGE: '反馈内容过长，请精简后重试。',
+    };
+    return new UserVisibleError(
+      messages[data.code] || rawDetail || '这次请求没有处理成功，请稍后重试。',
+      action ? [action] : [],
+      { retryable: Boolean(data.retryable), protocol },
+    );
+  }
   if (status === 401) return new UserVisibleError('登录状态已失效，请重新登录。', ['relogin'], { retryable: false });
   if (status === 403) return new UserVisibleError('当前请求无权处理，请重新登录或联系管理员。', ['relogin'], { retryable: false });
   if (status === 429) return new UserVisibleError(rawDetail || '当前请求较多，请稍后再试。', ['retry_request']);
@@ -860,8 +925,16 @@ function safeHttpError(status, data) {
   return new UserVisibleError(`请求失败（HTTP ${status}），请稍后重试。`, ['retry_request']);
 }
 
-function streamedError(message) {
-  const text = String(message || '服务端处理失败，请稍后重试。');
+function streamedError(event) {
+  const text = String(event?.message || event || '服务端处理失败，请稍后重试。');
+  if (event?.status) {
+    const action = protocolRecoveryAction(event.action);
+    return new UserVisibleError(
+      text,
+      action ? [action] : [],
+      { retryable: Boolean(event.retryable), protocol: event },
+    );
+  }
   const retryable = !text.includes('重新登录') && !text.includes('额度') && !text.includes('邀请码');
   const actions = text.includes('重新登录') ? ['relogin'] : retryable ? ['retry_request'] : [];
   return new UserVisibleError(text, actions, { retryable });
@@ -869,10 +942,13 @@ function streamedError(message) {
 
 async function request(url, options, timeoutMs, timeoutMessage, track = true, networkMessage = '') {
   const controller = new AbortController();
+  const requestId = createRequestId();
+  const headers = new Headers(options?.headers || {});
+  headers.set('x-request-id', requestId);
   if (track) activeController = controller;
   const timer = setTimeout(() => controller.abort('timeout'), timeoutMs);
   try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
+    const response = await fetch(url, { ...options, headers, signal: controller.signal });
     const contentType = response.headers.get('content-type') || '';
     let data = {};
     if (contentType.includes('application/json')) {
@@ -880,17 +956,21 @@ async function request(url, options, timeoutMs, timeoutMessage, track = true, ne
     } else {
       await response.text();
     }
-    if (!response.ok) throw safeHttpError(response.status, data);
-    if (!contentType.includes('application/json')) throw new UserVisibleError('服务返回格式异常，请稍后重试。', ['retry_request']);
+    if (!response.ok) throw safeHttpError(response.status, data, requestId);
+    if (!contentType.includes('application/json')) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
     return data;
   } catch (error) {
     if (error.name === 'AbortError') {
       if (controller.signal.reason === 'new-chat') throw new UserVisibleError('当前识别已取消。');
-      throw new UserVisibleError(timeoutMessage, ['retry_request']);
+      throw new UserVisibleError(timeoutMessage, ['retry_request'], {
+        protocol: { status: 'ERROR', layer: 'network', code: 'REQUEST_TIMEOUT', retryable: true, action: 'retry_request', request_id: requestId },
+      });
     }
     if (error instanceof UserVisibleError) throw error;
-    if (error instanceof TypeError) throw new UserVisibleError(networkMessage || '无法连接服务，请检查网络后重试。', ['retry_request']);
-    throw new UserVisibleError('服务返回格式异常，请稍后重试。', ['retry_request']);
+    if (error instanceof TypeError) throw new UserVisibleError(networkMessage || '无法连接服务，请检查网络后重试。', ['retry_request'], {
+      protocol: { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: requestId },
+    });
+    throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
   } finally {
     clearTimeout(timer);
     if (activeController === controller) activeController = null;
@@ -899,16 +979,19 @@ async function request(url, options, timeoutMs, timeoutMessage, track = true, ne
 
 async function requestStream(url, options, timeoutMs, timeoutMessage, onProgress, networkMessage = '') {
   const controller = new AbortController();
+  const requestId = createRequestId();
+  const headers = new Headers(options?.headers || {});
+  headers.set('x-request-id', requestId);
   activeController = controller;
   const timer = setTimeout(() => controller.abort('timeout'), timeoutMs);
   try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
+    const response = await fetch(url, { ...options, headers, signal: controller.signal });
     if (!response.ok) {
       let data = {};
       try { data = await response.json(); } catch (_error) { data = {}; }
-      throw safeHttpError(response.status, data);
+      throw safeHttpError(response.status, data, requestId);
     }
-    if (!response.body) throw new UserVisibleError('服务返回格式异常，请稍后重试。', ['retry_request']);
+    if (!response.body) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -923,20 +1006,24 @@ async function requestStream(url, options, timeoutMs, timeoutMessage, onProgress
         const event = JSON.parse(line);
         if (event.type === 'progress') onProgress?.(event);
         if (event.type === 'result') result = event.data;
-        if (event.type === 'error') throw streamedError(event.message);
+        if (event.type === 'error') throw streamedError(event);
       }
       if (done) break;
     }
-    if (!result) throw new UserVisibleError('服务返回格式异常，请稍后重试。', ['retry_request']);
+    if (!result) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
     return result;
   } catch (error) {
     if (error.name === 'AbortError') {
       if (controller.signal.reason === 'new-chat') throw new UserVisibleError('当前识别已取消。');
-      throw new UserVisibleError(timeoutMessage, ['retry_request']);
+      throw new UserVisibleError(timeoutMessage, ['retry_request'], {
+        protocol: { status: 'ERROR', layer: 'network', code: 'REQUEST_TIMEOUT', retryable: true, action: 'retry_request', request_id: requestId },
+      });
     }
     if (error instanceof UserVisibleError) throw error;
-    if (error instanceof TypeError) throw new UserVisibleError(networkMessage || '无法连接服务，请检查网络后重试。', ['retry_request']);
-    throw new UserVisibleError('服务返回格式异常，请稍后重试。', ['retry_request']);
+    if (error instanceof TypeError) throw new UserVisibleError(networkMessage || '无法连接服务，请检查网络后重试。', ['retry_request'], {
+      protocol: { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: requestId },
+    });
+    throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
   } finally {
     clearTimeout(timer);
     if (activeController === controller) activeController = null;
@@ -946,7 +1033,9 @@ async function requestStream(url, options, timeoutMs, timeoutMessage, onProgress
 function responseItem(data) {
   updateSessionContext(data);
   const failure = data?.failure && typeof data.failure === 'object' ? data.failure : null;
-  const recoveryAction = String(failure?.recovery_action || '');
+  const protocol = protocolFields(data);
+  const recoveryAction = protocolRecoveryAction(data?.action)
+    || String(failure?.recovery_action || '');
   return {
     message: data.text || '处理完成。',
     me: false,
@@ -956,11 +1045,24 @@ function responseItem(data) {
     taskRevision: Number(data.session?.task_revision || 0),
     candidateCount: Number(data.session?.candidate_count || 0),
     candidateGeneration: String(data.session?.candidate_generation || ''),
-    variant: failure ? 'error' : '',
+    variant: protocol.status === 'ERROR' || failure
+      ? 'error'
+      : protocol.status === 'PARTIAL' ? 'partial' : '',
     recoveryActions: recoveryAction ? [recoveryAction] : [],
     messageId: createMessageId(),
     createdAt: Date.now(),
+    ...protocol,
   };
+}
+
+function setResponseStatus(data) {
+  if (data?.status === 'PARTIAL') {
+    setStatus('ready', '结果已返回，部分能力暂时降级');
+  } else if (data?.status === 'ERROR' || data?.failure) {
+    setStatus('error', '处理失败，可重新尝试');
+  } else {
+    setStatus('ready', '准备就绪');
+  }
 }
 
 function updateSessionContext(data) {
@@ -999,7 +1101,7 @@ async function sendTextValue(value, displayValue = value, actionContext = null) 
     if (operation !== operationVersion) return;
     pending?.remove();
     addMessage(responseItem(data));
-    setStatus(data?.failure ? 'error' : 'ready', data?.failure ? '处理失败，可重新尝试' : '准备就绪');
+    setResponseStatus(data);
   } catch (error) {
     if (operation !== operationVersion) return;
     pending?.remove();
@@ -1010,6 +1112,7 @@ async function sendTextValue(value, displayValue = value, actionContext = null) 
         ? normalizeRecoveryActions(error.recoveryActions || [])
         : mergeRecoveryActions(error.recoveryActions || [], ['retry_request']),
       retryAction: { type: 'text', value: clean, displayValue, actionContext },
+      ...protocolFields(error),
     });
     setStatus('error', '处理失败，可重新尝试');
   } finally {
@@ -1053,7 +1156,7 @@ function setUploadRowPreview(row, url) {
   if (image) image.src = url;
 }
 
-function addUploadFailure(row, message, prepared, recoveryActions = []) {
+function addUploadFailure(row, message, prepared, recoveryActions = [], protocol = {}) {
   const fullMessage = `${message} 裁剪后的图片已保留，可直接重新上传。`;
   setUploadRowStatus(row, fullMessage, 'error');
   const retry = document.createElement('button');
@@ -1065,6 +1168,7 @@ function addUploadFailure(row, message, prepared, recoveryActions = []) {
   addMessage({
     message: fullMessage, variant: 'error',
     recoveryActions: mergeRecoveryActions(recoveryActions, ['reupload']),
+    ...protocolFields(protocol),
   });
   return row;
 }
@@ -1101,7 +1205,7 @@ async function submitPreparedImage(prepared, uploadRow) {
     releaseObjectUrl(prepared.preview);
     clearPendingUpload({ releasePreview: false });
     addMessage(response);
-    setStatus(data?.failure ? 'error' : 'ready', data?.failure ? '处理失败，可重新尝试' : '准备就绪');
+    setResponseStatus(data);
   } catch (error) {
     if (operation !== operationVersion) return;
     pending.remove();
@@ -1110,6 +1214,7 @@ async function submitPreparedImage(prepared, uploadRow) {
       error.message || '服务端处理失败，请稍后重试。',
       prepared,
       error.recoveryActions || [],
+      error,
     );
     setStatus('error', '上传失败，可直接重试');
   } finally {
@@ -1129,7 +1234,16 @@ async function uploadImage(selected) {
   const validationError = validateImage(selected);
   fileInput.value = '';
   if (validationError) {
-    addMessage({ message: validationError, variant: 'error', recoveryActions: ['reupload'] });
+    const code = validationError.includes('太大')
+      ? 'UPLOAD_TOO_LARGE'
+      : validationError.includes('格式') ? 'UPLOAD_UNSUPPORTED_FORMAT' : 'UPLOAD_REQUIRED';
+    addMessage({
+      message: validationError,
+      variant: 'error',
+      recoveryActions: ['reupload'],
+      status: 'NEEDS_INPUT', layer: 'upload', code, retryable: false,
+      action: 'retry_upload', requestId: createRequestId(), searchId: '',
+    });
     return;
   }
   invalidateCandidateActions();
@@ -1155,6 +1269,8 @@ async function uploadImage(selected) {
       addMessage({
         message: error.message || '图片处理失败，请重新选择图片。',
         variant: 'error', recoveryActions: ['reupload'],
+        status: 'NEEDS_INPUT', layer: 'upload', code: 'UPLOAD_DECODE_FAILED',
+        retryable: false, action: 'retry_upload', requestId: createRequestId(), searchId: '',
       });
       setStatus('error', '图片处理失败');
     }
@@ -1234,6 +1350,7 @@ async function checkHealth() {
       'connection',
       '暂时无法连接服务。当前对话仍保留在本机，请检查网络后重新连接。',
       ['retry_connection'],
+      { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: createRequestId(), search_id: sessionContext.search_id || '' },
     );
     return false;
   }
@@ -1317,6 +1434,7 @@ window.addEventListener('offline', () => {
     'connection',
     '当前网络已断开。当前对话仍保留在本机，请恢复网络后重新连接。',
     ['retry_connection'],
+    { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: createRequestId(), search_id: sessionContext.search_id || '' },
   );
 });
 window.addEventListener('online', retryConnection);

@@ -157,10 +157,11 @@ class Candidate8794BaselineTest(unittest.TestCase):
         self.assertEqual(mainline.get("/health").json(), candidate.get("/health").json())
         self.assertEqual(mainline.get("/").text, candidate.get("/").text)
         self.assertEqual(mainline.get("/api/session").json(), candidate.get("/api/session").json())
-        self.assertEqual(
-            mainline.post("/api/message", json={"text": "4"}).json(),
-            candidate.post("/api/message", json={"text": "4"}).json(),
-        )
+        mainline_message = mainline.post("/api/message", json={"text": "4"}).json()
+        candidate_message = candidate.post("/api/message", json={"text": "4"}).json()
+        self.assertTrue(mainline_message.pop("request_id").startswith("req_"))
+        self.assertTrue(candidate_message.pop("request_id").startswith("req_"))
+        self.assertEqual(mainline_message, candidate_message)
         self.assertEqual(mainline_runtime.calls, candidate_runtime.calls)
         mainline_cookie_names = {cookie.name for cookie in mainline.cookies.jar}
         candidate_cookie_names = {cookie.name for cookie in candidate.cookies.jar}

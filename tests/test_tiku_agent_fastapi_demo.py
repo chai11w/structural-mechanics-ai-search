@@ -290,7 +290,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260814-failure-complete-v3"', 'src="/assets/demo.js?v=20260814-failure-complete-v3"',
+            'href="/assets/demo.css?v=20260814-request-protocol-v1"', 'src="/assets/demo.js?v=20260814-request-protocol-v1"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -341,7 +341,9 @@ class FastApiDemoTest(unittest.TestCase):
             "题图或结果图片已失效", "反馈提交失败，可重新提交",
             "retry_request: '重试上一条'", "retry_search: '重试搜索'",
             "function normalizeRetryAction", "function retryTextAction",
-            "variant: failure ? 'error' : ''", "data?.failure ? 'error' : 'ready'",
+            "protocol.status === 'PARTIAL' ? 'partial' : ''",
+            "function setResponseStatus(data)", "headers.set('x-request-id', requestId)",
+            "search_id: context.item.searchId || sessionContext.search_id || ''",
         ):
             self.assertIn(expected, _SCRIPT)
         self.assertLess(
@@ -626,7 +628,14 @@ class FastApiDemoTest(unittest.TestCase):
 
         stream = client.post("/api/message/stream", json={"text": "你好"})
         events = [json.loads(line) for line in stream.text.splitlines() if line]
-        self.assertEqual(events, [{"type": "error", "message": "当前请求较多，请稍后再试。"}])
+        self.assertEqual(events[0]["type"], "error")
+        self.assertEqual(events[0]["message"], "当前请求较多，请稍后再试。")
+        self.assertEqual(events[0]["status"], "ERROR")
+        self.assertEqual(events[0]["layer"], "queue")
+        self.assertEqual(events[0]["code"], "QUEUE_FULL")
+        self.assertTrue(events[0]["retryable"])
+        self.assertEqual(events[0]["action"], "retry_request")
+        self.assertTrue(events[0]["request_id"].startswith("req_"))
 
         runtime.error = AgentBudgetExceededError("今日服务额度已用完，请明天再试。")
         budget = client.post("/api/message", json={"text": "你好"})

@@ -272,6 +272,11 @@ def create_admin_app(
         identity_status: str = "",
         chapter: str = "",
         review_status: str = "",
+        status: str = "",
+        layer: str = "",
+        code: str = "",
+        request_id: str = "",
+        search_id: str = "",
         include_archived: bool = False,
         date: str = "",
         limit: int = 50,
@@ -286,6 +291,11 @@ def create_admin_app(
                 identity_status=identity_status,
                 chapter=chapter,
                 review_status=review_status,
+                status=status,
+                layer=layer,
+                code=code,
+                request_id=request_id,
+                search_id=search_id,
                 include_archived=include_archived,
                 date=date,
                 limit=limit,
@@ -293,6 +303,28 @@ def create_admin_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="反馈日期格式无效。") from exc
+
+    @app.get("/api/admin/activity")
+    def request_activity(
+        identity_key: str = "",
+        status: str = "",
+        layer: str = "",
+        code: str = "",
+        request_id: str = "",
+        search_id: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        return reporter.request_events(
+            identity_key=identity_key,
+            status=status,
+            layer=layer,
+            code=code,
+            request_id=request_id,
+            search_id=search_id,
+            limit=limit,
+            offset=offset,
+        )
 
     @app.get("/api/admin/feedback/{feedback_id}")
     def feedback_detail(feedback_id: str) -> dict[str, object]:
@@ -418,7 +450,7 @@ def create_admin_app(
     @app.get("/{page:path}", response_class=HTMLResponse)
     def pages(page: str) -> Response:
         clean = str(page).strip("/")
-        if clean in {"login", "setup", "overview", "invitations", "feedback", "settings"} or clean.startswith("feedback/"):
+        if clean in {"login", "setup", "overview", "invitations", "activity", "feedback", "settings"} or clean.startswith("feedback/"):
             return HTMLResponse((WEB_DIR / "index.html").read_text(encoding="utf-8"))
         raise HTTPException(status_code=404, detail="page not found")
 

@@ -12,9 +12,9 @@ from typing import Literal
 from tiku_agent.tools import DEFAULT_RUNTIME_DIR
 
 
-TASK_LOG_SCHEMA_VERSION = 1
+TASK_LOG_SCHEMA_VERSION = 2
 DEFAULT_TASK_LOG_PATH = DEFAULT_RUNTIME_DIR / "task_logs.jsonl"
-TaskKind = Literal["image", "text"]
+TaskKind = Literal["image", "text", "feedback", "session", "login", "media"]
 TaskOutcome = Literal["waiting", "candidates", "answered", "no_match", "cancelled", "error"]
 
 
@@ -36,6 +36,14 @@ class TaskLogEntry:
     chapter: str = ""
     route: str = ""
     error_kind: str = ""
+    request_id: str = ""
+    search_id: str = ""
+    identity_key: str = ""
+    status: str = "SUCCESS"
+    layer: str = "tool"
+    code: str = "REQUEST_SUCCEEDED"
+    retryable: bool = False
+    action: str = ""
     schema_version: int = TASK_LOG_SCHEMA_VERSION
 
     def to_dict(self) -> dict:

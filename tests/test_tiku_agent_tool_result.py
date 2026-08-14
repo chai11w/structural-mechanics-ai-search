@@ -35,6 +35,10 @@ class ToolResultContractTest(unittest.TestCase):
             [item.to_dict()["outcome"] for item in cases],
             [item.value for item in ToolOutcome],
         )
+        self.assertEqual(
+            [item.to_dict()["status"] for item in cases],
+            ["SUCCESS", "NO_MATCH", "NEEDS_INPUT", "PARTIAL", "ERROR"],
+        )
         self.assertEqual([item.to_dict()["tool"] for item in cases], ["example"] * 5)
         self.assertEqual([item.ok for item in cases], [True, True, True, True, False])
         self.assertEqual(
@@ -48,8 +52,15 @@ class ToolResultContractTest(unittest.TestCase):
 
         self.assertEqual(success.outcome, ToolOutcome.SUCCESS)
         self.assertEqual(success.code, "LEGACY_SUCCESS")
-        self.assertEqual(failure.outcome, ToolOutcome.TOOL_ERROR)
+        self.assertEqual(failure.outcome, ToolOutcome.ERROR)
         self.assertEqual(failure.code, "LEGACY_TOOL_ERROR")
+
+    def test_old_tool_error_value_is_read_as_public_error(self):
+        result = ToolResult(outcome="TOOL_ERROR", code="PROVIDER_FAILED")
+
+        self.assertEqual(result.outcome, ToolOutcome.ERROR)
+        self.assertEqual(result.to_dict()["outcome"], "ERROR")
+        self.assertEqual(result.to_dict()["layer"], "tool")
 
     def test_conflicting_legacy_ok_and_outcome_is_rejected(self):
         with self.assertRaises(ValueError):

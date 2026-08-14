@@ -10,7 +10,6 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 import threading
 import time
 from typing import Any, Callable, Protocol
-from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from tiku_agent.agent import AgentResponse, TikuSearchAgent
@@ -28,6 +27,11 @@ from tiku_shared.model_costs import (
     SQLiteModelCostLedger,
     model_cost_scope,
     submit_with_model_cost_context,
+)
+from tiku_shared.request_protocol import (
+    RequestProtocol,
+    new_request_id,
+    new_search_id,
 )
 
 
@@ -78,12 +82,37 @@ class BudgetPolicy(Protocol):
     def budget_limits_for(self, identity_key: str) -> Any: ...
 
 
-class AgentRuntimeBusyError(RuntimeError):
+class AgentProtocolError(RuntimeError):
+    """A request-boundary error with stable public protocol metadata."""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.request_id = ""
+        self.search_id = ""
+
+    def bind(self, *, request_id: str, search_id: str = "") -> RequestProtocol:
+        self.request_id = request_id
+        self.search_id = search_id
+        return RequestProtocol.from_code(
+            self.code, request_id=request_id, search_id=search_id
+        )
+
+
+class AgentRuntimeBusyError(AgentProtocolError):
     """The bounded web runtime cannot accept another task right now."""
 
+    def __init__(self, message: str, *, code: str = "QUEUE_FULL") -> None:
+        super().__init__(message, code=code)
 
-class AgentBudgetExceededError(RuntimeError):
+
+class AgentBudgetExceededError(AgentProtocolError):
     """The configured daily model-cost ceiling has already been reached."""
+
+    def __init__(
+        self, message: str, *, code: str = "GLOBAL_DAILY_QUOTA_EXCEEDED"
+    ) -> None:
+        super().__init__(message, code=code)
 
 
 class _ExecutionGate:
@@ -105,7 +134,9 @@ class _ExecutionGate:
         with self._condition:
             if self._active >= self.max_concurrent:
                 if self._waiting >= self.max_queued:
-                    raise AgentRuntimeBusyError("当前请求较多，请稍后再试。")
+                    raise AgentRuntimeBusyError(
+                        "当前请求较多，请稍后再试。", code="QUEUE_FULL"
+                    )
                 queued = True
                 self._waiting += 1
                 if progress is not None:
@@ -115,7 +146,10 @@ class _ExecutionGate:
                     while self._active >= self.max_concurrent:
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
-                            raise AgentRuntimeBusyError("排队等待超时，请稍后重新提交。")
+                            raise AgentRuntimeBusyError(
+                                "排队等待超时，请稍后重新提交。",
+                                code="QUEUE_TIMEOUT",
+                            )
                         self._condition.wait(remaining)
                 finally:
                     self._waiting -= 1
@@ -195,29 +229,47 @@ class AgentSessionRuntime:
         *,
         identity_key: str = "",
         progress: ProgressReporter | None = None,
+        request_id: str = "",
     ) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
+        clean_request_id = str(request_id or "").strip() or new_request_id()
+        search_id = new_search_id()
 
         def execute() -> AgentResponse:
             self.purge_expired()
-            persisted_image = self.artifacts.persist_image(clean_session_id, image_path)
+            try:
+                persisted_image = self.artifacts.persist_image(clean_session_id, image_path)
+            except Exception as exc:  # noqa: BLE001 - normalize storage failures at the request boundary.
+                raise AgentProtocolError(
+                    "题图暂时无法保存，请重新上传。",
+                    code="UPLOAD_PERSIST_FAILED",
+                ) from exc
             if self.external_load_screen is not None:
                 return self._run_screened_image(
                     clean_session_id,
                     persisted_image,
                     identity_key=identity_key,
                     progress=progress,
+                    request_id=clean_request_id,
+                    search_id=search_id,
                 )
             return self._run(
                 clean_session_id,
                 "image",
-                lambda agent: agent.handle_image(persisted_image),
+                lambda agent: agent.handle_image(persisted_image, search_id=search_id),
                 identity_key=identity_key,
                 progress=progress,
+                request_id=clean_request_id,
             )
 
         return self._admit(
-            clean_session_id, execute, identity_key=identity_key, progress=progress
+            clean_session_id,
+            execute,
+            kind="image",
+            request_id=clean_request_id,
+            search_id=search_id,
+            identity_key=identity_key,
+            progress=progress,
         )
 
     def _run_screened_image(
@@ -227,12 +279,14 @@ class AgentSessionRuntime:
         *,
         identity_key: str,
         progress: ProgressReporter | None,
+        request_id: str,
+        search_id: str,
     ) -> AgentResponse:
         baseline_state = self.store.load(session_id) or AgentState(session_id=session_id)
         phase_before = baseline_state.phase
         started_at = datetime.now(UTC)
         started = time.perf_counter()
-        task_id = uuid4().hex
+        task_id = request_id
         collector = ModelCostCollector(
             run_id=task_id,
             session_key=session_key(session_id),
@@ -257,7 +311,10 @@ class AgentSessionRuntime:
                 race,
             )
             search_future = submit_with_model_cost_context(
-                self._image_executor, agent.handle_image, image_path
+                self._image_executor,
+                agent.handle_image,
+                image_path,
+                search_id=search_id,
             )
 
         deadline = time.monotonic() + self.external_load_timeout_seconds
@@ -285,7 +342,7 @@ class AgentSessionRuntime:
                 verdict = self._screen_verdict(screen_future)
                 if verdict == "no" and race.claim_no_load():
                     response_state, response = self._no_load_response(
-                        baseline_state, image_path
+                        baseline_state, image_path, search_id=search_id
                     )
                     break
 
@@ -295,7 +352,7 @@ class AgentSessionRuntime:
                 except ImageSearchCancelled:
                     if race.cancel_search.is_set():
                         response_state, response = self._no_load_response(
-                            baseline_state, image_path
+                            baseline_state, image_path, search_id=search_id
                         )
                         break
                     raise
@@ -319,7 +376,7 @@ class AgentSessionRuntime:
             race.expire_screen()
             if race.no_load_committed:
                 response_state, response = self._no_load_response(
-                    baseline_state, image_path
+                    baseline_state, image_path, search_id=search_id
                 )
             elif search_future.done():
                 if search_error is not None:
@@ -330,12 +387,18 @@ class AgentSessionRuntime:
                     response = search_future.result()
                 except ImageSearchCancelled:
                     response_state, response = self._no_load_response(
-                        baseline_state, image_path
+                        baseline_state, image_path, search_id=search_id
                     )
                 else:
                     response_state = agent.state
 
         assert response is not None and response_state is not None
+        self._attach_response_protocol(
+            response,
+            state=response_state,
+            request_id=request_id,
+            search_id=response_state.current_search_id or search_id,
+        )
         self.store.save(response_state)
         duration_ms = round((time.perf_counter() - started) * 1000)
         futures = (screen_future, search_future)
@@ -350,6 +413,7 @@ class AgentSessionRuntime:
                 state=response_state,
                 response=response,
                 collector=collector,
+                identity_key=identity_key,
             )
         else:
             if not search_future.done():
@@ -366,6 +430,7 @@ class AgentSessionRuntime:
                 state=response_state,
                 response=response,
                 collector=collector,
+                identity_key=identity_key,
             )
         return response
 
@@ -411,16 +476,19 @@ class AgentSessionRuntime:
 
     @staticmethod
     def _no_load_response(
-        state_before: AgentState, image_path: Path
+        state_before: AgentState, image_path: Path, *, search_id: str
     ) -> tuple[AgentState, AgentResponse]:
         state = AgentState.from_dict(state_before.to_dict())
-        state.start_search(str(image_path))
+        state.start_search(str(image_path), search_id=search_id)
         state.set_candidates([])
         state.last_error = NO_EXTERNAL_LOAD_MESSAGE
         return state, AgentResponse(
             text=NO_EXTERNAL_LOAD_MESSAGE,
             state=state.to_dict(),
             intent="external_load_screen",
+            protocol=RequestProtocol.from_code(
+                "EXTERNAL_LOAD_NOT_FOUND", search_id=search_id
+            ).to_dict(),
         )
 
     def _finish_screened_observability(
@@ -435,6 +503,7 @@ class AgentSessionRuntime:
         state: AgentState,
         response: AgentResponse,
         collector: ModelCostCollector,
+        identity_key: str,
     ) -> None:
         wait(futures)
         for future in futures:
@@ -452,11 +521,12 @@ class AgentSessionRuntime:
             state=state,
             response=response,
             error_kind="",
+            identity_key=identity_key,
         )
         if self.cost_ledger is not None:
             try:
                 if state.task_revision > 0:
-                    collector.search_key = (
+                    collector.search_key = state.current_search_id or (
                         f"{collector.session_key}:{state.task_revision}"
                     )
                 self.cost_ledger.write_run(
@@ -474,8 +544,12 @@ class AgentSessionRuntime:
         *,
         identity_key: str = "",
         progress: ProgressReporter | None = None,
+        request_id: str = "",
     ) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
+        clean_request_id = str(request_id or "").strip() or new_request_id()
+        current_state = self.store.load(clean_session_id)
+        search_id = current_state.current_search_id if current_state is not None else ""
         return self._admit(
             clean_session_id,
             lambda: self._run(
@@ -484,7 +558,11 @@ class AgentSessionRuntime:
                 lambda agent: agent.handle_text(text),
                 identity_key=identity_key,
                 progress=progress,
+                request_id=clean_request_id,
             ),
+            kind="text",
+            request_id=clean_request_id,
+            search_id=search_id,
             identity_key=identity_key,
             progress=progress,
         )
@@ -522,6 +600,7 @@ class AgentSessionRuntime:
                 "candidate_generation": "",
                 "candidate_count": 0,
                 "chapter": "",
+                "search_id": "",
             }
         return {
             "session_valid": True,
@@ -531,6 +610,7 @@ class AgentSessionRuntime:
             "candidate_generation": state.candidate_generation,
             "candidate_count": state.candidate_count,
             "chapter": state.chapter,
+            "search_id": state.current_search_id,
         }
 
     def resolve_upload(self, session_id: str, filename: str) -> Path | None:
@@ -543,6 +623,34 @@ class AgentSessionRuntime:
         if self.store.load(clean_session_id) is None:
             return None
         return self.artifacts.persist_media(clean_session_id, source)
+
+    def record_protocol_event(
+        self,
+        session_id: str,
+        *,
+        kind: str,
+        identity_key: str = "",
+        protocol: RequestProtocol,
+        error_kind: str = "",
+    ) -> None:
+        """Record an API-boundary event that never reached the Agent runner."""
+
+        clean_session_id = self._clean_session_id(session_id)
+        state = self.store.load(clean_session_id) or AgentState(session_id=clean_session_id)
+        now = datetime.now(UTC)
+        self._write_task_log(
+            task_id=protocol.request_id or new_request_id(),
+            session_id=clean_session_id,
+            kind=kind,
+            started_at=now,
+            duration_ms=0,
+            phase_before=state.phase,
+            state=state,
+            response=None,
+            error_kind=error_kind,
+            identity_key=identity_key,
+            protocol=protocol,
+        )
 
     def resolve_media(self, session_id: str, filename: str) -> Path | None:
         return self._resolve_artifact(session_id, "media", filename)
@@ -568,6 +676,7 @@ class AgentSessionRuntime:
         *,
         identity_key: str = "",
         progress: ProgressReporter | None = None,
+        request_id: str,
     ) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
         self.purge_expired()
@@ -575,7 +684,7 @@ class AgentSessionRuntime:
         phase_before = state.phase
         started_at = datetime.now(UTC)
         started = time.perf_counter()
-        task_id = uuid4().hex
+        task_id = request_id
         cost_collector = ModelCostCollector(
             run_id=task_id,
             session_key=session_key(clean_session_id),
@@ -589,6 +698,12 @@ class AgentSessionRuntime:
         try:
             with model_cost_scope(cost_collector):
                 response = handler(agent)
+            self._attach_response_protocol(
+                response,
+                state=agent.state,
+                request_id=request_id,
+                search_id=agent.state.current_search_id,
+            )
             if response.intent == "cancel":
                 self.store.clear(clean_session_id)
                 self.artifacts.clear_session(clean_session_id)
@@ -610,11 +725,12 @@ class AgentSessionRuntime:
                 state=agent.state,
                 response=response,
                 error_kind=error_kind,
+                identity_key=identity_key,
             )
             if self.cost_ledger is not None:
                 try:
                     if agent.state.task_revision > 0:
-                        cost_collector.search_key = (
+                        cost_collector.search_key = agent.state.current_search_id or (
                             f"{cost_collector.session_key}:{agent.state.task_revision}"
                         )
                     self.cost_ledger.write_run(
@@ -653,15 +769,38 @@ class AgentSessionRuntime:
         session_id: str,
         execute: Callable[[], AgentResponse],
         *,
+        kind: str,
+        request_id: str,
+        search_id: str,
         identity_key: str = "",
         progress: ProgressReporter | None = None,
     ) -> AgentResponse:
-        with self._execution_gate.enter(progress):
-            lock = self._session_locks[hash(session_id) % len(self._session_locks)]
-            with lock:
-                self._await_background_image_work(session_id)
-                self._check_daily_budget(identity_key)
-                return execute()
+        started_at = datetime.now(UTC)
+        started = time.perf_counter()
+        try:
+            with self._execution_gate.enter(progress):
+                lock = self._session_locks[hash(session_id) % len(self._session_locks)]
+                with lock:
+                    self._await_background_image_work(session_id)
+                    self._check_daily_budget(identity_key)
+                    return execute()
+        except AgentProtocolError as exc:
+            protocol = exc.bind(request_id=request_id, search_id=search_id)
+            state = self.store.load(session_id) or AgentState(session_id=session_id)
+            self._write_task_log(
+                task_id=request_id,
+                session_id=session_id,
+                kind=kind,
+                started_at=started_at,
+                duration_ms=round((time.perf_counter() - started) * 1000),
+                phase_before=state.phase,
+                state=state,
+                response=None,
+                error_kind=type(exc).__name__,
+                identity_key=identity_key,
+                protocol=protocol,
+            )
+            raise
 
     def _check_daily_budget(self, identity_key: str = "") -> None:
         if self.cost_ledger is None:
@@ -678,17 +817,26 @@ class AgentSessionRuntime:
         if global_budget_micros > 0 and self.cost_ledger.estimated_cost_micros_since(
             started_at
         ) >= global_budget_micros:
-            raise AgentBudgetExceededError("今日服务额度已用完，请明天再试。")
+            raise AgentBudgetExceededError(
+                "今日服务额度已用完，请明天再试。",
+                code="GLOBAL_DAILY_QUOTA_EXCEEDED",
+            )
         clean_identity = str(identity_key).strip()
         if identity_budget_micros <= 0:
             return
         if not clean_identity:
-            raise AgentBudgetExceededError("当前请求缺少有效邀请码，请重新登录。")
+            raise AgentBudgetExceededError(
+                "当前请求缺少有效邀请码，请重新登录。",
+                code="INVITE_IDENTITY_MISSING",
+            )
         spent = self.cost_ledger.estimated_cost_micros_since(
             started_at, identity_key=clean_identity
         )
         if spent >= identity_budget_micros:
-            raise AgentBudgetExceededError("该邀请码今日额度已用完，请明天再试。")
+            raise AgentBudgetExceededError(
+                "该邀请码今日额度已用完，请明天再试。",
+                code="INVITE_DAILY_QUOTA_EXCEEDED",
+            )
 
     def _write_task_log(
         self,
@@ -702,8 +850,16 @@ class AgentSessionRuntime:
         state: AgentState,
         response: AgentResponse | None,
         error_kind: str,
+        identity_key: str = "",
+        protocol: RequestProtocol | None = None,
     ) -> None:
         outcome = _task_outcome(state, response, error_kind)
+        resolved_protocol = protocol or _request_protocol(
+            state,
+            response,
+            error_kind,
+            request_id=task_id,
+        )
         entry = TaskLogEntry(
             task_id=task_id,
             session_key=session_key(session_id),
@@ -719,11 +875,35 @@ class AgentSessionRuntime:
             chapter=state.current_chapter,
             route=state.current_route,
             error_kind=error_kind or ("agent_error" if state.phase == "ERROR" else ""),
+            request_id=resolved_protocol.request_id or task_id,
+            search_id=resolved_protocol.search_id or state.current_search_id,
+            identity_key=str(identity_key or "").strip(),
+            status=resolved_protocol.status.value,
+            layer=resolved_protocol.layer.value,
+            code=resolved_protocol.code,
+            retryable=resolved_protocol.retryable,
+            action=resolved_protocol.action.value,
         )
         try:
             self.task_logger.write(entry)
         except Exception:  # noqa: BLE001 - observability must not break the Agent.
             pass
+
+    @staticmethod
+    def _attach_response_protocol(
+        response: AgentResponse,
+        *,
+        state: AgentState,
+        request_id: str,
+        search_id: str,
+    ) -> None:
+        response.protocol = _request_protocol(
+            state,
+            response,
+            "",
+            request_id=request_id,
+            search_id=search_id,
+        ).to_dict()
 
     @staticmethod
     def _clean_session_id(session_id: str) -> str:
@@ -745,3 +925,35 @@ def _task_outcome(state: AgentState, response: AgentResponse | None, error_kind:
     if state.candidates:
         return "candidates"
     return "waiting"
+
+
+def _request_protocol(
+    state: AgentState,
+    response: AgentResponse | None,
+    error_kind: str,
+    *,
+    request_id: str,
+    search_id: str = "",
+) -> RequestProtocol:
+    if response is not None and response.protocol:
+        payload = dict(response.protocol)
+        payload["request_id"] = request_id
+        payload["search_id"] = (
+            search_id or payload.get("search_id") or state.current_search_id
+        )
+        return RequestProtocol.from_dict(payload)
+    if error_kind or state.phase == "ERROR":
+        code = "AGENT_FAILED"
+    elif response is not None and response.intent == "external_load_screen":
+        code = "EXTERNAL_LOAD_NOT_FOUND"
+    elif state.phase == "NO_MATCH":
+        code = "NO_MATCH"
+    elif state.phase == "WAIT_CHAPTER":
+        code = "CHAPTER_REQUIRED"
+    else:
+        code = "REQUEST_SUCCEEDED"
+    return RequestProtocol.from_code(
+        code,
+        request_id=request_id,
+        search_id=search_id or state.current_search_id,
+    )
