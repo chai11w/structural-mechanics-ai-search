@@ -729,11 +729,8 @@ function expireHistoryIfNeeded() {
 }
 
 function showSessionExpiredNotice() {
-  addMessage({
-    message: '临时会话已过期，之前的题图和候选已清理。请重新上传题图，或开始新对话。',
-    variant: 'error', recoveryActions: ['reupload', 'new_chat'],
-  }, false);
-  setStatus('ready', '临时会话已清理');
+  renderHistory();
+  setStatus('ready', '准备就绪');
 }
 
 function replacePending(row, item) {
@@ -856,7 +853,10 @@ function safeHttpError(status, data) {
   if (status === 415 || detail.includes('unsupported image')) return new UserVisibleError('图片格式不支持，请上传 PNG、JPG、WEBP、GIF 或 BMP 图片。');
   if (status === 400 && detail.includes('invalid image')) return new UserVisibleError('服务端无法读取该图片，请检查图片后重试。');
   if (status >= 500) return new UserVisibleError('服务端处理失败，请稍后重试。', ['retry_request']);
-  if (status === 400) return new UserVisibleError('提交的内容无法处理，请检查后重试。', ['retry_request']);
+  if (status === 400) return new UserVisibleError(
+    '这次请求没有处理成功，请直接重试；如果仍然失败，请点踩并补充说明。',
+    ['retry_request'],
+  );
   return new UserVisibleError(`请求失败（HTTP ${status}），请稍后重试。`, ['retry_request']);
 }
 

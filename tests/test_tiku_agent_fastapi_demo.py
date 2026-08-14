@@ -290,7 +290,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260814-failure-complete"', 'src="/assets/demo.js?v=20260814-failure-complete"',
+            'href="/assets/demo.css?v=20260814-failure-complete-v3"', 'src="/assets/demo.js?v=20260814-failure-complete-v3"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -330,7 +330,7 @@ class FastApiDemoTest(unittest.TestCase):
             "['found_answer', '找到了正确答案']", "['not_found', '没找到正确题']",
             "const feedbackEligible = !item.me && item.variant !== 'pending'",
             "function createRecoveryActions", "登录状态已失效，请重新登录。",
-            "临时会话已过期，之前的题图和候选已清理。",
+            "这次请求没有处理成功，请直接重试；如果仍然失败，请点踩并补充说明。",
             "if (now - activityAt >= HISTORY_TTL_MS)", "showSessionExpiredNotice();",
             "function flushStartupNotices", "pendingSessionExpiredNotice = true",
             "variant: 'error', recoveryActions:",
