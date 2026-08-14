@@ -356,13 +356,11 @@ class TikuAdminTest(unittest.TestCase):
     def test_admin_http_flow_covers_setup_invites_overview_feedback_and_settings(self):
         feedback = SQLiteFeedbackStore(self.root / "feedback.sqlite3")
         costs = self.root / "model_costs.sqlite3"
-        task_log = self.root / "task_logs.jsonl"
         self._create_cost_schema(costs)
         reporter = AdminReporter(
             control_store=self.control,
             cost_database=costs,
             feedback_store=feedback,
-            task_log_path=task_log,
         )
         client = TestClient(
             create_admin_app(
@@ -398,26 +396,6 @@ class TikuAdminTest(unittest.TestCase):
         self.assertEqual(created.status_code, 200, created.text)
         payload = created.json()
         invite_id = payload["invitation"]["invite_id"]
-        task_log.write_text(json.dumps({
-            "task_id": "req_1234567890abcdef1234567890abcdef",
-            "request_id": "req_1234567890abcdef1234567890abcdef",
-            "search_id": "search_1234567890abcdef1234567890abcdef",
-            "identity_key": invite_id,
-            "session_key": "session-key",
-            "kind": "image",
-            "status": "PARTIAL",
-            "layer": "tool",
-            "code": "PARTIAL_RESULT",
-            "retryable": True,
-            "action": "retry_search",
-            "outcome": "candidates",
-            "phase_before": "IDLE",
-            "phase_after": "WAIT_CANDIDATE_CHOICE",
-            "candidate_count": 3,
-            "duration_ms": 8765,
-            "started_at": datetime.now(UTC).isoformat(),
-            "finished_at": datetime.now(UTC).isoformat(),
-        }, ensure_ascii=False) + "\n", encoding="utf-8")
         self.assertTrue(payload["code"].startswith("TIKU-"))
         invitation_list = client.get("/api/admin/invitations")
         self.assertNotIn(payload["code"], invitation_list.text)
@@ -450,11 +428,6 @@ class TikuAdminTest(unittest.TestCase):
             candidate_count=3,
             search_duration_ms=8_765,
             search_key="search-one",
-            request_id="req_1234567890abcdef1234567890abcdef",
-            search_id="search_1234567890abcdef1234567890abcdef",
-            status="PARTIAL",
-            layer="tool",
-            code="PARTIAL_RESULT",
             chapter="4力法",
             conversation=[{
                 "me": False,
@@ -478,7 +451,6 @@ class TikuAdminTest(unittest.TestCase):
         self.assertEqual(filtered.status_code, 200, filtered.text)
         self.assertEqual(filtered.json()["total"], 1)
         self.assertEqual(filtered.json()["items"][0]["invite_label"], "真实用户 A")
-        self.assertEqual(filtered.json()["items"][0]["status"], "PARTIAL")
         self.assertEqual(filtered.json()["chapters"], ["4力法"])
         self.assertRegex(
             filtered.json()["items"][0]["feedback_number"],
@@ -505,17 +477,6 @@ class TikuAdminTest(unittest.TestCase):
         self.assertEqual(detail.status_code, 200)
         self.assertEqual(detail.json()["conversation"][0]["message"], "请选择候选题。")
         self.assertEqual(detail.json()["search_duration_ms"], 8_765)
-        self.assertEqual(detail.json()["search_id"], "search_1234567890abcdef1234567890abcdef")
-        self.assertEqual(detail.json()["timeline"][0]["code"], "PARTIAL_RESULT")
-        activity = client.get(
-            "/api/admin/activity",
-            params={"identity_key": invite_id, "status": "PARTIAL"},
-        )
-        self.assertEqual(activity.status_code, 200, activity.text)
-        self.assertEqual(activity.json()["total"], 1)
-        self.assertEqual(activity.json()["items"][0]["invite_label"], "真实用户 A")
-        self.assertEqual(activity.json()["items"][0]["search_id"], "search_1234567890abcdef1234567890abcdef")
-        self.assertEqual(client.get("/activity").status_code, 200)
         self.assertEqual(
             client.get(f"/api/admin/feedback/{saved.feedback_number}").status_code,
             200,

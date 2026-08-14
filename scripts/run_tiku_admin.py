@@ -45,7 +45,6 @@ def build_app(
         control_store=control_store,
         cost_database=source_root / "model_costs.sqlite3",
         feedback_store=feedback_store,
-        task_log_path=source_root / "task_logs.jsonl",
     )
     return create_admin_app(
         control_store=control_store,

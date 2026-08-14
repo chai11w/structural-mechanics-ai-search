@@ -2,7 +2,7 @@ const app = document.querySelector('#app');
 let csrfToken = '';
 
 const ICONS = {
-  overview: 'layout-dashboard', invitations: 'key-round', activity: 'activity', feedback: 'message-square',
+  overview: 'layout-dashboard', invitations: 'key-round', feedback: 'message-square',
   settings: 'settings', logout: 'log-out', add: 'plus', view: 'eye', edit: 'pencil',
   reset: 'refresh-cw', pause: 'circle-pause', enable: 'circle-play', archive: 'archive',
   restore: 'archive-restore', delete: 'trash-2',
@@ -66,10 +66,7 @@ function toLocalInput(value) {
 }
 
 function statusText(status) {
-  return ({
-    enabled: '启用', disabled: '停用', archived: '已归档', pending: '待处理', resolved: '已处理', no_action: '无需处理',
-    SUCCESS: '成功', NO_MATCH: '无匹配', NEEDS_INPUT: '需补充', PARTIAL: '部分完成', ERROR: '错误',
-  })[status] || status || '未知';
+  return ({ enabled: '启用', disabled: '停用', archived: '已归档', pending: '待处理', resolved: '已处理', no_action: '无需处理' })[status] || status || '未知';
 }
 
 function ratingText(rating) { return rating === 'positive' ? '点赞' : '点踩'; }
@@ -170,7 +167,7 @@ function navLink(key, label, active, badge = '') {
 }
 
 function mountShell(active, title, description, actions = '') {
-  app.innerHTML = `<div class="shell"><aside class="sidebar" id="sidebar"><a class="brand" href="/overview"><span class="brand-mark">力</span><span class="brand-copy"><strong>力答</strong><span>管理后台</span></span></a><nav class="nav" aria-label="后台导航">${navLink('overview', '概览', active)}${navLink('invitations', '邀请码', active)}${navLink('activity', '请求记录', active)}${navLink('feedback', '反馈', active)}${navLink('settings', '设置', active)}</nav><div class="sidebar-foot"><button class="button button-quiet logout-button" id="logout" type="button">${icon('logout')}<span>退出登录</span></button></div></aside><div class="main-shell"><header class="mobile-topbar"><button class="icon-button" id="open-sidebar" type="button" aria-label="打开导航">${icon('menu')}</button><a class="brand" href="/overview"><span class="brand-mark">力</span><span class="brand-copy"><strong>力答后台</strong></span></a><span class="mobile-spacer"></span></header><main class="page"><header class="page-head"><div class="page-title"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(description)}</p></div><div class="page-actions">${actions}</div></header><div id="page-body"><div class="loading-screen page-loading"><span>正在加载…</span></div></div></main></div></div>`;
+  app.innerHTML = `<div class="shell"><aside class="sidebar" id="sidebar"><a class="brand" href="/overview"><span class="brand-mark">力</span><span class="brand-copy"><strong>力答</strong><span>管理后台</span></span></a><nav class="nav" aria-label="后台导航">${navLink('overview', '概览', active)}${navLink('invitations', '邀请码', active)}${navLink('feedback', '反馈', active)}${navLink('settings', '设置', active)}</nav><div class="sidebar-foot"><button class="button button-quiet logout-button" id="logout" type="button">${icon('logout')}<span>退出登录</span></button></div></aside><div class="main-shell"><header class="mobile-topbar"><button class="icon-button" id="open-sidebar" type="button" aria-label="打开导航">${icon('menu')}</button><a class="brand" href="/overview"><span class="brand-mark">力</span><span class="brand-copy"><strong>力答后台</strong></span></a><span class="mobile-spacer"></span></header><main class="page"><header class="page-head"><div class="page-title"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(description)}</p></div><div class="page-actions">${actions}</div></header><div id="page-body"><div class="loading-screen page-loading"><span>正在加载…</span></div></div></main></div></div>`;
   document.querySelector('#logout').addEventListener('click', async () => {
     try { await api('/api/admin/logout', { method: 'POST' }); } finally { location.assign('/login'); }
   });
@@ -359,75 +356,6 @@ function bindFeedbackLinks() {
   }));
 }
 
-const LAYER_LABELS = {
-  login: '登录', quota: '额度', queue: '排队', upload: '上传', network: '网络',
-  session: '会话', tool: '工具', media: '媒体', feedback: '反馈',
-};
-
-const KIND_LABELS = {
-  image: '上传题图', text: '消息', feedback: '反馈', session: '会话', login: '登录', media: '媒体',
-};
-
-const ACTION_LABELS = {
-  relogin: '重新登录', retry_upload: '重新上传题图', retry_request: '重试当前请求',
-  retry_search: '重新检索', change_chapter: '更换章节', new_chat: '开始新对话',
-  retry_feedback: '重新提交反馈',
-};
-
-function requestEventRows(items) {
-  if (!items.length) return '<tr><td class="empty-row" colspan="8">没有符合条件的请求记录</td></tr>';
-  return items.map((item) => {
-    const searchLink = item.search_id
-      ? `<a class="text-link protocol-id" href="/activity?search_id=${encodeURIComponent(item.search_id)}">${escapeHtml(item.search_id)}</a>`
-      : '<span class="cell-sub">无</span>';
-    const recoveryAction = ACTION_LABELS[item.action] || item.action;
-    return `<tr><td><span class="cell-main">${escapeHtml(item.invite_label || item.identity_key || '未识别用户')}</span><span class="cell-sub">${escapeHtml(item.identity_key || '')}</span></td><td><span class="cell-main">${escapeHtml(KIND_LABELS[item.kind] || item.kind)}</span><span class="cell-sub">${formatDateTime(item.finished_at)}</span></td><td>${statusBadge(String(item.status || '').toLowerCase(), statusText(item.status))}</td><td><span class="cell-main">${escapeHtml(LAYER_LABELS[item.layer] || item.layer)}</span><span class="cell-sub protocol-code">${escapeHtml(item.code)}</span></td><td><span class="cell-main">${escapeHtml(item.phase_before || '—')} → ${escapeHtml(item.phase_after || '—')}</span><span class="cell-sub">${Number(item.candidate_count || 0)} 个候选 · ${formatDuration(item.duration_ms)}</span></td><td><span class="cell-main protocol-id">${escapeHtml(item.request_id)}</span></td><td>${searchLink}</td><td>${item.retryable ? '可重试' : '不可重试'}${recoveryAction ? `<span class="cell-sub">${escapeHtml(recoveryAction)}</span>` : ''}</td></tr>`;
-  }).join('');
-}
-
-async function renderActivity() {
-  const params = new URLSearchParams(location.search);
-  const filters = {
-    identity_key: params.get('identity_key') || '', status: params.get('status') || '',
-    layer: params.get('layer') || '', code: params.get('code') || '',
-    request_id: params.get('request_id') || '', search_id: params.get('search_id') || '',
-    offset: Math.max(0, Number(params.get('offset') || 0)), limit: 50,
-  };
-  const body = mountShell('activity', '请求记录', '按用户查看上传、处理、失败和反馈，使用统一五状态定位同一次请求。');
-  try {
-    const requestParams = new URLSearchParams({ offset: String(filters.offset), limit: String(filters.limit) });
-    Object.entries(filters).forEach(([key, value]) => {
-      if (!['offset', 'limit'].includes(key) && value) requestParams.set(key, String(value));
-    });
-    const [data, invites] = await Promise.all([
-      api(`/api/admin/activity?${requestParams.toString()}`),
-      api('/api/admin/invitations?include_archived=true'),
-    ]);
-    const inviteOptions = invites.items.map((item) => `<option value="${attr(item.invite_id)}" ${filters.identity_key === item.invite_id ? 'selected' : ''}>${escapeHtml(userLabel(item))}</option>`).join('');
-    const statusOptions = ['SUCCESS', 'NO_MATCH', 'NEEDS_INPUT', 'PARTIAL', 'ERROR'].map((value) => `<option value="${value}" ${filters.status === value ? 'selected' : ''}>${statusText(value)}</option>`).join('');
-    const layerOptions = Object.entries(LAYER_LABELS).map(([value, label]) => `<option value="${value}" ${filters.layer === value ? 'selected' : ''}>${label}</option>`).join('');
-    const codeOptions = data.codes.map((value) => `<option value="${attr(value)}" ${filters.code === value ? 'selected' : ''}>${escapeHtml(value)}</option>`).join('');
-    const idValue = filters.request_id || filters.search_id;
-    const pagination = data.total > filters.limit ? `<button class="icon-button" id="activity-prev" type="button" aria-label="上一页" ${filters.offset <= 0 ? 'disabled' : ''}>${icon('back')}</button><button class="icon-button" id="activity-next" type="button" aria-label="下一页" ${filters.offset + filters.limit >= data.total ? 'disabled' : ''}>${icon('next')}</button>` : '';
-    body.innerHTML = `<form class="toolbar feedback-filters" id="activity-filters"><div class="field"><label class="field-label" for="activity-user">用户</label><select class="select" id="activity-user" name="identity_key"><option value="">全部用户</option>${inviteOptions}</select></div><div class="field"><label class="field-label" for="activity-status">五状态</label><select class="select" id="activity-status" name="status"><option value="">全部状态</option>${statusOptions}</select></div><div class="field"><label class="field-label" for="activity-layer">环节</label><select class="select" id="activity-layer" name="layer"><option value="">全部环节</option>${layerOptions}</select></div><div class="field"><label class="field-label" for="activity-code">原因码</label><select class="select" id="activity-code" name="code"><option value="">全部原因</option>${codeOptions}</select></div><div class="field search-field"><label class="field-label" for="activity-id">请求或搜题编号</label><div class="search-wrap">${icon('search')}<input class="input" id="activity-id" name="event_id" value="${attr(idValue)}" placeholder="req_… 或 search_…"></div></div><button class="button button-secondary" type="submit">${icon('search')}筛选</button></form><div class="table-tool"><div class="table-scroll"><table class="data-table activity-table"><thead><tr><th>用户</th><th>事件</th><th>五状态</th><th>环节 / 原因</th><th>状态流转</th><th>请求编号</th><th>搜题编号</th><th>恢复</th></tr></thead><tbody>${requestEventRows(data.items)}</tbody></table></div><div class="pagination"><span>共 ${Number(data.total)} 条</span>${pagination}</div></div>`;
-    document.querySelector('#activity-filters').addEventListener('submit', (event) => {
-      event.preventDefault();
-      const form = new FormData(event.currentTarget);
-      const next = new URLSearchParams();
-      for (const [key, value] of form.entries()) {
-        const clean = String(value).trim();
-        if (!clean) continue;
-        if (key === 'event_id') next.set(clean.startsWith('req_') ? 'request_id' : 'search_id', clean);
-        else next.set(key, clean);
-      }
-      location.search = next.toString();
-    });
-    const page = (offset) => { const next = new URLSearchParams(location.search); next.set('offset', String(Math.max(0, offset))); location.search = next.toString(); };
-    document.querySelector('#activity-prev')?.addEventListener('click', () => page(filters.offset - filters.limit));
-    document.querySelector('#activity-next')?.addEventListener('click', () => page(filters.offset + filters.limit));
-  } catch (error) { body.innerHTML = errorState(error.message); }
-}
-
 async function feedbackAction(feedbackNumber, action) {
   const labels = {
     archive: ['归档反馈', '归档后默认列表将不再显示，但仍可恢复。', '确认归档'],
@@ -520,12 +448,6 @@ function conversationHtml(data) {
   }).join('');
 }
 
-function requestTimelineHtml(items = []) {
-  if (!items.length) return '';
-  const rows = [...items].reverse().map((item) => `<li><span>${formatDateTime(item.finished_at)}</span><strong>${statusText(item.status)} · ${escapeHtml(LAYER_LABELS[item.layer] || item.layer)}</strong><code>${escapeHtml(item.code)}</code><small>${escapeHtml(KIND_LABELS[item.kind] || item.kind)} · ${formatDuration(item.duration_ms)}</small></li>`).join('');
-  return `<section class="request-timeline"><header><h2>本题请求链路</h2><a class="text-link" href="/activity?search_id=${encodeURIComponent(items[0].search_id || '')}">查看请求记录 ${icon('next')}</a></header><ol>${rows}</ol></section>`;
-}
-
 async function renderFeedbackDetail(feedbackId) {
   const body = mountShell('feedback', '反馈详情', '查看用户反馈时的完整对话和本题运行信息。');
   try {
@@ -534,7 +456,7 @@ async function renderFeedbackDetail(feedbackId) {
     const archiveAction = data.archived_at
       ? `<button class="button button-secondary" id="detail-restore" type="button">${icon('restore')}取消归档</button>`
       : `<button class="button button-secondary" id="detail-archive" type="button">${icon('archive')}归档</button>`;
-    body.innerHTML = `<div class="detail-topbar"><a class="back-link" href="${attr(back)}">${icon('back')}返回反馈列表</a>${archiveAction}</div><div class="detail-layout"><section><header class="conversation-head"><h2>完整对话</h2>${statusBadge(data.rating, ratingText(data.rating))}</header><div class="conversation">${conversationHtml(data)}</div>${requestTimelineHtml(data.timeline)}</section><aside class="detail-side"><section class="detail-section"><h2>反馈信息</h2><dl class="facts"><dt>反馈编号</dt><dd class="feedback-number">${escapeHtml(data.feedback_number)}</dd><dt>用户</dt><dd>${escapeHtml(feedbackUserLabel(data))}</dd><dt>提交时间</dt><dd>${formatFullDate(data.created_at)}</dd><dt>章节</dt><dd>${escapeHtml(data.chapter || '未确定')}</dd><dt>反馈原因</dt><dd>${data.tags.map((tag) => escapeHtml(TAG_LABELS[tag] || tag)).join('、') || '未选择'}</dd><dt>补充说明</dt><dd>${escapeHtml(data.detail || '未填写')}</dd></dl></section><section class="detail-section"><h2>本题运行</h2><dl class="facts"><dt>五状态</dt><dd>${statusBadge(String(data.status || '').toLowerCase(), statusText(data.status))}</dd><dt>环节 / 原因</dt><dd>${escapeHtml(LAYER_LABELS[data.layer] || data.layer)} · <span class="protocol-code">${escapeHtml(data.code)}</span></dd><dt>请求编号</dt><dd class="protocol-id">${escapeHtml(data.request_id || '旧数据无记录')}</dd><dt>搜题编号</dt><dd class="protocol-id">${escapeHtml(data.search_id || '旧数据无记录')}</dd><dt>估算费用</dt><dd>¥${escapeHtml(data.cost.estimated_cost_cny)}</dd><dt>模型调用</dt><dd>${Number(data.cost.model_call_count)} 次</dd><dt>开始时间</dt><dd>${formatDateTime(data.cost.started_at)}</dd><dt>结束时间</dt><dd>${formatDateTime(data.cost.finished_at)}</dd><dt>候选数量</dt><dd>${Number(data.candidate_count)} 个</dd><dt>搜题耗时</dt><dd>${formatDuration(data.search_duration_ms)}</dd></dl></section><section class="detail-section"><h2>处理记录</h2><form class="review-form" id="review-form"><div class="field"><label for="review-status">处理状态</label><select class="select" id="review-status" name="review_status"><option value="pending" ${data.review_status === 'pending' ? 'selected' : ''}>待处理</option><option value="resolved" ${data.review_status === 'resolved' ? 'selected' : ''}>已处理</option><option value="no_action" ${data.review_status === 'no_action' ? 'selected' : ''}>无需处理</option></select></div><div class="field"><label for="admin-note">内部备注</label><textarea class="textarea" id="admin-note" name="admin_note" maxlength="2000" placeholder="记录判断、原因或后续动作…">${escapeHtml(data.admin_note || '')}</textarea></div><button class="button button-primary" type="submit">${icon('save')}保存处理结果</button></form></section></aside></div>`;
+    body.innerHTML = `<div class="detail-topbar"><a class="back-link" href="${attr(back)}">${icon('back')}返回反馈列表</a>${archiveAction}</div><div class="detail-layout"><section><header class="conversation-head"><h2>完整对话</h2>${statusBadge(data.rating, ratingText(data.rating))}</header><div class="conversation">${conversationHtml(data)}</div></section><aside class="detail-side"><section class="detail-section"><h2>反馈信息</h2><dl class="facts"><dt>反馈编号</dt><dd class="feedback-number">${escapeHtml(data.feedback_number)}</dd><dt>用户</dt><dd>${escapeHtml(feedbackUserLabel(data))}</dd><dt>提交时间</dt><dd>${formatFullDate(data.created_at)}</dd><dt>章节</dt><dd>${escapeHtml(data.chapter || '未确定')}</dd><dt>反馈原因</dt><dd>${data.tags.map((tag) => escapeHtml(TAG_LABELS[tag] || tag)).join('、') || '未选择'}</dd><dt>补充说明</dt><dd>${escapeHtml(data.detail || '未填写')}</dd></dl></section><section class="detail-section"><h2>本题运行</h2><dl class="facts"><dt>估算费用</dt><dd>¥${escapeHtml(data.cost.estimated_cost_cny)}</dd><dt>模型调用</dt><dd>${Number(data.cost.model_call_count)} 次</dd><dt>开始时间</dt><dd>${formatDateTime(data.cost.started_at)}</dd><dt>结束时间</dt><dd>${formatDateTime(data.cost.finished_at)}</dd><dt>候选数量</dt><dd>${Number(data.candidate_count)} 个</dd><dt>搜题耗时</dt><dd>${formatDuration(data.search_duration_ms)}</dd></dl></section><section class="detail-section"><h2>处理记录</h2><form class="review-form" id="review-form"><div class="field"><label for="review-status">处理状态</label><select class="select" id="review-status" name="review_status"><option value="pending" ${data.review_status === 'pending' ? 'selected' : ''}>待处理</option><option value="resolved" ${data.review_status === 'resolved' ? 'selected' : ''}>已处理</option><option value="no_action" ${data.review_status === 'no_action' ? 'selected' : ''}>无需处理</option></select></div><div class="field"><label for="admin-note">内部备注</label><textarea class="textarea" id="admin-note" name="admin_note" maxlength="2000" placeholder="记录判断、原因或后续动作…">${escapeHtml(data.admin_note || '')}</textarea></div><button class="button button-primary" type="submit">${icon('save')}保存处理结果</button></form></section></aside></div>`;
     document.querySelector('#detail-archive')?.addEventListener('click', () => feedbackAction(data.feedback_number, 'archive'));
     document.querySelector('#detail-restore')?.addEventListener('click', () => feedbackAction(data.feedback_number, 'restore'));
     document.querySelector('#review-form').addEventListener('submit', async (event) => {
@@ -604,7 +526,6 @@ async function bootstrap() {
   if (path === '/' || path === '/login') { location.replace('/overview'); return; }
   if (path === '/overview') return renderOverview();
   if (path === '/invitations') return renderInvitations();
-  if (path === '/activity') return renderActivity();
   if (path === '/feedback') return renderFeedback();
   if (path.startsWith('/feedback/')) return renderFeedbackDetail(path.split('/')[2] || '');
   if (path === '/settings') return renderSettings();
