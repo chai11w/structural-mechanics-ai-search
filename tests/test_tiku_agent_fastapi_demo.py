@@ -213,13 +213,13 @@ class FastApiDemoTest(unittest.TestCase):
         config_path.write_text(json.dumps(config), encoding="utf-8")
         runtime = FakeRuntime(image_path)
         feedback_store = SQLiteFeedbackStore(test_dir / "feedback.sqlite3")
-        client = TestClient(
-            create_app(
-                runtime=runtime,
-                invite_access=InviteAccess(config_path),
-                feedback_store=feedback_store,
-            )
+        access = InviteAccess(config_path)
+        app = create_app(
+            runtime=runtime,
+            invite_access=access,
+            feedback_store=feedback_store,
         )
+        client = TestClient(app)
 
         self.assertEqual(client.get("/health").status_code, 200)
         self.assertEqual(client.get("/api/session").status_code, 401)
@@ -252,6 +252,16 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(feedback.status_code, 200)
         self.assertEqual(feedback_store.list_feedback()[0].identity_key, codes[0][0])
 
+        expired = TestClient(app)
+        expired.cookies.set(access.cookie_name, "invalid-signed-cookie")
+        expired_redirect = expired.get("/", follow_redirects=False)
+        self.assertEqual(expired_redirect.status_code, 303)
+        self.assertEqual(expired_redirect.headers["location"], "/invite?reason=session_expired")
+        expired_page = expired.get(expired_redirect.headers["location"])
+        self.assertIn("登录状态已失效，请重新输入邀请码。", expired_page.text)
+        self.assertNotIn("点赞", expired_page.text)
+        self.assertNotIn("点踩", expired_page.text)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for JavaScript syntax validation")
     def test_javascript_has_valid_syntax(self):
         result = subprocess.run(
@@ -280,7 +290,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260814-failure-visibility-v2"', 'src="/assets/demo.js?v=20260814-failure-visibility-v2"',
+            'href="/assets/demo.css?v=20260814-failure-complete"', 'src="/assets/demo.js?v=20260814-failure-complete"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -321,12 +331,17 @@ class FastApiDemoTest(unittest.TestCase):
             "const feedbackEligible = !item.me && item.variant !== 'pending'",
             "function createRecoveryActions", "登录状态已失效，请重新登录。",
             "临时会话已过期，之前的题图和候选已清理。",
+            "if (now - activityAt >= HISTORY_TTL_MS)", "showSessionExpiredNotice();",
+            "function flushStartupNotices", "pendingSessionExpiredNotice = true",
             "variant: 'error', recoveryActions:",
             "function showFailureNotice", "function resolveFailureNotice",
             "retry_connection: '重新连接'", "function retryConnection()",
             "暂时无法连接服务。当前对话仍保留在本机",
             "浏览器无法保存临时对话", "浏览器中的临时对话无法读取",
             "题图或结果图片已失效", "反馈提交失败，可重新提交",
+            "retry_request: '重试上一条'", "retry_search: '重试搜索'",
+            "function normalizeRetryAction", "function retryTextAction",
+            "variant: failure ? 'error' : ''", "data?.failure ? 'error' : 'ready'",
         ):
             self.assertIn(expected, _SCRIPT)
         self.assertLess(
@@ -469,6 +484,7 @@ class FastApiDemoTest(unittest.TestCase):
         text_response = client.post("/api/message", json={"text": "就这个"})
         self.assertEqual(text_response.status_code, 200)
         self.assertEqual(text_response.json()["text"], "我明白了。")
+        self.assertIsNone(text_response.json()["failure"])
         self.assertIn(SESSION_COOKIE, text_response.cookies)
         follow_up = client.post("/api/message", json={"text": "再说一次"})
         self.assertIn(SESSION_COOKIE, follow_up.cookies)
@@ -497,6 +513,41 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(reset_response.status_code, 200)
         self.assertEqual(runtime.calls[-1][0], "clear")
         self.assertEqual(client.get(media_url).status_code, 404)
+
+    def test_business_error_payload_has_public_recovery_contract(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"demo_error_contract_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+
+        class ErrorRuntime(FakeRuntime):
+            def __init__(self, image_path: Path, *, has_active_image: bool):
+                super().__init__(image_path)
+                self.has_active_image = has_active_image
+
+            def handle_text(self, session_id: str, text: str, *, identity_key="", progress=None) -> AgentResponse:
+                del text, identity_key, progress
+                self.snapshot.update({
+                    "session_valid": True,
+                    "phase": "ERROR",
+                    "has_active_image": self.has_active_image,
+                })
+                return AgentResponse(
+                    text="这次没查成功。题图已保留，你可以直接回复“重试”。",
+                    intent="unsupported",
+                )
+
+        for has_active_image, expected_action in ((True, "retry_search"), (False, "new_chat")):
+            with self.subTest(has_active_image=has_active_image):
+                response = TestClient(create_app(runtime=ErrorRuntime(
+                    image_path, has_active_image=has_active_image,
+                ))).post("/api/message", json={"text": "重试"})
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.json()["failure"],
+                    {"kind": "business_error", "recovery_action": expected_action},
+                )
 
     def test_streaming_endpoints_emit_real_progress_before_result(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"

@@ -55,14 +55,15 @@ const FEEDBACK_OPTIONS = {
 };
 const RECOVERY_ACTION_LABELS = {
   relogin: '重新登录', reupload: '重新上传题图', new_chat: '开始新对话',
-  retry_connection: '重新连接',
+  retry_connection: '重新连接', retry_request: '重试上一条', retry_search: '重试搜索',
 };
 
 class UserVisibleError extends Error {
-  constructor(message, recoveryActions = []) {
+  constructor(message, recoveryActions = [], { retryable = true } = {}) {
     super(message);
     this.name = 'UserVisibleError';
     this.recoveryActions = normalizeRecoveryActions(recoveryActions);
+    this.retryable = Boolean(retryable);
   }
 }
 
@@ -79,6 +80,8 @@ let historyLastActivityAt = 0;
 let historyExpiryTimer = null;
 let historyStorageWarningShown = false;
 const activeFailureNotices = new Set();
+let pendingSessionExpiredNotice = false;
+let pendingHistoryStorageNotice = '';
 let sessionContext = {
   session_valid: false, phase: 'IDLE', has_active_image: false,
   task_revision: 0, candidate_generation: '', candidate_count: 0,
@@ -166,6 +169,7 @@ function remember(item) {
     createdAt: Number(item.createdAt || 0),
     feedback: item.feedback || null,
     recoveryActions: normalizeRecoveryActions(item.recoveryActions),
+    retryAction: normalizeRetryAction(item.retryAction),
   });
   history = history.slice(-HISTORY_LIMIT);
   saveHistory({ refreshActivity: true });
@@ -184,6 +188,28 @@ function mediaKind(item) {
 function normalizeRecoveryActions(actions) {
   return Array.from(new Set(Array.isArray(actions) ? actions : []))
     .filter((action) => Object.hasOwn(RECOVERY_ACTION_LABELS, action));
+}
+
+function normalizeRetryAction(action) {
+  if (!action || action.type !== 'text') return null;
+  const value = String(action.value || '').trim();
+  if (!value) return null;
+  const context = action.actionContext && typeof action.actionContext === 'object'
+    ? {
+        type: String(action.actionContext.type || ''),
+        rank: Number(action.actionContext.rank || 0),
+        task_revision: Number(action.actionContext.task_revision || 0),
+        candidate_generation: String(action.actionContext.candidate_generation || ''),
+      }
+    : null;
+  return {
+    type: 'text', value, displayValue: String(action.displayValue || value),
+    actionContext: context?.type === 'select_candidate' ? context : null,
+  };
+}
+
+function mergeRecoveryActions(...groups) {
+  return normalizeRecoveryActions(groups.flat());
 }
 
 function openLightbox(url, alt) {
@@ -374,8 +400,11 @@ function createMessageActions(item, article) {
   return actions;
 }
 
-function createRecoveryActions(actions) {
-  const values = normalizeRecoveryActions(actions);
+function createRecoveryActions(actions, item = {}) {
+  const retryAction = normalizeRetryAction(item.retryAction);
+  const values = normalizeRecoveryActions(actions).filter((action) => (
+    action !== 'retry_request' || retryAction
+  ));
   if (!values.length) return null;
   const host = document.createElement('div');
   host.className = 'message-recovery-actions';
@@ -389,6 +418,8 @@ function createRecoveryActions(actions) {
       else if (action === 'reupload') fileInput.click();
       else if (action === 'new_chat') resetConversation();
       else if (action === 'retry_connection') retryConnection();
+      else if (action === 'retry_request') retryTextAction(retryAction);
+      else if (action === 'retry_search') sendTextValue('重试');
     });
     host.append(button);
   });
@@ -566,7 +597,7 @@ function addMessage(item, persist = true) {
     images.forEach((url, index) => grid.append(createMediaCard(url, index, { ...item, images })));
     content.append(grid);
   }
-  const recoveryActions = createRecoveryActions(item.recoveryActions);
+  const recoveryActions = createRecoveryActions(item.recoveryActions, item);
   if (recoveryActions) content.append(recoveryActions);
   if (feedbackEligible) content.append(createMessageActions(item, article));
   article.append(content);
@@ -588,8 +619,18 @@ function restoreHistory() {
     const stored = JSON.parse(raw || 'null');
     const activityAt = Number(stored?.lastActivityAt ?? stored?.savedAt);
     const now = Date.now();
-    if (!stored || !Array.isArray(stored.messages) || !Number.isFinite(activityAt) || activityAt > now + 60000 || now - activityAt >= HISTORY_TTL_MS) {
+    if (!stored) {
       clearHistory();
+      return;
+    }
+    if (!Array.isArray(stored.messages) || !Number.isFinite(activityAt) || activityAt > now + 60000) {
+      clearHistory();
+      pendingHistoryStorageNotice = '浏览器中的临时对话无法读取，已为你开始新对话。请检查浏览器存储设置。';
+      return;
+    }
+    if (now - activityAt >= HISTORY_TTL_MS) {
+      clearHistory();
+      pendingSessionExpiredNotice = true;
       return;
     }
     historyLastActivityAt = activityAt;
@@ -606,10 +647,19 @@ function restoreHistory() {
     renderHistory();
   } catch (_error) {
     clearHistory();
-    showFailureNotice(
-      'history-storage',
-      '浏览器中的临时对话无法读取，已为你开始新对话。请检查浏览器存储设置。',
-    );
+    pendingHistoryStorageNotice = '浏览器中的临时对话无法读取，已为你开始新对话。请检查浏览器存储设置。';
+  }
+}
+
+function flushStartupNotices() {
+  if (pendingHistoryStorageNotice) {
+    const message = pendingHistoryStorageNotice;
+    pendingHistoryStorageNotice = '';
+    showFailureNotice('history-storage', message);
+  }
+  if (pendingSessionExpiredNotice) {
+    pendingSessionExpiredNotice = false;
+    showSessionExpiredNotice();
   }
 }
 
@@ -624,9 +674,12 @@ async function repairUploadedImageHistory() {
         clearHistory();
         renderHistory();
         showSessionExpiredNotice();
+      } else {
+        flushStartupNotices();
       }
       return;
     }
+    flushStartupNotices();
     if (!isPersistentImage(data.uploaded_image)) return;
     for (let index = history.length - 1; index >= 0; index -= 1) {
       const item = history[index];
@@ -638,6 +691,7 @@ async function repairUploadedImageHistory() {
       }
     }
   } catch (_error) {
+    flushStartupNotices();
     showFailureNotice(
       'connection',
       '暂时无法连接服务。当前对话仍保留在本机，请检查网络后重新连接。',
@@ -791,25 +845,26 @@ async function normalizeImage(selected, sourceUrl) {
 function safeHttpError(status, data) {
   const rawDetail = typeof data?.detail === 'string' ? data.detail : '';
   const detail = rawDetail.toLowerCase();
-  if (status === 401) return new UserVisibleError('登录状态已失效，请重新登录。', ['relogin']);
-  if (status === 403) return new UserVisibleError('当前请求无权处理，请重新登录或联系管理员。', ['relogin']);
-  if (status === 429) return new UserVisibleError(rawDetail || '当前请求较多，请稍后再试。');
+  if (status === 401) return new UserVisibleError('登录状态已失效，请重新登录。', ['relogin'], { retryable: false });
+  if (status === 403) return new UserVisibleError('当前请求无权处理，请重新登录或联系管理员。', ['relogin'], { retryable: false });
+  if (status === 429) return new UserVisibleError(rawDetail || '当前请求较多，请稍后再试。', ['retry_request']);
   if (status === 503 && (detail.includes('额度') || detail.includes('邀请码'))) {
     const actions = detail.includes('重新登录') ? ['relogin'] : [];
-    return new UserVisibleError(rawDetail || '今日服务额度已用完，请明天再试。', actions);
+    return new UserVisibleError(rawDetail || '今日服务额度已用完，请明天再试。', actions, { retryable: false });
   }
   if (status === 413 || detail.includes('too large')) return new UserVisibleError('图片太大，请上传不超过 15MB 的图片。');
   if (status === 415 || detail.includes('unsupported image')) return new UserVisibleError('图片格式不支持，请上传 PNG、JPG、WEBP、GIF 或 BMP 图片。');
   if (status === 400 && detail.includes('invalid image')) return new UserVisibleError('服务端无法读取该图片，请检查图片后重试。');
-  if (status >= 500) return new UserVisibleError('服务端处理失败，请稍后重试。');
-  if (status === 400) return new UserVisibleError('提交的内容无法处理，请检查后重试。');
-  return new UserVisibleError(`请求失败（HTTP ${status}），请稍后重试。`);
+  if (status >= 500) return new UserVisibleError('服务端处理失败，请稍后重试。', ['retry_request']);
+  if (status === 400) return new UserVisibleError('提交的内容无法处理，请检查后重试。', ['retry_request']);
+  return new UserVisibleError(`请求失败（HTTP ${status}），请稍后重试。`, ['retry_request']);
 }
 
 function streamedError(message) {
   const text = String(message || '服务端处理失败，请稍后重试。');
-  const actions = text.includes('重新登录') ? ['relogin'] : [];
-  return new UserVisibleError(text, actions);
+  const retryable = !text.includes('重新登录') && !text.includes('额度') && !text.includes('邀请码');
+  const actions = text.includes('重新登录') ? ['relogin'] : retryable ? ['retry_request'] : [];
+  return new UserVisibleError(text, actions, { retryable });
 }
 
 async function request(url, options, timeoutMs, timeoutMessage, track = true, networkMessage = '') {
@@ -826,15 +881,16 @@ async function request(url, options, timeoutMs, timeoutMessage, track = true, ne
       await response.text();
     }
     if (!response.ok) throw safeHttpError(response.status, data);
-    if (!contentType.includes('application/json')) throw new UserVisibleError('服务返回格式异常，请稍后重试。');
+    if (!contentType.includes('application/json')) throw new UserVisibleError('服务返回格式异常，请稍后重试。', ['retry_request']);
     return data;
   } catch (error) {
     if (error.name === 'AbortError') {
       if (controller.signal.reason === 'new-chat') throw new UserVisibleError('当前识别已取消。');
-      throw new UserVisibleError(timeoutMessage);
+      throw new UserVisibleError(timeoutMessage, ['retry_request']);
     }
-    if (error instanceof TypeError) throw new UserVisibleError(networkMessage || '无法连接服务，请检查网络后重试。');
-    throw error;
+    if (error instanceof UserVisibleError) throw error;
+    if (error instanceof TypeError) throw new UserVisibleError(networkMessage || '无法连接服务，请检查网络后重试。', ['retry_request']);
+    throw new UserVisibleError('服务返回格式异常，请稍后重试。', ['retry_request']);
   } finally {
     clearTimeout(timer);
     if (activeController === controller) activeController = null;
@@ -852,7 +908,7 @@ async function requestStream(url, options, timeoutMs, timeoutMessage, onProgress
       try { data = await response.json(); } catch (_error) { data = {}; }
       throw safeHttpError(response.status, data);
     }
-    if (!response.body) throw new UserVisibleError('服务返回格式异常，请稍后重试。');
+    if (!response.body) throw new UserVisibleError('服务返回格式异常，请稍后重试。', ['retry_request']);
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -871,15 +927,16 @@ async function requestStream(url, options, timeoutMs, timeoutMessage, onProgress
       }
       if (done) break;
     }
-    if (!result) throw new UserVisibleError('服务返回格式异常，请稍后重试。');
+    if (!result) throw new UserVisibleError('服务返回格式异常，请稍后重试。', ['retry_request']);
     return result;
   } catch (error) {
     if (error.name === 'AbortError') {
       if (controller.signal.reason === 'new-chat') throw new UserVisibleError('当前识别已取消。');
-      throw new UserVisibleError(timeoutMessage);
+      throw new UserVisibleError(timeoutMessage, ['retry_request']);
     }
-    if (error instanceof TypeError) throw new UserVisibleError(networkMessage || '无法连接服务，请检查网络后重试。');
-    throw error;
+    if (error instanceof UserVisibleError) throw error;
+    if (error instanceof TypeError) throw new UserVisibleError(networkMessage || '无法连接服务，请检查网络后重试。', ['retry_request']);
+    throw new UserVisibleError('服务返回格式异常，请稍后重试。', ['retry_request']);
   } finally {
     clearTimeout(timer);
     if (activeController === controller) activeController = null;
@@ -888,6 +945,8 @@ async function requestStream(url, options, timeoutMs, timeoutMessage, onProgress
 
 function responseItem(data) {
   updateSessionContext(data);
+  const failure = data?.failure && typeof data.failure === 'object' ? data.failure : null;
+  const recoveryAction = String(failure?.recovery_action || '');
   return {
     message: data.text || '处理完成。',
     me: false,
@@ -897,6 +956,8 @@ function responseItem(data) {
     taskRevision: Number(data.session?.task_revision || 0),
     candidateCount: Number(data.session?.candidate_count || 0),
     candidateGeneration: String(data.session?.candidate_generation || ''),
+    variant: failure ? 'error' : '',
+    recoveryActions: recoveryAction ? [recoveryAction] : [],
     messageId: createMessageId(),
     createdAt: Date.now(),
   };
@@ -938,13 +999,17 @@ async function sendTextValue(value, displayValue = value, actionContext = null) 
     if (operation !== operationVersion) return;
     pending?.remove();
     addMessage(responseItem(data));
-    setStatus('ready', '准备就绪');
+    setStatus(data?.failure ? 'error' : 'ready', data?.failure ? '处理失败，可重新尝试' : '准备就绪');
   } catch (error) {
     if (operation !== operationVersion) return;
     pending?.remove();
     if (error.message !== '当前识别已取消。') addMessage({
       message: error.message || '暂时无法处理，请再试一次。',
-      variant: 'error', recoveryActions: error.recoveryActions || [],
+      variant: 'error',
+      recoveryActions: error.retryable === false
+        ? normalizeRecoveryActions(error.recoveryActions || [])
+        : mergeRecoveryActions(error.recoveryActions || [], ['retry_request']),
+      retryAction: { type: 'text', value: clean, displayValue, actionContext },
     });
     setStatus('error', '处理失败，可重新尝试');
   } finally {
@@ -969,6 +1034,12 @@ function addLocalUploadPreview(preview) {
   return row;
 }
 
+async function retryTextAction(action) {
+  const retry = normalizeRetryAction(action);
+  if (!retry || isBusy) return;
+  await sendTextValue(retry.value, retry.displayValue, retry.actionContext);
+}
+
 function setUploadRowStatus(row, message, variant = '') {
   row.classList.remove('error');
   if (variant) row.classList.add(variant);
@@ -991,7 +1062,10 @@ function addUploadFailure(row, message, prepared, recoveryActions = []) {
   retry.textContent = '重新上传';
   retry.addEventListener('click', () => retryUpload(row, prepared));
   row.querySelector('.message-content')?.append(retry);
-  addMessage({ message: fullMessage, variant: 'error', recoveryActions });
+  addMessage({
+    message: fullMessage, variant: 'error',
+    recoveryActions: mergeRecoveryActions(recoveryActions, ['reupload']),
+  });
   return row;
 }
 
@@ -1027,7 +1101,7 @@ async function submitPreparedImage(prepared, uploadRow) {
     releaseObjectUrl(prepared.preview);
     clearPendingUpload({ releasePreview: false });
     addMessage(response);
-    setStatus('ready', '准备就绪');
+    setStatus(data?.failure ? 'error' : 'ready', data?.failure ? '处理失败，可重新尝试' : '准备就绪');
   } catch (error) {
     if (operation !== operationVersion) return;
     pending.remove();

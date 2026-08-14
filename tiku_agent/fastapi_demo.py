@@ -140,9 +140,8 @@ def create_app(
         if _forwarded_proto(request) == "http":
             return RedirectResponse(str(request.url.replace(scheme="https")), status_code=308)
         if invite_access is not None:
-            identity = invite_access.verify_cookie(
-                str(request.cookies.get(invite_access.cookie_name) or "")
-            )
+            cookie_value = str(request.cookies.get(invite_access.cookie_name) or "")
+            identity = invite_access.verify_cookie(cookie_value)
             request.state.invite_identity = identity
             public_path = (
                 request.url.path == "/health"
@@ -157,7 +156,8 @@ def create_app(
                         status_code=401,
                         headers={"Cache-Control": "no-store"},
                     )
-                return RedirectResponse("/invite", status_code=303)
+                target = "/invite?reason=session_expired" if cookie_value else "/invite"
+                return RedirectResponse(target, status_code=303)
         result = await call_next(request)
         result.headers["Content-Security-Policy"] = (
             "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; "
@@ -180,8 +180,11 @@ def create_app(
         identity = getattr(request.state, "invite_identity", None)
         if isinstance(identity, InviteIdentity):
             return RedirectResponse("/", status_code=303)
+        error = ""
+        if request.query_params.get("reason") == "session_expired":
+            error = '<p class="error">登录状态已失效，请重新输入邀请码。</p>'
         return HTMLResponse(
-            _INVITE_PAGE.replace("{error}", ""), headers={"Cache-Control": "no-store"}
+            _INVITE_PAGE.replace("{error}", error), headers={"Cache-Control": "no-store"}
         )
 
     @app.post("/api/invite/login")
@@ -698,12 +701,22 @@ def _agent_payload(
         if persisted is not None:
             image_urls.append(f"/api/media/{persisted.name}")
     uploaded_image_url = f"/api/upload/{uploaded_image.name}" if uploaded_image is not None else ""
+    snapshot = runtime.session_snapshot(session_id)
+    failure = None
+    if snapshot.get("phase") == "ERROR":
+        failure = {
+            "kind": "business_error",
+            "recovery_action": (
+                "retry_search" if snapshot.get("has_active_image") is True else "new_chat"
+            ),
+        }
     return {
         "text": response.text,
         "images": image_urls,
         "uploaded_image": uploaded_image_url,
         "intent": response.intent,
-        "session": runtime.session_snapshot(session_id),
+        "session": snapshot,
+        "failure": failure,
     }
 
 
