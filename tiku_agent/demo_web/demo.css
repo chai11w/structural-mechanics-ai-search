@@ -65,6 +65,11 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .message-action.is-selected[data-rating="positive"] img { opacity: 1; filter: invert(37%) sepia(39%) saturate(1082%) hue-rotate(103deg) brightness(88%) contrast(88%); }
 .message-action.is-selected[data-rating="negative"] img { opacity: 1; filter: invert(22%) sepia(74%) saturate(2359%) hue-rotate(351deg) brightness(87%) contrast(88%); }
 .message-time { margin-left: 7px; color: #969690; font-size: 12px; font-variant-numeric: tabular-nums; }
+.message-recovery-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.message-recovery { min-height: 34px; padding: 0 13px; border: 1px solid #b9b9b2; border-radius: 9px; color: #33332f; background: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
+.message-recovery:hover { background: #f6f6f2; }
+.message.error .message-recovery { border-color: #b91c1c; color: #991b1b; }
+.message.error .message-recovery:hover { background: #fff7f7; }
 .retry-upload { align-self: flex-start; min-height: 34px; margin-top: 10px; padding: 0 13px; border: 1px solid #b91c1c; border-radius: 9px; color: #991b1b; background: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
 .retry-upload:hover { background: #fff7f7; }
 .message.pending .message-text { color: #71717a; }

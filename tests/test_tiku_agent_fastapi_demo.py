@@ -280,7 +280,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260811-feedback-cases"', 'src="/assets/demo.js?v=20260812-image-compression"',
+            'href="/assets/demo.css?v=20260814-failure-feedback"', 'src="/assets/demo.js?v=20260814-failure-feedback"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -303,7 +303,7 @@ class FastApiDemoTest(unittest.TestCase):
             "function scheduleHistoryExpiry()", "function expireHistoryIfNeeded()",
             "if (!data.session?.session_valid)", "window.addEventListener('focus', expireHistoryIfNeeded)",
             "document.addEventListener('visibilitychange'",
-            "data.uploaded_image", "Number.isFinite(activityAt)", "无法连接本地服务",
+            "data.uploaded_image", "Number.isFinite(activityAt)", "无法连接服务",
             "IMAGE_TARGET_BYTES = 1024 * 1024", "IMAGE_MAX_DIMENSION = 2560", "IMAGE_FALLBACK_DIMENSION = 2048",
             "canvas.toBlob(resolve, 'image/jpeg', quality)", "formData.append('file', prepared.blob, prepared.filename)",
             "const filename = `cropped_${Date.now()}.jpg`", "function retryUpload", "pendingUpload = prepared",
@@ -318,8 +318,16 @@ class FastApiDemoTest(unittest.TestCase):
             "function createMessageActions", "function openFeedback", "request('/api/feedback'",
             "function cancelFeedback", "method: 'DELETE'", "syncFeedbackButtons(context.article, '')",
             "['found_answer', '找到了正确答案']", "['not_found', '没找到正确题']",
+            "const feedbackEligible = !item.me && item.variant !== 'pending'",
+            "function createRecoveryActions", "登录状态已失效，请重新登录。",
+            "临时会话已过期，之前的题图和候选已清理。",
+            "variant: 'error', recoveryActions:",
         ):
             self.assertIn(expected, _SCRIPT)
+        self.assertLess(
+            _SCRIPT.index("if (status === 503"),
+            _SCRIPT.index("if (status >= 500)"),
+        )
         self.assertNotIn("new File(", _SCRIPT)
         self.assertNotIn("sendTextValue(String(index + 1)", _SCRIPT)
         self.assertNotIn("题图处理中", _SCRIPT)

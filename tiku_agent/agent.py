@@ -274,6 +274,7 @@ class TikuSearchAgent:
     ) -> AgentResponse:
         if not image_path:
             return self._fail("没有收到图片路径。")
+        notices: list[str] = []
         self._raise_if_image_search_cancelled()
         pending_chapter = chapter_override or self.state.pending_chapter
         self.state.start_search(image_path)
@@ -284,6 +285,7 @@ class TikuSearchAgent:
         stopped = self._stop_for_tool_result(multi, allow_partial=True)
         if stopped is not None:
             return stopped
+        self._collect_partial_notice(notices, multi)
         if multi.ok and multi.data.get("is_multi"):
             prepared = self.tools.prepare_question_units(
                 image_path,
@@ -294,8 +296,14 @@ class TikuSearchAgent:
             stopped = self._stop_for_tool_result(prepared, allow_partial=True)
             if stopped is not None:
                 return stopped
+            self._collect_partial_notice(notices, prepared)
             self.state.set_questions(list(prepared.data.get("questions") or []))
-            return self._response(render.render_multi_question_list(self.state), IntentResult("search_image"))
+            return self._response(
+                render.render_multi_question_list(
+                    self.state, note=self._join_notices(notices)
+                ),
+                IntentResult("search_image"),
+            )
         scope_analysis = multi.data.get("single_analysis") if multi.ok else None
         if isinstance(scope_analysis, dict):
             chapter_hint = str(scope_analysis.get("chapter_hint") or "").strip()
@@ -329,8 +337,13 @@ class TikuSearchAgent:
         if self.state.phase == "WAIT_CHAPTER":
             self.state.offer_global_search()
             self._raise_if_image_search_cancelled()
-            return self._response(render.render_chapter_prompt(self.state), IntentResult("search_image"))
-        return self._run_search()
+            return self._response(
+                render.render_chapter_prompt(
+                    self.state, note=self._join_notices(notices)
+                ),
+                IntentResult("search_image"),
+            )
+        return self._run_search(notices=notices)
 
     def _set_or_correct_chapter(
         self,
@@ -378,7 +391,9 @@ class TikuSearchAgent:
         intent: IntentResult | None = None,
         classified: dict[str, Any] | None = None,
         continuing: bool = False,
+        notices: list[str] | None = None,
     ) -> AgentResponse:
+        notices = list(notices or [])
         chapter = self.state.current_chapter
         message = f"正在按「{chapter}」搜索题目…" if chapter else "正在搜索题目…"
         self._report_progress("searching", message)
@@ -405,6 +420,7 @@ class TikuSearchAgent:
             stopped = self._stop_for_tool_result(structured, allow_partial=True)
             if stopped is not None:
                 return stopped
+            self._collect_partial_notice(notices, structured)
             structure_type = str(structured.data.get("structure_type") or "")
             self.state.set_route(route, structure_type=structure_type)
 
@@ -441,6 +457,7 @@ class TikuSearchAgent:
         stopped = self._stop_for_tool_result(reranked, allow_partial=True)
         if stopped is not None:
             return stopped
+        self._collect_partial_notice(notices, reranked)
         if reranked.outcome is ToolOutcome.NO_MATCH:
             self.state.set_candidates([])
             return self._response(
@@ -455,7 +472,7 @@ class TikuSearchAgent:
         text = render.render_candidates(
             self.state,
             reranked=bool(reranked.data.get("reranked")),
-            note=str(reranked.data.get("rerank_note") or ""),
+            note=self._join_notices(notices),
         )
         return self._response(text, intent or IntentResult("search_image"), images=[str(item.get("path")) for item in visible if item.get("path")])
 
@@ -464,6 +481,7 @@ class TikuSearchAgent:
             return self._response(render.render_unsupported(), intent)
 
         self._report_progress("global_searching", "正在全局搜索题目，可能需要一点时间…")
+        notices: list[str] = []
 
         routed = self.tools.route_bank(self.state.current_loads)
         stopped = self._stop_for_tool_result(routed)
@@ -481,6 +499,7 @@ class TikuSearchAgent:
         stopped = self._stop_for_tool_result(structured, allow_partial=True)
         if stopped is not None:
             return stopped
+        self._collect_partial_notice(notices, structured)
         structure_type = str(structured.data.get("structure_type") or "")
         self.state.set_route(route, structure_type=structure_type)
 
@@ -497,9 +516,16 @@ class TikuSearchAgent:
         candidates = list(searched.data.get("candidates") or [])
         self.state.set_candidates(candidates)
         if not candidates:
-            return self._response(render.render_global_no_match(), intent)
+            return self._response(
+                render.append_notice(
+                    render.render_global_no_match(), self._join_notices(notices)
+                ),
+                intent,
+            )
         return self._response(
-            render.render_global_candidates(self.state),
+            render.render_global_candidates(
+                self.state, note=self._join_notices(notices)
+            ),
             intent,
             images=[str(item.get("path")) for item in candidates if item.get("path")],
         )
@@ -555,6 +581,18 @@ class TikuSearchAgent:
         if result.outcome is ToolOutcome.PARTIAL and not allow_partial:
             return self._fail(result.error or "工具只完成了部分处理，请稍后重试。")
         return None
+
+    @staticmethod
+    def _collect_partial_notice(notices: list[str], result: ToolResult) -> None:
+        if result.outcome is not ToolOutcome.PARTIAL:
+            return
+        note = str(result.error or result.data.get("rerank_note") or "").strip()
+        if note and note not in notices:
+            notices.append(note)
+
+    @staticmethod
+    def _join_notices(notices: list[str]) -> str:
+        return "；".join(dict.fromkeys(note.strip() for note in notices if note.strip()))
 
     def _response(self, text: str, intent: IntentResult, *, images: list[str] | None = None) -> AgentResponse:
         return AgentResponse(text=text, images=list(images or []), state=self.state.to_dict(), intent=intent.intent)

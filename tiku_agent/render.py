@@ -15,25 +15,33 @@ def render_greeting() -> str:
     )
 
 
-def render_chapter_prompt(state: AgentState) -> str:
+def render_chapter_prompt(state: AgentState, *, note: str = "") -> str:
     if state.global_search_offered:
-        return "我还不能确定这题属于哪一章。你知道的话直接告诉我；也可以让我全局搜索，不过会慢一点。"
-    return "我还不能确定这题属于哪一章。你知道的话告诉我就行。"
+        text = "我还不能确定这题属于哪一章。你知道的话直接告诉我；也可以让我全局搜索，不过会慢一点。"
+    else:
+        text = "我还不能确定这题属于哪一章。你知道的话告诉我就行。"
+    return append_notice(text, note)
 
 
-def render_multi_question_list(state: AgentState) -> str:
+def render_multi_question_list(state: AgentState, *, note: str = "") -> str:
     if not state.questions:
-        return "没有识别到可选择的题目。"
-    return f"我在这张图里看到了 {len(state.questions)} 道题。你想查哪一道？"
+        return append_notice("没有识别到可选择的题目。", note)
+    return append_notice(
+        f"我在这张图里看到了 {len(state.questions)} 道题。你想查哪一道？",
+        note,
+    )
 
 
 def render_candidates(state: AgentState, *, reranked: bool = False, note: str = "") -> str:
+    del reranked
     if not state.candidates:
-        return "没有找到可用候选。"
+        return append_notice("没有找到可用候选。", note)
 
     if len(state.candidates) == 1:
-        return "我从题库里找到了最相似的一道题。你看看是不是这道。"
-    return f"我从题库里找到了 {len(state.candidates)} 道比较像的题，你看看有没有想要的。"
+        text = "我从题库里找到了最相似的一道题。你看看是不是这道。"
+    else:
+        text = f"我从题库里找到了 {len(state.candidates)} 道比较像的题，你看看有没有想要的。"
+    return append_notice(text, note)
 
 
 def render_candidates_rejected(state: AgentState) -> str:
@@ -59,9 +67,9 @@ def render_no_more_candidates(state: AgentState) -> str:
     return f"{chapter}里已经没有更多未看过的候选了。可以换章节或发一张更清楚的题图。"
 
 
-def render_global_candidates(state: AgentState) -> str:
+def render_global_candidates(state: AgentState, *, note: str = "") -> str:
     if not state.candidates:
-        return render_global_no_match()
+        return append_notice(render_global_no_match(), note)
     chapters = []
     for item in state.candidates:
         for chapter in item.get("source_chapters") or [item.get("chapter")]:
@@ -69,8 +77,10 @@ def render_global_candidates(state: AgentState) -> str:
                 chapters.append(str(chapter))
     sources = "、".join(f"「{chapter}」" for chapter in chapters)
     if len(state.candidates) == 1:
-        return f"我从全题库找到了一道高相似题，来自{sources}。你看是不是这道。"
-    return f"我从全题库找到 {len(state.candidates)} 道高相似题，分别来自{sources}。你看有没有想要的。"
+        text = f"我从全题库找到了一道高相似题，来自{sources}。你看是不是这道。"
+    else:
+        text = f"我从全题库找到 {len(state.candidates)} 道高相似题，分别来自{sources}。你看有没有想要的。"
+    return append_notice(text, note)
 
 
 def render_global_no_match() -> str:
@@ -118,6 +128,16 @@ def render_failure_explanation(state: AgentState) -> str:
 def render_no_match(state: AgentState) -> str:
     chapter = state.current_chapter or "这一章"
     return f"我在{chapter}里没找到很像的题。换个章节试试？"
+
+
+def append_notice(text: str, note: str = "") -> str:
+    """Append a concise, user-visible degradation notice once."""
+
+    clean_text = str(text or "").strip()
+    clean_note = str(note or "").strip()
+    if not clean_note:
+        return clean_text
+    return f"{clean_text}\n\n提示：{clean_note}"
 
 
 def _safe_failure_detail(error: str) -> str:

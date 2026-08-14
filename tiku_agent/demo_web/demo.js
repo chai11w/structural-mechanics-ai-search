@@ -53,6 +53,17 @@ const FEEDBACK_OPTIONS = {
     ['too_slow', '搜索太慢'], ['system_error', '系统报错'], ['other', '其他'],
   ],
 };
+const RECOVERY_ACTION_LABELS = {
+  relogin: '重新登录', reupload: '重新上传题图', new_chat: '开始新对话',
+};
+
+class UserVisibleError extends Error {
+  constructor(message, recoveryActions = []) {
+    super(message);
+    this.name = 'UserVisibleError';
+    this.recoveryActions = normalizeRecoveryActions(recoveryActions);
+  }
+}
 
 let history = [];
 let isBusy = false;
@@ -145,6 +156,7 @@ function remember(item) {
     messageId: String(item.messageId || ''),
     createdAt: Number(item.createdAt || 0),
     feedback: item.feedback || null,
+    recoveryActions: normalizeRecoveryActions(item.recoveryActions),
   });
   history = history.slice(-HISTORY_LIMIT);
   saveHistory({ refreshActivity: true });
@@ -158,6 +170,11 @@ function mediaKind(item) {
   if (item.me) return 'upload';
   if (item.intent === 'select_candidate' || item.intent === 'resend_answer') return 'answer';
   return item.images?.length ? 'candidate' : '';
+}
+
+function normalizeRecoveryActions(actions) {
+  return Array.from(new Set(Array.isArray(actions) ? actions : []))
+    .filter((action) => Object.hasOwn(RECOVERY_ACTION_LABELS, action));
 }
 
 function openLightbox(url, alt) {
@@ -335,6 +352,26 @@ function createMessageActions(item, article) {
   return actions;
 }
 
+function createRecoveryActions(actions) {
+  const values = normalizeRecoveryActions(actions);
+  if (!values.length) return null;
+  const host = document.createElement('div');
+  host.className = 'message-recovery-actions';
+  values.forEach((action) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'message-recovery';
+    button.textContent = RECOVERY_ACTION_LABELS[action];
+    button.addEventListener('click', () => {
+      if (action === 'relogin') window.location.assign('/invite');
+      else if (action === 'reupload') fileInput.click();
+      else if (action === 'new_chat') resetConversation();
+    });
+    host.append(button);
+  });
+  return host;
+}
+
 async function submitFeedback() {
   if (!activeFeedback || feedbackRequestPending) return;
   const context = activeFeedback;
@@ -453,7 +490,7 @@ function createMediaCard(url, index, item) {
 
 function addMessage(item, persist = true) {
   item = { ...item, createdAt: Number(item.createdAt || Date.now()) };
-  const feedbackEligible = !item.me && !item.variant;
+  const feedbackEligible = !item.me && item.variant !== 'pending';
   if (feedbackEligible) {
     item = {
       ...item,
@@ -499,6 +536,8 @@ function addMessage(item, persist = true) {
     images.forEach((url, index) => grid.append(createMediaCard(url, index, { ...item, images })));
     content.append(grid);
   }
+  const recoveryActions = createRecoveryActions(item.recoveryActions);
+  if (recoveryActions) content.append(recoveryActions);
   if (feedbackEligible) content.append(createMessageActions(item, article));
   article.append(content);
   chat.append(article);
@@ -549,6 +588,7 @@ async function repairUploadedImageHistory() {
       if (history.length) {
         clearHistory();
         renderHistory();
+        showSessionExpiredNotice();
       }
       return;
     }
@@ -591,8 +631,16 @@ function expireHistoryIfNeeded() {
     task_revision: 0, candidate_generation: '', candidate_count: 0,
   };
   closeLightbox();
-  setStatus('ready', '临时会话已清理');
+  showSessionExpiredNotice();
   return true;
+}
+
+function showSessionExpiredNotice() {
+  addMessage({
+    message: '临时会话已过期，之前的题图和候选已清理。请重新上传题图，或开始新对话。',
+    variant: 'error', recoveryActions: ['reupload', 'new_chat'],
+  }, false);
+  setStatus('ready', '临时会话已清理');
 }
 
 function replacePending(row, item) {
@@ -702,16 +750,27 @@ async function normalizeImage(selected, sourceUrl) {
 }
 
 function safeHttpError(status, data) {
-  const detail = typeof data?.detail === 'string' ? data.detail.toLowerCase() : '';
-  if (status === 413 || detail.includes('too large')) return '图片太大，请上传不超过 15MB 的图片。';
-  if (status === 415 || detail.includes('unsupported image')) return '图片格式不支持，请上传 PNG、JPG、WEBP、GIF 或 BMP 图片。';
-  if (status === 400 && detail.includes('invalid image')) return '服务端无法读取该图片，请检查图片后重试。';
-  if (status >= 500) return '服务端处理失败，请稍后重试。';
-  if (status === 400) return '提交的内容无法处理，请检查后重试。';
-  if (status === 401 || status === 403) return '当前请求无权处理。';
-  if (status === 429) return data?.detail || '当前请求较多，请稍后再试。';
-  if (status === 503 && detail.includes('额度')) return data?.detail || '今日服务额度已用完，请稍后再试。';
-  return `请求失败（HTTP ${status}），请稍后重试。`;
+  const rawDetail = typeof data?.detail === 'string' ? data.detail : '';
+  const detail = rawDetail.toLowerCase();
+  if (status === 401) return new UserVisibleError('登录状态已失效，请重新登录。', ['relogin']);
+  if (status === 403) return new UserVisibleError('当前请求无权处理，请重新登录或联系管理员。', ['relogin']);
+  if (status === 429) return new UserVisibleError(rawDetail || '当前请求较多，请稍后再试。');
+  if (status === 503 && (detail.includes('额度') || detail.includes('邀请码'))) {
+    const actions = detail.includes('重新登录') ? ['relogin'] : [];
+    return new UserVisibleError(rawDetail || '今日服务额度已用完，请明天再试。', actions);
+  }
+  if (status === 413 || detail.includes('too large')) return new UserVisibleError('图片太大，请上传不超过 15MB 的图片。');
+  if (status === 415 || detail.includes('unsupported image')) return new UserVisibleError('图片格式不支持，请上传 PNG、JPG、WEBP、GIF 或 BMP 图片。');
+  if (status === 400 && detail.includes('invalid image')) return new UserVisibleError('服务端无法读取该图片，请检查图片后重试。');
+  if (status >= 500) return new UserVisibleError('服务端处理失败，请稍后重试。');
+  if (status === 400) return new UserVisibleError('提交的内容无法处理，请检查后重试。');
+  return new UserVisibleError(`请求失败（HTTP ${status}），请稍后重试。`);
+}
+
+function streamedError(message) {
+  const text = String(message || '服务端处理失败，请稍后重试。');
+  const actions = text.includes('重新登录') ? ['relogin'] : [];
+  return new UserVisibleError(text, actions);
 }
 
 async function request(url, options, timeoutMs, timeoutMessage, track = true, networkMessage = '') {
@@ -727,15 +786,15 @@ async function request(url, options, timeoutMs, timeoutMessage, track = true, ne
     } else {
       await response.text();
     }
-    if (!response.ok) throw new Error(safeHttpError(response.status, data));
-    if (!contentType.includes('application/json')) throw new Error('服务返回格式异常，请稍后重试。');
+    if (!response.ok) throw safeHttpError(response.status, data);
+    if (!contentType.includes('application/json')) throw new UserVisibleError('服务返回格式异常，请稍后重试。');
     return data;
   } catch (error) {
     if (error.name === 'AbortError') {
-      if (controller.signal.reason === 'new-chat') throw new Error('当前识别已取消。');
-      throw new Error(timeoutMessage);
+      if (controller.signal.reason === 'new-chat') throw new UserVisibleError('当前识别已取消。');
+      throw new UserVisibleError(timeoutMessage);
     }
-    if (error instanceof TypeError) throw new Error(networkMessage || '无法连接本地服务，请确认 Demo 正在运行后重试。');
+    if (error instanceof TypeError) throw new UserVisibleError(networkMessage || '无法连接服务，请检查网络后重试。');
     throw error;
   } finally {
     clearTimeout(timer);
@@ -752,9 +811,9 @@ async function requestStream(url, options, timeoutMs, timeoutMessage, onProgress
     if (!response.ok) {
       let data = {};
       try { data = await response.json(); } catch (_error) { data = {}; }
-      throw new Error(safeHttpError(response.status, data));
+      throw safeHttpError(response.status, data);
     }
-    if (!response.body) throw new Error('服务返回格式异常，请稍后重试。');
+    if (!response.body) throw new UserVisibleError('服务返回格式异常，请稍后重试。');
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -769,18 +828,18 @@ async function requestStream(url, options, timeoutMs, timeoutMessage, onProgress
         const event = JSON.parse(line);
         if (event.type === 'progress') onProgress?.(event);
         if (event.type === 'result') result = event.data;
-        if (event.type === 'error') throw new Error(event.message || '服务端处理失败，请稍后重试。');
+        if (event.type === 'error') throw streamedError(event.message);
       }
       if (done) break;
     }
-    if (!result) throw new Error('服务返回格式异常，请稍后重试。');
+    if (!result) throw new UserVisibleError('服务返回格式异常，请稍后重试。');
     return result;
   } catch (error) {
     if (error.name === 'AbortError') {
-      if (controller.signal.reason === 'new-chat') throw new Error('当前识别已取消。');
-      throw new Error(timeoutMessage);
+      if (controller.signal.reason === 'new-chat') throw new UserVisibleError('当前识别已取消。');
+      throw new UserVisibleError(timeoutMessage);
     }
-    if (error instanceof TypeError) throw new Error(networkMessage || '无法连接本地服务，请确认 Demo 正在运行后重试。');
+    if (error instanceof TypeError) throw new UserVisibleError(networkMessage || '无法连接服务，请检查网络后重试。');
     throw error;
   } finally {
     clearTimeout(timer);
@@ -844,7 +903,10 @@ async function sendTextValue(value, displayValue = value, actionContext = null) 
   } catch (error) {
     if (operation !== operationVersion) return;
     pending?.remove();
-    if (error.message !== '当前识别已取消。') addMessage({ message: error.message || '暂时无法处理，请再试一次。', variant: 'error' });
+    if (error.message !== '当前识别已取消。') addMessage({
+      message: error.message || '暂时无法处理，请再试一次。',
+      variant: 'error', recoveryActions: error.recoveryActions || [],
+    });
     setStatus('error', '处理失败，可重新尝试');
   } finally {
     if (operation !== operationVersion) return;
@@ -881,14 +943,16 @@ function setUploadRowPreview(row, url) {
   if (image) image.src = url;
 }
 
-function addUploadFailure(row, message, prepared) {
-  setUploadRowStatus(row, `${message} 裁剪后的图片已保留，可直接重新上传。`, 'error');
+function addUploadFailure(row, message, prepared, recoveryActions = []) {
+  const fullMessage = `${message} 裁剪后的图片已保留，可直接重新上传。`;
+  setUploadRowStatus(row, fullMessage, 'error');
   const retry = document.createElement('button');
   retry.type = 'button';
   retry.className = 'retry-upload';
   retry.textContent = '重新上传';
   retry.addEventListener('click', () => retryUpload(row, prepared));
   row.querySelector('.message-content')?.append(retry);
+  addMessage({ message: fullMessage, variant: 'error', recoveryActions });
   return row;
 }
 
@@ -911,7 +975,7 @@ async function submitPreparedImage(prepared, uploadRow) {
       setStatus('working', event.message);
     }, '网络上传失败，请检查网络后重试。');
     if (operation !== operationVersion) return;
-    if (!isPersistentImage(data.uploaded_image)) throw new Error('服务端处理失败，未返回已上传的题图。');
+    if (!isPersistentImage(data.uploaded_image)) throw new UserVisibleError('服务端处理失败，未返回已上传的题图，请直接重新上传。');
     pending.remove();
     setUploadRowPreview(uploadRow, data.uploaded_image);
     setUploadRowStatus(uploadRow, '我发了一张题图。');
@@ -928,7 +992,12 @@ async function submitPreparedImage(prepared, uploadRow) {
   } catch (error) {
     if (operation !== operationVersion) return;
     pending.remove();
-    addUploadFailure(uploadRow, error.message || '服务端处理失败，请稍后重试。', prepared);
+    addUploadFailure(
+      uploadRow,
+      error.message || '服务端处理失败，请稍后重试。',
+      prepared,
+      error.recoveryActions || [],
+    );
     setStatus('error', '上传失败，可直接重试');
   } finally {
     if (operation !== operationVersion) return;
@@ -947,7 +1016,7 @@ async function uploadImage(selected) {
   const validationError = validateImage(selected);
   fileInput.value = '';
   if (validationError) {
-    addMessage({ message: validationError, variant: 'error' });
+    addMessage({ message: validationError, variant: 'error', recoveryActions: ['reupload'] });
     return;
   }
   invalidateCandidateActions();
@@ -970,6 +1039,10 @@ async function uploadImage(selected) {
   } catch (error) {
     if (operation === operationVersion) {
       setUploadRowStatus(uploadRow, error.message || '裁剪处理失败，请重新选择图片。', 'error');
+      addMessage({
+        message: error.message || '图片处理失败，请重新选择图片。',
+        variant: 'error', recoveryActions: ['reupload'],
+      });
       setStatus('error', '图片处理失败');
     }
     return;
@@ -1024,7 +1097,10 @@ async function resetConversation() {
     setStatus('ready', '已开始新对话');
   } catch (error) {
     if (operation !== operationVersion) return;
-    addMessage({ message: error.message || '新对话创建失败，请稍后重试。', variant: 'error' });
+    addMessage({
+      message: error.message || '新对话创建失败，请稍后重试。',
+      variant: 'error', recoveryActions: error.recoveryActions || [],
+    });
     setStatus('error', '新对话创建失败');
   } finally {
     if (operation !== operationVersion) return;
@@ -1098,7 +1174,10 @@ document.addEventListener('drop', (event) => {
   const files = Array.from(event.dataTransfer?.files || []);
   hideDropOverlay();
   if (files.length > 1) {
-    addMessage({ message: '当前一次处理一张题图，请先上传其中一张。', variant: 'error' });
+    addMessage({
+      message: '当前一次处理一张题图，请先上传其中一张。',
+      variant: 'error', recoveryActions: ['reupload'],
+    });
     return;
   }
   if (!isBusy) uploadImage(files[0]);

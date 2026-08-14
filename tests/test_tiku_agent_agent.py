@@ -643,6 +643,58 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.phase, STATE_WAIT_CANDIDATE_CHOICE)
         self.assertEqual(agent.state.candidate_count, 2)
         self.assertEqual(response.images, ["4力法/q1.jpg", "4力法/q2.jpg"])
+        self.assertIn("复筛未完成，已回退粗筛排序。", response.text)
+
+    def test_partial_detection_and_structure_fallbacks_are_visible(self):
+        fake = FakeTools(chapter="4力法")
+        fake.analyze_multi_image = lambda *args, **kwargs: ToolResult.partial(
+            data={"is_multi": False, "questions": []},
+            error="多题判断未完成，已按单题流程继续。",
+            code="MULTI_DETECTION_FALLBACK",
+            next_state="READY_FOR_SINGLE_ANALYSIS",
+            error_category="external_model",
+        )
+        fake.classify_structure = lambda *args, **kwargs: ToolResult.partial(
+            data={"structure_type": "", "source": "vision_failed"},
+            error="结构类型识别未完成，已跳过该筛选。",
+            code="STRUCTURE_CLASSIFICATION_FALLBACK",
+            next_state="READY_FOR_COARSE_SEARCH",
+            retryable=True,
+            error_category="external_model",
+        )
+        agent = self.make_agent(fake)
+
+        response = agent.handle_image("q.jpg")
+
+        self.assertIn("多题判断未完成，已按单题流程继续。", response.text)
+        self.assertIn("结构类型识别未完成，已跳过该筛选。", response.text)
+
+    def test_partial_multi_question_crop_is_visible(self):
+        fake = FakeTools(chapter="4力法")
+        fake.analyze_multi_image = lambda *args, **kwargs: ToolResult.success(
+            data={"is_multi": True, "questions": []},
+            code="MULTI_QUESTION_DETECTED",
+        )
+        fake.prepare_question_units = lambda *args, **kwargs: ToolResult.partial(
+            data={
+                "questions": [
+                    {"question_index": 1, "label": "1"},
+                    {"question_index": 2, "label": "2"},
+                ],
+                "diagram_crops": {},
+            },
+            error="部分题图裁剪未完成，仍可按题号继续。",
+            code="MULTI_CROPS_UNAVAILABLE",
+            next_state="WAIT_QUESTION_CHOICE",
+            retryable=True,
+            error_category="image_processing",
+        )
+        agent = self.make_agent(fake)
+
+        response = agent.handle_image("q.jpg")
+
+        self.assertIn("我在这张图里看到了 2 道题", response.text)
+        self.assertIn("部分题图裁剪未完成，仍可按题号继续。", response.text)
 
     def test_low_reliability_rerank_enters_no_match_without_showing_candidates(self):
         fake = FakeTools(chapter="4力法")
