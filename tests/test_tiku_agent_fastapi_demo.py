@@ -280,7 +280,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260814-failure-feedback"', 'src="/assets/demo.js?v=20260814-failure-feedback"',
+            'href="/assets/demo.css?v=20260814-failure-visibility-v2"', 'src="/assets/demo.js?v=20260814-failure-visibility-v2"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -322,12 +322,18 @@ class FastApiDemoTest(unittest.TestCase):
             "function createRecoveryActions", "登录状态已失效，请重新登录。",
             "临时会话已过期，之前的题图和候选已清理。",
             "variant: 'error', recoveryActions:",
+            "function showFailureNotice", "function resolveFailureNotice",
+            "retry_connection: '重新连接'", "function retryConnection()",
+            "暂时无法连接服务。当前对话仍保留在本机",
+            "浏览器无法保存临时对话", "浏览器中的临时对话无法读取",
+            "题图或结果图片已失效", "反馈提交失败，可重新提交",
         ):
             self.assertIn(expected, _SCRIPT)
         self.assertLess(
             _SCRIPT.index("if (status === 503"),
             _SCRIPT.index("if (status >= 500)"),
         )
+        self.assertNotIn("A temporary network failure should not discard", _SCRIPT)
         self.assertNotIn("new File(", _SCRIPT)
         self.assertNotIn("sendTextValue(String(index + 1)", _SCRIPT)
         self.assertNotIn("题图处理中", _SCRIPT)

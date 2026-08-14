@@ -55,6 +55,7 @@ const FEEDBACK_OPTIONS = {
 };
 const RECOVERY_ACTION_LABELS = {
   relogin: '重新登录', reupload: '重新上传题图', new_chat: '开始新对话',
+  retry_connection: '重新连接',
 };
 
 class UserVisibleError extends Error {
@@ -76,6 +77,8 @@ let activeFeedback = null;
 let feedbackRequestPending = false;
 let historyLastActivityAt = 0;
 let historyExpiryTimer = null;
+let historyStorageWarningShown = false;
+const activeFailureNotices = new Set();
 let sessionContext = {
   session_valid: false, phase: 'IDLE', has_active_image: false,
   task_revision: 0, candidate_generation: '', candidate_count: 0,
@@ -121,7 +124,13 @@ function saveHistory({ refreshActivity = false } = {}) {
       messages: history.slice(-HISTORY_LIMIT),
     }));
   } catch (_error) {
-    // The demo remains usable when browser storage is unavailable.
+    if (!historyStorageWarningShown) {
+      historyStorageWarningShown = true;
+      setTimeout(() => showFailureNotice(
+        'history-storage',
+        '浏览器无法保存临时对话。当前页面仍可使用，但刷新后记录可能丢失，请检查浏览器存储设置。',
+      ), 0);
+    }
   }
   scheduleHistoryExpiry();
 }
@@ -275,6 +284,19 @@ function closeFeedback() {
   focusBeforeModal?.focus();
 }
 
+function showFailureNotice(key, message, recoveryActions = []) {
+  const noticeKey = String(key || '').trim();
+  if (!noticeKey || activeFailureNotices.has(noticeKey)) return null;
+  activeFailureNotices.add(noticeKey);
+  return addMessage({
+    message, variant: 'error', recoveryActions,
+  });
+}
+
+function resolveFailureNotice(key) {
+  activeFailureNotices.delete(String(key || '').trim());
+}
+
 function setFeedbackPending(pending) {
   feedbackRequestPending = pending;
   feedbackClose.disabled = pending;
@@ -366,6 +388,7 @@ function createRecoveryActions(actions) {
       if (action === 'relogin') window.location.assign('/invite');
       else if (action === 'reupload') fileInput.click();
       else if (action === 'new_chat') resetConversation();
+      else if (action === 'retry_connection') retryConnection();
     });
     host.append(button);
   });
@@ -405,6 +428,7 @@ async function submitFeedback() {
     feedbackError.hidden = false;
     setFeedbackPending(false);
     feedbackSubmit.textContent = '重新提交';
+    setStatus('error', '反馈提交失败，可重新提交');
   }
 }
 
@@ -430,6 +454,7 @@ async function cancelFeedback() {
     feedbackError.hidden = false;
     setFeedbackPending(false);
     feedbackCancel.textContent = '重新取消';
+    setStatus('error', '取消反馈失败，可重新取消');
   }
 }
 
@@ -451,6 +476,11 @@ function createMediaCard(url, index, item) {
     note.className = 'expired-image';
     note.textContent = '图片已失效，请重新上传';
     openButton.replaceWith(note);
+    showFailureNotice(
+      'expired-media',
+      '题图或结果图片已失效，请重新上传题图；如果问题反复出现，可以点踩告诉我们。',
+      ['reupload'],
+    );
   }, { once: true });
   openButton.append(image);
   openButton.addEventListener('click', () => openLightbox(image.currentSrc || image.src, item.imageAlt));
@@ -576,6 +606,10 @@ function restoreHistory() {
     renderHistory();
   } catch (_error) {
     clearHistory();
+    showFailureNotice(
+      'history-storage',
+      '浏览器中的临时对话无法读取，已为你开始新对话。请检查浏览器存储设置。',
+    );
   }
 }
 
@@ -583,6 +617,7 @@ async function repairUploadedImageHistory() {
   try {
     const data = await request('/api/session', {}, 5000, '会话恢复超时。', false);
     updateSessionContext(data);
+    resolveFailureNotice('connection');
     renderHistory();
     if (!data.session?.session_valid) {
       if (history.length) {
@@ -603,7 +638,11 @@ async function repairUploadedImageHistory() {
       }
     }
   } catch (_error) {
-    // A temporary network failure should not discard unexpired local history.
+    showFailureNotice(
+      'connection',
+      '暂时无法连接服务。当前对话仍保留在本机，请检查网络后重新连接。',
+      ['retry_connection'],
+    );
   }
 }
 
@@ -1112,10 +1151,23 @@ async function resetConversation() {
 async function checkHealth() {
   try {
     await request('/health', {}, 5000, '服务连接超时。', false);
+    resolveFailureNotice('connection');
     if (!isBusy) setStatus('ready', '准备就绪');
+    return true;
   } catch (_error) {
     setStatus('error', '本地服务未连接');
+    showFailureNotice(
+      'connection',
+      '暂时无法连接服务。当前对话仍保留在本机，请检查网络后重新连接。',
+      ['retry_connection'],
+    );
+    return false;
   }
+}
+
+async function retryConnection() {
+  const healthy = await checkHealth();
+  if (healthy) await repairUploadedImageHistory();
 }
 
 form.addEventListener('submit', (event) => { event.preventDefault(); sendText(); });
@@ -1185,8 +1237,15 @@ document.addEventListener('drop', (event) => {
 window.addEventListener('blur', hideDropOverlay);
 window.addEventListener('pagehide', releaseAllObjectUrls);
 window.addEventListener('focus', expireHistoryIfNeeded);
-window.addEventListener('offline', () => setStatus('error', '当前网络已断开'));
-window.addEventListener('online', checkHealth);
+window.addEventListener('offline', () => {
+  setStatus('error', '当前网络已断开');
+  showFailureNotice(
+    'connection',
+    '当前网络已断开。当前对话仍保留在本机，请恢复网络后重新连接。',
+    ['retry_connection'],
+  );
+});
+window.addEventListener('online', retryConnection);
 window.addEventListener('resize', syncVisualViewport, { passive: true });
 window.addEventListener('orientationchange', syncVisualViewport, { passive: true });
 window.visualViewport?.addEventListener('resize', syncVisualViewport, { passive: true });
