@@ -77,10 +77,10 @@
   ],
   "samples": [
     {
-      "id": "generated_white_wall_01",
+      "id": "wallpaper_white_wall_01",
       "source_kind": "generated_fixture",
       "source_ref": "deterministic-pillow:seed-8890:white-wall",
-      "relative_path": "images/a1_irrelevant_wallpaper_01.jpg",
+      "relative_path": "images/wallpaper_white_wall_01.jpg",
       "sha256": "1206652a94b677b7587db8272aef7182f7054220d502d03b30e5d6b7d2237c12",
       "width": 1600,
       "height": 1000,
@@ -95,10 +95,10 @@
       "notes": "Copyright-safe white-wall texture with no text or structure-mechanics content."
     },
     {
-      "id": "generated_landscape_01",
+      "id": "wallpaper_landscape_01",
       "source_kind": "generated_fixture",
       "source_ref": "deterministic-pillow:seed-8890:abstract-landscape",
-      "relative_path": "images/a1_irrelevant_wallpaper_02.jpg",
+      "relative_path": "images/wallpaper_landscape_01.jpg",
       "sha256": "4066f3809813f918b45610a9eafd6364c98779c8add3120335916cd1a42c0a3e",
       "width": 1600,
       "height": 1000,
@@ -113,10 +113,10 @@
       "notes": "Copyright-safe abstract landscape with no text or structure-mechanics content."
     },
     {
-      "id": "user_unrecoverable_crop_01",
+      "id": "21",
       "source_kind": "user_provided_fixture",
       "source_ref": "user-file:21.jpg",
-      "relative_path": "images/a1_unrecoverable_crop_01.jpg",
+      "relative_path": "images/21.jpg",
       "sha256": "f2869a4e59409477aaacf1a875426da2a9c5c3e2af958a14fce1bb2d5bdde0fa",
       "width": 134,
       "height": 281,
@@ -131,10 +131,10 @@
       "notes": "Only a partial member and support remain; there is no complete searchable question."
     },
     {
-      "id": "user_public_stem_subfigures_01",
+      "id": "cebc2d0707f2a7dd9cb6f01afbfd4bfd",
       "source_kind": "user_provided_fixture",
       "source_ref": "user-file:cebc2d0707f2a7dd9cb6f01afbfd4bfd.jpg",
-      "relative_path": "images/a3_public_stem_subfigures_01.jpg",
+      "relative_path": "images/cebc2d0707f2a7dd9cb6f01afbfd4bfd.jpg",
       "sha256": "998cd6c89ef9adef85d72c6cd1521b4531033e875eed02677bb31ae29049af9f",
       "width": 1080,
       "height": 1440,
@@ -159,10 +159,10 @@
       "notes": "One shared stem with a-e structures; b and e are only partly visible, so automatic A2 is unsafe."
     },
     {
-      "id": "user_multiple_questions_01",
+      "id": "f830caaa43dab06a877a77ff205d3bc3",
       "source_kind": "user_provided_fixture",
       "source_ref": "user-file:f830caaa43dab06a877a77ff205d3bc3.jpg",
-      "relative_path": "images/a3_multiple_questions_01.jpg",
+      "relative_path": "images/f830caaa43dab06a877a77ff205d3bc3.jpg",
       "sha256": "e8fef23239ed8f984bca977a9be5ffb88035dc82014681dcf98eb79f01375091",
       "width": 1080,
       "height": 1440,
@@ -182,14 +182,14 @@
       "notes": "Three independent searchable units share one page and must not enter the single-question fast path."
     },
     {
-      "id": "derived_multiple_questions_rotated_90_01",
+      "id": "f830caaa43dab06a877a77ff205d3bc3_rotated_ccw90",
       "source_kind": "derived_fixture",
-      "source_ref": "rotate-90:user_multiple_questions_01",
-      "relative_path": "images/quality_rotated_90_01.jpg",
+      "source_ref": "rotate-90:f830caaa43dab06a877a77ff205d3bc3",
+      "relative_path": "images/f830caaa43dab06a877a77ff205d3bc3_rotated_ccw90.jpg",
       "sha256": "1a453caa290aa7c83995f9bfba91e9df05f53ac048c0161869bed942320520b9",
       "width": 1440,
       "height": 1080,
-      "derived_from": "user_multiple_questions_01",
+      "derived_from": "f830caaa43dab06a877a77ff205d3bc3",
       "transformation": "rotate_counterclockwise_90_degrees",
       "expected_route": "A3",
       "label_status": "derived",
