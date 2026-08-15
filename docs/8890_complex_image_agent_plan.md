@@ -71,7 +71,7 @@
 | `8891` | 隔离权威分流 MVP | A1/A2/A3 权威分流；A3 暂停并说明当前边界 |
 | `8892` | A3 隔离实现线 | 新增拆解、选题和 A2 交接；使用独立运行状态，不影响现有服务 |
 
-`8892` 必须具有独立启动入口、端口、Cookie、runtime、session 数据库、日志、checkpoint、临时图片和测试输出。它可以只读使用同一题库 live 数据；不得复用 `8890/8891` 的会话和运行状态，也不得影响 `8788/8790/8794/8795`。是否接入 `8795` 的正式身份和额度数据，留到有限用户验证前单独决定，原型阶段默认不混用生产会话状态。
+`8892` 必须使用独立入口、runtime、日志、临时图片和测试输出。Phase 2 先以离线 CLI 验证拆解，不监听端口；进入 Phase 3 交互服务前再补独立端口、Cookie、session 数据库和 checkpoint。它可以只读使用同一题库 live 数据；不得复用 `8890/8891` 的会话和运行状态，也不得影响 `8788/8790/8794/8795`。是否接入 `8795` 的正式身份和额度数据，留到有限用户验证前单独决定，原型阶段默认不混用生产会话状态。
 
 若后续把现有 `review-tiku` Tunnel 从 8793 改指向 8794，Cloudflare 界面只需替换 Service URL，但这只切换公网流量，不会停止 8793 看门狗或进程。切换前必须先确认 8794 正在监听且 `/health` 正常，并补齐应用门禁、费用/并发上限和独立看门狗；否则可能直接产生 502 或把无门禁模型入口暴露到公网。若要同时保留两条线，应新建独立子域名，不覆盖现有路由。
 
@@ -486,7 +486,7 @@ OpenCV 负责确定性区域检测和实际裁剪，模型负责语义角色与�
 
 验收：Schema 非法时不能进入 A2；固定有效题不能误判 A1；固定复杂题不能误放 A2。
 
-当前进度：已建立 `experiments/complex_image_eval/` 固定评测集，包含 8 张已跟踪图片和 5 张题库单题候选；新增 `download.png` 覆盖一题多图、原结构图与单位荷载辅助图。已完成最小 `ImageTriageObservation`、千问观察适配器、分流交接数据包、A1/A2/A3 安全路由函数和纯代码测试。千问摘要复跑和 A2/A3 交接冒烟已完成。完整 `ProblemSnapshot`、`SearchUnit`、`ImageTaskState` 留在正式路由和 A3 拆解前完成；当前影子期只验证最外层分流，不把最小观察契约当作生产验收。
+当前进度：已建立 `experiments/complex_image_eval/` 固定评测集，包含 8 张已跟踪图片和 5 张题库单题候选；新增 `download.png` 覆盖一题多图、原结构图与单位荷载辅助图。已完成最小 `ImageTriageObservation`、千问观察适配器、分流交接数据包、A1/A2/A3 安全路由函数和纯代码测试。A3 Phase 2 已补充 `ProblemGroup`、`ChapterHint`、`SearchUnit`、`A3PageObservation` 和 `A3DecompositionResult` 强类型对象及互斥状态校验；`ImageTaskState` 的持久化实现仍留待选题与取消阶段。
 
 ### Stage 2：预检影子运行
 
@@ -547,11 +547,19 @@ OpenCV 负责确定性区域检测和实际裁剪，模型负责语义角色与�
 
 ### A3 Phase 2：`8892` 离线识别、分组和裁剪
 
-状态：`PENDING`
+状态：`IN_PROGRESS`（2026-08-15 代码与本地 OpenCV 已完成，真实模型样本待授权验证）
 
 交付：独立 `8892` 运行边界、结构化观察、问题分组、图角色判断、OpenCV 裁剪、裁剪校验和脱敏日志。只输出 `A3DecompositionResult`，不调用 A2。
 
 验收：代表性一题多图、a/b/c/d、多大题混合、公共题干和 `q + Fp=1` 样本得到正确可检索单元；辅助图不成为单元，裁剪不完整或绑定不清时不得输出 `single_ready`。
+
+当前进度：
+
+- 新增 `tiku_agent/image_decomposer.py`，固定执行候选块检测、双图结构化观察、题目分组、角色绑定、裁剪、质量校验和单元数状态判定；不导入或调用 A2；
+- 新增离线入口 `scripts/run_tiku_agent_8892.py`，默认状态、候选图、裁剪图和脱敏日志位于 `.tmp_tiku_agent_a3_8892/`；Phase 2 暂不监听 HTTP 端口，选题服务留到 Phase 3；
+- 章节提示继续经过现有 `normalize_chapter_hint`、`normalize_chapter_confidence` 和 `guard_chapter_prediction`，没有可见题干时强制回到 `unknown`；
+- 已用仓库内共用题干样本完成本地 OpenCV 候选块检查，未向外部模型发送图片；Qwen 双图请求使用 mock 验证；
+- 新增 10 项 A3 测试，项目完整测试 `525` 项通过。未经单独授权，不使用用户原图进行真实付费拆解验证。
 
 ### A3 Phase 3：单元数量路由与选题交互
 
@@ -731,9 +739,9 @@ tests/test_image_cancellation.py
 
 ## 23. 下一步唯一入口
 
-A3 Phase 1 契约已经完成。下一步仍不开发 Planner、LangGraph 或 DeepSeek Harness：
+A3 Phase 2 代码、本地 OpenCV 和 mock 模型测试已经完成。下一步仍不接 A2，不开发 Planner、LangGraph 或 DeepSeek Harness：
 
-1. 建立隔离 `8892` 的配置、runtime、session、日志、临时图片和测试输出，不能复用 `8890/8891` 状态；
-2. 实现 `ProblemGroup`、`ChapterHint`、`SearchUnit`、`A3DecompositionResult` 强类型对象和严格校验；
-3. 复用现有多题 Prompt 的章节规则、归一化保护和 OpenCV 裁剪能力，实现只观察不检索的离线拆解；
-4. 先用第 17 节案例验证单元数量、角色、分组、裁剪和逐单元章节提示，达标后才接选题 UI 和 A2。
+1. 经用户单独授权后，选择固定评测集中的复杂图调用一次真实千问拆解；不得默认重发用户原图；
+2. 对照第 17 节人工预期检查候选块角色、题目组、单元数量、裁剪完整性和逐单元章节提示；
+3. 若真实输出失败，先区分 OpenCV 候选缺失、模型角色错误、分组错误或 Schema 错误，不为单个案例无界追加提示词；
+4. Phase 2 真实样本达标后，再进入 Phase 3，建立 `8892` 交互服务和“一个自动继续、多个等待选择”的状态流。
