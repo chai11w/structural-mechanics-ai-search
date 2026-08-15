@@ -3,22 +3,22 @@
   "status": "DRAFT",
   "created_at": "2026-08-15",
   "privacy": {
-    "tracked_media": false,
+    "tracked_media": true,
     "feedback_originals_copied": false,
-    "notes": "Metadata only. Runtime paths, user text and private identifiers are excluded."
+    "notes": "Tracked media contains only user-approved evaluation images, deterministic derivatives and generated copyright-safe A1 fixtures. Runtime paths, user text and private identifiers are excluded."
   },
   "coverage": [
     {
       "category": "out_of_scope_irrelevant",
       "minimum": 2,
-      "available": 0,
-      "needs_user_sample": true,
+      "available": 2,
+      "needs_user_sample": false,
       "notes": "White wall, scenery, person or unrelated screenshot."
     },
     {
       "category": "unrecoverable_quality",
       "minimum": 2,
-      "available": 0,
+      "available": 1,
       "needs_user_sample": true,
       "notes": "Too blurry, truncated or damaged to continue."
     },
@@ -49,33 +49,163 @@
     {
       "category": "public_stem_subquestions",
       "minimum": 2,
-      "available": 0,
+      "available": 1,
       "needs_user_sample": true,
       "notes": "One stem with a/b/c/d or several subquestion diagrams."
     },
     {
       "category": "multiple_questions_mixed",
       "minimum": 2,
-      "available": 0,
+      "available": 1,
       "needs_user_sample": true,
       "notes": "Several independent questions in one image, with or without diagrams."
     },
     {
       "category": "binding_or_role_ambiguous",
       "minimum": 2,
-      "available": 0,
+      "available": 1,
       "needs_user_sample": true,
       "notes": "Unbound region, unknown diagram role or user confirmation required."
     },
     {
       "category": "mobile_or_rotation_quality",
       "minimum": 2,
-      "available": 0,
+      "available": 1,
       "needs_user_sample": true,
       "notes": "Long screenshot, rotated image, low contrast or compressed small diagram."
     }
   ],
   "samples": [
+    {
+      "id": "generated_white_wall_01",
+      "source_kind": "generated_fixture",
+      "source_ref": "deterministic-pillow:seed-8890:white-wall",
+      "relative_path": "images/a1_irrelevant_wallpaper_01.jpg",
+      "sha256": "1206652a94b677b7587db8272aef7182f7054220d502d03b30e5d6b7d2237c12",
+      "width": 1600,
+      "height": 1000,
+      "expected_route": "A1",
+      "label_status": "curated",
+      "question_count": 0,
+      "subquestion_count": 0,
+      "diagram_count": 0,
+      "diagram_roles": [],
+      "actual_loads": [],
+      "quality_flags": [],
+      "notes": "Copyright-safe white-wall texture with no text or structure-mechanics content."
+    },
+    {
+      "id": "generated_landscape_01",
+      "source_kind": "generated_fixture",
+      "source_ref": "deterministic-pillow:seed-8890:abstract-landscape",
+      "relative_path": "images/a1_irrelevant_wallpaper_02.jpg",
+      "sha256": "4066f3809813f918b45610a9eafd6364c98779c8add3120335916cd1a42c0a3e",
+      "width": 1600,
+      "height": 1000,
+      "expected_route": "A1",
+      "label_status": "curated",
+      "question_count": 0,
+      "subquestion_count": 0,
+      "diagram_count": 0,
+      "diagram_roles": [],
+      "actual_loads": [],
+      "quality_flags": [],
+      "notes": "Copyright-safe abstract landscape with no text or structure-mechanics content."
+    },
+    {
+      "id": "user_unrecoverable_crop_01",
+      "source_kind": "user_provided_fixture",
+      "source_ref": "user-file:21.jpg",
+      "relative_path": "images/a1_unrecoverable_crop_01.jpg",
+      "sha256": "f2869a4e59409477aaacf1a875426da2a9c5c3e2af958a14fce1bb2d5bdde0fa",
+      "width": 134,
+      "height": 281,
+      "expected_route": "A1",
+      "label_status": "human_confirmed",
+      "question_count": 0,
+      "subquestion_count": 0,
+      "diagram_count": 1,
+      "diagram_roles": ["unknown"],
+      "actual_loads": [],
+      "quality_flags": ["cropped", "missing_stem", "missing_external_load"],
+      "notes": "Only a partial member and support remain; there is no complete searchable question."
+    },
+    {
+      "id": "user_public_stem_subfigures_01",
+      "source_kind": "user_provided_fixture",
+      "source_ref": "user-file:cebc2d0707f2a7dd9cb6f01afbfd4bfd.jpg",
+      "relative_path": "images/a3_public_stem_subfigures_01.jpg",
+      "sha256": "998cd6c89ef9adef85d72c6cd1521b4531033e875eed02677bb31ae29049af9f",
+      "width": 1080,
+      "height": 1440,
+      "expected_route": "A3",
+      "label_status": "human_confirmed",
+      "question_count": 1,
+      "subquestion_count": 5,
+      "diagram_count": 5,
+      "diagram_roles": [
+        {"label": "a", "role": "original_structure"},
+        {"label": "b", "role": "unknown"},
+        {"label": "c", "role": "original_structure"},
+        {"label": "d", "role": "original_structure"},
+        {"label": "e", "role": "unknown"}
+      ],
+      "actual_loads": [
+        {"subquestion": "a", "type": "集中", "raw": "Fp"},
+        {"subquestion": "c", "type": "均布", "raw": "q"},
+        {"subquestion": "d", "type": "均布", "raw": "q"}
+      ],
+      "quality_flags": ["partial_subfigures_b_and_e", "handwritten_marks"],
+      "notes": "One shared stem with a-e structures; b and e are only partly visible, so automatic A2 is unsafe."
+    },
+    {
+      "id": "user_multiple_questions_01",
+      "source_kind": "user_provided_fixture",
+      "source_ref": "user-file:f830caaa43dab06a877a77ff205d3bc3.jpg",
+      "relative_path": "images/a3_multiple_questions_01.jpg",
+      "sha256": "e8fef23239ed8f984bca977a9be5ffb88035dc82014681dcf98eb79f01375091",
+      "width": 1080,
+      "height": 1440,
+      "expected_route": "A3",
+      "label_status": "human_confirmed",
+      "question_count": 3,
+      "subquestion_count": 0,
+      "question_labels": ["三", "四-1", "四-2"],
+      "diagram_count": 3,
+      "diagram_roles": ["original_structure", "original_structure", "original_structure"],
+      "actual_loads": [
+        {"question": "三", "type": "集中", "raw": "Fp"},
+        {"question": "四-1", "type": "均布", "raw": "6"},
+        {"question": "四-2", "type": "集中", "raw": "P"}
+      ],
+      "quality_flags": ["multiple_independent_questions"],
+      "notes": "Three independent searchable units share one page and must not enter the single-question fast path."
+    },
+    {
+      "id": "derived_multiple_questions_rotated_90_01",
+      "source_kind": "derived_fixture",
+      "source_ref": "rotate-90:user_multiple_questions_01",
+      "relative_path": "images/quality_rotated_90_01.jpg",
+      "sha256": "1a453caa290aa7c83995f9bfba91e9df05f53ac048c0161869bed942320520b9",
+      "width": 1440,
+      "height": 1080,
+      "derived_from": "user_multiple_questions_01",
+      "transformation": "rotate_counterclockwise_90_degrees",
+      "expected_route": "A3",
+      "label_status": "derived",
+      "question_count": 3,
+      "subquestion_count": 0,
+      "question_labels": ["三", "四-1", "四-2"],
+      "diagram_count": 3,
+      "diagram_roles": ["original_structure", "original_structure", "original_structure"],
+      "actual_loads": [
+        {"question": "三", "type": "集中", "raw": "Fp"},
+        {"question": "四-1", "type": "均布", "raw": "6"},
+        {"question": "四-2", "type": "集中", "raw": "P"}
+      ],
+      "quality_flags": ["multiple_independent_questions", "rotated_90"],
+      "notes": "Deterministic orientation variant; semantic labels must remain identical to the source sample."
+    },
     {
       "id": "bank_beam_single",
       "source_kind": "question_bank",
