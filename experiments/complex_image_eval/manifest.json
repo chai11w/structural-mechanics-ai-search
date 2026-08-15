@@ -1,0 +1,164 @@
+{
+  "manifest_version": "8890-triage-eval-v0-draft",
+  "status": "DRAFT",
+  "created_at": "2026-08-15",
+  "privacy": {
+    "tracked_media": false,
+    "feedback_originals_copied": false,
+    "notes": "Metadata only. Runtime paths, user text and private identifiers are excluded."
+  },
+  "coverage": [
+    {
+      "category": "out_of_scope_irrelevant",
+      "minimum": 2,
+      "available": 0,
+      "needs_user_sample": true,
+      "notes": "White wall, scenery, person or unrelated screenshot."
+    },
+    {
+      "category": "unrecoverable_quality",
+      "minimum": 2,
+      "available": 0,
+      "needs_user_sample": true,
+      "notes": "Too blurry, truncated or damaged to continue."
+    },
+    {
+      "category": "clean_single_question",
+      "minimum": 5,
+      "available": 0,
+      "pending_review": 5,
+      "needs_user_sample": false,
+      "notes": "Question-bank baselines are provisional until human image review."
+    },
+    {
+      "category": "one_question_multiple_diagrams",
+      "minimum": 2,
+      "available": 0,
+      "pending_review": 1,
+      "needs_user_sample": true,
+      "notes": "Includes original structure plus internal-force or unit-load diagrams."
+    },
+    {
+      "category": "q_plus_auxiliary_fp",
+      "minimum": 1,
+      "available": 0,
+      "pending_review": 1,
+      "needs_user_sample": false,
+      "notes": "Feedback-derived candidate; role and actual-load labels still require review."
+    },
+    {
+      "category": "public_stem_subquestions",
+      "minimum": 2,
+      "available": 0,
+      "needs_user_sample": true,
+      "notes": "One stem with a/b/c/d or several subquestion diagrams."
+    },
+    {
+      "category": "multiple_questions_mixed",
+      "minimum": 2,
+      "available": 0,
+      "needs_user_sample": true,
+      "notes": "Several independent questions in one image, with or without diagrams."
+    },
+    {
+      "category": "binding_or_role_ambiguous",
+      "minimum": 2,
+      "available": 0,
+      "needs_user_sample": true,
+      "notes": "Unbound region, unknown diagram role or user confirmation required."
+    },
+    {
+      "category": "mobile_or_rotation_quality",
+      "minimum": 2,
+      "available": 0,
+      "needs_user_sample": true,
+      "notes": "Long screenshot, rotated image, low contrast or compressed small diagram."
+    }
+  ],
+  "samples": [
+    {
+      "id": "bank_beam_single",
+      "source_kind": "question_bank",
+      "source_ref": "experiments/structure_dimension_eval/samples.json#beam_single",
+      "relative_path": "2静定结构/1单跨梁/题目a/1均/1.jpg",
+      "expected_route": "A2",
+      "label_status": "provisional",
+      "expected_structure": "梁",
+      "notes": "Clean one-question baseline; verify that the image is an original structure diagram."
+    },
+    {
+      "id": "bank_beam_force_2span",
+      "source_kind": "question_bank",
+      "source_ref": "experiments/structure_dimension_eval/samples.json#beam_force_2span",
+      "relative_path": "4力法/1梁/2多未知量/题目/2.jpg",
+      "expected_route": "A2",
+      "label_status": "provisional",
+      "expected_structure": "梁",
+      "notes": "Single force-method question; verify diagram role before accepting A2."
+    },
+    {
+      "id": "bank_truss_triangle",
+      "source_kind": "question_bank",
+      "source_ref": "experiments/structure_dimension_eval/samples.json#truss_triangle",
+      "relative_path": "2静定结构/5桁架/所有杆/题目aa/三角/18.jpg",
+      "expected_route": "A2",
+      "label_status": "provisional",
+      "expected_structure": "桁架",
+      "notes": "Single truss baseline; verify actual external-load visibility."
+    },
+    {
+      "id": "bank_frame_l",
+      "source_kind": "question_bank",
+      "source_ref": "experiments/structure_dimension_eval/samples.json#frame_l",
+      "relative_path": "2静定结构/3钢架/1内力图/题目2/1L形/3.jpg",
+      "expected_route": "A2",
+      "label_status": "provisional",
+      "expected_structure": "钢架",
+      "notes": "Single frame baseline; path label mentions internal force and needs human review."
+    },
+    {
+      "id": "bank_beam_continuous",
+      "source_kind": "question_bank",
+      "source_ref": "experiments/structure_dimension_eval/samples.json#beam_continuous",
+      "relative_path": "2静定结构/2多跨梁/内力图/题目2/3跨/1力/34.jpg",
+      "expected_route": "A2",
+      "label_status": "provisional",
+      "expected_structure": "梁",
+      "notes": "Continuous-beam baseline; path label mentions internal force and needs human review."
+    },
+    {
+      "id": "feedback_unique_input_b25_5de42a7d",
+      "source_kind": "feedback_case_media",
+      "source_ref": "case:b25bf488e9e04030980fa9eafb2fbb86/media_sha256:5de42a7df6f85e4e",
+      "relative_path": null,
+      "expected_route": null,
+      "label_status": "needs_human_review",
+      "image_role": "original_user_upload",
+      "width": 479,
+      "height": 368,
+      "notes": "Canonical content shared by two feedback cases; do not copy into tracked fixtures before privacy and role review."
+    },
+    {
+      "id": "feedback_unique_input_f44_a8970c5e",
+      "source_kind": "feedback_case_media",
+      "source_ref": "case:f44a1647b0784f9cb1b3ebd543344aa5/media_sha256:a8970c5eaaf56f63",
+      "relative_path": null,
+      "expected_route": null,
+      "label_status": "needs_human_review",
+      "image_role": "original_user_upload",
+      "width": 591,
+      "height": 552,
+      "notes": "Unique feedback input; do not copy into tracked fixtures before privacy and role review."
+    },
+    {
+      "id": "feedback_duplicate_input_b5_5de42a7d",
+      "source_kind": "feedback_case_media",
+      "source_ref": "case:b5e38a46644c4b2eba8a629d6c6085c6/media_sha256:5de42a7df6f85e4e",
+      "relative_path": null,
+      "expected_route": null,
+      "label_status": "duplicate",
+      "duplicate_of": "feedback_unique_input_b25_5de42a7d",
+      "notes": "Same content appeared in two feedback cases; excluded from the sample count."
+    }
+  ]
+}
