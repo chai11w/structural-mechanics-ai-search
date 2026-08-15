@@ -7,7 +7,7 @@ from typing import Literal
 
 
 IMAGE_TRIAGE_SCHEMA_VERSION = "8890-image-triage-v1"
-A3_DECOMPOSITION_SCHEMA_VERSION = "a3-decomposition-v1"
+A3_DECOMPOSITION_SCHEMA_VERSION = "a3-decomposition-v2"
 Route = Literal["A1", "A2", "A3"]
 A3Status = Literal["no_unit", "single_ready", "multiple_wait_choice", "uncertain"]
 ChapterScope = Literal["page", "question_group", "search_unit", "unknown"]

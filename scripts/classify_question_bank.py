@@ -65,19 +65,7 @@ CHAPTER_TRIGGER_WORDS = {
     "8影响线": ["影响线"],
 }
 
-SYSTEM_PROMPT = """你是结构力学题目荷载提取与分类助手。请从题目图片中识别真实外部荷载，只输出JSON。
-
-输出格式:
-{
-  "loads":[{"type":"集中|均布|弯矩","raw":"去掉单位后的荷载标注"}],
-  "chapter_hint":"2静定结构|3静定结构位移|4力法|5位移法|6力矩分配|7矩阵位移|8影响线|unknown",
-  "chapter_confidence":0到1之间的小数,
-  "visible_problem_text":"原样抄写图片中实际可见的题干文字；没有题干则留空",
-  "chapter_evidence":"原样引用用于判断章节的可见题干文字，使用中文引号；没有则留空"
-}
-
-章节识别规则:
-- 只允许从 2静定结构、3静定结构位移、4力法、5位移法、6力矩分配、7矩阵位移、8影响线、unknown 中选择。
+CHAPTER_RECOGNITION_RULES = """- 只允许从 2静定结构、3静定结构位移、4力法、5位移法、6力矩分配、7矩阵位移、8影响线、unknown 中选择。
 - 优先根据题目文字、方法名、题干说明判断章节，不要只根据结构图形猜章节。
 - visible_problem_text 只允许抄写图片中实际存在的完整题干/任务文字；节点字母、荷载符号、尺寸和 EI 不算题干，也不得根据结构长相编写题干。
 - visible_problem_text 为空时，chapter_hint 必须为 unknown；只有确实看见题干文字时，才允许结合题干与结构图判断章节。
@@ -94,7 +82,41 @@ SYSTEM_PROMPT = """你是结构力学题目荷载提取与分类助手。请从�
 - 题干明确要求静定结构位移，或要求桁架节点位移/水平位移/竖向位移且出现 EA 为常数、单位荷载法、图乘法等静定结构位移线索，可判断为 3静定结构位移。
 - 仅出现“求位移”“求转角”不能单独判断为 3静定结构位移，因为超静定结构位移计算也可能出现在力法章节。
 - 只要题干明确出现“静定”并要求作内力图、弯矩图、剪力图或轴力图，就可判断为 2静定结构，不要限制后面是梁、钢架、多跨梁还是其他结构。仅要求作内力图、弯矩图、剪力图但没有“静定”文字时，不能单独判断为 2静定结构，因为超静定结构也可能要求作内力图。
-- 没有明确章节或方法线索时，chapter_hint 为 unknown，chapter_confidence 不要高于 0.5。
+- 没有明确章节或方法线索时，chapter_hint 为 unknown，chapter_confidence 不要高于 0.5。"""
+
+
+def build_chapter_recognition_prompt() -> str:
+    """Build the chapter-only prompt shared by A3 and future A2 extraction."""
+
+    return """你是结构力学题目章节识别助手。只判断给定题目组所属章节，不识别荷载、结构类型，不求解，不搜索题库，只输出JSON。
+
+输出格式:
+{
+  "chapter_hint":"2静定结构|3静定结构位移|4力法|5位移法|6力矩分配|7矩阵位移|8影响线|unknown",
+  "chapter_confidence":0到1之间的小数,
+  "chapter_evidence":"原样引用用于判断章节的可见题干文字，使用中文引号；没有则留空"
+}
+
+用户消息会给出当前题目组题号和拆题阶段原样抄写的 visible_problem_text。只判断该题目组；图片中其他题目的文字不得作为证据。
+
+章节识别规则:
+""" + CHAPTER_RECOGNITION_RULES + """
+
+不要输出解释、Markdown或代码块。"""
+
+SYSTEM_PROMPT = """你是结构力学题目荷载提取与分类助手。请从题目图片中识别真实外部荷载，只输出JSON。
+
+输出格式:
+{
+  "loads":[{"type":"集中|均布|弯矩","raw":"去掉单位后的荷载标注"}],
+  "chapter_hint":"2静定结构|3静定结构位移|4力法|5位移法|6力矩分配|7矩阵位移|8影响线|unknown",
+  "chapter_confidence":0到1之间的小数,
+  "visible_problem_text":"原样抄写图片中实际可见的题干文字；没有题干则留空",
+  "chapter_evidence":"原样引用用于判断章节的可见题干文字，使用中文引号；没有则留空"
+}
+
+章节识别规则:
+""" + CHAPTER_RECOGNITION_RULES + """
 
 荷载类型只有三种:
 - 集中: 集中力，如 10kN, P, F=20kN, F1=40kN, ql, 2P

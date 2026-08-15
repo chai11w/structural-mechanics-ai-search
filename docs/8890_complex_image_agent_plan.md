@@ -130,10 +130,11 @@ Agent 的终点不是答案，而是零个、一个或多个经过校验的 `Sea
 
 ### 6.5 A3 观察与 A2 正式识别分层
 
-- A3 负责完整页面独有的信息：题目/子题归属、图的角色、公共题干、裁剪范围和逐单元章节提示。
+- A3 拆题观察只负责完整页面独有的信息：题目/子题归属、图的角色、公共题干和裁剪范围，不在同一个 Prompt 中判断章节。
+- 独立章节观察按题目组调用既有章节规则、归一化和证据保护；同一公共题干组只调用一次，不同题目组最多两路并发，结果再作为逐单元弱提示。
 - A3 可以为了分组而观察荷载或结构，但这些字段只用于解释和校验，不是正式检索输入。
 - A2 继续使用现有 Prompt 和代码正式识别选中裁剪图的荷载、章节，并继续现有结构类型、路由、粗筛、尺寸过滤和视觉重排。
-- 不能复制一份 A2 Prompt 到 A3。需要共享章节判断时，应调用同一 Prompt 构造器、归一化和章节证据保护代码。
+- 不能复制一份 A2 章节规则到 A3。公共章节规则必须只有一个代码来源，A3 的模型结果仍须经过同一归一化和章节证据保护代码。
 
 ### 6.6 内部推理不向用户展示
 
@@ -325,14 +326,17 @@ Prompt 的任务是“盘点图片”，不是“自由处理图片”。必须�
 
 ### v1 固定步骤
 
-1. `inspect_full_image`：识别题号、公共题干、图的角色和关系；
-2. `detect_regions`：用现有 OpenCV 候选块提供区域，不把模型 bbox 直接视为可靠裁剪；
+1. `detect_regions`：用现有 OpenCV 候选块提供区域，不把模型 bbox 直接视为可靠裁剪；
+2. `inspect_full_image`：结合完整原图和编号联系表识别题号、公共题干、图的角色和关系，不判断章节；
 3. `bind_question_diagram`：建立题目组、子题和原结构图绑定；
-4. `crop_region`：只裁经过绑定的原结构图；
-5. `validate_search_unit`：检查完整性、清晰度、其他题目污染和辅助图误选；
-6. `decide_unit_count`：代码产生 `no_unit/single_ready/multiple_wait_choice/uncertain`；
-7. `present_unit_choice`：多个单元时展示题号和裁剪预览并停止；
-8. `handoff_selected_unit_to_a2`：只交接唯一或用户选中的一个单元。
+4. `recognize_group_chapter`：只对有可见题干且包含原结构的题目组调用独立章节识别；同组一次、不同组最多两路并发；
+5. `crop_region`：只裁经过绑定的原结构图；
+6. `validate_search_unit`：检查完整性、清晰度、其他题目污染和辅助图误选；
+7. `decide_unit_count`：代码产生 `no_unit/single_ready/multiple_wait_choice/uncertain`；
+8. `present_unit_choice`：多个单元时展示题号和裁剪预览并停止；
+9. `handoff_selected_unit_to_a2`：只交接唯一或用户选中的一个单元。
+
+并发属于编排器而不是未来 ReAct Planner。每个并发结果必须按 `task_id/group_id/unit_id` 回填并经过提交栅栏；Agent 只观察汇合后的结构化结果。禁止多个未选中单元并发进入 A2。
 
 ### 禁止动作
 
@@ -557,9 +561,11 @@ OpenCV 负责确定性区域检测和实际裁剪，模型负责语义角色与�
 
 - 新增 `tiku_agent/image_decomposer.py`，固定执行候选块检测、双图结构化观察、题目分组、角色绑定、裁剪、质量校验和单元数状态判定；不导入或调用 A2；
 - 新增离线入口 `scripts/run_tiku_agent_8892.py`，默认状态、候选图、裁剪图和脱敏日志位于 `.tmp_tiku_agent_a3_8892/`；Phase 2 暂不监听 HTTP 端口，选题服务留到 Phase 3；
-- 章节提示继续经过现有 `normalize_chapter_hint`、`normalize_chapter_confidence` 和 `guard_chapter_prediction`，没有可见题干时强制回到 `unknown`；
+- 拆题 Prompt 已升级为 `a3-decomposition-v2`，只输出题目组、可见公共题干和图块角色；即使模型额外返回章节字段，解析器也不采信；
+- 新增独立题目组章节观察，共享现有章节规则、`normalize_chapter_hint`、`normalize_chapter_confidence` 和 `guard_chapter_prediction`；同组只调用一次，不同组最多两路并发，没有可见题干时跳过模型并保持 `unknown`；
+- 章节调用失败不改变可靠拆图的 `single_ready/multiple_wait_choice`，仅记录 `chapter_recognition_failed` 并把该组提示保持为 `unknown`，后续仍按 A2 合并表处理；
 - 已用仓库内共用题干样本完成本地 OpenCV 候选块检查，未向外部模型发送图片；Qwen 双图请求使用 mock 验证；
-- 新增 10 项 A3 测试，项目完整测试 `525` 项通过。未经单独授权，不使用用户原图进行真实付费拆解验证。
+- A3 测试已扩展到 17 项，覆盖拆题/章节 Prompt 分离、旧章节规则共享、同组去重、不同组两路并发、费用上下文传播、无题干跳过和脱敏日志；项目完整测试 `532` 项通过。未经单独授权，不使用用户原图进行真实付费拆解验证。
 
 ### A3 Phase 3：单元数量路由与选题交互
 
@@ -716,7 +722,7 @@ A3 拆解准确率、端到端成功率、P95 延迟和单次费用阈值，要�
 
 | 现有实现 | A3 v1 如何使用 | 不能直接沿用的部分 |
 | --- | --- | --- |
-| `scripts/classify_question_bank.py` 的章节规则、归一化和证据保护 | 抽成同一公共实现，供整页提示与 A2 裁剪图识别调用 | 不复制 Prompt 文本形成第二套章节规则 |
+| `scripts/classify_question_bank.py` 的章节规则、归一化和证据保护 | 公共章节规则供 A3 独立题目组识别与 A2 原识别共同引用 | 不在拆题 Prompt 中顺便判断章节或复制第二套章节规则 |
 | `tiku_shared/multi_question.py` 的 OpenCV 区域发现和安全裁剪 | 作为候选区域与实际裁剪工具 | 不按图块顺序强行绑定；不在裁剪失败时退回仅荷载搜索 |
 | `prepare_question_units`、`AgentState.set_questions`、`select_question` | 复用题号列表、等待选择和选择状态语义 | 不把 A3 预观察荷载直接送入 `_run_search` |
 | A2 `_start_image_search(..., prechecked_single=True)` | 作为唯一或选中裁剪图的正式识别入口 | 不用 `chapter_override` 静默覆盖；新增弱提示并执行章节合并 |

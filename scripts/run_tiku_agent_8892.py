@@ -13,8 +13,10 @@ if str(BASE) not in sys.path:
 
 from tiku_agent.image_contracts import A3PageObservation
 from tiku_agent.image_decomposer import (
+    A3ChapterObserver,
     A3DecompositionRuntime,
     A3Observer,
+    QwenA3ChapterObserver,
     QwenA3Observer,
     parse_a3_observation,
 )
@@ -28,13 +30,23 @@ def build_runtime(
     runtime_dir: str | Path = DEFAULT_RUNTIME_DIR,
     *,
     observer: A3Observer | None = None,
+    chapter_observer: A3ChapterObserver | None = None,
     model: str = "qwen3.7-plus",
     timeout_seconds: float = 120.0,
+    max_chapter_workers: int = 2,
+    enable_chapter_recognition: bool = True,
 ) -> A3DecompositionRuntime:
     return A3DecompositionRuntime(
         runtime_dir,
         observer=observer
         or QwenA3Observer(model=model, timeout_seconds=timeout_seconds),
+        chapter_observer=(
+            chapter_observer
+            or QwenA3ChapterObserver(model=model, timeout_seconds=timeout_seconds)
+            if enable_chapter_recognition
+            else None
+        ),
+        max_chapter_workers=max_chapter_workers,
     )
 
 
@@ -58,6 +70,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model", default="qwen3.7-plus")
     parser.add_argument("--timeout-seconds", type=float, default=120.0)
+    parser.add_argument("--max-chapter-workers", type=int, choices=(1, 2), default=2)
     parser.add_argument(
         "--output-json",
         type=Path,
@@ -72,6 +85,8 @@ def main() -> int:
         args.runtime_dir,
         model=args.model,
         timeout_seconds=args.timeout_seconds,
+        max_chapter_workers=args.max_chapter_workers,
+        enable_chapter_recognition=args.observation_json is None,
     )
     observation = (
         load_observation(args.observation_json) if args.observation_json else None

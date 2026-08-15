@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,7 @@ except ImportError:  # pragma: no cover - guarded at runtime.
 from scripts.classify_question_bank import (
     DEFAULT_ENDPOINT,
     DEFAULT_MODEL,
+    build_chapter_recognition_prompt,
     guard_chapter_prediction,
     normalize_chapter_confidence,
     normalize_chapter_hint,
@@ -34,17 +36,15 @@ from scripts.classify_question_bank import (
     find_diagram_blocks_cv,
 )
 from tiku_shared.image_payload import image_to_model_data_url
-from tiku_shared.model_costs import timed_model_call
+from tiku_shared.model_costs import submit_with_model_cost_context, timed_model_call
 
 from .image_contracts import (
-    A3_CHAPTER_SCOPES,
     A3_DECOMPOSITION_SCHEMA_VERSION,
     A3_DIAGRAM_ROLES,
     A3DecompositionResult,
     A3DiagramObservation,
     A3PageObservation,
     ChapterHint,
-    ChapterScope,
     DiagramRole,
     ProblemGroup,
     SearchUnit,
@@ -93,8 +93,34 @@ class A3Observer(Protocol):
     ) -> A3ObserverResult: ...
 
 
+@dataclass(frozen=True)
+class A3ChapterObserverResult:
+    hint: ChapterHint
+    model: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+class A3ChapterObserver(Protocol):
+    def recognize(
+        self,
+        image_path: Path,
+        group: ProblemGroup,
+    ) -> A3ChapterObserverResult: ...
+
+
+@dataclass(frozen=True)
+class A3ChapterBatchResult:
+    attempted_group_count: int = 0
+    succeeded_group_count: int = 0
+    failed_group_count: int = 0
+    total_tokens: int = 0
+    reason_codes: tuple[str, ...] = ()
+
+
 def parse_a3_observation(payload: object) -> A3PageObservation:
-    """Strictly parse model JSON and reuse the existing chapter guard."""
+    """Parse grouping and roles without trusting model-proposed chapters."""
 
     if not isinstance(payload, dict):
         raise ValueError("A3 observation must be an object")
@@ -112,20 +138,6 @@ def parse_a3_observation(payload: object) -> A3PageObservation:
         if not isinstance(raw, dict):
             raise ValueError("problem group must be an object")
         source_text = str(raw.get("shared_stem_text") or "").strip()
-        chapter_evidence = str(raw.get("chapter_evidence") or "").strip()
-        chapter_value = normalize_chapter_hint(raw.get("chapter_hint"))
-        chapter_confidence = normalize_chapter_confidence(
-            raw.get("chapter_confidence")
-        )
-        chapter_value, chapter_confidence, chapter_evidence = guard_chapter_prediction(
-            chapter_value,
-            chapter_confidence,
-            chapter_evidence,
-            source_text,
-        )
-        scope_text = str(raw.get("chapter_scope") or "question_group").strip()
-        if scope_text not in A3_CHAPTER_SCOPES:
-            raise ValueError(f"unsupported chapter scope: {scope_text}")
         member_labels = raw.get("member_labels")
         if not isinstance(member_labels, list):
             raise ValueError("problem group member_labels must be an array")
@@ -137,13 +149,6 @@ def parse_a3_observation(payload: object) -> A3PageObservation:
                 ).strip(),
                 member_labels=tuple(str(value).strip() for value in member_labels),
                 shared_stem_text=source_text,
-                shared_chapter_hint=ChapterHint(
-                    value=chapter_value,
-                    scope=cast(ChapterScope, scope_text),
-                    source_text=source_text,
-                    evidence=chapter_evidence,
-                    confidence=chapter_confidence,
-                ),
             )
         )
 
@@ -192,11 +197,7 @@ def build_a3_observation_prompt(candidate_count: int) -> str:
     "group_id":"g1",
     "parent_question_label":"5-2",
     "member_labels":["(a)","(b)"],
-    "shared_stem_text":"原样抄写实际可见的公共题干，没有则留空",
-    "chapter_hint":"2静定结构|3静定结构位移|4力法|5位移法|6力矩分配|7矩阵位移|8影响线|unknown",
-    "chapter_scope":"question_group|search_unit|page|unknown",
-    "chapter_confidence":0.0,
-    "chapter_evidence":"原样引用可见文字，没有则留空"
+    "shared_stem_text":"原样抄写实际可见的公共题干，没有则留空"
   }}],
   "diagrams":[{{
     "block_id":1,
@@ -214,8 +215,9 @@ def build_a3_observation_prompt(candidate_count: int) -> str:
 - 原结构 + 内力图 + 单位力图属于一个可检索单元；a/b/c/d 中多个独立原结构属于多个可选择单元。
 - 同页不等于同题。只有题号、共享题干和版面关系明确时才能放入同一个 group。
 - original_structure 必须填写 group_id 和 question_label，并且 label 必须出现在该 group 的 member_labels 中。
-- 章节只根据实际可见题干或方法文字判断，不能根据结构外形、支座、EI 或荷载猜测。没有明确文字时输出 unknown，置信度不高于 0.5。
+- shared_stem_text 只原样抄写实际可见题干，不判断章节，不填写方法推断；没有可见题干时留空。
 - 不输出荷载和结构类型；这些由 A2 对选中裁剪图重新识别。
+- 不输出 chapter_hint、chapter_confidence、chapter_evidence 或 chapter_scope；章节由独立识别器处理。
 - 不输出 Markdown 或解释。"""
 
 
@@ -318,6 +320,207 @@ class QwenA3Observer:
         )
 
 
+def parse_a3_chapter_hint(payload: object, group: ProblemGroup) -> ChapterHint:
+    """Apply the existing chapter normalization and evidence guard."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("chapter observation must be an object")
+    chapter_value = normalize_chapter_hint(payload.get("chapter_hint"))
+    chapter_confidence = normalize_chapter_confidence(
+        payload.get("chapter_confidence")
+    )
+    chapter_evidence = str(payload.get("chapter_evidence") or "").strip()
+    if chapter_value == "unknown" and not chapter_evidence:
+        chapter_evidence = "未识别到明确章节线索"
+    chapter_value, chapter_confidence, chapter_evidence = guard_chapter_prediction(
+        chapter_value,
+        chapter_confidence,
+        chapter_evidence,
+        group.shared_stem_text,
+    )
+    return ChapterHint(
+        value=chapter_value,
+        scope="question_group",
+        source_text=group.shared_stem_text,
+        evidence=chapter_evidence,
+        confidence=chapter_confidence,
+    )
+
+
+class QwenA3ChapterObserver:
+    """Recognize one problem group's chapter with the shared chapter prompt."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        endpoint: str = DEFAULT_ENDPOINT,
+        model: str = DEFAULT_MODEL,
+        timeout_seconds: float = 120.0,
+    ) -> None:
+        self.api_key = str(api_key or os.environ.get("DASHSCOPE_API_KEY", "")).strip()
+        self.endpoint = str(endpoint).strip() or DEFAULT_ENDPOINT
+        self.model = str(model).strip() or DEFAULT_MODEL
+        self.timeout_seconds = max(1.0, float(timeout_seconds))
+
+    def recognize(
+        self,
+        image_path: Path,
+        group: ProblemGroup,
+    ) -> A3ChapterObserverResult:
+        if not self.api_key:
+            raise A3DecompositionError("dashscope_not_configured")
+        group_context = {
+            "parent_question_label": group.parent_question_label,
+            "member_labels": list(group.member_labels),
+            "visible_problem_text": group.shared_stem_text,
+        }
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": build_chapter_recognition_prompt(),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_to_model_data_url(image_path)
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": (
+                                "只判断下面这个题目组，其他题目文字不得作为证据。"
+                                + json.dumps(group_context, ensure_ascii=False)
+                                + "。只输出JSON。"
+                            ),
+                        },
+                    ],
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 500,
+            "enable_thinking": False,
+        }
+        request = urllib.request.Request(
+            self.endpoint,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        def request_data() -> dict:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout_seconds
+            ) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        data = timed_model_call(
+            request_data,
+            provider="dashscope",
+            model=self.model,
+            call_type="qwen_a3_chapter_recognition",
+            usage_getter=lambda value: value.get("usage", {}),
+            request_id_getter=lambda value: str(
+                value.get("request_id") or value.get("id") or ""
+            ),
+        )
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise A3DecompositionError("invalid_chapter_response") from exc
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False)
+        try:
+            hint = parse_a3_chapter_hint(parse_model_json(content), group)
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise A3DecompositionError("invalid_chapter_schema") from exc
+        usage = data.get("usage") if isinstance(data, dict) else {}
+        usage = usage if isinstance(usage, dict) else {}
+        return A3ChapterObserverResult(
+            hint=hint,
+            model=self.model,
+            prompt_tokens=_non_negative_int(usage.get("prompt_tokens")),
+            completion_tokens=_non_negative_int(usage.get("completion_tokens")),
+            total_tokens=_non_negative_int(usage.get("total_tokens")),
+        )
+
+
+def recognize_group_chapters(
+    image_path: Path,
+    observation: A3PageObservation,
+    observer: A3ChapterObserver,
+    *,
+    max_workers: int = 2,
+) -> tuple[A3PageObservation, A3ChapterBatchResult]:
+    """Recognize independent groups concurrently and merge in stable order."""
+
+    original_group_ids = {
+        diagram.group_id
+        for diagram in observation.diagrams
+        if diagram.role == "original_structure"
+    }
+    targets = [
+        group
+        for group in observation.groups
+        if group.group_id in original_group_ids and group.shared_stem_text.strip()
+    ]
+    if not targets:
+        return observation, A3ChapterBatchResult()
+
+    worker_count = min(max(1, int(max_workers)), 2, len(targets))
+    hints: dict[str, ChapterHint] = {}
+    failures: list[str] = []
+    total_tokens = 0
+    with ThreadPoolExecutor(
+        max_workers=worker_count,
+        thread_name_prefix="a3-chapter",
+    ) as executor:
+        futures = {
+            submit_with_model_cost_context(
+                executor, observer.recognize, image_path, group
+            ): group.group_id
+            for group in targets
+        }
+        for future in as_completed(futures):
+            group_id = futures[future]
+            try:
+                chapter_result = future.result()
+            except Exception:  # noqa: BLE001 - one group must not block other groups.
+                failures.append(group_id)
+                continue
+            hints[group_id] = chapter_result.hint
+            total_tokens += chapter_result.total_tokens
+
+    enriched = replace(
+        observation,
+        groups=tuple(
+            replace(
+                group,
+                shared_chapter_hint=hints.get(
+                    group.group_id, group.shared_chapter_hint
+                ),
+            )
+            for group in observation.groups
+        ),
+    )
+    reason_codes = ("chapter_recognition_failed",) if failures else ()
+    return enriched, A3ChapterBatchResult(
+        attempted_group_count=len(targets),
+        succeeded_group_count=len(hints),
+        failed_group_count=len(failures),
+        total_tokens=total_tokens,
+        reason_codes=reason_codes,
+    )
+
+
 def detect_candidate_blocks(image_path: Path, output_dir: Path) -> CandidateSet:
     """Create deterministic candidate crops and a numbered contact sheet."""
 
@@ -367,6 +570,8 @@ def build_decomposition_result(
     observation: A3PageObservation,
     candidates: tuple[CandidateBlock, ...],
     output_dir: Path,
+    *,
+    non_blocking_reason_codes: tuple[str, ...] = (),
 ) -> A3DecompositionResult:
     """Bind validated original-structure blocks to SearchUnits."""
 
@@ -441,7 +646,7 @@ def build_decomposition_result(
             )
         )
 
-    reasons = tuple(dict.fromkeys(reason_codes))
+    reasons = tuple(dict.fromkeys((*reason_codes, *non_blocking_reason_codes)))
     if ambiguous:
         return A3DecompositionResult(
             status="uncertain",
@@ -458,12 +663,12 @@ def build_decomposition_result(
         return A3DecompositionResult(
             status="single_ready",
             search_units=tuple(units),
-            reason_codes=("decomposition_validated",),
+            reason_codes=("decomposition_validated", *reasons),
         )
     return A3DecompositionResult(
         status="multiple_wait_choice",
         search_units=tuple(units),
-        reason_codes=("multiple_units_require_selection",),
+        reason_codes=("multiple_units_require_selection", *reasons),
     )
 
 
@@ -481,6 +686,7 @@ class A3DecompositionLogger:
         candidate_count: int,
         seconds: float,
         observer: A3ObserverResult | None = None,
+        chapter_batch: A3ChapterBatchResult | None = None,
     ) -> None:
         record = {
             "schema_version": result.schema_version,
@@ -494,6 +700,16 @@ class A3DecompositionLogger:
             "prompt_tokens": observer.prompt_tokens if observer else 0,
             "completion_tokens": observer.completion_tokens if observer else 0,
             "total_tokens": observer.total_tokens if observer else 0,
+            "chapter_group_count": (
+                chapter_batch.attempted_group_count if chapter_batch else 0
+            ),
+            "chapter_success_count": (
+                chapter_batch.succeeded_group_count if chapter_batch else 0
+            ),
+            "chapter_failure_count": (
+                chapter_batch.failed_group_count if chapter_batch else 0
+            ),
+            "chapter_total_tokens": chapter_batch.total_tokens if chapter_batch else 0,
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
@@ -509,6 +725,8 @@ class A3DecompositionRuntime:
         runtime_dir: str | Path,
         *,
         observer: A3Observer | None = None,
+        chapter_observer: A3ChapterObserver | None = None,
+        max_chapter_workers: int = 2,
         detector: Callable[[Path, Path], CandidateSet] = detect_candidate_blocks,
     ) -> None:
         self.root = Path(runtime_dir).resolve()
@@ -518,6 +736,8 @@ class A3DecompositionRuntime:
         for directory in (self.tasks_dir, self.incoming_dir, self.sessions_dir):
             directory.mkdir(parents=True, exist_ok=True)
         self.observer = observer or QwenA3Observer()
+        self.chapter_observer = chapter_observer
+        self.max_chapter_workers = min(max(1, int(max_chapter_workers)), 2)
         self.detector = detector
         self.logger = A3DecompositionLogger(self.root / "a3_decomposition.jsonl")
 
@@ -531,6 +751,7 @@ class A3DecompositionRuntime:
         task_dir = self.tasks_dir / uuid4().hex
         candidates: CandidateSet | None = None
         observer_result: A3ObserverResult | None = None
+        chapter_batch: A3ChapterBatchResult | None = None
         try:
             source = Path(image_path).resolve(strict=True)
             candidates = self.detector(source, task_dir / "candidates")
@@ -539,8 +760,20 @@ class A3DecompositionRuntime:
                     source, candidates.blocks, candidates.contact_sheet_path
                 )
                 observation = observer_result.observation
+            if self.chapter_observer is not None:
+                observation, chapter_batch = recognize_group_chapters(
+                    source,
+                    observation,
+                    self.chapter_observer,
+                    max_workers=self.max_chapter_workers,
+                )
             result = build_decomposition_result(
-                observation, candidates.blocks, task_dir / "units"
+                observation,
+                candidates.blocks,
+                task_dir / "units",
+                non_blocking_reason_codes=(
+                    chapter_batch.reason_codes if chapter_batch else ()
+                ),
             )
         except A3DecompositionError as exc:
             result = A3DecompositionResult(
@@ -562,6 +795,7 @@ class A3DecompositionRuntime:
             candidate_count=len(candidates.blocks) if candidates else 0,
             seconds=time.perf_counter() - started,
             observer=observer_result,
+            chapter_batch=chapter_batch,
         )
         return result
 

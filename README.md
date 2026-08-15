@@ -129,13 +129,13 @@ python -B scripts/run_tiku_agent_8891.py
 
 默认访问 `http://127.0.0.1:8891`，独立 Cookie 为 `tiku_agent_8891_session`，运行数据位于 `.tmp_tiku_agent_v2_validation_8891/`。`8890` 继续保持影子线路，`8790` 不受影响；本入口暂不处理 A3 自动拆解，也不接入正式身份或公网流量。
 
-8892 当前是 A3 Phase 2 离线拆解入口，只做 OpenCV 候选块、题目分组、图角色判断、裁剪和校验，不调用 A2，也不监听 HTTP 端口。默认运行数据位于 `.tmp_tiku_agent_a3_8892/`：
+8892 当前是 A3 Phase 2 离线拆解入口，只做 OpenCV 候选块、题目分组、图角色判断、独立题目组章节提示、裁剪和校验，不调用 A2，也不监听 HTTP 端口。拆题 Prompt 不判断章节；章节识别共享现有章节规则，同一公共题干组只调用一次，不同题目组最多两路并发。默认运行数据位于 `.tmp_tiku_agent_a3_8892/`：
 
 ```powershell
 python -B scripts/run_tiku_agent_8892.py --image "D:\path\to\complex-question.jpg"
 ```
 
-本地调试可用 `--observation-json` 传入已保存的结构化观察，从而不调用外部模型。只有状态为 `single_ready` 或用户后续从 `multiple_wait_choice` 中选定一个单元，才允许在 Phase 4 接入 A2；当前入口不会搜索题库。
+本地调试可用 `--observation-json` 传入已保存的结构化观察，从而跳过拆题和章节外部模型调用；这时章节提示保持 `unknown`。只有状态为 `single_ready` 或用户后续从 `multiple_wait_choice` 中选定一个单元，才允许在 Phase 4 接入 A2；当前入口不会搜索题库。
 
 不传 `--observation-json` 时，入口会把原图和本地生成的候选块联系表发送给千问。未经图片所有者授权，不要用该模式评测用户原图。
 
