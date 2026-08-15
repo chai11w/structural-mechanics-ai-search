@@ -19,6 +19,7 @@
       "category": "unrecoverable_quality",
       "minimum": 2,
       "available": 1,
+      "pending_review": 1,
       "needs_user_sample": true,
       "notes": "Too blurry, truncated or damaged to continue."
     },
@@ -113,6 +114,24 @@
       "notes": "Copyright-safe abstract landscape with no text or structure-mechanics content."
     },
     {
+      "id": "10",
+      "source_kind": "user_provided_fixture",
+      "source_ref": "user-file:10.jpg",
+      "relative_path": "images/10.jpg",
+      "sha256": "c0bc6c132adfb0a0570cf1d895a0c67a9c35ae1f5d8b416203bec8c8e38f7010",
+      "width": 173,
+      "height": 225,
+      "expected_route": null,
+      "label_status": "needs_human_review",
+      "question_count": null,
+      "subquestion_count": null,
+      "diagram_count": 1,
+      "diagram_roles": ["unknown"],
+      "actual_loads": [],
+      "quality_flags": ["cropped", "partial_structure", "unbound_context"],
+      "notes": "Second user-provided cropped/complex residual image; route intentionally awaits confirmation."
+    },
+    {
       "id": "21",
       "source_kind": "user_provided_fixture",
       "source_ref": "user-file:21.jpg",
@@ -156,7 +175,7 @@
         {"subquestion": "d", "type": "均布", "raw": "q"}
       ],
       "quality_flags": ["partial_subfigures_b_and_e", "handwritten_marks"],
-      "notes": "One shared stem with a-e structures; b and e are only partly visible, so automatic A2 is unsafe."
+      "notes": "One shared stem with a-e structures and other question remnants; b and e are partly visible, so automatic A2 is unsafe."
     },
     {
       "id": "f830caaa43dab06a877a77ff205d3bc3",
