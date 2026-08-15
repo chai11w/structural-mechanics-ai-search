@@ -1,10 +1,22 @@
 import unittest
 
 from tiku_agent.image_contracts import ImageTriageObservation
-from tiku_agent.image_triage import build_handoff, finalize_route, parse_route_candidate
+from tiku_agent.image_triage import (
+    build_handoff,
+    finalize_route,
+    load_triage_prompt,
+    parse_route_candidate,
+)
 
 
 class ImageTriageTest(unittest.TestCase):
+    def test_prompt_does_not_treat_detached_load_drawing_as_a_second_diagram(self):
+        prompt = load_triage_prompt()
+
+        self.assertIn("不要求荷载箭头或分布线必须与杆件直接接触", prompt)
+        self.assertIn("荷载或尺寸采用分离画法但归属清楚时仍进入 A2", prompt)
+        self.assertIn("不得仅凭荷载、尺寸或文字区域与杆件没有接触就判为 A3", prompt)
+
     def test_parse_route_requires_a_standalone_recommendation(self):
         self.assertEqual(parse_route_candidate("建议路线：A3\n原因：一题多图"), "A3")
         self.assertEqual(parse_route_candidate("A2：单题且完整"), "A2")
