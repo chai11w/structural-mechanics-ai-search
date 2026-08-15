@@ -4,7 +4,7 @@
 
 项目重点不是简单的图片识别，而是把“题图识别、章节判断、荷载归一化、题库路由、相似度粗筛、视觉复筛、答案定位”串成一条可落地的工作流。
 
-> `8890` C 端复杂题图预检、受约束拆解 Agent、服务端取消和后续 `8794` 框架学习线的完整开发规范见 [`docs/8890_complex_image_agent_plan.md`](docs/8890_complex_image_agent_plan.md)。继续该方向前先读取该文档；当前在 `8891` 验证 Stage 3 权威分流 MVP，不要直接开发 Planner、LangGraph 或 DeepSeek Harness。
+> C 端复杂题图 A1/A2/A3 的完整开发规范见 [`docs/8890_complex_image_agent_plan.md`](docs/8890_complex_image_agent_plan.md)。`8891` 保留权威分流 MVP；A3 将在隔离 `8892` 按“识别分组与裁剪 -> 单个直达 A2 / 多个先选题 -> 选中单元完整走 A2”的固定流程开发。第一版不直接开发自由 Planner、LangGraph 或 DeepSeek Harness。
 
 ## 项目亮点
 
