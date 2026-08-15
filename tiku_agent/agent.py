@@ -126,7 +126,11 @@ class TikuSearchAgent:
         self._turn_protocol: dict[str, Any] = {}
 
     def handle_image(
-        self, image_path: str | Path, *, search_id: str = ""
+        self,
+        image_path: str | Path,
+        *,
+        search_id: str = "",
+        prechecked_single: bool = False,
     ) -> AgentResponse:
         self._incoming_search_id = str(search_id or "").strip()
         self._turn_protocol = {}
@@ -137,7 +141,12 @@ class TikuSearchAgent:
             event_type="image",
             llm_client=self._v2_llm_client(),
         )
-        return self._dispatch_v2(decision, context, image_path=image_path)
+        return self._dispatch_v2(
+            decision,
+            context,
+            image_path=image_path,
+            prechecked_single=prechecked_single,
+        )
 
     def handle_text(self, text: str) -> AgentResponse:
         self._incoming_search_id = ""
@@ -223,6 +232,7 @@ class TikuSearchAgent:
         context: ConversationContextV2,
         *,
         image_path: str | Path | None = None,
+        prechecked_single: bool = False,
     ) -> AgentResponse:
         self.state.remember_intent(decision.to_dict())
         if is_reply_shell_action(decision.action):
@@ -231,6 +241,11 @@ class TikuSearchAgent:
                 state=self.state.to_dict(),
                 intent=decision.action,
                 protocol=self._reply_shell_protocol(decision),
+            )
+        if prechecked_single and decision.action == "search_image":
+            return self._start_image_search(
+                str(image_path or ""),
+                prechecked_single=True,
             )
         return self._dispatch(
             adapt_decision_v2(decision, image_path=image_path),
@@ -297,6 +312,7 @@ class TikuSearchAgent:
         image_path: str,
         *,
         chapter_override: str = "",
+        prechecked_single: bool = False,
     ) -> AgentResponse:
         if not image_path:
             return self._fail("没有收到图片路径。")
@@ -309,7 +325,14 @@ class TikuSearchAgent:
         )
         if pending_chapter:
             self.state.set_pending_chapter(pending_chapter)
-        multi = self.tools.analyze_multi_image(image_path, config=self.config)
+        if prechecked_single:
+            multi = ToolResult.success(
+                code="TRIAGE_SINGLE_QUESTION_CONFIRMED",
+                data={"is_multi": False, "single_analysis": None},
+                next_state="READY_FOR_SINGLE_ANALYSIS",
+            )
+        else:
+            multi = self.tools.analyze_multi_image(image_path, config=self.config)
         self._raise_if_image_search_cancelled()
         stopped = self._stop_for_tool_result(multi, allow_partial=True)
         if stopped is not None:

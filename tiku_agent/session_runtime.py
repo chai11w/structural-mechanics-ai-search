@@ -185,6 +185,7 @@ class AgentSessionRuntime:
         budget_policy: BudgetPolicy | None = None,
         external_load_screen: ExternalLoadScreen | None = None,
         external_load_timeout_seconds: float = 15.0,
+        image_triage_authority: object | None = None,
     ) -> None:
         self.store = store
         self.artifacts = artifacts or SessionArtifacts()
@@ -209,6 +210,7 @@ class AgentSessionRuntime:
         self.external_load_timeout_seconds = max(
             0.01, float(external_load_timeout_seconds)
         )
+        self.image_triage_authority = image_triage_authority
         self._image_executor = (
             ThreadPoolExecutor(max_workers=8, thread_name_prefix="tiku-image-race")
             if external_load_screen is not None
@@ -253,6 +255,15 @@ class AgentSessionRuntime:
                     request_id=clean_request_id,
                     search_id=search_id,
                 )
+            if self.image_triage_authority is not None:
+                return self._run_authoritative_image(
+                    clean_session_id,
+                    persisted_image,
+                    identity_key=identity_key,
+                    progress=progress,
+                    request_id=clean_request_id,
+                    search_id=search_id,
+                )
             return self._run(
                 clean_session_id,
                 "image",
@@ -270,6 +281,67 @@ class AgentSessionRuntime:
             search_id=search_id,
             identity_key=identity_key,
             progress=progress,
+        )
+
+    def _run_authoritative_image(
+        self,
+        session_id: str,
+        image_path: Path,
+        *,
+        identity_key: str,
+        progress: ProgressReporter | None,
+        request_id: str,
+        search_id: str,
+    ) -> AgentResponse:
+        """Run 8891 triage inside the normal admission, logging and cost scope."""
+
+        def handle(agent: TikuSearchAgent) -> AgentResponse:
+            if progress is not None:
+                progress("triage", "正在检查图片并决定处理路线…")
+            try:
+                decision = self.image_triage_authority.decide(image_path)  # type: ignore[union-attr]
+            except Exception as exc:
+                raise AgentProtocolError(
+                    "图片检查暂时失败，请稍后重试。",
+                    code="SERVICE_UNAVAILABLE",
+                ) from exc
+            handoff = decision.handoff
+            if handoff.route == "A2":
+                if progress is not None:
+                    progress("searching", "图片适合直接检索，正在识别题目信息…")
+                return agent.handle_image(
+                    image_path,
+                    search_id=search_id,
+                    prechecked_single=True,
+                )
+
+            state = agent.state
+            state.start_search(str(image_path), search_id=search_id)
+            state.current_route = handoff.route
+            state.last_error = decision.reply
+            state.set_candidates([])
+            code = (
+                "TRIAGE_A1_STOPPED"
+                if handoff.route == "A1"
+                else "TRIAGE_A3_REQUIRES_REUPLOAD"
+            )
+            protocol = RequestProtocol.from_code(code, search_id=search_id).to_dict()
+            return AgentResponse(
+                text=decision.reply,
+                state=state.to_dict(),
+                intent="image_triage_stop",
+                reply_source=decision.reply_source,
+                fallback_reason=decision.fallback_reason,
+                protocol=protocol,
+            )
+
+        return self._run(
+            session_id,
+            "image",
+            handle,
+            identity_key=identity_key,
+            progress=progress,
+            request_id=request_id,
         )
 
     def _run_screened_image(

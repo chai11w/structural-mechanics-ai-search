@@ -117,6 +117,18 @@ PROTOCOL_REASONS: dict[str, ProtocolReason] = {
         False,
         RequestAction.RETRY_UPLOAD,
     ),
+    "TRIAGE_A1_STOPPED": ProtocolReason(
+        RequestStatus.NEEDS_INPUT,
+        RequestLayer.TOOL,
+        False,
+        RequestAction.RETRY_UPLOAD,
+    ),
+    "TRIAGE_A3_REQUIRES_REUPLOAD": ProtocolReason(
+        RequestStatus.NEEDS_INPUT,
+        RequestLayer.TOOL,
+        False,
+        RequestAction.RETRY_UPLOAD,
+    ),
     "LOGIN_REQUIRED": ProtocolReason(
         RequestStatus.NEEDS_INPUT, RequestLayer.LOGIN, False, RequestAction.RELOGIN
     ),

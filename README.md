@@ -4,7 +4,7 @@
 
 项目重点不是简单的图片识别，而是把“题图识别、章节判断、荷载归一化、题库路由、相似度粗筛、视觉复筛、答案定位”串成一条可落地的工作流。
 
-> `8890` C 端复杂题图预检、受约束拆解 Agent、服务端取消和后续 `8794` 框架学习线的完整开发规范见 [`docs/8890_complex_image_agent_plan.md`](docs/8890_complex_image_agent_plan.md)。继续该方向前先读取该文档，当前只推进 Stage 2 的预检影子观察，不要直接开发 Planner、LangGraph 或 DeepSeek Harness。
+> `8890` C 端复杂题图预检、受约束拆解 Agent、服务端取消和后续 `8794` 框架学习线的完整开发规范见 [`docs/8890_complex_image_agent_plan.md`](docs/8890_complex_image_agent_plan.md)。继续该方向前先读取该文档；当前在 `8891` 验证 Stage 3 权威分流 MVP，不要直接开发 Planner、LangGraph 或 DeepSeek Harness。
 
 ## 项目亮点
 
@@ -120,6 +120,14 @@ python -B scripts/run_tiku_agent_8890.py
 ```
 
 默认访问 `http://127.0.0.1:8890`。session 数据库、上传/媒体文件、incoming 临时图片、任务日志、费用、反馈状态和影子记录统一位于 `.tmp_tiku_agent_v2_validation_8890/`；影子记录文件是 `triage_shadow.jsonl`，临时副本完成观察后立即删除。独立 Cookie 为 `tiku_agent_8890_session`。原型默认不接入 8795 身份、邀请码或生产额度，不应绑定公网 Tunnel。回退时可添加 `--disable-image-triage-shadow`，不需要修改或重启其他端口。
+
+8891 是权威分流 MVP：A1/A3 把上游观察和线路边界交给第二次千问生成用户说明，A2 跳过旧多题判断并进入现有精确识别和检索；旧并行外荷载检查在该入口关闭：
+
+```powershell
+python -B scripts/run_tiku_agent_8891.py
+```
+
+默认访问 `http://127.0.0.1:8891`，独立 Cookie 为 `tiku_agent_8891_session`，运行数据位于 `.tmp_tiku_agent_v2_validation_8891/`。`8890` 继续保持影子线路，`8790` 不受影响；本入口暂不处理 A3 自动拆解，也不接入正式身份或公网流量。
 
 需要临时验证旧固定行为时，可显式关闭相应可回退能力：
 

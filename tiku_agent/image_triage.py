@@ -10,6 +10,7 @@ import re
 import urllib.request
 
 from tiku_shared.image_payload import image_to_model_data_url
+from tiku_shared.model_costs import timed_model_call
 from .image_contracts import ImageTriageHandoff, ImageTriageObservation, Route
 
 
@@ -192,8 +193,18 @@ class QwenImageTriage:
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        def request_data() -> dict:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        data = timed_model_call(
+            request_data,
+            provider="dashscope",
+            model=self.model,
+            call_type="qwen_image_triage",
+            usage_getter=lambda value: value.get("usage", {}),
+            request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
+        )
         try:
             content = data["choices"][0]["message"].get("content") or ""
         except (KeyError, IndexError, TypeError) as exc:
