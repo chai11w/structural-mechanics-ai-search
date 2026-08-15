@@ -113,7 +113,21 @@ python -B scripts/model_cost_report.py --runtime-dir .tmp_tiku_agent_v2_prod_879
 python -B scripts/run_tiku_agent_demo.py --port 8790 --disable-safe-answer-v0
 ```
 
-8794 保留为现有隔离基线和后续框架学习线；LangGraph 与 DeepSeek Harness 都只是待验证候选，尚未确认采用。当前业务开发优先级已经改为 `8890`，但正式 `8890` 启动器尚未实现；应先按开发规范完成 Stage 0，不要把以下 8794 启动命令误当成新的业务入口：
+8890 已完成 Stage 0 隔离基线，当前只复用现有固定检索线路，不包含图片预检、Planner、LangGraph 或 DeepSeek Harness：
+
+```powershell
+python -B scripts/run_tiku_agent_8890.py
+```
+
+默认访问 `http://127.0.0.1:8890`。session 数据库、上传/媒体文件、incoming 临时图片、任务日志、费用和反馈状态统一位于 `.tmp_tiku_agent_v2_validation_8890/`；独立 Cookie 为 `tiku_agent_8890_session`。原型默认不接入 8795 身份、邀请码或生产额度，不应绑定公网 Tunnel。回退时只停止 8890 前台进程并继续使用原 8790；保留 8890 runtime 便于复查，不需要修改或重启其他端口。
+
+需要临时验证旧固定行为时，可显式关闭相应可回退能力：
+
+```powershell
+python -B scripts/run_tiku_agent_8890.py --disable-safe-answer-v0 --disable-dimension-filter --disable-external-load-screen
+```
+
+8794 保留为现有隔离基线和后续框架学习线；LangGraph 与 DeepSeek Harness 都只是待验证候选，尚未确认采用。不要把以下 8794 启动命令误当成新的业务入口：
 
 ```powershell
 python -B scripts/run_tiku_agent_8794.py

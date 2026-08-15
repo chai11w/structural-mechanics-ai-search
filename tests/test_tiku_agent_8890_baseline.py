@@ -1,0 +1,182 @@
+from pathlib import Path
+import shutil
+import unittest
+from unittest.mock import patch
+from uuid import uuid4
+
+from fastapi.testclient import TestClient
+
+from scripts.run_tiku_agent_8890 import (
+    DEFAULT_PORT,
+    DEFAULT_RUNTIME_DIR,
+    SESSION_COOKIE as VALIDATION_SESSION_COOKIE,
+    build_app as build_8890_app,
+    build_argument_parser,
+    build_runtime,
+)
+from scripts.run_tiku_agent_demo import build_app as build_8790_app
+from tiku_agent.agent import AgentResponse
+from tiku_agent.fastapi_demo import SESSION_COOKIE as MAINLINE_SESSION_COOKIE
+from tiku_agent.state import AgentState
+
+
+class RecordingRuntime:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+        self.snapshot = {
+            "session_valid": False,
+            "phase": "IDLE",
+            "has_active_image": False,
+            "task_revision": 0,
+            "candidate_generation": "",
+            "candidate_count": 0,
+        }
+
+    def handle_text(self, session_id: str, text: str, *, progress=None) -> AgentResponse:
+        self.calls.append(("text", session_id, text))
+        self.snapshot.update({"session_valid": True, "phase": "WAIT_CHAPTER"})
+        return AgentResponse(text="请告诉我题目章节。", intent="provide_chapter")
+
+    def session_snapshot(self, session_id: str) -> dict[str, object]:
+        self.calls.append(("session", session_id, ""))
+        return dict(self.snapshot)
+
+    def current_image_path(self, session_id: str):
+        return None
+
+    def clear(self, session_id: str) -> None:
+        self.calls.append(("clear", session_id, ""))
+
+    def resolve_upload(self, session_id: str, filename: str):
+        return None
+
+    def resolve_media(self, session_id: str, filename: str):
+        return None
+
+
+class Baseline8890Test(unittest.TestCase):
+    def make_root(self, label: str) -> Path:
+        root = Path(__file__).resolve().parents[1] / (
+            f".tmp_test_8890_{label}_{uuid4().hex}"
+        )
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        return root
+
+    def test_launcher_defaults_and_explicit_rollbacks(self):
+        parser = build_argument_parser()
+        defaults = parser.parse_args([])
+
+        self.assertEqual(defaults.host, "127.0.0.1")
+        self.assertEqual(defaults.port, 8890)
+        self.assertEqual(DEFAULT_PORT, 8890)
+        self.assertEqual(
+            DEFAULT_RUNTIME_DIR.name, ".tmp_tiku_agent_v2_validation_8890"
+        )
+        self.assertTrue(defaults.enable_safe_answer_v0)
+        self.assertTrue(defaults.enable_dimension_filter)
+        self.assertTrue(defaults.enable_external_load_screen)
+        self.assertEqual(defaults.external_load_timeout_seconds, 15.0)
+        self.assertFalse(
+            parser.parse_args(["--disable-safe-answer-v0"]).enable_safe_answer_v0
+        )
+        self.assertFalse(
+            parser.parse_args(["--disable-dimension-filter"]).enable_dimension_filter
+        )
+        self.assertFalse(
+            parser.parse_args(
+                ["--disable-external-load-screen"]
+            ).enable_external_load_screen
+        )
+
+    def test_runtime_artifacts_are_all_under_8890_root(self):
+        root = self.make_root("runtime")
+        runtime = build_runtime(root, enable_external_load_screen=False)
+
+        self.assertEqual(
+            runtime.store.database_path.resolve(), (root / "session.db").resolve()
+        )
+        self.assertEqual(runtime.artifacts.root, (root / "sessions").resolve())
+        self.assertEqual(
+            runtime.task_logger.path.resolve(), (root / "task_logs.jsonl").resolve()
+        )
+        self.assertEqual(
+            runtime.cost_ledger.path.resolve(),
+            (root / "model_costs.sqlite3").resolve(),
+        )
+        self.assertNotEqual(VALIDATION_SESSION_COOKIE, MAINLINE_SESSION_COOKIE)
+        agent = runtime._make_agent(AgentState(session_id="8890-isolated"))
+        self.assertEqual(agent.config.runtime_dir.resolve(), root.resolve())
+        self.assertEqual(
+            agent.config.session_dir.resolve(),
+            runtime.artifacts.session_dir("8890-isolated").resolve(),
+        )
+
+    def test_app_binds_incoming_feedback_and_cookie_to_8890(self):
+        root = self.make_root("app")
+        runtime = RecordingRuntime()
+
+        with patch("scripts.run_tiku_agent_8890.create_app") as create_app:
+            build_8890_app(root, runtime=runtime)
+
+        kwargs = create_app.call_args.kwargs
+        self.assertIs(kwargs["runtime"], runtime)
+        self.assertEqual(kwargs["incoming_dir"], root.resolve() / "incoming")
+        self.assertEqual(kwargs["session_cookie"], VALIDATION_SESSION_COOKIE)
+        self.assertEqual(
+            kwargs["feedback_store"].path.resolve(),
+            (root / "feedback.sqlite3").resolve(),
+        )
+        self.assertEqual(
+            kwargs["feedback_store"].cases_root,
+            (root / "feedback_cases").resolve(),
+        )
+
+    def test_fixed_line_mock_http_behavior_is_equivalent(self):
+        mainline_runtime = RecordingRuntime()
+        validation_runtime = RecordingRuntime()
+        mainline_root = self.make_root("mainline")
+        validation_root = self.make_root("validation")
+        mainline = TestClient(
+            build_8790_app(mainline_root, runtime=mainline_runtime)
+        )
+        validation = TestClient(
+            build_8890_app(validation_root, runtime=validation_runtime)
+        )
+        mainline.cookies.set(
+            MAINLINE_SESSION_COOKIE,
+            "parity-session",
+            domain="testserver.local",
+            path="/",
+        )
+        validation.cookies.set(
+            VALIDATION_SESSION_COOKIE,
+            "parity-session",
+            domain="testserver.local",
+            path="/",
+        )
+
+        self.assertEqual(mainline.get("/health").json(), validation.get("/health").json())
+        self.assertEqual(mainline.get("/").text, validation.get("/").text)
+        self.assertEqual(
+            mainline.get("/api/session").json(),
+            validation.get("/api/session").json(),
+        )
+        mainline_message = mainline.post("/api/message", json={"text": "4"}).json()
+        validation_message = validation.post(
+            "/api/message", json={"text": "4"}
+        ).json()
+        self.assertTrue(mainline_message.pop("request_id").startswith("req_"))
+        self.assertTrue(validation_message.pop("request_id").startswith("req_"))
+        self.assertEqual(mainline_message, validation_message)
+        self.assertEqual(mainline_runtime.calls, validation_runtime.calls)
+
+        mainline_cookies = {cookie.name for cookie in mainline.cookies.jar}
+        validation_cookies = {cookie.name for cookie in validation.cookies.jar}
+        self.assertIn(MAINLINE_SESSION_COOKIE, mainline_cookies)
+        self.assertNotIn(VALIDATION_SESSION_COOKIE, mainline_cookies)
+        self.assertIn(VALIDATION_SESSION_COOKIE, validation_cookies)
+        self.assertNotIn(MAINLINE_SESSION_COOKIE, validation_cookies)
+
+
+if __name__ == "__main__":
+    unittest.main()

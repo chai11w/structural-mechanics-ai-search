@@ -398,7 +398,7 @@ OpenCV 负责确定性区域检测和实际裁剪，模型负责语义角色与�
 
 ### Stage 0：正式隔离 `8890` 基线
 
-状态：`NEXT`
+状态：`DONE`（2026-08-15）
 
 交付：
 
@@ -409,9 +409,17 @@ OpenCV 负责确定性区域检测和实际裁剪，模型负责语义角色与�
 
 验收：启动 `8890` 不改变其他端口进程或数据；固定标准题在 mock 条件下与现有线路等价。
 
+完成记录：
+
+- 新增 `scripts/run_tiku_agent_8890.py`，默认仅监听 `127.0.0.1:8890`；
+- 使用独立 Cookie `tiku_agent_8890_session` 和 runtime `.tmp_tiku_agent_v2_validation_8890/`；
+- session 数据库、session 媒体、incoming 临时图片、任务日志、费用台账、反馈数据库和反馈案例均位于 8890 runtime 下；
+- 原型默认不接入 `8795` 身份、邀请码或生产额度状态，也不改变任何公网 Tunnel；
+- `tests/test_tiku_agent_8890_baseline.py` 覆盖隔离边界、默认回退开关及与 8790 固定 HTTP 线路的 mock 等价，4 项测试通过。
+
 ### Stage 1：数据契约与固定评测集
 
-状态：`PENDING`
+状态：`NEXT`
 
 交付：
 
@@ -615,9 +623,9 @@ tests/test_image_cancellation.py
 
 ## 23. 下一步唯一入口
 
-先完成 Stage 0，不同时开发 Planner：
+Stage 0 已完成。下一步只进入 Stage 1，不同时开发预检模型、Planner、LangGraph 或 DeepSeek Harness：
 
-1. 建立正式 `8890` 独立启动器和 runtime 边界；
-2. 写 `8890` 与现有固定线路的基线等价测试；
-3. 核实不影响其他端口和运行状态；
-4. Stage 0 验收后，再进入 Stage 1 的数据契约和固定评测集。
+1. 确认四个强类型对象的最小字段和版本策略；
+2. 建立脱敏固定样本清单及人工标签；
+3. 实现 Schema 解析、互斥字段校验和 A1/A2/A3 纯代码路由测试；
+4. 达到 Stage 1 验收门后，再决定是否进入 Stage 2 预检影子运行。
