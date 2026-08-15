@@ -135,6 +135,14 @@ python -B scripts/run_tiku_agent_8891.py
 python -B scripts/run_tiku_agent_8892.py --image "D:\path\to\complex-question.jpg"
 ```
 
+为逐步验收拆图，先使用独立版面区域识别入口。它只让千问识别独立大题、共享题干子题和每个图的粗略百分比区域，保存原始回答、规范化 JSON 和画框预览；不运行 OpenCV，不判断章节、荷载或图角色，也不调用 A2。默认运行数据位于 `.tmp_tiku_agent_a3_region_map_8892/`：
+
+```powershell
+python -B scripts/map_a3_regions.py --image "D:\path\to\complex-question.jpg"
+```
+
+可用 `--observation-json` 离线重放已保存区域 JSON。一个区域同时覆盖多个局部题号、区域明显重叠或存在未知绑定时，结果为 `uncertain`，不能进入后续裁剪。未经图片所有者授权，不要调用外部模型评测用户原图。
+
 本地调试可用 `--observation-json` 传入已保存的结构化观察，从而跳过拆题和章节外部模型调用；这时章节提示保持 `unknown`。只有状态为 `single_ready` 或用户后续从 `multiple_wait_choice` 中选定一个单元，才允许在 Phase 4 接入 A2；当前入口不会搜索题库。
 
 不传 `--observation-json` 时，入口会把原图和本地生成的候选块联系表发送给千问。未经图片所有者授权，不要用该模式评测用户原图。
