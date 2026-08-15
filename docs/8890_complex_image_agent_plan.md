@@ -419,7 +419,7 @@ OpenCV 负责确定性区域检测和实际裁剪，模型负责语义角色与�
 
 ### Stage 1：数据契约与固定评测集
 
-状态：`NEXT`
+状态：`IN_PROGRESS`
 
 交付：
 
@@ -430,7 +430,7 @@ OpenCV 负责确定性区域检测和实际裁剪，模型负责语义角色与�
 
 验收：Schema 非法时不能进入 A2；固定有效题不能误判 A1；固定复杂题不能误放 A2。
 
-当前进度：已建立 `experiments/complex_image_eval/` 的评测集草稿。当前包含 5 个题库标准图候选、2 张去重后的反馈输入图元数据，以及 7 张已归档的 A1/A3/旋转 fixture；第二张截断图 `10.jpg` 的路由仍待确认，6 类复杂或质量边界仍未达到最小样本数。尚未开始业务 Schema、视觉调用或路由验收，草稿不能作为生产验收集使用。
+当前进度：已建立 `experiments/complex_image_eval/` 固定评测集，包含 8 张已跟踪图片和 5 张题库单题候选；新增 `download.png` 覆盖一题多图、原结构图与单位荷载辅助图。已完成最小 `ImageTriageObservation`、分流交接数据包、A1/A2/A3 安全路由函数和纯代码测试；完整 `ProblemSnapshot`、`SearchUnit`、`ImageTaskState` 以及 8890 影子运行尚未接入。千问 `qwen3.7-plus` 已完成 13 张样本初步试跑，当前只作为评测结论，不能视为生产验收。
 
 ### Stage 2：预检影子运行
 
