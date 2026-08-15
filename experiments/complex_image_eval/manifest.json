@@ -34,7 +34,7 @@
     {
       "category": "one_question_multiple_diagrams",
       "minimum": 2,
-      "available": 0,
+      "available": 1,
       "pending_review": 1,
       "needs_user_sample": true,
       "notes": "Includes original structure plus internal-force or unit-load diagrams."
@@ -42,7 +42,7 @@
     {
       "category": "q_plus_auxiliary_fp",
       "minimum": 1,
-      "available": 0,
+      "available": 1,
       "pending_review": 1,
       "needs_user_sample": false,
       "notes": "Feedback-derived candidate; role and actual-load labels still require review."
@@ -227,6 +227,32 @@
       ],
       "quality_flags": ["multiple_independent_questions", "rotated_90"],
       "notes": "Deterministic orientation variant; semantic labels must remain identical to the source sample."
+    },
+    {
+      "id": "download",
+      "source_kind": "user_provided_fixture",
+      "source_ref": "user-file:download.png",
+      "relative_path": "images/download.png",
+      "sha256": "5fdf1bffe32d7c18a4ea54d4a3edd5dfb1e234913b5e956f66ea21107faf42f7",
+      "width": 2560,
+      "height": 782,
+      "expected_route": "A3",
+      "label_status": "human_confirmed",
+      "route_reason": "ONE_QUESTION_MULTIPLE_DIAGRAMS",
+      "search_allowed_before_confirmation": false,
+      "question_count": 1,
+      "subquestion_count": 0,
+      "diagram_count": 3,
+      "diagram_roles": [
+        {"label": "a", "role": "original_structure"},
+        {"label": "b", "role": "load_bending_moment", "raw": "M_P图"},
+        {"label": "c", "role": "unit_load_bending_moment", "raw": "M_1图"}
+      ],
+      "actual_loads": [
+        {"question": "例4-24", "type": "均布", "raw": "q"}
+      ],
+      "quality_flags": ["photographed_page", "multiple_diagrams", "handwritten_marks"],
+      "notes": "One displacement question with the original loaded beam, its M_P diagram and a unit-load bending-moment diagram. Detailed role recognition belongs to A3."
     },
     {
       "id": "bank_beam_single",

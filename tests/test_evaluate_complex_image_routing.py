@@ -20,7 +20,7 @@ class EvaluateComplexImageRoutingTest(unittest.TestCase):
 
     def test_resolve_tracked_samples_without_question_bank(self):
         samples = resolve_samples(include_question_bank=False, config={})
-        self.assertEqual(len(samples), 7)
+        self.assertEqual(len(samples), 8)
         self.assertTrue(all(item["image_path"].is_file() for item in samples))
         self.assertTrue(all(item["source_kind"] != "question_bank" for item in samples))
 

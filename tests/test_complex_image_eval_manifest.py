@@ -66,6 +66,18 @@ class ComplexImageEvalManifestTest(unittest.TestCase):
                 with self.subTest(sample=sample["id"], load=load):
                     self.assertIn(load["type"], ALLOWED_LOAD_TYPES)
 
+    def test_download_fixture_keeps_detailed_diagram_roles_in_a3(self):
+        sample = self.samples_by_id["download"]
+        self.assertEqual(sample["expected_route"], "A3")
+        self.assertEqual(sample["label_status"], "human_confirmed")
+        self.assertEqual(sample["question_count"], 1)
+        self.assertEqual(sample["diagram_count"], 3)
+        self.assertEqual(
+            [diagram["role"] for diagram in sample["diagram_roles"]],
+            ["original_structure", "load_bending_moment", "unit_load_bending_moment"],
+        )
+        self.assertEqual(sample["actual_loads"], [{"question": "例4-24", "type": "均布", "raw": "q"}])
+
     def test_manifest_does_not_contain_runtime_or_absolute_paths(self):
         serialized = json.dumps(self.manifest, ensure_ascii=False)
 

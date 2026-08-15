@@ -181,6 +181,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="独立比较智谱和千问的复杂题图初步分流")
     parser.add_argument("--providers", nargs="+", choices=("qwen", "zhipu"), default=("qwen", "zhipu"))
     parser.add_argument("--include-question-bank", action="store_true", help="加入清单中的暂定 A2 题库单题")
+    parser.add_argument("--sample-id", action="append", dest="sample_ids", help="只运行指定图片编号，可重复使用")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--workers", type=int, default=2)
@@ -189,6 +190,13 @@ def main() -> int:
     config = load_local_config()
     prompt = load_prompt()
     samples = resolve_samples(include_question_bank=args.include_question_bank, config=config)
+    if args.sample_ids:
+        requested = set(args.sample_ids)
+        available = {sample["id"] for sample in samples}
+        missing = requested - available
+        if missing:
+            parser.error(f"找不到指定评测图片: {', '.join(sorted(missing))}")
+        samples = [sample for sample in samples if sample["id"] in requested]
     import hashlib
 
     prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
