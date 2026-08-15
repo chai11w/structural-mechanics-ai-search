@@ -227,22 +227,29 @@ def build_a3_region_map_prompt() -> str:
 - 同页不等于同题。多个独立大题号分别建立 group，relationship 为 independent_question。
 - 一个公共题干下的 (a)(b)(c)(d) 等子题放在同一 group，relationship 为 shared_subquestions。
 - 同一道题包含原结构图、内力图、单位力图等多个图时放在同一 group，relationship 为 single_question_multiple_diagrams。本阶段不要判断各图具体角色。
+- relationship 描述实际输出的 regions 之间的关系。一个 group 只有一个 region 时不能写 single_question_multiple_diagrams，应写 independent_question。
 - parent_question_label 填可见的大题号或父题号；看不清可以留空，不能编造。
 
 区域规则：
-- bbox 使用原图百分比坐标 [x1,y1,x2,y2]，取值 0 到 100，只需给后续 OpenCV 一个可靠粗分区，不要求贴边精确。
+- bbox 必须使用原图百分比坐标 [x1,y1,x2,y2]，四个数都只能取 0 到 100；禁止输出像素坐标。只需给后续 OpenCV 一个可靠粗分区，不要求贴边精确。
 - 每个 diagram 区域只能包含一个可独立辨认的结构力学图。一个框不能同时包住两个并列或上下排列的结构图。
 - 特别检查 (a)(b)(c)(d) 等相邻子图；例如 (c) 和 (d) 必须输出两个 region，不能合并。
 - visible_labels 只填写该区域紧邻的局部题号或图号。没有局部标签时输出 []；不要把父题号重复塞入每个区域。
 - 如果一个候选框确实覆盖多个局部标签，visible_labels 必须全部列出并在 unknowns 说明，不能隐瞒；代码会阻止它通过第一步。
 - 纯题干但没有图的独立题可输出 text_only。尺寸线、装订条、页眉、页脚、水印和纯图名不要单独建立 region。
+- 页面边缘只有子图标签、零散荷载箭头或尺寸，主体承重结构不可辨认时，不建立 region。边缘残图只有在至少能看清一段相连的主体杆件及其支座或关键节点时才建立 region。
+- diagram 的 bbox 只包住本图、紧邻局部标签和必要尺寸，必须在下一道大题或下一小题的题干之前停止，不能侵入下一题文字。
 - 图名属于紧邻的题，不能跨到下一题。页首只露出上一题图时，可为该可见图建立独立区域。
 - 题目边界不清时使用 unknown，不要靠上下顺序强行绑定。
 
 禁止输出章节、荷载、结构类型、图角色、解题方法推断、A2 数据或 Markdown。只输出 JSON。"""
 
 
-def parse_a3_region_map(payload: object) -> A3RegionMap:
+def parse_a3_region_map(
+    payload: object,
+    *,
+    image_size: tuple[int, int] | None = None,
+) -> A3RegionMap:
     """Parse and validate one model-produced region map."""
 
     if not isinstance(payload, dict):
@@ -257,6 +264,25 @@ def parse_a3_region_map(payload: object) -> A3RegionMap:
         raise ValueError("region map requires groups and regions arrays")
     if not isinstance(raw_unknowns, list):
         raise ValueError("region map unknowns must be an array")
+
+    parsed_bboxes = [
+        _parse_percentage_bbox(raw.get("bbox"))
+        if isinstance(raw, dict)
+        else None
+        for raw in raw_regions
+    ]
+    pixel_bbox_mode = any(
+        bbox is not None and max(bbox) > 100 for bbox in parsed_bboxes
+    )
+    if pixel_bbox_mode:
+        if image_size is None:
+            raise ValueError("pixel region bboxes require the source image size")
+        parsed_bboxes = [
+            _pixel_bbox_to_percentages(bbox, image_size)
+            if bbox is not None
+            else None
+            for bbox in parsed_bboxes
+        ]
 
     groups: list[A3RegionGroup] = []
     for raw in raw_groups:
@@ -277,13 +303,15 @@ def parse_a3_region_map(payload: object) -> A3RegionMap:
         )
 
     regions: list[A3CoarseRegion] = []
-    for raw in raw_regions:
+    for index, raw in enumerate(raw_regions):
         if not isinstance(raw, dict):
             raise ValueError("coarse region must be an object")
         labels = raw.get("visible_labels", [])
         if not isinstance(labels, list):
             raise ValueError("visible_labels must be an array")
-        bbox = _parse_percentage_bbox(raw.get("bbox"))
+        bbox = parsed_bboxes[index]
+        if bbox is None:
+            raise ValueError("coarse region must be an object")
         content_type = str(raw.get("content_type") or "unknown").strip()
         if content_type not in REGION_CONTENT_TYPES:
             raise ValueError(f"unsupported region content type: {content_type}")
@@ -300,8 +328,29 @@ def parse_a3_region_map(payload: object) -> A3RegionMap:
             )
         )
 
+    diagram_counts: dict[str, int] = {}
+    for region in regions:
+        if region.content_type == "diagram":
+            diagram_counts[region.group_id] = (
+                diagram_counts.get(region.group_id, 0) + 1
+            )
+    normalized_groups = tuple(
+        A3RegionGroup(
+            group_id=group.group_id,
+            parent_question_label=group.parent_question_label,
+            relationship=(
+                "independent_question"
+                if group.relationship == "single_question_multiple_diagrams"
+                and diagram_counts.get(group.group_id, 0) == 1
+                else group.relationship
+            ),
+            visible_stem_text=group.visible_stem_text,
+        )
+        for group in groups
+    )
+
     return A3RegionMap(
-        groups=tuple(groups),
+        groups=normalized_groups,
         regions=tuple(regions),
         unknowns=tuple(
             str(value).strip() for value in raw_unknowns if str(value).strip()
@@ -465,8 +514,11 @@ class A3RegionMapRuntime:
                 raw_file.write_text(model_response.raw_text, encoding="utf-8")
                 raw_path = str(raw_file)
                 try:
+                    with Image.open(source) as source_image:
+                        image_size = ImageOps.exif_transpose(source_image).size
                     observation = parse_a3_region_map(
-                        parse_model_json(model_response.raw_text)
+                        parse_model_json(model_response.raw_text),
+                        image_size=image_size,
                     )
                 except (ValueError, json.JSONDecodeError) as exc:
                     raise A3RegionMapError("invalid_region_map_schema") from exc
@@ -607,6 +659,26 @@ def _parse_percentage_bbox(value: object) -> tuple[float, float, float, float]:
             raise ValueError("region bbox values must be numeric") from exc
         parsed.append(round(number, 4))
     return cast(tuple[float, float, float, float], tuple(parsed))
+
+
+def _pixel_bbox_to_percentages(
+    bbox: tuple[float, float, float, float],
+    image_size: tuple[int, int],
+) -> tuple[float, float, float, float]:
+    """Normalize a consistently pixel-based model response using the source size."""
+
+    width, height = image_size
+    if width <= 0 or height <= 0:
+        raise ValueError("source image size must be positive")
+    x1, y1, x2, y2 = bbox
+    if min(bbox) < 0 or x2 > width or y2 > height:
+        raise ValueError("pixel region bbox is outside the source image")
+    return (
+        round(x1 * 100 / width, 4),
+        round(y1 * 100 / height, 4),
+        round(x2 * 100 / width, 4),
+        round(y2 * 100 / height, 4),
+    )
 
 
 def _percentage_bbox_to_pixels(

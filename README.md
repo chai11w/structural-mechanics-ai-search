@@ -141,7 +141,7 @@ python -B scripts/run_tiku_agent_8892.py --image "D:\path\to\complex-question.jp
 python -B scripts/map_a3_regions.py --image "D:\path\to\complex-question.jpg"
 ```
 
-可用 `--observation-json` 离线重放已保存区域 JSON。一个区域同时覆盖多个局部题号、区域明显重叠或存在未知绑定时，结果为 `uncertain`，不能进入后续裁剪。未经图片所有者授权，不要调用外部模型评测用户原图。
+可用 `--observation-json` 离线重放已保存区域 JSON。一个区域同时覆盖多个局部题号、区域明显重叠或存在未知绑定时，结果为 `uncertain`，不能进入后续裁剪；模型误用源图像素坐标时，运行时会在确认坐标未越界后换算为百分比。授权的 3 张代表图已通过粗分区验收：完整题图可以相互分开，粗框稍大或多出边缘残图候选由下一阶段的区域内 OpenCV 和裁剪校验处理。未经图片所有者授权，不要调用外部模型评测用户原图。
 
 本地调试可用 `--observation-json` 传入已保存的结构化观察，从而跳过拆题和章节外部模型调用；这时章节提示保持 `unknown`。只有状态为 `single_ready` 或用户后续从 `multiple_wait_choice` 中选定一个单元，才允许在 Phase 4 接入 A2；当前入口不会搜索题库。
 

@@ -88,6 +88,9 @@ class A3RegionMapperTest(unittest.TestCase):
 
         self.assertIn("(c) 和 (d) 必须输出两个 region", prompt)
         self.assertIn("同页不等于同题", prompt)
+        self.assertIn("禁止输出像素坐标", prompt)
+        self.assertIn("主体承重结构不可辨认时，不建立 region", prompt)
+        self.assertIn("不能侵入下一题文字", prompt)
         self.assertIn("后续 OpenCV", prompt)
         self.assertIn("禁止输出章节、荷载、结构类型、图角色", prompt)
         self.assertNotIn('"chapter_hint"', prompt)
@@ -101,6 +104,32 @@ class A3RegionMapperTest(unittest.TestCase):
         self.assertEqual(observation.groups[0].parent_question_label, "四")
         self.assertEqual(observation.regions[0].visible_labels, ())
         self.assertEqual(assess_a3_region_map(observation), ())
+
+    def test_single_diagram_cannot_remain_multiple_diagrams_relationship(self):
+        payload = region_payload(
+            labels=(), relationship="single_question_multiple_diagrams"
+        )
+
+        observation = parse_a3_region_map(payload)
+
+        self.assertEqual(
+            observation.groups[0].relationship, "independent_question"
+        )
+
+    def test_pixel_bboxes_are_normalized_with_source_image_size(self):
+        payload = region_payload()
+        payload["regions"][0]["bbox"] = [50, 160, 750, 640]
+
+        observation = parse_a3_region_map(payload, image_size=(1000, 800))
+
+        self.assertEqual(observation.regions[0].bbox, (5.0, 20.0, 75.0, 80.0))
+
+    def test_pixel_bboxes_without_source_image_size_are_rejected(self):
+        payload = region_payload()
+        payload["regions"][0]["bbox"] = [50, 160, 750, 640]
+
+        with self.assertRaisesRegex(ValueError, "source image size"):
+            parse_a3_region_map(payload)
 
     def test_one_box_with_c_and_d_is_blocked(self):
         observation = parse_a3_region_map(region_payload(labels=("(c)", "(d)")))
