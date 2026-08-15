@@ -75,7 +75,9 @@ class Baseline8890Test(unittest.TestCase):
         self.assertTrue(defaults.enable_safe_answer_v0)
         self.assertTrue(defaults.enable_dimension_filter)
         self.assertTrue(defaults.enable_external_load_screen)
+        self.assertTrue(defaults.enable_image_triage_shadow)
         self.assertEqual(defaults.external_load_timeout_seconds, 15.0)
+        self.assertEqual(defaults.image_triage_timeout_seconds, 120.0)
         self.assertFalse(
             parser.parse_args(["--disable-safe-answer-v0"]).enable_safe_answer_v0
         )
@@ -86,6 +88,11 @@ class Baseline8890Test(unittest.TestCase):
             parser.parse_args(
                 ["--disable-external-load-screen"]
             ).enable_external_load_screen
+        )
+        self.assertFalse(
+            parser.parse_args(
+                ["--disable-image-triage-shadow"]
+            ).enable_image_triage_shadow
         )
 
     def test_runtime_artifacts_are_all_under_8890_root(self):
@@ -102,6 +109,10 @@ class Baseline8890Test(unittest.TestCase):
         self.assertEqual(
             runtime.cost_ledger.path.resolve(),
             (root / "model_costs.sqlite3").resolve(),
+        )
+        self.assertEqual(
+            runtime.triage_shadow.logger.path.resolve(),
+            (root / "triage_shadow.jsonl").resolve(),
         )
         self.assertNotEqual(VALIDATION_SESSION_COOKIE, MAINLINE_SESSION_COOKIE)
         agent = runtime._make_agent(AgentState(session_id="8890-isolated"))

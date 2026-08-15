@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 import re
 import urllib.request
@@ -36,6 +37,17 @@ _CHINESE_COUNTS = {
     "九": 9,
     "十": 10,
 }
+
+
+@dataclass(frozen=True)
+class QwenImageTriageResult:
+    """One observation plus the non-sensitive usage needed for shadow evaluation."""
+
+    observation: ImageTriageObservation
+    model: str
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
 
 
 def load_triage_prompt(path: str | Path = DEFAULT_PROMPT_PATH) -> str:
@@ -153,6 +165,9 @@ class QwenImageTriage:
         self.prompt_path = Path(prompt_path)
 
     def observe(self, image_path: str | Path) -> ImageTriageObservation:
+        return self.observe_with_metadata(image_path).observation
+
+    def observe_with_metadata(self, image_path: str | Path) -> QwenImageTriageResult:
         if not self.api_key:
             raise RuntimeError("DASHSCOPE_API_KEY is not configured")
         payload = {
@@ -185,7 +200,22 @@ class QwenImageTriage:
             raise RuntimeError("千问分流返回缺少模型回答") from exc
         if not isinstance(content, str):
             content = json.dumps(content, ensure_ascii=False)
-        return observation_from_model_text(content)
+        usage = data.get("usage") if isinstance(data, dict) else None
+        usage = usage if isinstance(usage, dict) else {}
+        return QwenImageTriageResult(
+            observation=observation_from_model_text(content),
+            model=self.model,
+            prompt_tokens=_non_negative_int(usage.get("prompt_tokens")),
+            completion_tokens=_non_negative_int(usage.get("completion_tokens")),
+            total_tokens=_non_negative_int(usage.get("total_tokens")),
+        )
+
+
+def _non_negative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def finalize_route(observation: ImageTriageObservation) -> Route:

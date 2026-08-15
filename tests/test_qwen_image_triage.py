@@ -58,17 +58,25 @@ class QwenImageTriageTest(unittest.TestCase):
             self.assertEqual(load_triage_prompt(path), "建议路线：A1")
 
     def test_qwen_observe_uses_isolated_vision_request(self):
-        response = {"choices": [{"message": {"content": "建议路线：A2\n单题、单原结构图。"}}]}
+        response = {
+            "choices": [{"message": {"content": "建议路线：A2\n单题、单原结构图。"}}],
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 30,
+                "total_tokens": 150,
+            },
+        }
         with patch("tiku_agent.image_triage.image_to_model_data_url", return_value="data:image/jpeg;base64,AA"), patch(
             "tiku_agent.image_triage.urllib.request.urlopen", return_value=_FakeResponse(response)
         ) as urlopen:
             observer = QwenImageTriage(api_key="test-key", endpoint="http://qwen.test")
-            observation = observer.observe("question.jpg")
+            result = observer.observe_with_metadata("question.jpg")
 
         request = urlopen.call_args.args[0]
         body = json.loads(request.data.decode("utf-8"))
         self.assertEqual(body["model"], "qwen3.7-plus")
-        self.assertEqual(observation.route_candidate, "A2")
+        self.assertEqual(result.observation.route_candidate, "A2")
+        self.assertEqual(result.total_tokens, 150)
         self.assertIn("Authorization", request.headers)
 
 

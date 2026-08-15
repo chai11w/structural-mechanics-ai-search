@@ -4,7 +4,7 @@
 
 项目重点不是简单的图片识别，而是把“题图识别、章节判断、荷载归一化、题库路由、相似度粗筛、视觉复筛、答案定位”串成一条可落地的工作流。
 
-> `8890` C 端复杂题图预检、受约束拆解 Agent、服务端取消和后续 `8794` 框架学习线的完整开发规范见 [`docs/8890_complex_image_agent_plan.md`](docs/8890_complex_image_agent_plan.md)。继续该方向前先读取该文档，当前唯一实施入口是 Stage 0 的独立 `8890` 基线，不要直接从 Planner、LangGraph 或 DeepSeek Harness 开始。
+> `8890` C 端复杂题图预检、受约束拆解 Agent、服务端取消和后续 `8794` 框架学习线的完整开发规范见 [`docs/8890_complex_image_agent_plan.md`](docs/8890_complex_image_agent_plan.md)。继续该方向前先读取该文档，当前只推进 Stage 2 的预检影子观察，不要直接开发 Planner、LangGraph 或 DeepSeek Harness。
 
 ## 项目亮点
 
@@ -113,18 +113,18 @@ python -B scripts/model_cost_report.py --runtime-dir .tmp_tiku_agent_v2_prod_879
 python -B scripts/run_tiku_agent_demo.py --port 8790 --disable-safe-answer-v0
 ```
 
-8890 已完成 Stage 0 隔离基线，当前只复用现有固定检索线路，不包含图片预检、Planner、LangGraph 或 DeepSeek Harness：
+8890 已完成 Stage 0 隔离基线，并进入 Stage 2 预检影子观察；千问预检只在后台记录建议路线、摘要、自由观察、分流原因、耗时、令牌用量和错误，不改变现有固定检索返回，也不包含 Planner、LangGraph 或 DeepSeek Harness：
 
 ```powershell
 python -B scripts/run_tiku_agent_8890.py
 ```
 
-默认访问 `http://127.0.0.1:8890`。session 数据库、上传/媒体文件、incoming 临时图片、任务日志、费用和反馈状态统一位于 `.tmp_tiku_agent_v2_validation_8890/`；独立 Cookie 为 `tiku_agent_8890_session`。原型默认不接入 8795 身份、邀请码或生产额度，不应绑定公网 Tunnel。回退时只停止 8890 前台进程并继续使用原 8790；保留 8890 runtime 便于复查，不需要修改或重启其他端口。
+默认访问 `http://127.0.0.1:8890`。session 数据库、上传/媒体文件、incoming 临时图片、任务日志、费用、反馈状态和影子记录统一位于 `.tmp_tiku_agent_v2_validation_8890/`；影子记录文件是 `triage_shadow.jsonl`，临时副本完成观察后立即删除。独立 Cookie 为 `tiku_agent_8890_session`。原型默认不接入 8795 身份、邀请码或生产额度，不应绑定公网 Tunnel。回退时可添加 `--disable-image-triage-shadow`，不需要修改或重启其他端口。
 
 需要临时验证旧固定行为时，可显式关闭相应可回退能力：
 
 ```powershell
-python -B scripts/run_tiku_agent_8890.py --disable-safe-answer-v0 --disable-dimension-filter --disable-external-load-screen
+python -B scripts/run_tiku_agent_8890.py --disable-safe-answer-v0 --disable-dimension-filter --disable-external-load-screen --disable-image-triage-shadow
 ```
 
 8794 保留为现有隔离基线和后续框架学习线；LangGraph 与 DeepSeek Harness 都只是待验证候选，尚未确认采用。不要把以下 8794 启动命令误当成新的业务入口：
