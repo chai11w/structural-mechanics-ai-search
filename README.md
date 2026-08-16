@@ -143,6 +143,14 @@ python -B scripts/map_a3_regions.py --image "D:\path\to\complex-question.jpg"
 
 可用 `--observation-json` 离线重放已保存区域 JSON。一个区域同时覆盖多个局部题号、区域明显重叠或存在未知绑定时，结果为 `uncertain`，不能进入后续裁剪；模型误用源图像素坐标时，运行时会在确认坐标未越界后换算为百分比。授权的 3 张代表图已通过粗分区验收：完整题图可以相互分开，粗框稍大或多出边缘残图候选由下一阶段的区域内 OpenCV 和裁剪校验处理。未经图片所有者授权，不要调用外部模型评测用户原图。
 
+区域内 OpenCV 精裁实验使用已保存的区域 JSON，不调用模型或 A2。它联合区域内所有有效前景分量，避免只取最大连通块时丢失断开的荷载箭头、尺寸线和标注，并用相邻粗框限制外扩范围：
+
+```powershell
+python -B scripts/crop_a3_regions.py --image "D:\path\to\complex-question.jpg" --observation-json "D:\path\to\region_map.json" --output-dir ".tmp_tiku_agent_a3_region_crop_8892\trial"
+```
+
+输出包含逐区域裁图、`crop_manifest.json` 和蓝色粗框/红色 OpenCV 框对照图。当前真实图实验能保留荷载、尺寸和支座，但公共题干密集排布及跨区手写标记仍可能把相邻标签带入裁图；该入口只用于离线验收，尚不能把结果标为 `single_ready` 或交给 A2。
+
 本地调试可用 `--observation-json` 传入已保存的结构化观察，从而跳过拆题和章节外部模型调用；这时章节提示保持 `unknown`。只有状态为 `single_ready` 或用户后续从 `multiple_wait_choice` 中选定一个单元，才允许在 Phase 4 接入 A2；当前入口不会搜索题库。
 
 不传 `--observation-json` 时，入口会把原图和本地生成的候选块联系表发送给千问。未经图片所有者授权，不要用该模式评测用户原图。
