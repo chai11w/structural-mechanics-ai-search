@@ -151,6 +151,14 @@ python -B scripts/crop_a3_regions.py --image "D:\path\to\complex-question.jpg" -
 
 输出包含逐区域裁图、`crop_manifest.json` 和蓝色粗框/红色 OpenCV 框对照图。当前真实图实验能保留荷载、尺寸和支座，但公共题干密集排布及跨区手写标记仍可能把相邻标签带入裁图；该入口只用于离线验收，尚不能把结果标为 `single_ready` 或交给 A2。
 
+Paddle 候选框也有独立的离线质检入口。它读取已经保存的 PP-Structure 布局 JSON，给 `image` 框固定候选 ID，标记近重复框、整组大框、单容器框和贴页边框，并导出真实裁片、叠框图和清单；不调用 Paddle、LLM、A2 或题库：
+
+```powershell
+python -B scripts/inspect_paddle_layout_candidates.py --layout-json "D:\path\to\layout_res.json" --image "D:\path\to\question.jpg"
+```
+
+几何框不能证明荷载、尺寸和支座完整，所以该入口始终输出 `review_required`，不得据此自动进入 A2。
+
 本地调试可用 `--observation-json` 传入已保存的结构化观察，从而跳过拆题和章节外部模型调用；这时章节提示保持 `unknown`。只有状态为 `single_ready` 或用户后续从 `multiple_wait_choice` 中选定一个单元，才允许在 Phase 4 接入 A2；当前入口不会搜索题库。
 
 不传 `--observation-json` 时，入口会把原图和本地生成的候选块联系表发送给千问。未经图片所有者授权，不要用该模式评测用户原图。

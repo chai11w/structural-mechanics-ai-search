@@ -22,18 +22,19 @@
 - 8790/8794 的 HTTP、流式和业务错误均可恢复、评价或重试，部分结果显示降级；8793 未刷新。
 - `tiku_shared/request_protocol.py` 固定五状态并统一 `layer/code/retryable/action/request_id/search_id`；Agent、API、网络边界和任务日志已接入，同题重试沿用 `search_id`，每次请求使用独立 `request_id`。
 - 任务日志和反馈保存统一协议字段；反馈绑定具体回复并可按状态、环节、原因码和请求/搜题编号筛选，旧数据只读兼容。
+- `8891` 已完成隔离权威分流 MVP：A2 进入原检索，A1/A3 只生成受约束说明；分离绘制的荷载按结构语义归属。
+- `8892` 已有 Paddle JSON 离线质检器：固定候选 ID，标记近重复、群框、单容器和贴页边框，导出真实裁片/叠框图/清单；始终 `review_required`，不接 A2。
 
 ## In Progress
 
 - 隔离 8890 的长期方向是受约束自主搜题 Agent；规划器只能选择白名单动作，确定性检索、章节边界、裁剪和排序仍由代码控制。
 - 真实复杂多图案例中，当前识别把辅助单位力 `Fp=1` 当作实际荷载，导致 `mixed_symbolic_numeric` 并泄露英文内部错误；新理解层必须区分原结构图、内力图和辅助单位力图，实际检索荷载只保留原结构上的 `q`。
 - `8890` 已接入千问 `qwen3.7-plus` 影子预检且不改变固定检索；首批 6 条均成功并经人工确认，A1/A2/A3 为 2/1/3，P50 约 6.8 秒、P95 约 8.9 秒、总令牌 12350。
-- `8891` 已完成隔离权威分流 MVP：A1/A3 生成受约束说明，A2 进入原精确检索；分离绘制的荷载按结构语义归属，不以是否接触杆件判多图。
-- `8892` 仍与 A2 隔离。Paddle 在普通页能分出完整图框；拥挤竖向页即使阈值 0.2、关闭 NMS 仍合并子图和残图；横向原图/`MP`/单位荷载图可分裁，但有重复框和整组大框。初步路线：Paddle 高召回框与确定性裁剪；A3 按框 ID 配题干、原图和辅助图，把结构化 `title_text + original_image` 交给 A2；不拼位图且 LLM 不输出坐标。
+- `8892` 仍与 A2 隔离。横排样本可提取原图/`MP`/单位荷载三个叶子框并标出群框；拥挤竖排样本仍只有叶子框和贴边容器框，人工选框成功不等于自动拆分成功。下一步需局部切片补召回，再由 A3 按框 ID 配题干和图角色；不拼位图且 LLM 不输出坐标。
 
 ## Not Implemented
 
-- `ProblemSnapshot`、Paddle 候选去重/群框回退、完整性与残图门禁、A3 配对和图形角色选择尚未实现；Planner 和工具观察循环也未实现。
+- `ProblemSnapshot`、Paddle 局部切片回退、内容完整性/残图门禁、A3 配对和图角色选择尚未实现；Planner 和工具观察循环也未实现。
 - `8890` 影子期已有首份小样本统计和用户人工确认，但尚未完成费用报表；影子结果不能直接提升到 8790 正式线路。
 - 8795 暂不扩展统一协议报表；登录失败限速未实现，Cloudflare Access/WAF 因支付方式限制暂不启用。
 - 桁架高度几何计算未实现；模型只抄录明确标注。
@@ -80,8 +81,8 @@
 
 ## Next Best Step
 
-1. 在 `8892` 建隔离的 Paddle 候选框 MVP：固定低阈值/关闭 NMS，输出坐标、类型和真实裁片，标记重复小框与整组大框；用全部授权样本检查荷载、尺寸、支座完整性及相邻题/残图混入，暂不接 A2。
-2. 框选达到高召回后接 A3：LLM 只返回标题框、原结构框和辅助图框 ID；确定性代码生成结构化 `ProblemSnapshot`，唯一且完整时自动进 A2，歧义时留在 A3。
+1. 在 `8892` 为嵌套/贴边容器框增加确定性局部切片回退，映射回全图坐标后复用候选去重；先让拥挤竖排授权样本召回各子图，仍不接 A2。
+2. 高召回稳定后接 A3：LLM 只返回标题、原结构和辅助图框 ID；代码生成 `ProblemSnapshot`，通过内容完整性门禁才进 A2，歧义留在 A3。
 3. `8890` 影子线路仍需补费用报表并扩大对照覆盖；固定编排稳定前不开发 Planner、LangGraph 或 DeepSeek Harness。
 
 ## Important Commands
@@ -93,6 +94,6 @@
 - `powershell -ExecutionPolicy Bypass -File scripts/switch_tiku_agent_8790_control.ps1`（灾备重切前只读预检）
 - `powershell -ExecutionPolicy Bypass -File scripts/tiku_admin_watchdog_8795.ps1`
 - `python scripts/run_tiku_agent_demo.py --help`
-- `python scripts/manage_tiku_invites.py --help`
+- `python scripts/inspect_paddle_layout_candidates.py --help`
 - `python scripts/search_by_loads.py --help`
 - `python search.py --help`
