@@ -13,7 +13,7 @@
 
 每完成一个阶段，都应更新本文的阶段状态和 `.agents/project_memory.md`，不能只在对话中说明。本文中的“已确认决策”可以直接执行；“待验证假设”和“开放问题”必须通过样本或用户决定后再固化。
 
-> 当前上下文债务：`.agents/project_memory.md` 和 `.agents/roadmap.md` 受本机 ACL 保护为只读，仍保留“8794 优先”的旧路线。两者与本文在 `8890/8794` 优先级上冲突时，以本文和 `README.md` 为较新事实；不要按旧 roadmap 直接开发 8794。权限恢复后应先用 `project-context-c` 的 bootstrap/handoff 模式压缩并同步这两个文件。
+> 上下文债务已处理（2026-08-16）：`.agents/project_memory.md` 与 `.agents/roadmap.md` 已同步到本文的 `8890` 优先路线，`8794` 有限自主仍暂停。两者与本文在 `8890/8794` 优先级上冲突时，仍以本文和 `README.md` 为较新事实。
 
 ## 2. 目标与问题定义
 
