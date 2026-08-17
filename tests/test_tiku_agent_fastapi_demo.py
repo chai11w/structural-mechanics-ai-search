@@ -290,7 +290,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260817-a3-mvp-v1"', 'src="/assets/demo.js?v=20260817-a3-mvp-v2"',
+            'href="/assets/demo.css?v=20260817-a3-mvp-v1"', 'src="/assets/demo.js?v=20260817-a3-mvp-v3"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -343,6 +343,7 @@ class FastApiDemoTest(unittest.TestCase):
             "function normalizeRetryAction", "function retryTextAction",
             "protocol.status === 'PARTIAL' ? 'partial' : ''",
             "function setResponseStatus(data)", "headers.set('x-request-id', requestId)",
+            "isPersistentImage(data.submitted_crop)", "我提交了裁剪后的题图。",
             "search_id: context.item.searchId || sessionContext.search_id || ''",
         ):
             self.assertIn(expected, _SCRIPT)

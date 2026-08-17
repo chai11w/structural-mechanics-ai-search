@@ -757,7 +757,18 @@ def create_app(
                     task_revision=task_revision,
                     **kwargs,
                 )
-                return _agent_payload(response, runtime, session_id)
+                a3_snapshot = runtime.session_snapshot(session_id).get("a3") or {}
+                submitted_crop = (
+                    runtime.current_crop_path(session_id, unit_id)  # type: ignore[attr-defined]
+                    if a3_snapshot.get("phase") == "A2_ACTIVE"
+                    else None
+                )
+                return _agent_payload(
+                    response,
+                    runtime,
+                    session_id,
+                    submitted_crop=submitted_crop,
+                )
 
             result = StreamingResponse(
                 _stream_agent_events(
@@ -1061,6 +1072,7 @@ def _agent_payload(
     session_id: str,
     *,
     uploaded_image: Path | None = None,
+    submitted_crop: Path | None = None,
 ) -> dict[str, object]:
     image_urls = []
     for image in response.images:
@@ -1071,6 +1083,11 @@ def _agent_payload(
         if persisted is not None:
             image_urls.append(f"/api/media/{persisted.name}")
     uploaded_image_url = f"/api/upload/{uploaded_image.name}" if uploaded_image is not None else ""
+    submitted_crop_url = ""
+    if submitted_crop is not None and submitted_crop.is_file():
+        persisted_crop = runtime.persist_media(session_id, submitted_crop)
+        if persisted_crop is not None:
+            submitted_crop_url = f"/api/media/{persisted_crop.name}"
     snapshot = runtime.session_snapshot(session_id)
     if response.protocol:
         protocol = RequestProtocol.from_dict(response.protocol)
@@ -1112,6 +1129,7 @@ def _agent_payload(
         "text": response.text,
         "images": image_urls,
         "uploaded_image": uploaded_image_url,
+        "submitted_crop": submitted_crop_url,
         "intent": response.intent,
         "session": snapshot,
         "failure": failure,

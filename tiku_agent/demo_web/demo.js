@@ -1539,6 +1539,13 @@ async function submitA3Crop() {
     });
     if (operation !== operationVersion) return;
     const response = responseItem(data);
+    if (isPersistentImage(data.submitted_crop)) {
+      addMessage({
+        message: '我提交了裁剪后的题图。', me: true,
+        images: [data.submitted_crop], imageAlt: '裁剪后的题图',
+        taskRevision: response.taskRevision,
+      });
+    }
     if (!A3_INLINE_ONLY_INTENTS.has(data.intent)) addMessage(response);
     setResponseStatus(data);
     if (data.intent === 'a3_crop_review_required') {

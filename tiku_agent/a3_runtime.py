@@ -268,7 +268,7 @@ class A3MvpRuntime:
         with lock:
             previous = self.store.load(clean)
             next_revision = int(previous.task_revision if previous is not None else 0) + 1
-            self._clear_locked(clean)
+            self._clear_locked(clean, preserve_artifacts=True)
             persisted = self.artifacts.persist_image(clean, image_path)
             state = A3SessionState(
                 session_id=clean,
@@ -676,17 +676,19 @@ class A3MvpRuntime:
         return snapshot
 
     def resolve_upload(self, session_id: str, filename: str) -> Path | None:
-        state = self.store.load(_clean_session_id(session_id))
-        if state is None:
+        clean = _clean_session_id(session_id)
+        if self.store.load(clean) is None:
             return None
-        path = Path(state.source_page_path).resolve()
-        return path if path.is_file() and path.name == Path(str(filename)).name == str(filename) else None
+        return self.artifacts.resolve_upload(clean, filename)
 
     def persist_media(self, session_id: str, source: str | Path) -> Path | None:
         return self.a2_runtime.persist_media(_clean_session_id(session_id), source)
 
     def resolve_media(self, session_id: str, filename: str) -> Path | None:
-        return self.a2_runtime.resolve_media(_clean_session_id(session_id), filename)
+        clean = _clean_session_id(session_id)
+        if self.store.load(clean) is None:
+            return None
+        return self.a2_runtime.resolve_media(clean, filename, allow_preserved=True)
 
     def record_protocol_event(self, *args: Any, **kwargs: Any) -> None:
         self.a2_runtime.record_protocol_event(*args, **kwargs)
@@ -886,7 +888,7 @@ class A3MvpRuntime:
             )
         switching_from_a2 = state.phase == A3_PHASE_A2_ACTIVE
         if switching_from_a2:
-            self.a2_runtime.clear(state.session_id)
+            self.a2_runtime.clear(state.session_id, preserve_artifacts=True)
         state.selected_unit_id = unit_id
         state.phase = A3_PHASE_CROP_REQUIRED
         state.crop_review_required = False
@@ -905,7 +907,7 @@ class A3MvpRuntime:
         )
 
     def _return_to_unit_selection_locked(self, state: A3SessionState) -> AgentResponse:
-        self.a2_runtime.clear(state.session_id)
+        self.a2_runtime.clear(state.session_id, preserve_artifacts=True)
         state.selected_unit_id = ""
         remaining = state.remaining_units
         state.phase = A3_PHASE_WAIT_SELECTION if remaining else A3_PHASE_COMPLETE
@@ -1034,10 +1036,11 @@ class A3MvpRuntime:
             "task_revision": state.task_revision,
         }
 
-    def _clear_locked(self, session_id: str) -> None:
+    def _clear_locked(self, session_id: str, *, preserve_artifacts: bool = False) -> None:
         self.store.clear(session_id)
-        self.artifacts.clear_session(session_id)
-        self.a2_runtime.clear(session_id)
+        if not preserve_artifacts:
+            self.artifacts.clear_session(session_id)
+        self.a2_runtime.clear(session_id, preserve_artifacts=preserve_artifacts)
 
     def _call_model(
         self,

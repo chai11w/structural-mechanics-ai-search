@@ -109,6 +109,8 @@ class FakeAnalyzer:
 class FakeA2Runtime:
     def __init__(self):
         self.sessions = {}
+        self.media = {}
+        self.clear_calls = []
         self.preanalyzed_calls = []
         self.prechecked_calls = []
         self.text_calls = []
@@ -193,17 +195,27 @@ class FakeA2Runtime:
             "search_id": "",
         })
 
-    def clear(self, session_id):
+    def clear(self, session_id, *, preserve_artifacts=False):
+        self.clear_calls.append((session_id, preserve_artifacts))
         self.sessions.pop(session_id, None)
+        if not preserve_artifacts:
+            self.media = {
+                key: value for key, value in self.media.items() if key[0] != session_id
+            }
 
     def purge_expired(self):
         return None
 
-    def persist_media(self, _session_id, _source):
-        return None
+    def persist_media(self, session_id, source):
+        path = Path(source).resolve()
+        self.media[(session_id, path.name)] = path
+        return path
 
-    def resolve_media(self, _session_id, _filename):
-        return None
+    def resolve_media(self, session_id, filename, *, allow_preserved=False):
+        if not allow_preserved and session_id not in self.sessions:
+            return None
+        path = self.media.get((session_id, filename))
+        return path if path is not None and path.is_file() else None
 
     def record_protocol_event(self, *_args, **_kwargs):
         return None
@@ -663,7 +675,10 @@ class A3RuntimeTests(unittest.TestCase):
         )
         events = [json.loads(line) for line in cropped.text.splitlines() if line]
         self.assertEqual(events[-1]["type"], "result")
-        self.assertEqual(events[-1]["data"]["session"]["a3"]["phase"], A3_PHASE_A2_ACTIVE)
+        crop_data = events[-1]["data"]
+        self.assertEqual(crop_data["session"]["a3"]["phase"], A3_PHASE_A2_ACTIVE)
+        self.assertTrue(crop_data["submitted_crop"].startswith("/api/media/"))
+        self.assertEqual(client.get(crop_data["submitted_crop"]).status_code, 200)
 
         switched = client.post(
             "/api/a3/select",
@@ -673,6 +688,31 @@ class A3RuntimeTests(unittest.TestCase):
         switched_a3 = switched.json()["session"]["a3"]
         self.assertEqual(switched_a3["phase"], A3_PHASE_CROP_REQUIRED)
         self.assertEqual(switched_a3["selected_unit"]["unit_id"], "g1-u2")
+        self.assertEqual(client.get(crop_data["submitted_crop"]).status_code, 200)
+
+        next_page = client.post(
+            "/api/image",
+            files={"file": ("next.jpg", self.source.read_bytes(), "image/jpeg")},
+        )
+        self.assertEqual(next_page.status_code, 200)
+        self.assertEqual(client.get(crop_data["submitted_crop"]).status_code, 200)
+
+    def test_uploading_next_page_keeps_previous_upload_available(self):
+        client = TestClient(create_app(runtime=self.runtime, incoming_dir=self.root / "incoming"))
+        first = client.post(
+            "/api/image",
+            files={"file": ("first.jpg", self.source.read_bytes(), "image/jpeg")},
+        )
+        first_url = first.json()["uploaded_image"]
+
+        second = client.post(
+            "/api/image",
+            files={"file": ("second.jpg", self.source.read_bytes(), "image/jpeg")},
+        )
+
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(client.get(first_url).status_code, 200)
+        self.assertTrue(self.a2.clear_calls[-1][1])
 
     def test_page_observer_returns_parser_error_to_bounded_schema_retry(self):
         invalid = _page_payload()

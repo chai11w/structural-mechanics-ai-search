@@ -740,14 +740,15 @@ class AgentSessionRuntime:
             progress=progress,
         )
 
-    def clear(self, session_id: str) -> None:
-        """Explicitly start a fresh conversation and remove its temporary files."""
+    def clear(self, session_id: str, *, preserve_artifacts: bool = False) -> None:
+        """Clear active state, optionally retaining media until the parent session expires."""
         clean_session_id = self._clean_session_id(session_id)
         lock = self._session_locks[hash(clean_session_id) % len(self._session_locks)]
         with lock:
             self._await_background_image_work(clean_session_id)
             self.store.clear(clean_session_id)
-            self.artifacts.clear_session(clean_session_id)
+            if not preserve_artifacts:
+                self.artifacts.clear_session(clean_session_id)
 
     def current_image_path(self, session_id: str) -> Path | None:
         """Return the current persisted upload for a live session."""
@@ -825,21 +826,36 @@ class AgentSessionRuntime:
             protocol=protocol,
         )
 
-    def resolve_media(self, session_id: str, filename: str) -> Path | None:
-        return self._resolve_artifact(session_id, "media", filename)
+    def resolve_media(
+        self,
+        session_id: str,
+        filename: str,
+        *,
+        allow_preserved: bool = False,
+    ) -> Path | None:
+        return self._resolve_artifact(
+            session_id,
+            "media",
+            filename,
+            allow_preserved=allow_preserved,
+        )
 
-    def _resolve_artifact(self, session_id: str, folder: str, filename: str) -> Path | None:
+    def _resolve_artifact(
+        self,
+        session_id: str,
+        folder: str,
+        filename: str,
+        *,
+        allow_preserved: bool = False,
+    ) -> Path | None:
         clean_session_id = self._clean_session_id(session_id)
-        if self.store.load(clean_session_id) is None:
+        if not allow_preserved and self.store.load(clean_session_id) is None:
             return None
-        safe_name = Path(str(filename)).name
-        if not safe_name or safe_name != str(filename):
-            return None
-        artifact_dir = (self.artifacts.session_dir(clean_session_id) / folder).resolve()
-        target = (artifact_dir / safe_name).resolve()
-        if target.parent != artifact_dir or not target.is_file():
-            return None
-        return target
+        if folder == "uploads":
+            return self.artifacts.resolve_upload(clean_session_id, filename)
+        if folder == "media":
+            return self.artifacts.resolve_media(clean_session_id, filename)
+        return None
 
     def _run(
         self,

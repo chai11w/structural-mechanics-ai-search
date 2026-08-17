@@ -36,6 +36,11 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn("!A3_INLINE_ONLY_INTENTS.has(data.intent)", crop_body)
         self.assertIn("a3CropStatus.textContent = a3Current()?.crop_review_feedback", crop_body)
         self.assertIn("className = 'a3-unit-choice a3-continue-crop'", self.script)
+        self.assertIn("isPersistentImage(data.submitted_crop)", crop_body)
+        self.assertLess(
+            crop_body.index("message: '我提交了裁剪后的题图。'"),
+            crop_body.index("if (!A3_INLINE_ONLY_INTENTS.has(data.intent)) addMessage(response)"),
+        )
 
     def test_old_crop_workspace_echoes_are_removed_from_history(self):
         restore_body = self.script[

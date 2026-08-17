@@ -43,6 +43,22 @@ class SessionArtifacts:
         shutil.copy2(source_path, target)
         return target
 
+    def resolve_upload(self, session_id: str, filename: str) -> Path | None:
+        return self._resolve_file(session_id, "uploads", filename)
+
+    def resolve_media(self, session_id: str, filename: str) -> Path | None:
+        return self._resolve_file(session_id, "media", filename)
+
+    def _resolve_file(self, session_id: str, folder: str, filename: str) -> Path | None:
+        safe_name = Path(str(filename)).name
+        if not safe_name or safe_name != str(filename):
+            return None
+        artifact_dir = (self.session_dir(session_id) / folder).resolve()
+        target = (artifact_dir / safe_name).resolve()
+        if target.parent != artifact_dir or not target.is_file():
+            return None
+        return target
+
     def clear_session(self, session_id: str) -> None:
         target = self.session_dir(session_id)
         if target.parent != self.root:

@@ -164,6 +164,25 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.assertFalse(self.artifacts.session_dir(session_id).exists())
         self.assertEqual(self.logger.entries[-1].outcome, "cancelled")
 
+    def test_state_only_clear_keeps_history_media_until_full_clear(self):
+        session_id = "history-media-session"
+        self.addCleanup(lambda: self.artifacts.clear_session(session_id))
+        self.runtime.handle_image(session_id, self.source_image)
+        upload = self.runtime.current_image_path(session_id)
+        media = self.runtime.persist_media(session_id, self.source_image)
+
+        self.runtime.clear(session_id, preserve_artifacts=True)
+
+        self.assertIsNone(self.store.load(session_id))
+        self.assertIsNone(self.runtime.resolve_upload(session_id, upload.name))
+        self.assertIsNone(self.runtime.resolve_media(session_id, media.name))
+        self.assertEqual(
+            self.runtime.resolve_media(session_id, media.name, allow_preserved=True),
+            media.resolve(),
+        )
+        self.runtime.clear(session_id)
+        self.assertFalse(self.artifacts.session_dir(session_id).exists())
+
     def test_pending_chapter_survives_restart_and_is_consumed_once(self):
         session_id = "v2-pending-session"
         self.addCleanup(lambda: self.artifacts.clear_session(session_id))
