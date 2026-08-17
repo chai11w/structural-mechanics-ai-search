@@ -85,6 +85,16 @@ class A3PageParserTests(unittest.TestCase):
         result = parse_a3_page_understanding(raw)
         self.assertEqual(result.warnings, ("markdown_code_fence_stripped",))
 
+    def test_display_label_does_not_prefix_page_range(self):
+        payload = valid_payload()
+        payload["groups"][0]["parent_question_label"] = "3-15~3-24"
+        payload["groups"][0]["units"][0]["parent_question_label"] = "3-15~3-24"
+        payload["groups"][0]["units"][0]["question_label"] = "3-15"
+
+        result = parse_a3_page_understanding(payload)
+
+        self.assertEqual(build_display_label(result.groups[0].units[0], 1), "3-15")
+
     def test_reject_duplicate_unit_id(self):
         payload = valid_payload()
         payload["groups"][0]["units"][1]["unit_id"] = "g1-u1"

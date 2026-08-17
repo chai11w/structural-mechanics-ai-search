@@ -693,6 +693,100 @@ def create_app(
             raise HTTPException(status_code=404, detail="media not found")
         return FileResponse(path, headers={"Cache-Control": "private, no-store"})
 
+    if bool(getattr(runtime, "a3_enabled", False)):
+
+        @app.post("/api/a3/select")
+        async def a3_select(request: Request) -> Response:
+            try:
+                payload = await request.json()
+            except Exception as exc:  # noqa: BLE001 - malformed external input.
+                raise HTTPException(status_code=400, detail="invalid json") from exc
+            if not isinstance(payload, dict):
+                raise HTTPException(status_code=400, detail="json object is required")
+            unit_id = str(payload.get("unit_id") or "").strip()
+            if not unit_id:
+                raise HTTPException(status_code=400, detail="unit_id is required")
+            try:
+                task_revision = int(payload.get("task_revision"))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="task_revision is required") from exc
+            session_id = _session_id(request, cookie_name=session_cookie)
+            response = runtime.select_unit(  # type: ignore[attr-defined]
+                session_id,
+                unit_id,
+                task_revision=task_revision,
+                request_id=_request_id(request),
+            )
+            return _agent_json(
+                response,
+                runtime,
+                session_id,
+                secure_cookie=_is_secure_request(request),
+                cookie_name=session_cookie,
+            )
+
+        @app.post("/api/a3/crop/stream")
+        async def a3_crop_stream(request: Request) -> StreamingResponse:
+            try:
+                payload = await request.json()
+            except Exception as exc:  # noqa: BLE001 - malformed external input.
+                raise HTTPException(status_code=400, detail="invalid json") from exc
+            if not isinstance(payload, dict) or not isinstance(payload.get("bounds"), dict):
+                raise HTTPException(status_code=400, detail="crop bounds are required")
+            unit_id = str(payload.get("unit_id") or "").strip()
+            try:
+                task_revision = int(payload.get("task_revision"))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="task_revision is required") from exc
+            if not unit_id:
+                raise HTTPException(status_code=400, detail="unit_id is required")
+            session_id = _session_id(request, cookie_name=session_cookie)
+
+            def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
+                kwargs: dict[str, object] = {
+                    "progress": progress,
+                    "request_id": _request_id(request),
+                }
+                identity_key = _identity_key(request)
+                if identity_key:
+                    kwargs["identity_key"] = identity_key
+                response = runtime.handle_crop(  # type: ignore[attr-defined]
+                    session_id,
+                    payload["bounds"],
+                    unit_id=unit_id,
+                    task_revision=task_revision,
+                    **kwargs,
+                )
+                return _agent_payload(response, runtime, session_id)
+
+            result = StreamingResponse(
+                _stream_agent_events(
+                    execute,
+                    request_id=_request_id(request),
+                    search_id=str(runtime.session_snapshot(session_id).get("search_id") or ""),
+                ),
+                media_type="application/x-ndjson",
+            )
+            _set_session_cookie(
+                result,
+                session_id,
+                secure_cookie=_is_secure_request(request),
+                cookie_name=session_cookie,
+            )
+            return result
+
+        @app.get("/api/a3/crop/{unit_id}")
+        def get_a3_crop(unit_id: str, request: Request) -> FileResponse:
+            session_id = str(request.cookies.get(session_cookie) or "").strip()
+            path = (
+                runtime.current_crop_path(session_id, unit_id)  # type: ignore[attr-defined]
+                if session_id
+                else None
+            )
+            if path is None:
+                raise HTTPException(status_code=404, detail="crop not found")
+            return FileResponse(path, headers={"Cache-Control": "private, no-store"})
+
     return app
 
 

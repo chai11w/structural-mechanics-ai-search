@@ -148,6 +148,44 @@ class TikuSearchAgent:
             prechecked_single=prechecked_single,
         )
 
+    def handle_preanalyzed_image(
+        self,
+        image_path: str | Path,
+        *,
+        loads: list[dict[str, Any]],
+        chapter: str = "",
+        context_text: str = "",
+        classified: dict[str, Any] | None = None,
+        search_id: str = "",
+    ) -> AgentResponse:
+        """Enter A2 with a verified crop and its independently recovered context."""
+
+        clean_chapter = str(chapter or "").strip()
+        if clean_chapter.lower() == "unknown":
+            clean_chapter = ""
+        self._incoming_search_id = str(search_id or "").strip()
+        self._turn_protocol = {}
+        self.state.start_search(str(image_path), search_id=self._incoming_search_id or None)
+        self.state.set_analysis(
+            loads=list(loads or []),
+            chapter=clean_chapter,
+            question_image_path=str(image_path),
+        )
+        analysis = dict(classified or {})
+        analysis.setdefault("loads", list(loads or []))
+        analysis.setdefault("chapter_hint", clean_chapter or "unknown")
+        analysis.setdefault("visible_problem_text", str(context_text or "").strip())
+        if self.state.phase == "WAIT_CHAPTER":
+            self.state.offer_global_search()
+            return self._response(
+                render.render_chapter_prompt(self.state),
+                IntentResult("search_image"),
+            )
+        return self._run_search(
+            intent=IntentResult("search_image"),
+            classified=analysis,
+        )
+
     def handle_text(self, text: str) -> AgentResponse:
         self._incoming_search_id = ""
         self._turn_protocol = {}

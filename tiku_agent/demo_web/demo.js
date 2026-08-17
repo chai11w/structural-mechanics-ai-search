@@ -28,9 +28,33 @@ const feedbackDetail = $('#feedback-detail');
 const feedbackError = $('#feedback-error');
 const feedbackCancel = $('#feedback-cancel');
 const feedbackSubmit = $('#feedback-submit');
+const a3CropWorkspace = $('#a3-crop-workspace');
+const a3CropBack = $('#a3-crop-back');
+const a3CropLabel = $('#a3-crop-label');
+const a3Reselect = $('#a3-reselect');
+const a3Context = $('#a3-context');
+const a3ContextText = $('#a3-context-text');
+const a3ImageArea = $('.a3-image-area');
+const a3ImageFrame = $('#a3-image-frame');
+const a3SourceImage = $('#a3-source-image');
+const a3Selection = $('#a3-selection');
+const a3ImageHint = $('#a3-image-hint');
+const a3CropStatus = $('#a3-crop-status');
+const a3Submit = $('#a3-submit');
+const a3ZoomOut = $('#a3-zoom-out');
+const a3ZoomIn = $('#a3-zoom-in');
+const a3ZoomValue = $('#a3-zoom-value');
+const a3SheetBackdrop = $('#a3-sheet-backdrop');
+const a3SheetClose = $('#a3-sheet-close');
+const a3SheetUnits = $('#a3-sheet-units');
+const a3ExampleButton = $('#a3-example-button');
+const a3ExampleBackdrop = $('#a3-example-backdrop');
+const a3ExampleClose = $('#a3-example-close');
+const a3ExampleCanvas = $('#a3-example-canvas');
 
 const TEXT_TIMEOUT_MS = 60000;
 const IMAGE_TIMEOUT_MS = 90000;
+const A3_TIMEOUT_MS = 180000;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 const IMAGE_TARGET_BYTES = 1024 * 1024;
 const IMAGE_MAX_DIMENSION = 2560;
@@ -87,6 +111,16 @@ let sessionContext = {
   session_valid: false, phase: 'IDLE', has_active_image: false,
   task_revision: 0, candidate_generation: '', candidate_count: 0, search_id: '',
 };
+let a3SourceUrl = '';
+let a3Bounds = null;
+let a3Pointer = null;
+let a3CropHistoryActive = false;
+let a3PendingDismiss = true;
+let a3DismissedKey = '';
+let a3KnownRevision = 0;
+let a3Zoom = 1;
+let a3ZoomKey = '';
+const a3LocalDrafts = new Map();
 const objectUrls = new Set();
 
 function syncVisualViewport() {
@@ -204,6 +238,7 @@ function remember(item) {
     feedback: item.feedback || null,
     recoveryActions: normalizeRecoveryActions(item.recoveryActions),
     retryAction: normalizeRetryAction(item.retryAction),
+    a3: normalizeA3Snapshot(item.a3),
     ...protocolFields(item),
   });
   history = history.slice(-HISTORY_LIMIT);
@@ -245,6 +280,31 @@ function normalizeRetryAction(action) {
 
 function mergeRecoveryActions(...groups) {
   return normalizeRecoveryActions(groups.flat());
+}
+
+function normalizeA3Snapshot(value) {
+  if (!value || typeof value !== 'object' || value.enabled !== true) return null;
+  return {
+    enabled: true,
+    phase: String(value.phase || ''),
+    units: Array.isArray(value.units) ? value.units.map((unit) => ({
+      unit_id: String(unit.unit_id || ''),
+      display_label: String(unit.display_label || ''),
+      title_text: String(unit.title_text || ''),
+      completed: Boolean(unit.completed),
+      selected: Boolean(unit.selected),
+    })) : [],
+    selected_unit: value.selected_unit && typeof value.selected_unit === 'object' ? {
+      unit_id: String(value.selected_unit.unit_id || ''),
+      display_label: String(value.selected_unit.display_label || ''),
+      context_text: String(value.selected_unit.context_text || ''),
+    } : { unit_id: '', display_label: '', context_text: '' },
+    completed_unit_ids: Array.isArray(value.completed_unit_ids) ? value.completed_unit_ids.map(String) : [],
+    remaining_count: Number(value.remaining_count || 0),
+    crop_review_required: Boolean(value.crop_review_required),
+    crop_draft: value.crop_draft && typeof value.crop_draft === 'object' ? value.crop_draft : {},
+    task_revision: Number(value.task_revision || 0),
+  };
 }
 
 function openLightbox(url, alt) {
@@ -461,6 +521,47 @@ function createRecoveryActions(actions, item = {}) {
   return host;
 }
 
+function createA3UnitActions(rawA3) {
+  const a3 = normalizeA3Snapshot(rawA3);
+  if (!a3 || !a3.units.length) return null;
+  if (!['WAIT_UNIT_SELECTION', 'CROP_REQUIRED', 'COMPLETE'].includes(a3.phase)) return null;
+  const host = document.createElement('div');
+  host.className = 'a3-unit-actions';
+  const current = normalizeA3Snapshot(sessionContext.a3);
+  const currentRevision = Number(current?.task_revision || 0);
+  const isCurrentList = current && currentRevision === Number(a3.task_revision || 0);
+  const selectionAllowed = ['WAIT_UNIT_SELECTION', 'CROP_REQUIRED'].includes(current?.phase || '');
+  a3.units.forEach((unit) => {
+    const currentUnit = current?.units.find((item) => item.unit_id === unit.unit_id);
+    const completed = Boolean(currentUnit?.completed || unit.completed);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `a3-unit-choice${completed ? ' is-complete' : ''}`;
+    button.dataset.a3UnitId = unit.unit_id;
+    button.dataset.a3Revision = String(a3.task_revision || 0);
+    button.disabled = !isCurrentList || !selectionAllowed || completed || !currentUnit;
+    if (completed) {
+      button.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>';
+      const label = document.createElement('span');
+      label.textContent = `${unit.display_label} · 已完成`;
+      button.append(label);
+    } else {
+      button.textContent = unit.display_label || '未标号题目';
+    }
+    button.addEventListener('click', () => selectA3Unit(unit.unit_id, unit.display_label));
+    host.append(button);
+  });
+  if (current?.phase === 'CROP_REQUIRED' && current.selected_unit?.unit_id) {
+    const continueButton = document.createElement('button');
+    continueButton.type = 'button';
+    continueButton.className = 'a3-unit-choice';
+    continueButton.textContent = '继续裁剪';
+    continueButton.addEventListener('click', () => openA3Crop({ force: true }));
+    host.append(continueButton);
+  }
+  return host;
+}
+
 async function submitFeedback() {
   if (!activeFeedback || feedbackRequestPending) return;
   const context = activeFeedback;
@@ -643,6 +744,8 @@ function addMessage(item, persist = true) {
     images.forEach((url, index) => grid.append(createMediaCard(url, index, { ...item, images })));
     content.append(grid);
   }
+  const a3Actions = createA3UnitActions(item.a3);
+  if (a3Actions) content.append(a3Actions);
   const recoveryActions = createRecoveryActions(item.recoveryActions, item);
   if (recoveryActions) content.append(recoveryActions);
   if (feedbackEligible) content.append(createMessageActions(item, article));
@@ -754,6 +857,13 @@ function clearHistory() {
   historyExpiryTimer = null;
   clearPendingUpload();
   releaseAllObjectUrls();
+  a3SourceUrl = '';
+  a3Bounds = null;
+  a3LocalDrafts.clear();
+  a3DismissedKey = '';
+  a3KnownRevision = 0;
+  a3Zoom = 1;
+  a3ZoomKey = '';
   localStorage.removeItem(HISTORY_KEY);
   localStorage.removeItem(LEGACY_HISTORY_KEY);
 }
@@ -820,6 +930,7 @@ function setBusy(value) {
   fileInput.disabled = value;
   form.setAttribute('aria-busy', String(value));
   updateComposer();
+  if (!a3CropWorkspace.hidden) renderA3Selection();
 }
 
 function validateImage(file) {
@@ -1051,6 +1162,7 @@ function responseItem(data) {
     recoveryActions: recoveryAction ? [recoveryAction] : [],
     messageId: createMessageId(),
     createdAt: Date.now(),
+    a3: normalizeA3Snapshot(data.session?.a3),
     ...protocol,
   };
 }
@@ -1068,6 +1180,8 @@ function setResponseStatus(data) {
 function updateSessionContext(data) {
   if (!data?.session) return;
   sessionContext = { ...sessionContext, ...data.session };
+  if (isPersistentImage(data.uploaded_image)) a3SourceUrl = data.uploaded_image;
+  syncA3Interface();
 }
 
 function invalidateCandidateActions() {
@@ -1076,6 +1190,384 @@ function invalidateCandidateActions() {
     button.disabled = true;
     button.textContent = '候选已失效';
   });
+}
+
+function a3Current() {
+  return normalizeA3Snapshot(sessionContext.a3);
+}
+
+function a3DraftKey(a3 = a3Current()) {
+  const unitId = a3?.selected_unit?.unit_id || '';
+  return unitId ? `${Number(a3.task_revision || 0)}:${unitId}` : '';
+}
+
+function validA3Bounds(value) {
+  if (!value || typeof value !== 'object') return null;
+  const bounds = {
+    x: Number(value.x), y: Number(value.y),
+    width: Number(value.width), height: Number(value.height),
+  };
+  if (!Object.values(bounds).every(Number.isFinite)) return null;
+  if (bounds.x < 0 || bounds.y < 0 || bounds.width < 0.02 || bounds.height < 0.02) return null;
+  if (bounds.x + bounds.width > 1.000001 || bounds.y + bounds.height > 1.000001) return null;
+  return bounds;
+}
+
+function syncA3ActionButtons() {
+  const a3 = a3Current();
+  document.querySelectorAll('.a3-unit-choice[data-a3-unit-id]').forEach((button) => {
+    const unit = a3?.units.find((item) => item.unit_id === button.dataset.a3UnitId);
+    const sameRevision = Number(button.dataset.a3Revision || 0) === Number(a3?.task_revision || 0);
+    const completed = Boolean(unit?.completed);
+    const selectionAllowed = ['WAIT_UNIT_SELECTION', 'CROP_REQUIRED'].includes(a3?.phase || '');
+    button.disabled = !unit || !sameRevision || !selectionAllowed || completed;
+    button.classList.toggle('is-complete', completed);
+  });
+}
+
+function syncA3Interface() {
+  const a3 = a3Current();
+  syncA3ActionButtons();
+  if (!a3) {
+    if (!a3CropWorkspace.hidden) requestCloseA3Crop({ dismiss: false });
+    return;
+  }
+  if (a3KnownRevision && a3KnownRevision !== a3.task_revision) {
+    a3LocalDrafts.clear();
+    a3DismissedKey = '';
+  }
+  a3KnownRevision = a3.task_revision;
+  renderA3SheetUnits(a3);
+  if (a3.phase === 'CROP_REQUIRED') {
+    const key = a3DraftKey(a3);
+    if (key && key !== a3DismissedKey) openA3Crop();
+  } else if (!a3CropWorkspace.hidden) {
+    requestCloseA3Crop({ dismiss: false });
+  }
+}
+
+async function selectA3Unit(unitId, displayLabel = '') {
+  if (!unitId || isBusy) return;
+  a3DismissedKey = '';
+  closeA3Sheet();
+  addMessage({ message: `选择${displayLabel || '这道题'}`, me: true });
+  const operation = ++operationVersion;
+  const pending = addMessage({ message: '正在打开裁剪页', variant: 'pending' }, false);
+  setBusy(true);
+  setStatus('working', '正在准备裁剪…');
+  try {
+    const data = await request('/api/a3/select', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ unit_id: unitId, task_revision: Number(a3Current()?.task_revision || 0) }),
+    }, TEXT_TIMEOUT_MS, '选题超时，请重新选择。');
+    if (operation !== operationVersion) return;
+    pending.remove();
+    addMessage(responseItem(data));
+    setResponseStatus(data);
+  } catch (error) {
+    if (operation !== operationVersion) return;
+    pending.remove();
+    addMessage({
+      message: error.message || '选题失败，请重新选择。',
+      variant: 'error', recoveryActions: error.recoveryActions || [],
+      ...protocolFields(error),
+    });
+    setStatus('error', '选题失败');
+  } finally {
+    if (operation !== operationVersion) return;
+    setBusy(false);
+  }
+}
+
+function openA3Crop({ force = false } = {}) {
+  const a3 = a3Current();
+  const selected = a3?.selected_unit;
+  if (!a3 || a3.phase !== 'CROP_REQUIRED' || !selected?.unit_id) return;
+  if (!a3SourceUrl) {
+    setStatus('error', '原始题图未能恢复');
+    return;
+  }
+  const key = a3DraftKey(a3);
+  if (force) a3DismissedKey = '';
+  if (!force && key === a3DismissedKey) return;
+  a3CropLabel.textContent = selected.display_label || '未标号题目';
+  const contextText = String(selected.context_text || '').trim();
+  a3Context.hidden = !contextText;
+  a3ContextText.textContent = contextText;
+  a3Reselect.hidden = a3.units.filter((unit) => !unit.completed).length <= 1;
+  const serverDraft = validA3Bounds(a3.crop_draft?.bounds);
+  a3Bounds = validA3Bounds(a3LocalDrafts.get(key)) || serverDraft;
+  if (a3ZoomKey !== key) {
+    a3ZoomKey = key;
+    a3Zoom = 1;
+  }
+  if (a3Bounds) a3LocalDrafts.set(key, { ...a3Bounds });
+  a3SourceImage.src = a3SourceUrl;
+  if (a3SourceImage.complete && a3SourceImage.naturalWidth) applyA3Zoom();
+  renderA3Selection();
+  a3CropWorkspace.hidden = false;
+  a3CropWorkspace.setAttribute('aria-hidden', 'false');
+  document.body.dataset.modal = 'a3-crop';
+  if (!a3CropHistoryActive) {
+    window.history.pushState({ ...(window.history.state || {}), a3Crop: true }, '');
+    a3CropHistoryActive = true;
+  }
+  a3CropBack.focus();
+}
+
+function finishCloseA3Crop({ dismiss = true } = {}) {
+  if (a3CropWorkspace.hidden) return;
+  if (dismiss) a3DismissedKey = a3DraftKey();
+  a3CropWorkspace.hidden = true;
+  a3CropWorkspace.setAttribute('aria-hidden', 'true');
+  a3Pointer = null;
+  closeA3Sheet();
+  closeA3Example();
+  delete document.body.dataset.modal;
+}
+
+function requestCloseA3Crop({ dismiss = true } = {}) {
+  a3PendingDismiss = dismiss;
+  if (a3CropHistoryActive) {
+    window.history.back();
+    return;
+  }
+  finishCloseA3Crop({ dismiss });
+}
+
+function renderA3Selection() {
+  const bounds = validA3Bounds(a3Bounds);
+  a3Selection.hidden = !bounds;
+  a3ImageHint.hidden = Boolean(bounds);
+  a3Submit.disabled = !bounds || isBusy;
+  a3CropStatus.classList.toggle('is-warning', Boolean(a3Current()?.crop_review_required));
+  if (!bounds) {
+    a3CropStatus.textContent = '尚未框选结构图';
+    return;
+  }
+  a3Selection.style.left = `${bounds.x * 100}%`;
+  a3Selection.style.top = `${bounds.y * 100}%`;
+  a3Selection.style.width = `${bounds.width * 100}%`;
+  a3Selection.style.height = `${bounds.height * 100}%`;
+  a3CropStatus.textContent = a3Current()?.crop_review_required
+    ? '上次裁剪未通过校验，请调整范围后再提交'
+    : '已框选，可以提交校验';
+}
+
+function applyA3Zoom() {
+  if (!a3SourceImage.naturalWidth || !a3SourceImage.naturalHeight) return;
+  const availableWidth = Math.max(120, a3ImageArea.clientWidth - 44);
+  const availableHeight = Math.max(120, a3ImageArea.clientHeight - 44);
+  const fitScale = Math.min(
+    1,
+    availableWidth / a3SourceImage.naturalWidth,
+    availableHeight / a3SourceImage.naturalHeight,
+  );
+  a3SourceImage.style.width = `${Math.round(a3SourceImage.naturalWidth * fitScale * a3Zoom)}px`;
+  a3SourceImage.style.height = `${Math.round(a3SourceImage.naturalHeight * fitScale * a3Zoom)}px`;
+  a3ZoomValue.textContent = `${Math.round(a3Zoom * 100)}%`;
+  a3ZoomOut.disabled = a3Zoom <= 1;
+  a3ZoomIn.disabled = a3Zoom >= 3;
+  renderA3Selection();
+}
+
+function changeA3Zoom(delta) {
+  const next = Math.max(1, Math.min(3, Math.round((a3Zoom + delta) * 2) / 2));
+  if (next === a3Zoom) return;
+  const centerX = a3ImageArea.scrollLeft + a3ImageArea.clientWidth / 2;
+  const centerY = a3ImageArea.scrollTop + a3ImageArea.clientHeight / 2;
+  const ratio = next / a3Zoom;
+  a3Zoom = next;
+  applyA3Zoom();
+  a3ImageArea.scrollLeft = centerX * ratio - a3ImageArea.clientWidth / 2;
+  a3ImageArea.scrollTop = centerY * ratio - a3ImageArea.clientHeight / 2;
+}
+
+function a3Point(event) {
+  const rect = a3ImageFrame.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  return {
+    x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+    y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
+  };
+}
+
+function startA3Selection(event) {
+  if (isBusy || a3SourceImage.complete === false) return;
+  const point = a3Point(event);
+  if (!point) return;
+  event.preventDefault();
+  a3ImageFrame.setPointerCapture(event.pointerId);
+  a3Pointer = { id: event.pointerId, start: point };
+  a3Bounds = { x: point.x, y: point.y, width: 0, height: 0 };
+  a3Selection.hidden = false;
+  a3ImageHint.hidden = true;
+}
+
+function moveA3Selection(event) {
+  if (!a3Pointer || event.pointerId !== a3Pointer.id) return;
+  const point = a3Point(event);
+  if (!point) return;
+  const left = Math.min(a3Pointer.start.x, point.x);
+  const top = Math.min(a3Pointer.start.y, point.y);
+  a3Bounds = {
+    x: left, y: top,
+    width: Math.abs(point.x - a3Pointer.start.x),
+    height: Math.abs(point.y - a3Pointer.start.y),
+  };
+  a3Selection.style.left = `${a3Bounds.x * 100}%`;
+  a3Selection.style.top = `${a3Bounds.y * 100}%`;
+  a3Selection.style.width = `${a3Bounds.width * 100}%`;
+  a3Selection.style.height = `${a3Bounds.height * 100}%`;
+}
+
+function endA3Selection(event) {
+  if (!a3Pointer || event.pointerId !== a3Pointer.id) return;
+  a3Pointer = null;
+  if (!validA3Bounds(a3Bounds)) a3Bounds = null;
+  else a3LocalDrafts.set(a3DraftKey(), { ...a3Bounds });
+  renderA3Selection();
+}
+
+async function submitA3Crop() {
+  const bounds = validA3Bounds(a3Bounds);
+  if (!bounds || isBusy) return;
+  const operation = ++operationVersion;
+  setBusy(true);
+  a3Submit.disabled = true;
+  a3CropStatus.classList.remove('is-warning');
+  a3CropStatus.textContent = '正在校验裁剪图…';
+  setStatus('working', '正在校验裁剪图…');
+  try {
+    const data = await requestStream('/api/a3/crop/stream', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        bounds,
+        unit_id: String(a3Current()?.selected_unit?.unit_id || ''),
+        task_revision: Number(a3Current()?.task_revision || 0),
+      }),
+    }, A3_TIMEOUT_MS, '裁剪校验或搜题等待超时，已保留裁剪范围。', (event) => {
+      if (operation !== operationVersion) return;
+      a3CropStatus.textContent = event.message;
+      setStatus('working', event.message);
+    });
+    if (operation !== operationVersion) return;
+    const response = responseItem(data);
+    addMessage(response);
+    setResponseStatus(data);
+    if (data.intent === 'a3_crop_review_required') {
+      a3CropStatus.classList.add('is-warning');
+      a3CropStatus.textContent = '未通过校验，请调整框选范围';
+    }
+  } catch (error) {
+    if (operation !== operationVersion) return;
+    a3CropStatus.classList.add('is-warning');
+    a3CropStatus.textContent = error.message || '裁剪校验失败，可以直接重试';
+    addMessage({
+      message: error.message || '裁剪校验失败，可以直接重试。',
+      variant: 'error', recoveryActions: error.recoveryActions || [],
+      ...protocolFields(error),
+    });
+    setStatus('error', '裁剪校验失败');
+  } finally {
+    if (operation !== operationVersion) return;
+    setBusy(false);
+    renderA3Selection();
+  }
+}
+
+function renderA3SheetUnits(a3 = a3Current()) {
+  if (!a3SheetUnits || !a3) return;
+  a3SheetUnits.replaceChildren();
+  a3.units.forEach((unit) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'a3-sheet-unit';
+    button.disabled = unit.completed;
+    button.setAttribute('aria-current', String(unit.unit_id === a3.selected_unit?.unit_id));
+    const text = document.createElement('span');
+    const title = document.createElement('strong');
+    title.textContent = unit.display_label || '未标号题目';
+    const detail = document.createElement('small');
+    detail.textContent = unit.completed ? '已完成' : (unit.title_text || '待裁剪');
+    text.append(title, detail);
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    icon.setAttribute('viewBox', '0 0 24 24');
+    icon.innerHTML = unit.completed ? '<path d="m5 12 4 4L19 6"/>' : '<path d="m9 18 6-6-6-6"/>';
+    button.append(text, icon);
+    button.addEventListener('click', () => selectA3Unit(unit.unit_id, unit.display_label));
+    a3SheetUnits.append(button);
+  });
+}
+
+function openA3Sheet() {
+  const a3 = a3Current();
+  if (!a3 || a3.units.length <= 1) return;
+  renderA3SheetUnits(a3);
+  a3SheetBackdrop.hidden = false;
+  a3SheetClose.focus();
+}
+
+function closeA3Sheet() {
+  if (a3SheetBackdrop) a3SheetBackdrop.hidden = true;
+}
+
+function drawA3Example() {
+  const canvas = a3ExampleCanvas;
+  const context = canvas.getContext('2d');
+  if (!context) return;
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = '#f4f4f1';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = '#fff';
+  context.fillRect(86, 62, 788, 416);
+  context.strokeStyle = '#0f766e';
+  context.lineWidth = 5;
+  context.setLineDash([14, 10]);
+  context.strokeRect(116, 88, 728, 364);
+  context.setLineDash([]);
+  context.strokeStyle = '#202020';
+  context.lineWidth = 9;
+  context.beginPath();
+  context.moveTo(260, 356);
+  context.lineTo(260, 196);
+  context.lineTo(700, 196);
+  context.lineTo(700, 356);
+  context.stroke();
+  context.lineWidth = 4;
+  context.beginPath();
+  context.moveTo(228, 388); context.lineTo(260, 356); context.lineTo(292, 388); context.closePath();
+  context.moveTo(668, 388); context.lineTo(700, 356); context.lineTo(732, 388); context.closePath();
+  context.stroke();
+  context.strokeStyle = '#777770';
+  context.beginPath();
+  context.moveTo(210, 390); context.lineTo(310, 390);
+  context.moveTo(650, 390); context.lineTo(750, 390);
+  context.stroke();
+  context.strokeStyle = '#c2410c';
+  context.fillStyle = '#c2410c';
+  context.lineWidth = 4;
+  for (let x = 310; x <= 650; x += 68) {
+    context.beginPath(); context.moveTo(x, 122); context.lineTo(x, 180); context.stroke();
+    context.beginPath(); context.moveTo(x - 9, 166); context.lineTo(x, 180); context.lineTo(x + 9, 166); context.closePath(); context.fill();
+  }
+  context.beginPath(); context.moveTo(310, 122); context.lineTo(650, 122); context.stroke();
+  context.font = '600 28px system-ui, sans-serif';
+  context.fillText('q', 670, 132);
+  context.fillStyle = '#0f766e';
+  context.font = '600 24px system-ui, sans-serif';
+  context.fillText('保留完整结构、支座与全部荷载', 258, 432);
+}
+
+function openA3Example() {
+  drawA3Example();
+  a3ExampleBackdrop.hidden = false;
+  a3ExampleClose.focus();
+}
+
+function closeA3Example() {
+  if (a3ExampleBackdrop) a3ExampleBackdrop.hidden = true;
 }
 
 async function sendTextValue(value, displayValue = value, actionContext = null) {
@@ -1186,7 +1678,7 @@ async function submitPreparedImage(prepared, uploadRow) {
     debugUploadMetadata('form-data:file', prepared.blob, prepared.filename);
     const data = await requestStream('/api/image/stream', {
       method: 'POST', body: formData,
-    }, IMAGE_TIMEOUT_MS, '网络上传或题图识别超时，请直接重新上传。', (event) => {
+    }, sessionContext.a3?.enabled ? A3_TIMEOUT_MS : IMAGE_TIMEOUT_MS, '网络上传或题图识别超时，请直接重新上传。', (event) => {
       if (operation !== operationVersion) return;
       updatePendingMessage(pending, event.message);
       setStatus('working', event.message);
@@ -1321,6 +1813,8 @@ async function resetConversation() {
     await request('/api/reset', { method: 'POST' }, TEXT_TIMEOUT_MS, '新对话创建超时，请稍后重试。');
     if (operation !== operationVersion) return;
     clearHistory();
+    if (!a3CropWorkspace.hidden) finishCloseA3Crop({ dismiss: false });
+    a3CropHistoryActive = false;
     chat.replaceChildren();
     empty.hidden = false;
     setStatus('ready', '已开始新对话');
@@ -1381,15 +1875,39 @@ newChatButton.addEventListener('click', resetConversation);
 topNewChatButton.addEventListener('click', resetConversation);
 lightboxClose.addEventListener('click', closeLightbox);
 lightbox.addEventListener('click', (event) => { if (event.target === lightbox) closeLightbox(); });
+a3CropBack.addEventListener('click', () => requestCloseA3Crop({ dismiss: true }));
+a3Reselect.addEventListener('click', openA3Sheet);
+a3SheetClose.addEventListener('click', closeA3Sheet);
+a3SheetBackdrop.addEventListener('click', (event) => { if (event.target === a3SheetBackdrop) closeA3Sheet(); });
+a3ExampleButton.addEventListener('click', openA3Example);
+a3ExampleClose.addEventListener('click', closeA3Example);
+a3ExampleBackdrop.addEventListener('click', (event) => { if (event.target === a3ExampleBackdrop) closeA3Example(); });
+a3ImageFrame.addEventListener('pointerdown', startA3Selection);
+a3ImageFrame.addEventListener('pointermove', moveA3Selection);
+a3ImageFrame.addEventListener('pointerup', endA3Selection);
+a3ImageFrame.addEventListener('pointercancel', endA3Selection);
+a3SourceImage.addEventListener('load', applyA3Zoom);
+a3ZoomOut.addEventListener('click', () => changeA3Zoom(-0.5));
+a3ZoomIn.addEventListener('click', () => changeA3Zoom(0.5));
+a3Submit.addEventListener('click', submitA3Crop);
 feedbackClose.addEventListener('click', closeFeedback);
 feedbackBackdrop.addEventListener('click', (event) => { if (event.target === feedbackBackdrop) closeFeedback(); });
 feedbackCancel.addEventListener('click', cancelFeedback);
 feedbackSubmit.addEventListener('click', submitFeedback);
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
-  if (!feedbackBackdrop.hidden) closeFeedback();
+  if (!a3ExampleBackdrop.hidden) closeA3Example();
+  else if (!a3SheetBackdrop.hidden) closeA3Sheet();
+  else if (!a3CropWorkspace.hidden) requestCloseA3Crop({ dismiss: true });
+  else if (!feedbackBackdrop.hidden) closeFeedback();
   else if (!lightbox.hidden) closeLightbox();
   else closeDrawer();
+});
+window.addEventListener('popstate', () => {
+  if (!a3CropHistoryActive) return;
+  a3CropHistoryActive = false;
+  finishCloseA3Crop({ dismiss: a3PendingDismiss });
+  a3PendingDismiss = true;
 });
 document.addEventListener('dragenter', (event) => {
   if (!hasDraggedFiles(event)) return;
@@ -1438,7 +1956,10 @@ window.addEventListener('offline', () => {
   );
 });
 window.addEventListener('online', retryConnection);
-window.addEventListener('resize', syncVisualViewport, { passive: true });
+window.addEventListener('resize', () => {
+  syncVisualViewport();
+  if (!a3CropWorkspace.hidden) applyA3Zoom();
+}, { passive: true });
 window.addEventListener('orientationchange', syncVisualViewport, { passive: true });
 window.visualViewport?.addEventListener('resize', syncVisualViewport, { passive: true });
 window.visualViewport?.addEventListener('scroll', syncVisualViewport, { passive: true });

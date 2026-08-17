@@ -179,6 +179,78 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .feedback-submit:hover { background: #41413d; }
 .feedback-submit:disabled { color: #f1f1ef; background: #acaca8; cursor: wait; }
 
+.a3-unit-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 13px; }
+.a3-unit-choice { min-height: 38px; display: inline-flex; align-items: center; gap: 8px; padding: 0 13px; border: 1px solid #d7d7d2; border-radius: 9px; color: #33332f; background: #fff; font-size: 13px; font-weight: 620; cursor: pointer; }
+.a3-unit-choice:hover { border-color: #999992; background: #f7f7f4; }
+.a3-unit-choice:disabled { color: #999991; border-color: #e2e2dd; background: #f1f1ee; cursor: default; }
+.a3-unit-choice.is-complete { color: #176b55; border-color: #b7dbcf; background: #eef8f4; }
+.a3-unit-choice svg { width: 16px; height: 16px; }
+
+.a3-crop-workspace { position: fixed; z-index: 65; inset: 0; display: grid; grid-template-rows: 58px minmax(0, 1fr) 78px; color: #20201e; background: #f4f4f1; }
+.a3-crop-header { display: grid; grid-template-columns: 120px minmax(0, 1fr) 120px; align-items: center; gap: 10px; padding: 0 18px; border-bottom: 1px solid #deded9; background: #fff; }
+.a3-crop-heading { min-width: 0; display: flex; align-items: baseline; justify-content: center; gap: 9px; }
+.a3-crop-heading strong { font-size: 15px; font-weight: 680; }
+.a3-crop-heading span { max-width: min(36vw, 360px); overflow: hidden; color: #777770; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.a3-header-action { justify-self: end; min-height: 34px; padding: 0 11px; border: 1px solid #d8d8d3; border-radius: 9px; background: #fff; font-size: 12px; font-weight: 620; cursor: pointer; }
+.a3-header-action:hover { background: #f5f5f2; }
+.a3-crop-body { min-height: 0; display: grid; grid-template-columns: 290px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+.a3-crop-guide { grid-row: 1 / 3; padding: 28px 24px; border-right: 1px solid #deded9; background: #fff; }
+.a3-crop-guide > div { display: flex; align-items: flex-start; gap: 12px; }
+.a3-step { width: 25px; height: 25px; flex: 0 0 25px; display: grid; place-items: center; border-radius: 8px; color: #fff; background: #202020; font-size: 12px; font-weight: 700; }
+.a3-crop-guide h2 { margin: 1px 0 8px; font-size: 15px; line-height: 1.4; font-weight: 680; }
+.a3-crop-guide p { margin: 0; color: #707069; font-size: 12px; line-height: 1.7; }
+.a3-example-button { width: 100%; min-height: 40px; display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 22px; border: 1px solid #d6d6d1; border-radius: 9px; color: #383834; background: #fafaf8; font-size: 12px; font-weight: 620; cursor: pointer; }
+.a3-example-button:hover { border-color: #ababA5; background: #f2f2ef; }
+.a3-example-button svg { width: 17px; height: 17px; }
+.a3-context { min-width: 0; padding: 11px 18px; border-bottom: 1px solid #deded9; background: #fbfbfa; }
+.a3-context span { display: block; margin-bottom: 3px; color: #8a8a83; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.a3-context p { max-height: 42px; overflow: auto; margin: 0; color: #53534e; font-size: 12px; line-height: 1.6; white-space: pre-wrap; }
+.a3-image-area { min-width: 0; min-height: 0; position: relative; overflow: auto; padding: 22px; background-color: #e8e8e4; background-image: linear-gradient(45deg, #deded9 25%, transparent 25%), linear-gradient(-45deg, #deded9 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #deded9 75%), linear-gradient(-45deg, transparent 75%, #deded9 75%); background-position: 0 0, 0 8px, 8px -8px, -8px 0; background-size: 16px 16px; }
+.a3-image-frame { position: relative; width: fit-content; line-height: 0; overflow: hidden; margin: 0 auto; border: 1px solid #cfcfca; background: #fff; box-shadow: 0 8px 28px rgba(0,0,0,.08); cursor: crosshair; touch-action: none; user-select: none; }
+.a3-source-image { display: block; object-fit: contain; pointer-events: none; user-select: none; }
+.a3-selection { position: absolute; z-index: 2; border: 2px solid #0f766e; background: rgba(15,118,110,.08); box-shadow: 0 0 0 9999px rgba(20,20,20,.34); pointer-events: none; }
+.a3-selection i { position: absolute; width: 10px; height: 10px; border: 2px solid #fff; border-radius: 50%; background: #0f766e; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+.a3-selection i:nth-child(1) { top: -6px; left: -6px; }
+.a3-selection i:nth-child(2) { top: -6px; right: -6px; }
+.a3-selection i:nth-child(3) { right: -6px; bottom: -6px; }
+.a3-selection i:nth-child(4) { bottom: -6px; left: -6px; }
+.a3-image-hint { position: absolute; z-index: 3; top: 14px; left: 50%; transform: translateX(-50%); padding: 7px 10px; border-radius: 8px; color: #fff; background: rgba(31,31,29,.84); font-size: 11px; line-height: 1; white-space: nowrap; pointer-events: none; }
+.a3-zoom-controls { position: sticky; z-index: 4; bottom: 0; left: 0; width: max-content; display: flex; align-items: center; gap: 3px; margin-top: -38px; padding: 4px; border: 1px solid #d3d3ce; border-radius: 9px; background: rgba(255,255,255,.94); box-shadow: 0 4px 16px rgba(0,0,0,.1); backdrop-filter: blur(8px); }
+.a3-zoom-controls button { width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 7px; background: transparent; cursor: pointer; }
+.a3-zoom-controls button:hover { background: #eeeeea; }
+.a3-zoom-controls button:disabled { color: #b0b0aa; cursor: default; }
+.a3-zoom-controls svg { width: 16px; height: 16px; }
+.a3-zoom-controls span { min-width: 42px; color: #66665f; font-size: 10px; text-align: center; font-variant-numeric: tabular-nums; }
+.a3-crop-footer { display: flex; align-items: center; justify-content: flex-end; gap: 18px; padding: 0 max(20px, calc((100% - 1040px) / 2)); border-top: 1px solid #deded9; background: #fff; }
+.a3-crop-footer p { margin: 0; color: #777770; font-size: 12px; }
+.a3-crop-footer p.is-warning { color: #a43b18; }
+.a3-submit { min-width: 210px; height: 44px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 16px; border: 0; border-radius: 10px; color: #fff; background: #202020; font-size: 13px; font-weight: 650; cursor: pointer; }
+.a3-submit:hover { background: #333; }
+.a3-submit:disabled { color: #9c9c95; background: #e2e2de; cursor: default; }
+.a3-submit svg { width: 17px; height: 17px; }
+
+.a3-sheet-backdrop, .a3-example-backdrop { position: fixed; z-index: 80; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(20,20,20,.28); backdrop-filter: blur(3px); }
+.a3-sheet, .a3-example-dialog { width: min(620px, 100%); max-height: min(720px, calc(100dvh - 32px)); overflow-y: auto; padding: 24px; border: 1px solid #e2e2de; border-radius: 16px; background: #fff; box-shadow: 0 24px 80px rgba(0,0,0,.18); }
+.a3-sheet > header, .a3-example-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 18px; }
+.a3-sheet h2, .a3-example-dialog h2 { margin: 0; font-size: 20px; line-height: 1.3; font-weight: 680; }
+.a3-sheet header p, .a3-example-dialog header p { margin: 6px 0 0; color: #85857e; font-size: 12px; line-height: 1.55; }
+.a3-sheet-units { display: grid; gap: 8px; }
+.a3-sheet-unit { width: 100%; min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border: 1px solid #dfdfda; border-radius: 9px; background: #fff; text-align: left; cursor: pointer; }
+.a3-sheet-unit:hover { border-color: #a9a9a3; background: #f8f8f6; }
+.a3-sheet-unit[aria-current="true"] { border-color: #0f766e; box-shadow: inset 0 0 0 1px #0f766e; }
+.a3-sheet-unit:disabled { color: #8a8a83; background: #f1f1ee; cursor: default; }
+.a3-sheet-unit strong, .a3-sheet-unit small { display: block; }
+.a3-sheet-unit strong { font-size: 13px; }
+.a3-sheet-unit small { max-width: 420px; overflow: hidden; margin-top: 3px; color: #85857e; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.a3-sheet-unit svg { width: 17px; height: 17px; flex: 0 0 17px; color: #0f766e; }
+.a3-example-backdrop { z-index: 85; }
+.a3-example-dialog { width: min(760px, 100%); }
+.a3-example-dialog canvas { width: 100%; height: auto; display: block; border: 1px solid #dfdfda; border-radius: 8px; background: #f7f7f4; }
+.a3-example-legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 13px; color: #65655f; font-size: 11px; }
+.a3-example-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.a3-example-legend i { width: 9px; height: 9px; border-radius: 3px; background: #202020; }
+.a3-example-legend i.load { background: #c2410c; }
+
 button:focus-visible, [role="button"]:focus-visible, textarea:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 @keyframes pulse { 50% { opacity: .3; } }
 @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .35; } 30% { transform: translateY(-3px); opacity: 1; } }
@@ -207,6 +279,28 @@ button:focus-visible, [role="button"]:focus-visible, textarea:focus-visible { ou
   .feedback-dialog { width: 100%; max-height: min(82dvh, 680px); padding: 23px 18px max(20px, env(safe-area-inset-bottom)); border-width: 1px 0 0; border-radius: 20px 20px 0 0; }
   .feedback-header h2 { font-size: 21px; }
   .feedback-tag { min-height: 36px; padding: 0 13px; font-size: 12px; }
+  .a3-crop-workspace { grid-template-rows: 54px minmax(0, 1fr) auto; }
+  .a3-crop-header { grid-template-columns: 44px minmax(0, 1fr) auto; padding: 0 8px; }
+  .a3-crop-heading { display: block; text-align: center; }
+  .a3-crop-heading strong, .a3-crop-heading span { display: block; }
+  .a3-crop-heading strong { font-size: 14px; }
+  .a3-crop-heading span { max-width: 42vw; margin-top: 2px; font-size: 10px; }
+  .a3-header-action { padding: 0 8px; font-size: 11px; }
+  .a3-crop-body { display: flex; flex-direction: column; }
+  .a3-crop-guide { flex: 0 0 auto; padding: 13px 14px 11px; border-right: 0; border-bottom: 1px solid #deded9; }
+  .a3-step { width: 22px; height: 22px; flex-basis: 22px; }
+  .a3-crop-guide h2 { margin: 0 0 4px; font-size: 13px; }
+  .a3-crop-guide p { font-size: 11px; line-height: 1.55; }
+  .a3-example-button { width: auto; min-height: 32px; margin: 9px 0 0 34px; padding: 0 10px; }
+  .a3-context { padding: 8px 14px; }
+  .a3-context p { max-height: 34px; font-size: 11px; }
+  .a3-image-area { flex: 1 1 auto; padding: 12px; }
+  .a3-zoom-controls { margin-top: -36px; }
+  .a3-crop-footer { display: grid; grid-template-columns: 1fr; gap: 7px; padding: 9px 12px max(10px, env(safe-area-inset-bottom)); }
+  .a3-crop-footer p { text-align: center; }
+  .a3-submit { width: 100%; min-width: 0; }
+  .a3-sheet-backdrop, .a3-example-backdrop { align-items: end; padding: 0; }
+  .a3-sheet, .a3-example-dialog { width: 100%; max-height: min(82dvh, 680px); padding: 21px 16px max(18px, env(safe-area-inset-bottom)); border-width: 1px 0 0; border-radius: 16px 16px 0 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {

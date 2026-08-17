@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
   <title>力答 · 结构力学搜题</title>
-  <link rel="stylesheet" href="/assets/demo.css?v=20260814-request-protocol-v1">
+  <link rel="stylesheet" href="/assets/demo.css?v=20260817-a3-mvp-v1">
 </head>
 <body>
   <div class="app-shell">
@@ -73,6 +73,56 @@
 
   <div class="drop-overlay" id="drop-overlay" aria-hidden="true"><div><span class="drop-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4 4 4M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></svg></span><strong>松开即可上传题图</strong><small>支持 PNG、JPG、WEBP 等图片，最大 15MB</small></div></div>
   <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="查看大图" hidden><button class="lightbox-close" id="lightbox-close" type="button" aria-label="关闭大图"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button><img id="lightbox-image" alt=""></div>
+  <section class="a3-crop-workspace" id="a3-crop-workspace" aria-label="裁剪结构图" aria-hidden="true" hidden>
+    <header class="a3-crop-header">
+      <button class="icon-button" id="a3-crop-back" type="button" aria-label="返回对话" title="返回">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>
+      </button>
+      <div class="a3-crop-heading"><strong id="a3-crop-title">裁剪结构图</strong><span id="a3-crop-label"></span></div>
+      <button class="a3-header-action" id="a3-reselect" type="button">重新选题</button>
+    </header>
+    <div class="a3-crop-body">
+      <section class="a3-crop-guide" aria-labelledby="a3-guide-title">
+        <div><span class="a3-step">1</span><div><h2 id="a3-guide-title">框住单个完整结构图</h2><p>保留完整杆件、支座和全部外荷载。尺寸建议保留，题干文字可以不包含。</p></div></div>
+        <button class="a3-example-button" id="a3-example-button" type="button"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="m4 15 4-4 3 3 3-3 6 6"/><path d="M15 9h.01"/></svg><span>查看裁剪示例</span></button>
+      </section>
+      <div class="a3-context" id="a3-context" hidden><span>对应题干</span><p id="a3-context-text"></p></div>
+      <div class="a3-image-area">
+        <div class="a3-image-frame" id="a3-image-frame">
+          <img class="a3-source-image" id="a3-source-image" alt="原始整页题图" draggable="false">
+          <div class="a3-selection" id="a3-selection" hidden><i></i><i></i><i></i><i></i></div>
+          <div class="a3-image-hint" id="a3-image-hint">在图上拖动框选</div>
+        </div>
+        <div class="a3-zoom-controls" aria-label="图片缩放">
+          <button id="a3-zoom-out" type="button" aria-label="缩小图片" title="缩小"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M8 11h6m2 5 4 4"/></svg></button>
+          <span id="a3-zoom-value">100%</span>
+          <button id="a3-zoom-in" type="button" aria-label="放大图片" title="放大"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M8 11h6m-3-3v6m5 2 4 4"/></svg></button>
+        </div>
+      </div>
+    </div>
+    <footer class="a3-crop-footer">
+      <p id="a3-crop-status">尚未框选结构图</p>
+      <button class="a3-submit" id="a3-submit" type="button" disabled>
+        <span>提交并继续搜题</span>
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+      </button>
+    </footer>
+  </section>
+
+  <div class="a3-sheet-backdrop" id="a3-sheet-backdrop" hidden>
+    <section class="a3-sheet" role="dialog" aria-modal="true" aria-labelledby="a3-sheet-title">
+      <header><div><h2 id="a3-sheet-title">重新选题</h2><p>选择后会切换到对应的裁剪草稿</p></div><button class="icon-button" id="a3-sheet-close" type="button" aria-label="关闭选题"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></header>
+      <div class="a3-sheet-units" id="a3-sheet-units"></div>
+    </section>
+  </div>
+
+  <div class="a3-example-backdrop" id="a3-example-backdrop" hidden>
+    <section class="a3-example-dialog" role="dialog" aria-modal="true" aria-labelledby="a3-example-title">
+      <header><div><h2 id="a3-example-title">裁剪示例</h2><p>边框内只保留一个完整结构和它的全部外荷载</p></div><button class="icon-button" id="a3-example-close" type="button" aria-label="关闭示例"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></header>
+      <canvas id="a3-example-canvas" width="960" height="540" aria-label="完整结构图裁剪示例"></canvas>
+      <div class="a3-example-legend"><span><i class="good"></i>杆件与支座完整</span><span><i class="load"></i>荷载与作用范围完整</span></div>
+    </section>
+  </div>
   <div class="feedback-backdrop" id="feedback-backdrop" hidden>
     <section class="feedback-dialog" id="feedback-dialog" role="dialog" aria-modal="true" aria-labelledby="feedback-title">
       <header class="feedback-header">
@@ -90,6 +140,6 @@
       </div>
     </section>
   </div>
-  <script src="/assets/demo.js?v=20260814-request-protocol-v1" defer></script>
+  <script src="/assets/demo.js?v=20260817-a3-mvp-v1" defer></script>
 </body>
 </html>

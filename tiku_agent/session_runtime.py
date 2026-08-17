@@ -283,6 +283,60 @@ class AgentSessionRuntime:
             progress=progress,
         )
 
+    def handle_preanalyzed_image(
+        self,
+        session_id: str,
+        image_path: str | Path,
+        *,
+        loads: list[dict[str, Any]],
+        chapter: str = "",
+        context_text: str = "",
+        classified: dict[str, Any] | None = None,
+        identity_key: str = "",
+        progress: ProgressReporter | None = None,
+        request_id: str = "",
+    ) -> AgentResponse:
+        """Persist an A3-verified crop and enter A2 without rerunning image triage."""
+
+        clean_session_id = self._clean_session_id(session_id)
+        clean_request_id = str(request_id or "").strip() or new_request_id()
+        search_id = new_search_id()
+
+        def execute() -> AgentResponse:
+            self.purge_expired()
+            try:
+                persisted_image = self.artifacts.persist_image(clean_session_id, image_path)
+            except Exception as exc:  # noqa: BLE001 - normalize storage failures at the request boundary.
+                raise AgentProtocolError(
+                    "裁剪图暂时无法保存，请重新裁剪。",
+                    code="UPLOAD_PERSIST_FAILED",
+                ) from exc
+            return self._run(
+                clean_session_id,
+                "a3_verified_image",
+                lambda agent: agent.handle_preanalyzed_image(
+                    persisted_image,
+                    loads=list(loads or []),
+                    chapter=chapter,
+                    context_text=context_text,
+                    classified=classified,
+                    search_id=search_id,
+                ),
+                identity_key=identity_key,
+                progress=progress,
+                request_id=clean_request_id,
+            )
+
+        return self._admit(
+            clean_session_id,
+            execute,
+            kind="a3_verified_image",
+            request_id=clean_request_id,
+            search_id=search_id,
+            identity_key=identity_key,
+            progress=progress,
+        )
+
     def _run_authoritative_image(
         self,
         session_id: str,

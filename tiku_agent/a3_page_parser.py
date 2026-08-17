@@ -46,6 +46,7 @@ A3_PAGE_REASON_CODES = {
 }
 
 _UNIT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_LABEL_RANGE_RE = re.compile(r"(?:~|～|至|—|–)")
 
 
 def _reject_extra_keys(value: Mapping[str, Any], allowed: set[str], field_name: str) -> None:
@@ -253,6 +254,8 @@ def build_display_label(unit: A3PageUnit, ordinal: int) -> str:
     parent = _normalize_label(unit.parent_question_label)
     child = _normalize_label(unit.question_label)
     if child and parent:
+        if _LABEL_RANGE_RE.search(parent):
+            return unit.question_label
         if child == parent or child.startswith(parent + "-"):
             return unit.question_label
         if child.startswith(parent):
