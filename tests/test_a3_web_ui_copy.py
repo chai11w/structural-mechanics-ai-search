@@ -11,7 +11,7 @@ class A3WebUiCopyTests(unittest.TestCase):
 
     def test_candidate_and_original_question_actions_use_distinct_labels(self):
         self.assertIn("switchButton.textContent = '换题重新搜'", self.script)
-        self.assertIn("choose.textContent = isCurrent ? '选择这个候选'", self.script)
+        self.assertIn("choose.textContent = isCurrent ? '选择'", self.script)
         self.assertNotIn("switchButton.textContent = '换一道题'", self.script)
         self.assertNotIn("choose.textContent = isCurrent ? '选择这道题'", self.script)
 

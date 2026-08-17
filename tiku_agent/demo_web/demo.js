@@ -711,7 +711,7 @@ function createMediaCard(url, index, item) {
       && actionContext.candidate_generation
       && actionContext.candidate_generation === String(sessionContext.candidate_generation || '');
     choose.disabled = !isCurrent;
-    choose.textContent = isCurrent ? '选择这个候选' : '候选已失效';
+    choose.textContent = isCurrent ? '选择' : '候选已失效';
     choose.addEventListener('click', () => sendTextValue(`选择候选 ${index + 1}`, `选择候选 ${index + 1}`, actionContext));
     footer.append(label, choose);
     card.append(footer);
