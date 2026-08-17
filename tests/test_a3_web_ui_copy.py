@@ -36,8 +36,18 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn("44 / frameRect.width", self.script)
 
     def test_mobile_crop_question_label_is_centered_under_title(self):
-        self.assertIn(".a3-crop-header { min-width: 0;", self.style)
+        self.assertIn(".a3-crop-header { min-width: 0; position: relative;", self.style)
+        self.assertIn("position: absolute; top: 50%; left: 50%", self.style)
+        self.assertIn("transform: translate(-50%, -50%)", self.style)
         self.assertIn("width: 100%; max-width: 42vw; margin: 2px auto 0", self.style)
+
+    def test_crop_image_is_fitted_without_zoom_controls(self):
+        page = (ROOT / "tiku_agent" / "demo_web" / "index.html").read_text(encoding="utf-8")
+
+        self.assertNotIn("a3-zoom-controls", page)
+        self.assertNotIn("a3Zoom", self.script)
+        self.assertNotIn("changeA3Zoom", self.script)
+        self.assertIn("function fitA3Image()", self.script)
 
     def test_current_a3_buttons_refresh_their_derived_labels(self):
         self.assertIn("button.textContent = unit.display_label || '未标号题目'", self.script)

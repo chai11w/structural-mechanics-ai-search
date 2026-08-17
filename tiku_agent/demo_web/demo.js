@@ -41,9 +41,6 @@ const a3Selection = $('#a3-selection');
 const a3ImageHint = $('#a3-image-hint');
 const a3CropStatus = $('#a3-crop-status');
 const a3Submit = $('#a3-submit');
-const a3ZoomOut = $('#a3-zoom-out');
-const a3ZoomIn = $('#a3-zoom-in');
-const a3ZoomValue = $('#a3-zoom-value');
 const a3SheetBackdrop = $('#a3-sheet-backdrop');
 const a3SheetClose = $('#a3-sheet-close');
 const a3SheetUnits = $('#a3-sheet-units');
@@ -122,8 +119,6 @@ let a3CropHistoryActive = false;
 let a3PendingDismiss = true;
 let a3DismissedKey = '';
 let a3KnownRevision = 0;
-let a3Zoom = 1;
-let a3ZoomKey = '';
 const a3LocalDrafts = new Map();
 const objectUrls = new Set();
 
@@ -911,8 +906,6 @@ function clearHistory() {
   a3LocalDrafts.clear();
   a3DismissedKey = '';
   a3KnownRevision = 0;
-  a3Zoom = 1;
-  a3ZoomKey = '';
   localStorage.removeItem(HISTORY_KEY);
   localStorage.removeItem(LEGACY_HISTORY_KEY);
 }
@@ -1388,17 +1381,13 @@ function openA3Crop({ force = false } = {}) {
   a3Reselect.hidden = a3.units.filter((unit) => !unit.completed).length <= 1;
   const serverDraft = validA3Bounds(a3.crop_draft?.bounds);
   a3Bounds = validA3Bounds(a3LocalDrafts.get(key)) || serverDraft;
-  if (a3ZoomKey !== key) {
-    a3ZoomKey = key;
-    a3Zoom = 1;
-  }
   if (a3Bounds) a3LocalDrafts.set(key, { ...a3Bounds });
   a3SourceImage.src = a3SourceUrl;
-  if (a3SourceImage.complete && a3SourceImage.naturalWidth) applyA3Zoom();
   renderA3Selection();
   a3CropWorkspace.hidden = false;
   a3CropWorkspace.setAttribute('aria-hidden', 'false');
   document.body.dataset.modal = 'a3-crop';
+  if (a3SourceImage.complete && a3SourceImage.naturalWidth) fitA3Image();
   if (!a3CropHistoryActive) {
     window.history.pushState({ ...(window.history.state || {}), a3Crop: true }, '');
     a3CropHistoryActive = true;
@@ -1445,7 +1434,7 @@ function renderA3Selection() {
     : '已框选，可以提交校验';
 }
 
-function applyA3Zoom() {
+function fitA3Image() {
   if (!a3SourceImage.naturalWidth || !a3SourceImage.naturalHeight) return;
   const availableWidth = Math.max(120, a3ImageArea.clientWidth - 44);
   const availableHeight = Math.max(120, a3ImageArea.clientHeight - 44);
@@ -1454,24 +1443,9 @@ function applyA3Zoom() {
     availableWidth / a3SourceImage.naturalWidth,
     availableHeight / a3SourceImage.naturalHeight,
   );
-  a3SourceImage.style.width = `${Math.round(a3SourceImage.naturalWidth * fitScale * a3Zoom)}px`;
-  a3SourceImage.style.height = `${Math.round(a3SourceImage.naturalHeight * fitScale * a3Zoom)}px`;
-  a3ZoomValue.textContent = `${Math.round(a3Zoom * 100)}%`;
-  a3ZoomOut.disabled = a3Zoom <= 1;
-  a3ZoomIn.disabled = a3Zoom >= 3;
+  a3SourceImage.style.width = `${Math.round(a3SourceImage.naturalWidth * fitScale)}px`;
+  a3SourceImage.style.height = `${Math.round(a3SourceImage.naturalHeight * fitScale)}px`;
   renderA3Selection();
-}
-
-function changeA3Zoom(delta) {
-  const next = Math.max(1, Math.min(3, Math.round((a3Zoom + delta) * 2) / 2));
-  if (next === a3Zoom) return;
-  const centerX = a3ImageArea.scrollLeft + a3ImageArea.clientWidth / 2;
-  const centerY = a3ImageArea.scrollTop + a3ImageArea.clientHeight / 2;
-  const ratio = next / a3Zoom;
-  a3Zoom = next;
-  applyA3Zoom();
-  a3ImageArea.scrollLeft = centerX * ratio - a3ImageArea.clientWidth / 2;
-  a3ImageArea.scrollTop = centerY * ratio - a3ImageArea.clientHeight / 2;
 }
 
 function a3Point(event) {
@@ -2029,9 +2003,7 @@ a3ImageFrame.addEventListener('pointerdown', startA3Selection);
 a3ImageFrame.addEventListener('pointermove', moveA3Selection);
 a3ImageFrame.addEventListener('pointerup', endA3Selection);
 a3ImageFrame.addEventListener('pointercancel', endA3Selection);
-a3SourceImage.addEventListener('load', applyA3Zoom);
-a3ZoomOut.addEventListener('click', () => changeA3Zoom(-0.5));
-a3ZoomIn.addEventListener('click', () => changeA3Zoom(0.5));
+a3SourceImage.addEventListener('load', fitA3Image);
 a3Submit.addEventListener('click', submitA3Crop);
 feedbackClose.addEventListener('click', closeFeedback);
 feedbackBackdrop.addEventListener('click', (event) => { if (event.target === feedbackBackdrop) closeFeedback(); });
@@ -2101,7 +2073,7 @@ window.addEventListener('offline', () => {
 window.addEventListener('online', retryConnection);
 window.addEventListener('resize', () => {
   syncVisualViewport();
-  if (!a3CropWorkspace.hidden) applyA3Zoom();
+  if (!a3CropWorkspace.hidden) fitA3Image();
 }, { passive: true });
 window.addEventListener('orientationchange', syncVisualViewport, { passive: true });
 window.visualViewport?.addEventListener('resize', syncVisualViewport, { passive: true });

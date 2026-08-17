@@ -187,8 +187,8 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .a3-unit-choice svg { width: 16px; height: 16px; }
 
 .a3-crop-workspace { position: fixed; z-index: 65; inset: 0; display: grid; grid-template-rows: 58px minmax(0, 1fr) 78px; color: #20201e; background: #f4f4f1; }
-.a3-crop-header { min-width: 0; display: grid; grid-template-columns: 120px minmax(0, 1fr) 120px; align-items: center; gap: 10px; padding: 0 18px; border-bottom: 1px solid #deded9; background: #fff; }
-.a3-crop-heading { min-width: 0; display: flex; align-items: baseline; justify-content: center; gap: 9px; }
+.a3-crop-header { min-width: 0; position: relative; display: flex; align-items: center; justify-content: space-between; padding: 0 18px; border-bottom: 1px solid #deded9; background: #fff; }
+.a3-crop-heading { min-width: 0; position: absolute; top: 50%; left: 50%; max-width: calc(100% - 280px); display: flex; align-items: baseline; justify-content: center; gap: 9px; transform: translate(-50%, -50%); }
 .a3-crop-heading strong { font-size: 15px; font-weight: 680; }
 .a3-crop-heading span { max-width: min(36vw, 360px); overflow: hidden; color: #777770; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .a3-header-action { justify-self: end; min-height: 34px; padding: 0 11px; border: 1px solid #d8d8d3; border-radius: 9px; background: #fff; font-size: 12px; font-weight: 620; cursor: pointer; }
@@ -220,12 +220,6 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .a3-selection i[data-a3-handle="sw"] { bottom: -2px; left: -2px; cursor: nesw-resize; }
 .a3-selection i[data-a3-handle="sw"]::after { bottom: 0; left: 0; border-width: 0 0 3px 3px; }
 .a3-image-hint { position: absolute; z-index: 3; top: 14px; left: 50%; transform: translateX(-50%); padding: 7px 10px; border-radius: 8px; color: #fff; background: rgba(31,31,29,.84); font-size: 11px; line-height: 1; white-space: nowrap; pointer-events: none; }
-.a3-zoom-controls { position: sticky; z-index: 4; bottom: 0; left: 0; width: max-content; display: flex; align-items: center; gap: 3px; margin-top: -38px; padding: 4px; border: 1px solid #d3d3ce; border-radius: 9px; background: rgba(255,255,255,.94); box-shadow: 0 4px 16px rgba(0,0,0,.1); backdrop-filter: blur(8px); }
-.a3-zoom-controls button { width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 7px; background: transparent; cursor: pointer; }
-.a3-zoom-controls button:hover { background: #eeeeea; }
-.a3-zoom-controls button:disabled { color: #b0b0aa; cursor: default; }
-.a3-zoom-controls svg { width: 16px; height: 16px; }
-.a3-zoom-controls span { min-width: 42px; color: #66665f; font-size: 10px; text-align: center; font-variant-numeric: tabular-nums; }
 .a3-crop-footer { display: flex; align-items: center; justify-content: flex-end; gap: 18px; padding: 0 max(20px, calc((100% - 1040px) / 2)); border-top: 1px solid #deded9; background: #fff; }
 .a3-crop-footer p { margin: 0; color: #777770; font-size: 12px; }
 .a3-crop-footer p.is-warning { color: #a43b18; }
@@ -285,8 +279,8 @@ button:focus-visible, [role="button"]:focus-visible, textarea:focus-visible { ou
   .feedback-header h2 { font-size: 21px; }
   .feedback-tag { min-height: 36px; padding: 0 13px; font-size: 12px; }
   .a3-crop-workspace { grid-template-rows: 54px minmax(0, 1fr) auto; }
-  .a3-crop-header { grid-template-columns: 44px minmax(0, 1fr) auto; padding: 0 8px; }
-  .a3-crop-heading { width: 100%; display: block; justify-self: center; text-align: center; }
+  .a3-crop-header { padding: 0 8px; }
+  .a3-crop-heading { width: 42vw; max-width: 160px; display: block; text-align: center; }
   .a3-crop-heading strong, .a3-crop-heading span { display: block; }
   .a3-crop-heading strong { font-size: 14px; }
   .a3-crop-heading span { width: 100%; max-width: 42vw; margin: 2px auto 0; font-size: 10px; }
@@ -300,7 +294,6 @@ button:focus-visible, [role="button"]:focus-visible, textarea:focus-visible { ou
   .a3-context { padding: 8px 14px; }
   .a3-context p { max-height: 34px; font-size: 11px; }
   .a3-image-area { flex: 1 1 auto; padding: 12px; }
-  .a3-zoom-controls { margin-top: -36px; }
   .a3-crop-footer { display: grid; grid-template-columns: 1fr; gap: 7px; padding: 9px 12px max(10px, env(safe-area-inset-bottom)); }
   .a3-crop-footer p { text-align: center; }
   .a3-submit { width: 100%; min-width: 0; }
