@@ -1478,14 +1478,30 @@ function a3Point(event) {
   };
 }
 
+function paintA3Selection(bounds) {
+  a3Selection.style.left = `${bounds.x * 100}%`;
+  a3Selection.style.top = `${bounds.y * 100}%`;
+  a3Selection.style.width = `${bounds.width * 100}%`;
+  a3Selection.style.height = `${bounds.height * 100}%`;
+}
+
 function startA3Selection(event) {
-  if (isBusy || a3SourceImage.complete === false) return;
+  if (isBusy || a3SourceImage.complete === false || a3Pointer) return;
+  if (event.pointerType === 'mouse' && event.button !== 0) return;
+  if (event.pointerType !== 'mouse' && !event.isPrimary) return;
   const point = a3Point(event);
   if (!point) return;
   event.preventDefault();
   a3ImageFrame.setPointerCapture(event.pointerId);
-  a3Pointer = { id: event.pointerId, start: point };
-  a3Bounds = { x: point.x, y: point.y, width: 0, height: 0 };
+  const origin = validA3Bounds(a3Bounds);
+  const handle = event.target instanceof Element
+    ? String(event.target.closest('[data-a3-handle]')?.dataset.a3Handle || '')
+    : '';
+  let mode = 'create';
+  if (origin && handle) mode = 'resize';
+  else if (origin && event.target instanceof Element && event.target.closest('.a3-selection')) mode = 'move';
+  a3Pointer = { id: event.pointerId, start: point, mode, handle, origin: origin ? { ...origin } : null };
+  if (mode === 'create') a3Bounds = { x: point.x, y: point.y, width: 0, height: 0 };
   a3Selection.hidden = false;
   a3ImageHint.hidden = true;
 }
@@ -1494,22 +1510,46 @@ function moveA3Selection(event) {
   if (!a3Pointer || event.pointerId !== a3Pointer.id) return;
   const point = a3Point(event);
   if (!point) return;
-  const left = Math.min(a3Pointer.start.x, point.x);
-  const top = Math.min(a3Pointer.start.y, point.y);
-  a3Bounds = {
-    x: left, y: top,
-    width: Math.abs(point.x - a3Pointer.start.x),
-    height: Math.abs(point.y - a3Pointer.start.y),
-  };
-  a3Selection.style.left = `${a3Bounds.x * 100}%`;
-  a3Selection.style.top = `${a3Bounds.y * 100}%`;
-  a3Selection.style.width = `${a3Bounds.width * 100}%`;
-  a3Selection.style.height = `${a3Bounds.height * 100}%`;
+  event.preventDefault();
+  if (a3Pointer.mode === 'move' && a3Pointer.origin) {
+    const origin = a3Pointer.origin;
+    a3Bounds = {
+      ...origin,
+      x: Math.max(0, Math.min(1 - origin.width, origin.x + point.x - a3Pointer.start.x)),
+      y: Math.max(0, Math.min(1 - origin.height, origin.y + point.y - a3Pointer.start.y)),
+    };
+  } else if (a3Pointer.mode === 'resize' && a3Pointer.origin) {
+    const origin = a3Pointer.origin;
+    const frameRect = a3ImageFrame.getBoundingClientRect();
+    const minWidth = Math.min(0.25, Math.max(0.02, 44 / frameRect.width));
+    const minHeight = Math.min(0.25, Math.max(0.02, 44 / frameRect.height));
+    let left = origin.x;
+    let right = origin.x + origin.width;
+    let top = origin.y;
+    let bottom = origin.y + origin.height;
+    if (a3Pointer.handle.includes('w')) left = Math.max(0, Math.min(right - minWidth, point.x));
+    if (a3Pointer.handle.includes('e')) right = Math.min(1, Math.max(left + minWidth, point.x));
+    if (a3Pointer.handle.includes('n')) top = Math.max(0, Math.min(bottom - minHeight, point.y));
+    if (a3Pointer.handle.includes('s')) bottom = Math.min(1, Math.max(top + minHeight, point.y));
+    a3Bounds = { x: left, y: top, width: right - left, height: bottom - top };
+  } else {
+    const left = Math.min(a3Pointer.start.x, point.x);
+    const top = Math.min(a3Pointer.start.y, point.y);
+    a3Bounds = {
+      x: left, y: top,
+      width: Math.abs(point.x - a3Pointer.start.x),
+      height: Math.abs(point.y - a3Pointer.start.y),
+    };
+  }
+  paintA3Selection(a3Bounds);
 }
 
 function endA3Selection(event) {
   if (!a3Pointer || event.pointerId !== a3Pointer.id) return;
+  const pointer = a3Pointer;
   a3Pointer = null;
+  if (a3ImageFrame.hasPointerCapture(event.pointerId)) a3ImageFrame.releasePointerCapture(event.pointerId);
+  if (event.type === 'pointercancel') a3Bounds = pointer.origin;
   if (!validA3Bounds(a3Bounds)) a3Bounds = null;
   else a3LocalDrafts.set(a3DraftKey(), { ...a3Bounds });
   renderA3Selection();

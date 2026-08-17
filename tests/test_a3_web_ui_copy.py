@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class A3WebUiCopyTests(unittest.TestCase):
     def setUp(self):
         self.script = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
+        self.style = (ROOT / "tiku_agent" / "demo_web" / "demo.css").read_text(encoding="utf-8")
 
     def test_candidate_and_original_question_actions_use_distinct_labels(self):
         self.assertIn("switchButton.textContent = '换题重新搜'", self.script)
@@ -20,6 +21,23 @@ class A3WebUiCopyTests(unittest.TestCase):
 
         self.assertIn("选择图片中的题目", page)
         self.assertIn("选择其他题目后会重新裁剪并搜索", page)
+
+    def test_mobile_crop_box_can_move_and_resize(self):
+        page = (ROOT / "tiku_agent" / "demo_web" / "index.html").read_text(encoding="utf-8")
+
+        for handle in ("nw", "ne", "se", "sw"):
+            self.assertIn(f'data-a3-handle="{handle}"', page)
+        self.assertIn("if (origin && handle) mode = 'resize'", self.script)
+        self.assertIn("mode = 'move'", self.script)
+        self.assertIn("setPointerCapture(event.pointerId)", self.script)
+        self.assertIn("releasePointerCapture(event.pointerId)", self.script)
+        self.assertIn("width: 44px; height: 44px", self.style)
+        self.assertIn("pointer-events: auto; touch-action: none", self.style)
+        self.assertIn("44 / frameRect.width", self.script)
+
+    def test_mobile_crop_question_label_is_centered_under_title(self):
+        self.assertIn(".a3-crop-header { min-width: 0;", self.style)
+        self.assertIn("width: 100%; max-width: 42vw; margin: 2px auto 0", self.style)
 
     def test_crop_workspace_actions_do_not_repeat_in_chat(self):
         select_body = self.script[

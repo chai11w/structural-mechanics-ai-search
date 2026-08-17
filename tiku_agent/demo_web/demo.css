@@ -187,7 +187,7 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .a3-unit-choice svg { width: 16px; height: 16px; }
 
 .a3-crop-workspace { position: fixed; z-index: 65; inset: 0; display: grid; grid-template-rows: 58px minmax(0, 1fr) 78px; color: #20201e; background: #f4f4f1; }
-.a3-crop-header { display: grid; grid-template-columns: 120px minmax(0, 1fr) 120px; align-items: center; gap: 10px; padding: 0 18px; border-bottom: 1px solid #deded9; background: #fff; }
+.a3-crop-header { min-width: 0; display: grid; grid-template-columns: 120px minmax(0, 1fr) 120px; align-items: center; gap: 10px; padding: 0 18px; border-bottom: 1px solid #deded9; background: #fff; }
 .a3-crop-heading { min-width: 0; display: flex; align-items: baseline; justify-content: center; gap: 9px; }
 .a3-crop-heading strong { font-size: 15px; font-weight: 680; }
 .a3-crop-heading span { max-width: min(36vw, 360px); overflow: hidden; color: #777770; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
@@ -208,12 +208,17 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .a3-image-area { min-width: 0; min-height: 0; position: relative; overflow: auto; padding: 22px; background-color: #e8e8e4; background-image: linear-gradient(45deg, #deded9 25%, transparent 25%), linear-gradient(-45deg, #deded9 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #deded9 75%), linear-gradient(-45deg, transparent 75%, #deded9 75%); background-position: 0 0, 0 8px, 8px -8px, -8px 0; background-size: 16px 16px; }
 .a3-image-frame { position: relative; width: fit-content; line-height: 0; overflow: hidden; margin: 0 auto; border: 1px solid #cfcfca; background: #fff; box-shadow: 0 8px 28px rgba(0,0,0,.08); cursor: crosshair; touch-action: none; user-select: none; }
 .a3-source-image { display: block; object-fit: contain; pointer-events: none; user-select: none; }
-.a3-selection { position: absolute; z-index: 2; border: 2px solid #0f766e; background: rgba(15,118,110,.08); box-shadow: 0 0 0 9999px rgba(20,20,20,.34); pointer-events: none; }
-.a3-selection i { position: absolute; width: 10px; height: 10px; border: 2px solid #fff; border-radius: 50%; background: #0f766e; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
-.a3-selection i:nth-child(1) { top: -6px; left: -6px; }
-.a3-selection i:nth-child(2) { top: -6px; right: -6px; }
-.a3-selection i:nth-child(3) { right: -6px; bottom: -6px; }
-.a3-selection i:nth-child(4) { bottom: -6px; left: -6px; }
+.a3-selection { position: absolute; z-index: 2; border: 2px solid #0f766e; background: rgba(15,118,110,.08); box-shadow: 0 0 0 9999px rgba(20,20,20,.34); cursor: move; pointer-events: auto; touch-action: none; }
+.a3-selection i { position: absolute; width: 44px; height: 44px; border: 0; background: transparent; touch-action: none; }
+.a3-selection i::after { content: ''; position: absolute; width: 15px; height: 15px; border-color: #fff; border-style: solid; filter: drop-shadow(0 1px 1px rgba(0,0,0,.45)); }
+.a3-selection i[data-a3-handle="nw"] { top: -2px; left: -2px; cursor: nwse-resize; }
+.a3-selection i[data-a3-handle="nw"]::after { top: 0; left: 0; border-width: 3px 0 0 3px; }
+.a3-selection i[data-a3-handle="ne"] { top: -2px; right: -2px; cursor: nesw-resize; }
+.a3-selection i[data-a3-handle="ne"]::after { top: 0; right: 0; border-width: 3px 3px 0 0; }
+.a3-selection i[data-a3-handle="se"] { right: -2px; bottom: -2px; cursor: nwse-resize; }
+.a3-selection i[data-a3-handle="se"]::after { right: 0; bottom: 0; border-width: 0 3px 3px 0; }
+.a3-selection i[data-a3-handle="sw"] { bottom: -2px; left: -2px; cursor: nesw-resize; }
+.a3-selection i[data-a3-handle="sw"]::after { bottom: 0; left: 0; border-width: 0 0 3px 3px; }
 .a3-image-hint { position: absolute; z-index: 3; top: 14px; left: 50%; transform: translateX(-50%); padding: 7px 10px; border-radius: 8px; color: #fff; background: rgba(31,31,29,.84); font-size: 11px; line-height: 1; white-space: nowrap; pointer-events: none; }
 .a3-zoom-controls { position: sticky; z-index: 4; bottom: 0; left: 0; width: max-content; display: flex; align-items: center; gap: 3px; margin-top: -38px; padding: 4px; border: 1px solid #d3d3ce; border-radius: 9px; background: rgba(255,255,255,.94); box-shadow: 0 4px 16px rgba(0,0,0,.1); backdrop-filter: blur(8px); }
 .a3-zoom-controls button { width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 7px; background: transparent; cursor: pointer; }
@@ -281,10 +286,10 @@ button:focus-visible, [role="button"]:focus-visible, textarea:focus-visible { ou
   .feedback-tag { min-height: 36px; padding: 0 13px; font-size: 12px; }
   .a3-crop-workspace { grid-template-rows: 54px minmax(0, 1fr) auto; }
   .a3-crop-header { grid-template-columns: 44px minmax(0, 1fr) auto; padding: 0 8px; }
-  .a3-crop-heading { display: block; text-align: center; }
+  .a3-crop-heading { width: 100%; display: block; justify-self: center; text-align: center; }
   .a3-crop-heading strong, .a3-crop-heading span { display: block; }
   .a3-crop-heading strong { font-size: 14px; }
-  .a3-crop-heading span { max-width: 42vw; margin-top: 2px; font-size: 10px; }
+  .a3-crop-heading span { width: 100%; max-width: 42vw; margin: 2px auto 0; font-size: 10px; }
   .a3-header-action { padding: 0 8px; font-size: 11px; }
   .a3-crop-body { display: flex; flex-direction: column; }
   .a3-crop-guide { flex: 0 0 auto; padding: 13px 14px 11px; border-right: 0; border-bottom: 1px solid #deded9; }
