@@ -64,6 +64,10 @@ const HISTORY_TTL_MS = 2 * 60 * 60 * 1000;
 const HISTORY_LIMIT = 50;
 const HISTORY_KEY = 'tiku-agent-current-chat-v2';
 const LEGACY_HISTORY_KEY = 'tiku-agent-current-chat-v1';
+const LEGACY_EXPIRED_MEDIA_MESSAGE = '题图或结果图片已失效，请重新上传题图；如果问题反复出现，可以点踩告诉我们。';
+const A3_INLINE_ONLY_INTENTS = new Set([
+  'a3_unit_selected', 'a3_unit_already_selected', 'a3_crop_review_required',
+]);
 const ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp']);
 const ALLOWED_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp']);
 const FEEDBACK_OPTIONS = {
@@ -234,6 +238,7 @@ function remember(item) {
     candidateCount: Number(item.candidateCount || 0),
     candidateGeneration: String(item.candidateGeneration || ''),
     messageId: String(item.messageId || ''),
+    noticeKey: String(item.noticeKey || ''),
     createdAt: Number(item.createdAt || 0),
     feedback: item.feedback || null,
     recoveryActions: normalizeRecoveryActions(item.recoveryActions),
@@ -411,7 +416,7 @@ function showFailureNotice(key, message, recoveryActions = [], protocol = {}) {
   if (!noticeKey || activeFailureNotices.has(noticeKey)) return null;
   activeFailureNotices.add(noticeKey);
   return addMessage({
-    message, variant: 'error', recoveryActions, ...protocolFields(protocol),
+    message, variant: 'error', recoveryActions, noticeKey, ...protocolFields(protocol),
   });
 }
 
@@ -565,18 +570,22 @@ function createA3UnitActions(rawA3) {
     } else {
       button.textContent = unit.display_label || '未标号题目';
     }
-    button.addEventListener('click', () => selectA3Unit(unit.unit_id, unit.display_label));
+    button.addEventListener('click', () => selectA3Unit(unit.unit_id));
     host.append(button);
   });
   if (current?.phase === 'CROP_REQUIRED' && current.selected_unit?.unit_id) {
-    const continueButton = document.createElement('button');
-    continueButton.type = 'button';
-    continueButton.className = 'a3-unit-choice';
-    continueButton.textContent = '继续裁剪';
-    continueButton.addEventListener('click', () => openA3Crop({ force: true }));
-    host.append(continueButton);
+    host.append(createA3ContinueCropButton());
   }
   return host;
+}
+
+function createA3ContinueCropButton() {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'a3-unit-choice a3-continue-crop';
+  button.textContent = '继续裁剪';
+  button.addEventListener('click', () => openA3Crop({ force: true }));
+  return button;
 }
 
 async function submitFeedback() {
@@ -667,15 +676,11 @@ function createMediaCard(url, index, item) {
     note.className = 'expired-image';
     note.textContent = '图片已失效，请重新上传';
     openButton.replaceWith(note);
-    showFailureNotice(
-      'expired-media',
-      '题图或结果图片已失效，请重新上传题图；如果问题反复出现，可以点踩告诉我们。',
-      ['reupload'],
-      {
-        status: 'ERROR', layer: 'media', code: 'MEDIA_NOT_FOUND', retryable: true,
-        action: 'retry_upload', request_id: createRequestId(), search_id: item.searchId || sessionContext.search_id || '',
-      },
-    );
+    const candidateButton = card.querySelector('.select-candidate');
+    if (candidateButton) {
+      candidateButton.disabled = true;
+      candidateButton.textContent = '候选已失效';
+    }
   }, { once: true });
   openButton.append(image);
   openButton.addEventListener('click', () => openLightbox(image.currentSrc || image.src, item.imageAlt));
@@ -782,6 +787,15 @@ function renderHistory() {
   history.forEach((item) => addMessage({ ...item, images: (item.images || []).filter(isPersistentImage) }, false));
 }
 
+function isLegacyInlineOnlyMessage(item, index, messages) {
+  if (A3_INLINE_ONLY_INTENTS.has(String(item?.intent || ''))) return true;
+  if (!item?.me) return false;
+  const next = messages[index + 1];
+  if (!['a3_unit_selected', 'a3_unit_already_selected'].includes(String(next?.intent || ''))) return false;
+  const label = String(next?.a3?.selected_unit?.display_label || '').trim();
+  return Boolean(label) && item.message === `选择${label}`;
+}
+
 function restoreHistory() {
   try {
     const raw = localStorage.getItem(HISTORY_KEY) || localStorage.getItem(LEGACY_HISTORY_KEY);
@@ -803,13 +817,27 @@ function restoreHistory() {
       return;
     }
     historyLastActivityAt = activityAt;
-    history = stored.messages.slice(-HISTORY_LIMIT).map((item) => {
+    const storedMessages = stored.messages.slice(-HISTORY_LIMIT);
+    const restoredMessages = storedMessages.filter((item, index) => (
+      !isLegacyInlineOnlyMessage(item, index, storedMessages)
+      && !(
+        item?.variant === 'error'
+        && item?.code === 'MEDIA_NOT_FOUND'
+        && item?.message === LEGACY_EXPIRED_MEDIA_MESSAGE
+      )
+    ));
+    history = restoredMessages.map((item) => {
       if (item.me || item.variant) return item;
       return {
         ...item,
         messageId: item.messageId || createMessageId(),
         createdAt: Number(item.createdAt || activityAt),
       };
+    });
+    activeFailureNotices.clear();
+    history.forEach((item) => {
+      const noticeKey = String(item.noticeKey || '').trim();
+      if (noticeKey) activeFailureNotices.add(noticeKey);
     });
     localStorage.removeItem(LEGACY_HISTORY_KEY);
     saveHistory();
@@ -872,6 +900,7 @@ async function repairUploadedImageHistory() {
 
 function clearHistory() {
   history = [];
+  activeFailureNotices.clear();
   historyLastActivityAt = 0;
   if (historyExpiryTimer !== null) clearTimeout(historyExpiryTimer);
   historyExpiryTimer = null;
@@ -1249,13 +1278,35 @@ function syncA3ActionButtons() {
   const currentGroups = actionGroups.filter((host) => (
     Number(host.dataset.a3Revision || 0) === Number(a3?.task_revision || 0)
   ));
-  const latestGroup = currentGroups.at(-1) || null;
+  let latestGroup = currentGroups.at(-1) || null;
+  const canContinueCrop = a3?.phase === 'CROP_REQUIRED' && Boolean(a3.selected_unit?.unit_id);
+  if (canContinueCrop && !latestGroup) {
+    const latestAssistantContent = Array.from(document.querySelectorAll('.message:not(.user) .message-content')).at(-1);
+    if (latestAssistantContent) {
+      latestGroup = document.createElement('div');
+      latestGroup.className = 'a3-unit-actions';
+      latestGroup.dataset.a3Revision = String(a3.task_revision || 0);
+      latestAssistantContent.append(latestGroup);
+      actionGroups.push(latestGroup);
+    }
+  }
+  if (canContinueCrop && latestGroup && !latestGroup.querySelector('.a3-continue-crop')) {
+    latestGroup.append(createA3ContinueCropButton());
+  }
   actionGroups.forEach((host) => {
     host.hidden = host !== latestGroup;
   });
   document.querySelectorAll('.a3-switch-question').forEach((button) => {
     const host = button.closest('.a3-unit-actions');
-    button.disabled = !host || host.hidden || a3?.phase !== 'A2_ACTIVE';
+    const available = Boolean(host && !host.hidden && a3?.phase === 'A2_ACTIVE');
+    button.hidden = !available;
+    button.disabled = !available;
+  });
+  document.querySelectorAll('.a3-continue-crop').forEach((button) => {
+    const host = button.closest('.a3-unit-actions');
+    const available = Boolean(host && !host.hidden && canContinueCrop);
+    button.hidden = !available;
+    button.disabled = !available;
   });
 }
 
@@ -1280,11 +1331,10 @@ function syncA3Interface() {
   }
 }
 
-async function selectA3Unit(unitId, displayLabel = '') {
+async function selectA3Unit(unitId) {
   if (!unitId || isBusy) return;
   a3DismissedKey = '';
   closeA3Sheet();
-  addMessage({ message: `选择${displayLabel || '这道题'}`, me: true });
   const operation = ++operationVersion;
   const pending = addMessage({ message: '正在打开裁剪页', variant: 'pending' }, false);
   setBusy(true);
@@ -1297,7 +1347,8 @@ async function selectA3Unit(unitId, displayLabel = '') {
     }, TEXT_TIMEOUT_MS, '选题超时，请重新选择。');
     if (operation !== operationVersion) return;
     pending.remove();
-    addMessage(responseItem(data));
+    const response = responseItem(data);
+    if (!A3_INLINE_ONLY_INTENTS.has(data.intent)) addMessage(response);
     setResponseStatus(data);
   } catch (error) {
     if (operation !== operationVersion) return;
@@ -1488,7 +1539,7 @@ async function submitA3Crop() {
     });
     if (operation !== operationVersion) return;
     const response = responseItem(data);
-    addMessage(response);
+    if (!A3_INLINE_ONLY_INTENTS.has(data.intent)) addMessage(response);
     setResponseStatus(data);
     if (data.intent === 'a3_crop_review_required') {
       a3CropStatus.classList.add('is-warning');
@@ -1536,7 +1587,7 @@ function renderA3SheetUnits(a3 = a3Current()) {
     icon.innerHTML = unit.completed ? '<path d="m5 12 4 4L19 6"/>' : '<path d="m9 18 6-6-6-6"/>';
     button.append(text);
     if (!isCurrent) button.append(icon);
-    button.addEventListener('click', () => selectA3Unit(unit.unit_id, unit.display_label));
+    button.addEventListener('click', () => selectA3Unit(unit.unit_id));
     a3SheetUnits.append(button);
   });
 }

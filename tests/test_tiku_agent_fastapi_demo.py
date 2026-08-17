@@ -290,7 +290,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260817-a3-mvp-v1"', 'src="/assets/demo.js?v=20260817-a3-mvp-v1"',
+            'href="/assets/demo.css?v=20260817-a3-mvp-v1"', 'src="/assets/demo.js?v=20260817-a3-mvp-v2"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -338,7 +338,7 @@ class FastApiDemoTest(unittest.TestCase):
             "retry_connection: '重新连接'", "function retryConnection()",
             "暂时无法连接服务。当前对话仍保留在本机",
             "浏览器无法保存临时对话", "浏览器中的临时对话无法读取",
-            "题图或结果图片已失效", "反馈提交失败，可重新提交",
+            "图片已失效，请重新上传", "反馈提交失败，可重新提交",
             "retry_request: '重试上一条'", "retry_search: '重试搜索'",
             "function normalizeRetryAction", "function retryTextAction",
             "protocol.status === 'PARTIAL' ? 'partial' : ''",
