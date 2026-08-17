@@ -29,9 +29,9 @@ def _page_payload() -> dict:
             "unit_id": f"g1-u{index}",
             "parent_question_label": "四",
             "question_label": str(index),
-            "title_text": "",
+            "title_text": f"子题 {index} 条件",
             "shared_stem_text": "试作图示刚架的 M 图。",
-            "visible_text": f"子题 {index} 条件",
+            "visible_text": "10 kN, 4 m, A, B",
             "searchability": "searchable_candidate",
             "reason_codes": [],
             "diagram_ids": [f"d{index}"],
@@ -191,6 +191,7 @@ class A3RuntimeTests(unittest.TestCase):
             self.assertEqual(crop_image.size, (400, 300))
         self.assertIn("试作图示刚架的 M 图。", kwargs["context_text"])
         self.assertIn("子题 2 条件", kwargs["context_text"])
+        self.assertNotIn("10 kN", kwargs["context_text"])
         self.assertEqual(kwargs["chapter"], "4力法")
 
         blocked_switch = self.runtime.select_unit(session_id, "g1-u1")

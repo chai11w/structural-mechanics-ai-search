@@ -94,6 +94,8 @@ class A3SessionState:
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "A3SessionState":
         state = cls(**dict(payload))
+        for unit in state.units:
+            unit["a2_context_text"] = _question_context_text(unit)
         state.validate()
         return state
 
@@ -474,7 +476,7 @@ class A3MvpRuntime:
 
             if progress is not None:
                 progress("a3_analyzing_unit", "校验通过，正在结合题干识别章节和荷载…")
-            context_text = str(selected.get("a2_context_text") or "").strip()
+            context_text = _question_context_text(selected)
             try:
                 analysis = self._call_model(
                     state,
@@ -726,7 +728,7 @@ class A3MvpRuntime:
             units.append({
                 "unit_id": item["unit_id"],
                 "display_label": item["display_label"],
-                "title_text": item.get("title_text") or item.get("visible_text") or "",
+                "title_text": item.get("title_text") or "",
                 "completed": item["unit_id"] in completed,
                 "selected": item["unit_id"] == state.selected_unit_id,
             })
@@ -739,7 +741,7 @@ class A3MvpRuntime:
             "selected_unit": {
                 "unit_id": selected.get("unit_id", ""),
                 "display_label": selected.get("display_label", ""),
-                "context_text": selected.get("a2_context_text", ""),
+                "context_text": _question_context_text(selected),
             },
             "completed_unit_ids": list(state.completed_unit_ids),
             "remaining_count": len(state.remaining_units),
@@ -796,8 +798,19 @@ def _flatten_units(page: Mapping[str, Any]) -> list[dict[str, Any]]:
             continue
         for unit in group.get("units") or []:
             if isinstance(unit, Mapping):
-                units.append(dict(unit))
+                item = dict(unit)
+                item["a2_context_text"] = _question_context_text(item)
+                units.append(item)
     return units
+
+
+def _question_context_text(unit: Mapping[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("shared_stem_text", "title_text"):
+        value = str(unit.get(key) or "").strip()
+        if value and value not in parts:
+            parts.append(value)
+    return "\n".join(parts)
 
 
 def _normalize_bounds(payload: Mapping[str, Any]) -> dict[str, float]:

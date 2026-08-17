@@ -272,7 +272,7 @@ def build_a2_context_text(unit: A3PageUnit) -> str:
     """Build the text carried with a manual crop into the single-unit A2 call."""
 
     parts: list[str] = []
-    for value in (unit.shared_stem_text, unit.title_text, unit.visible_text):
+    for value in (unit.shared_stem_text, unit.title_text):
         value = value.strip()
         if value and value not in parts:
             parts.append(value)

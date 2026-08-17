@@ -75,7 +75,7 @@ class A3PageParserTests(unittest.TestCase):
         self.assertEqual(build_display_label(unit, 1), "四-1")
         self.assertEqual(
             build_a2_context_text(unit),
-            "试作图示刚架的 M 图。\n10 kN, 4 m",
+            "试作图示刚架的 M 图。",
         )
         output = result.to_dict(include_derived=True)
         self.assertEqual(output["groups"][0]["units"][0]["display_label"], "四-1")
@@ -94,6 +94,19 @@ class A3PageParserTests(unittest.TestCase):
         result = parse_a3_page_understanding(payload)
 
         self.assertEqual(build_display_label(result.groups[0].units[0], 1), "3-15")
+
+    def test_compact_unit_contract_derives_parent_and_shared_stem(self):
+        payload = valid_payload()
+        unit = payload["groups"][0]["units"][0]
+        for field in ("parent_question_label", "shared_stem_text", "visible_text", "evidence", "notes"):
+            unit.pop(field)
+        payload["diagrams"][0].pop("evidence")
+
+        result = parse_a3_page_understanding(payload)
+        parsed = result.groups[0].units[0]
+
+        self.assertEqual(parsed.parent_question_label, "四")
+        self.assertEqual(build_a2_context_text(parsed), "试作图示刚架的 M 图。")
 
     def test_reject_duplicate_unit_id(self):
         payload = valid_payload()
