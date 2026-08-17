@@ -108,6 +108,21 @@ class A3PageParserTests(unittest.TestCase):
         self.assertEqual(parsed.parent_question_label, "四")
         self.assertEqual(build_a2_context_text(parsed), "试作图示刚架的 M 图。")
 
+    def test_group_parent_title_is_derived_into_each_units_a2_context(self):
+        payload = valid_payload()
+        payload["groups"][0]["parent_title_text"] = "用力法计算图示结构。"
+        payload["groups"][0]["shared_stem_text"] = ""
+        payload["groups"][0]["units"][0]["shared_stem_text"] = ""
+        payload["groups"][0]["units"][0]["title_text"] = ""
+
+        result = parse_a3_page_understanding(payload)
+        output = result.to_dict(include_derived=True)
+
+        self.assertEqual(
+            output["groups"][0]["units"][0]["a2_context_text"],
+            "用力法计算图示结构。",
+        )
+
     def test_reject_duplicate_unit_id(self):
         payload = valid_payload()
         payload["groups"][0]["units"][1]["unit_id"] = "g1-u1"

@@ -888,9 +888,11 @@ def _flatten_units(page: Mapping[str, Any]) -> list[dict[str, Any]]:
     for group in page.get("groups") or []:
         if not isinstance(group, Mapping):
             continue
+        parent_title_text = str(group.get("parent_title_text") or "").strip()
         for unit in group.get("units") or []:
             if isinstance(unit, Mapping):
                 item = dict(unit)
+                item["parent_title_text"] = parent_title_text
                 item["a2_context_text"] = _question_context_text(item)
                 units.append(item)
     return units
@@ -898,7 +900,7 @@ def _flatten_units(page: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 def _question_context_text(unit: Mapping[str, Any]) -> str:
     parts: list[str] = []
-    for key in ("shared_stem_text", "title_text"):
+    for key in ("parent_title_text", "shared_stem_text", "title_text"):
         value = str(unit.get(key) or "").strip()
         if value and value not in parts:
             parts.append(value)
@@ -976,10 +978,13 @@ def _is_a3_reselect_request(text: str) -> bool:
         return False
     return bool(
         re.fullmatch(
-            r"(?:算了)?(?:我)?(?:想|要)?(?:换|重选|重新选|切换)(?:一?道|个)?题(?:目)?(?:了)?",
+            r"(?:算了)?(?:我)?(?:想|要)?(?:换|重选|重新选|切换)(?:一?道|个)?题(?:目)?(?:了)?(?:吧|呢|啊|呀)?",
             clean,
         )
-        or re.fullmatch(r"(?:这|当前)(?:一?道|个)?题(?:目)?(?:不搜|不查|不要)(?:了)?", clean)
+        or re.fullmatch(
+            r"(?:这|当前)(?:一?道|个)?题(?:目)?(?:不搜|不查|不要)(?:了)?(?:吧|呢|啊|呀)?",
+            clean,
+        )
     )
 
 

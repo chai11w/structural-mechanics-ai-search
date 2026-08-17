@@ -54,7 +54,7 @@ def _page_payload() -> dict:
         "groups": [{
             "group_id": "g1",
             "parent_question_label": "四",
-            "parent_title_text": "",
+            "parent_title_text": "用力法计算图示结构。",
             "shared_stem_text": "试作图示刚架的 M 图。",
             "units": units,
         }],
@@ -207,6 +207,7 @@ class A3RuntimeTests(unittest.TestCase):
         _session, crop_path, kwargs = self.a2.preanalyzed_calls[0]
         with Image.open(crop_path) as crop_image:
             self.assertEqual(crop_image.size, (400, 300))
+        self.assertIn("用力法计算图示结构。", kwargs["context_text"])
         self.assertIn("试作图示刚架的 M 图。", kwargs["context_text"])
         self.assertIn("子题 2 条件", kwargs["context_text"])
         self.assertNotIn("10 kN", kwargs["context_text"])
@@ -324,7 +325,7 @@ class A3RuntimeTests(unittest.TestCase):
             {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
         )
 
-        response = self.runtime.handle_text(session_id, "算了，我想换个题")
+        response = self.runtime.handle_text(session_id, "换个题吧")
 
         self.assertEqual(response.intent, "a3_reselect")
         self.assertIn("还有 2 道", response.text)

@@ -148,7 +148,10 @@ class A3PageGroup:
         }
         if include_derived:
             for unit_data, unit in zip(data["units"], self.units, strict=True):
-                unit_data["a2_context_text"] = build_a2_context_text(unit)
+                unit_data["a2_context_text"] = build_a2_context_text(
+                    unit,
+                    parent_title_text=self.parent_title_text,
+                )
         return data
 
 
@@ -268,11 +271,15 @@ def build_display_label(unit: A3PageUnit, ordinal: int) -> str:
     return f"未标号题{ordinal}"
 
 
-def build_a2_context_text(unit: A3PageUnit) -> str:
+def build_a2_context_text(
+    unit: A3PageUnit,
+    *,
+    parent_title_text: str = "",
+) -> str:
     """Build the text carried with a manual crop into the single-unit A2 call."""
 
     parts: list[str] = []
-    for value in (unit.shared_stem_text, unit.title_text):
+    for value in (parent_title_text, unit.shared_stem_text, unit.title_text):
         value = value.strip()
         if value and value not in parts:
             parts.append(value)
