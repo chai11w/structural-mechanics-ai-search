@@ -71,11 +71,19 @@ class FakeObserver:
 
 class FakeVerifier:
     verdict = "verified"
-
+    checks = {
+        "selected_diagram_match": True,
+        "single_target_diagram": True,
+        "structure_complete": True,
+        "supports_complete": True,
+        "external_loads_complete": True,
+        "image_clear": True,
+    }
     def verify(self, _page, _crop, selected, _understanding):
         return CropCompareResult(
             selected_unit_id=selected["unit_id"],
             verdict=self.verdict,
+            checks=dict(self.checks),
         )
 
 
@@ -224,18 +232,46 @@ class A3RuntimeTests(unittest.TestCase):
         self.runtime.handle_image(session_id, self.source)
         self.runtime.select_unit(session_id, "g1-u1")
         self.verifier.verdict = "review_required"
-
+        self.verifier.checks = {
+            **self.verifier.checks,
+            "external_loads_complete": False,
+        }
         response = self.runtime.handle_crop(
             session_id,
             {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
         )
 
         self.assertEqual(response.intent, "a3_crop_review_required")
+        self.assertEqual(
+            response.text,
+            "裁剪结果未通过，结构荷载不完整，请重新选择区域裁剪。",
+        )
         self.assertEqual(self.a2.preanalyzed_calls, [])
         a3 = self.runtime.session_snapshot(session_id)["a3"]
         self.assertEqual(a3["phase"], A3_PHASE_CROP_REQUIRED)
+        self.assertEqual(a3["crop_review_feedback"], response.text)
         self.assertTrue(a3["crop_draft"]["available"])
         self.assertEqual(a3["crop_draft"]["bounds"]["width"], 0.7)
+
+    def test_review_required_names_the_selected_question_on_binding_mismatch(self):
+        session_id = "a3-mismatch-session"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u1")
+        self.verifier.verdict = "review_required"
+        self.verifier.checks = {
+            **self.verifier.checks,
+            "selected_diagram_match": False,
+        }
+
+        response = self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+        )
+
+        self.assertRegex(
+            response.text,
+            r"^裁剪结果未通过，裁剪图不是.+，请重新选择区域裁剪。$",
+        )
 
     def test_cancel_returns_to_page_units_and_natural_label_can_resume(self):
         session_id = "a3-cancel-session"

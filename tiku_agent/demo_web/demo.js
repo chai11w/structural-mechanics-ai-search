@@ -302,6 +302,7 @@ function normalizeA3Snapshot(value) {
     completed_unit_ids: Array.isArray(value.completed_unit_ids) ? value.completed_unit_ids.map(String) : [],
     remaining_count: Number(value.remaining_count || 0),
     crop_review_required: Boolean(value.crop_review_required),
+    crop_review_feedback: String(value.crop_review_feedback || ''),
     crop_draft: value.crop_draft && typeof value.crop_draft === 'object' ? value.crop_draft : {},
     task_revision: Number(value.task_revision || 0),
   };
@@ -1364,7 +1365,7 @@ function renderA3Selection() {
   a3Selection.style.width = `${bounds.width * 100}%`;
   a3Selection.style.height = `${bounds.height * 100}%`;
   a3CropStatus.textContent = a3Current()?.crop_review_required
-    ? '上次裁剪未通过校验，请调整范围后再提交'
+    ? (a3Current()?.crop_review_feedback || '裁剪结果未通过，请重新选择区域裁剪。')
     : '已框选，可以提交校验';
 }
 
@@ -1471,7 +1472,9 @@ async function submitA3Crop() {
     setResponseStatus(data);
     if (data.intent === 'a3_crop_review_required') {
       a3CropStatus.classList.add('is-warning');
-      a3CropStatus.textContent = '未通过校验，请调整框选范围';
+      a3CropStatus.textContent = a3Current()?.crop_review_feedback
+        || response.message
+        || '裁剪结果未通过，请重新选择区域裁剪。';
     }
   } catch (error) {
     if (operation !== operationVersion) return;

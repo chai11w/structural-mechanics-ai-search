@@ -27,11 +27,19 @@ from tiku_shared.model_costs import timed_model_call
 
 PROMPT_DIR = Path(__file__).with_name("prompts")
 A3_PAGE_PROMPT_PATH = PROMPT_DIR / "a3_page_understanding_v2.txt"
-A3_CROP_COMPARE_PROMPT_PATH = PROMPT_DIR / "a3_crop_compare_v1.txt"
+A3_CROP_COMPARE_PROMPT_PATH = PROMPT_DIR / "a3_crop_compare_v2.txt"
 A3_UNIT_ANALYSIS_PROMPT_PATH = PROMPT_DIR / "a3_unit_analysis_v1.txt"
-CROP_COMPARE_SCHEMA_VERSION = "a3-crop-compare-v1"
+CROP_COMPARE_SCHEMA_VERSION = "a3-crop-compare-v2"
 UNIT_ANALYSIS_SCHEMA_VERSION = "a3-unit-analysis-v1"
 VALID_LOAD_TYPES = {"集中", "均布", "弯矩"}
+CROP_COMPARE_CHECK_KEYS = (
+    "selected_diagram_match",
+    "single_target_diagram",
+    "structure_complete",
+    "supports_complete",
+    "external_loads_complete",
+    "image_clear",
+)
 
 
 class A3ModelError(RuntimeError):
@@ -42,6 +50,7 @@ class A3ModelError(RuntimeError):
 class CropCompareResult:
     selected_unit_id: str
     verdict: str
+    checks: Mapping[str, bool | None]
     schema_version: str = CROP_COMPARE_SCHEMA_VERSION
 
     @property
@@ -87,7 +96,12 @@ def load_prompt(path: str | Path) -> str:
 
 def parse_crop_compare_result(payload: str | Mapping[str, Any], *, expected_unit_id: str) -> CropCompareResult:
     data = _raw_json_object(payload)
-    if set(data) != {"schema_version", "selected_unit_id", "verdict"}:
+    if set(data) != {
+        "schema_version",
+        "selected_unit_id",
+        "verdict",
+        "checks",
+    }:
         raise A3ModelError("invalid crop comparison fields")
     if data.get("schema_version") != CROP_COMPARE_SCHEMA_VERSION:
         raise A3ModelError("unsupported crop comparison schema")
@@ -97,7 +111,23 @@ def parse_crop_compare_result(payload: str | Mapping[str, Any], *, expected_unit
     verdict = str(data.get("verdict") or "").strip()
     if verdict not in {"verified", "review_required"}:
         raise A3ModelError("invalid crop comparison verdict")
-    return CropCompareResult(selected_unit_id=selected_unit_id, verdict=verdict)
+    raw_checks = data.get("checks")
+    if not isinstance(raw_checks, Mapping) or set(raw_checks) != set(CROP_COMPARE_CHECK_KEYS):
+        raise A3ModelError("invalid crop comparison checks")
+    checks: dict[str, bool | None] = {}
+    for key in CROP_COMPARE_CHECK_KEYS:
+        value = raw_checks.get(key)
+        if value is not None and not isinstance(value, bool):
+            raise A3ModelError("crop comparison checks must be boolean or null")
+        checks[key] = value
+    all_checks_pass = all(value is True for value in checks.values())
+    if (verdict == "verified") != all_checks_pass:
+        raise A3ModelError("crop comparison verdict and checks disagree")
+    return CropCompareResult(
+        selected_unit_id=selected_unit_id,
+        verdict=verdict,
+        checks=checks,
+    )
 
 
 def parse_unit_analysis(payload: str | Mapping[str, Any], *, context_text: str) -> A3UnitAnalysis:
@@ -275,7 +305,7 @@ class QwenA3CropVerifier(_QwenVisionClient):
                     ),
                 },
             ],
-            max_tokens=200,
+            max_tokens=300,
             call_type="qwen_a3_crop_compare",
         )
         return parse_crop_compare_result(content, expected_unit_id=unit_id)

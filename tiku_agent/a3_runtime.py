@@ -20,6 +20,7 @@ from tiku_agent.a3_models import (
     A3ModelError,
     A3PageObserver,
     A3UnitAnalyzer,
+    CropCompareResult,
 )
 from tiku_agent.agent import AgentResponse
 from tiku_agent.session_artifacts import SessionArtifacts, session_key
@@ -73,6 +74,7 @@ class A3SessionState:
     completed_unit_ids: list[str] = field(default_factory=list)
     crop_drafts: dict[str, dict[str, Any]] = field(default_factory=dict)
     crop_review_required: bool = False
+    crop_review_feedback: str = ""
     task_revision: int = 0
     current_search_id: str = ""
     last_error: str = ""
@@ -488,6 +490,7 @@ class A3MvpRuntime:
             }
             state.phase = A3_PHASE_VERIFYING
             state.crop_review_required = False
+            state.crop_review_feedback = ""
             self.store.save(state)
             if progress is not None:
                 progress("a3_verifying", "正在核对裁剪图和所选题目…")
@@ -515,10 +518,13 @@ class A3MvpRuntime:
             if not verdict.verified:
                 state.phase = A3_PHASE_CROP_REQUIRED
                 state.crop_review_required = True
+                state.crop_review_feedback = _crop_review_feedback(
+                    verdict,
+                    str(selected.get("display_label") or "").strip(),
+                )
                 self.store.save(state)
                 return _response(
-                    f"这次裁剪还不能确认是「{selected['display_label']}」的完整结构图。"
-                    "请重新框选，确保只有一个结构，并保留完整支座和全部外荷载。",
+                    state.crop_review_feedback,
                     state,
                     intent="a3_crop_review_required",
                     code="CLARIFICATION_REQUIRED",
@@ -546,9 +552,12 @@ class A3MvpRuntime:
             if not analysis.loads:
                 state.phase = A3_PHASE_CROP_REQUIRED
                 state.crop_review_required = True
+                state.crop_review_feedback = (
+                    "裁剪结果未通过，未识别到结构荷载，请重新裁剪。"
+                )
                 self.store.save(state)
                 return _response(
-                    "这张裁剪图里还没有识别到可检索的外荷载。请重新框选，把结构上的全部荷载和可见标注一起保留。",
+                    state.crop_review_feedback,
                     state,
                     intent="a3_crop_review_required",
                     code="CLARIFICATION_REQUIRED",
@@ -722,6 +731,7 @@ class A3MvpRuntime:
         state.selected_unit_id = unit_id
         state.phase = A3_PHASE_CROP_REQUIRED
         state.crop_review_required = False
+        state.crop_review_feedback = ""
         state.last_error = ""
         self.store.save(state)
         return _response(
@@ -741,6 +751,7 @@ class A3MvpRuntime:
         remaining = state.remaining_units
         state.phase = A3_PHASE_WAIT_SELECTION if remaining else A3_PHASE_COMPLETE
         state.crop_review_required = False
+        state.crop_review_feedback = ""
         state.last_error = ""
         self.store.save(state)
         return _response(
@@ -838,6 +849,7 @@ class A3MvpRuntime:
             "completed_unit_ids": list(state.completed_unit_ids),
             "remaining_count": len(state.remaining_units),
             "crop_review_required": state.crop_review_required,
+            "crop_review_feedback": state.crop_review_feedback,
             "crop_draft": {
                 "bounds": dict(draft.get("bounds") or {}),
                 "available": bool(draft.get("path")),
@@ -1042,6 +1054,24 @@ def _response(
         intent=intent,
         protocol=protocol.to_dict(),
     )
+
+
+def _crop_review_feedback(result: CropCompareResult, display_label: str) -> str:
+    checks = result.checks
+    if checks.get("selected_diagram_match") is False:
+        reason = f"裁剪图不是{display_label}" if display_label else "裁剪图与所选题目不匹配"
+        return f"裁剪结果未通过，{reason}，请重新选择区域裁剪。"
+    if checks.get("single_target_diagram") is False:
+        reason = "裁剪区域包含多个结构图"
+    elif checks.get("external_loads_complete") is False:
+        reason = "结构荷载不完整"
+    elif checks.get("structure_complete") is False or checks.get("supports_complete") is False:
+        reason = "结构图不完整"
+    elif checks.get("image_clear") is False:
+        reason = "裁剪图不清晰"
+    elif not any(value is False for value in checks.values()):
+        reason = "无法确认裁剪图完整"
+    return f"裁剪结果未通过，{reason}，请重新选择区域裁剪。"
 
 
 def _clean_session_id(session_id: str) -> str:
