@@ -67,7 +67,6 @@ CHAPTER_DEFINITIONS = (
         display_name="静定结构受力",
         storage_key="2静定结构",
         textbook_aliases=("静定结构", "静定梁", "静定刚架", "静定钢架", "静定桁架"),
-        method_aliases=("内力", "内力图", "静定结构内力"),
     ),
     ChapterDefinition(
         topic_id="static_displacement",
@@ -92,7 +91,7 @@ CHAPTER_DEFINITIONS = (
         topic_id="moment_distribution",
         display_name="力矩分配法",
         storage_key="6力矩分配",
-        method_aliases=("力矩分配", "力矩分配法", "弯矩分配法", "渐近法", "分配法"),
+        method_aliases=("力矩分配", "力矩分配法", "弯矩分配", "弯矩分配法", "渐近法"),
     ),
     ChapterDefinition(
         topic_id="matrix_displacement",
@@ -131,9 +130,9 @@ UNSUPPORTED_TOPIC_DEFINITIONS = (
         aliases=("极限荷载", "极限状态", "极限分析", "塑性极限"),
     ),
     UnsupportedTopicDefinition(
-        topic_id="foreign_questions",
-        display_name="国外题库",
-        aliases=("国外题库", "国外题", "国外"),
+        topic_id="non_chinese_question",
+        display_name="非中文题目",
+        aliases=("英文题目", "英文题", "英文题库", "英语题", "英语题目"),
     ),
 )
 
@@ -145,9 +144,6 @@ SUPPORTED_STORAGE_KEYS = tuple(item.storage_key for item in CHAPTER_DEFINITIONS)
 # silently select a directory.
 LEGACY_CHAPTER_ALIASES = {
     "静定": "2静定结构",
-    "内力": "2静定结构",
-    "内力图": "2静定结构",
-    "位移": "3静定结构位移",
 }
 
 
@@ -190,6 +186,28 @@ def parse_chapter_scope(text: object) -> ChapterScopeResult:
     if _looks_like_chapter_number(normalized):
         return _uncertain("numeric_chapter_requires_textbook", matched_text=normalized)
     return _uncertain("no_explicit_topic_evidence")
+
+
+def detect_non_chinese_problem_text(text: object) -> ChapterScopeResult | None:
+    """Reject a visible problem description when it is clearly non-Chinese.
+
+    This is intended for OCR text supplied by an image boundary, not for raw
+    image bytes.  Empty text means no description was recognized and must stay
+    eligible for chapter clarification.  Any non-empty description without a
+    Chinese character is rejected; one Chinese character is enough to keep it
+    eligible for normal chapter parsing.
+    """
+
+    raw = unicodedata.normalize("NFKC", str(text or "")).strip()
+    if not raw or re.search(r"[\u3400-\u9fff]", raw):
+        return None
+    return ChapterScopeResult(
+        status="unsupported",
+        topic_id="non_chinese_question",
+        display_name="非中文题目",
+        matched_text=raw[:60],
+        reason="non_chinese_problem_text",
+    )
 
 
 def resolve_supported_chapter(text: object, *, allow_numeric: bool = False) -> str | None:
