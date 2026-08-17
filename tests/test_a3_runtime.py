@@ -17,6 +17,9 @@ from tiku_agent.a3_runtime import (
 )
 from tiku_agent.agent import AgentResponse
 from tiku_agent.fastapi_demo import create_app
+from tiku_agent.image_contracts import ImageTriageObservation
+from tiku_agent.image_triage import build_handoff
+from tiku_agent.image_triage_authority import ImageTriageDecision
 from tiku_agent.session_artifacts import SessionArtifacts
 from tiku_shared.request_protocol import RequestProtocol
 
@@ -65,7 +68,11 @@ def _page_payload() -> dict:
 
 
 class FakeObserver:
+    def __init__(self):
+        self.calls = 0
+
     def observe(self, _image_path: Path):
+        self.calls += 1
         return parse_a3_page_understanding(_page_payload())
 
 
@@ -103,8 +110,28 @@ class FakeA2Runtime:
     def __init__(self):
         self.sessions = {}
         self.preanalyzed_calls = []
+        self.prechecked_calls = []
         self.text_calls = []
         self.candidate_count = 1
+
+    def handle_prechecked_image(self, session_id, image_path, **kwargs):
+        self.prechecked_calls.append((session_id, Path(image_path), kwargs))
+        self.sessions[session_id] = {
+            "session_valid": True,
+            "phase": "WAIT_CANDIDATE_CHOICE",
+            "has_active_image": True,
+            "task_revision": 1,
+            "candidate_generation": "1:1",
+            "candidate_count": self.candidate_count,
+            "chapter": "2静定结构",
+            "search_id": "search_direct_a2",
+        }
+        return AgentResponse(
+            text="我从题库里找到了最相似的一道题。",
+            state={"phase": "WAIT_CANDIDATE_CHOICE"},
+            intent="search_image",
+            protocol=RequestProtocol.from_code("REQUEST_SUCCEEDED").to_dict(),
+        )
 
     def handle_preanalyzed_image(self, session_id, image_path, **kwargs):
         self.preanalyzed_calls.append((session_id, Path(image_path), kwargs))
@@ -182,6 +209,52 @@ class FakeA2Runtime:
         return None
 
 
+def _triage_decision(route: str) -> ImageTriageDecision:
+    if route == "A1":
+        observation = ImageTriageObservation(
+            route_candidate="A1",
+            evidence=("没有结构力学题目。",),
+            has_structure_content=False,
+            raw_text="建议路线：A1",
+        )
+    elif route == "A2":
+        observation = ImageTriageObservation(
+            route_candidate="A2",
+            evidence=("单题、单结构图、实际荷载完整。",),
+            question_count=1,
+            original_structure_count=1,
+            auxiliary_diagram_count=0,
+            has_actual_load_evidence=True,
+            has_structure_content=True,
+            image_recoverable=True,
+            has_ambiguity=False,
+            raw_text="建议路线：A2",
+        )
+    else:
+        observation = ImageTriageObservation(
+            route_candidate="A3",
+            evidence=("包含多道题。",),
+            has_structure_content=True,
+            raw_text="建议路线：A3",
+        )
+    handoff = build_handoff("", observation)
+    return ImageTriageDecision(
+        handoff=handoff,
+        reply="这张图片不是可检索的结构力学题，请重新上传。" if route == "A1" else "",
+        reply_source="fixed_test" if route == "A1" else "",
+    )
+
+
+class FakeFlowAuthority:
+    def __init__(self, route: str):
+        self.route = route
+        self.calls = 0
+
+    def decide_for_full_flow(self, _image_path):
+        self.calls += 1
+        return _triage_decision(self.route)
+
+
 class A3RuntimeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -199,6 +272,73 @@ class A3RuntimeTests(unittest.TestCase):
             crop_verifier=self.verifier,
             unit_analyzer=FakeAnalyzer(),
         )
+
+    def test_full_flow_a2_skips_a3_crop_and_continues_in_original_a2(self):
+        authority = FakeFlowAuthority("A2")
+        self.runtime.image_triage_authority = authority
+
+        response = self.runtime.handle_image("full-flow-a2", self.source)
+
+        self.assertEqual(response.intent, "search_image")
+        self.assertEqual(authority.calls, 1)
+        self.assertEqual(self.runtime.page_observer.calls, 0)
+        self.assertEqual(len(self.a2.prechecked_calls), 1)
+        self.assertEqual(self.a2.preanalyzed_calls, [])
+        snapshot = self.runtime.session_snapshot("full-flow-a2")
+        self.assertEqual(snapshot["image_route"], "A2")
+        self.assertEqual(snapshot["phase"], "WAIT_CANDIDATE_CHOICE")
+        self.assertFalse(snapshot["a3"]["enabled"])
+
+        answered = self.runtime.handle_text("full-flow-a2", "选择候选 1")
+
+        self.assertEqual(answered.intent, "select_candidate")
+        self.assertEqual(self.a2.text_calls, [("full-flow-a2", "选择候选 1")])
+
+    def test_full_flow_a2_web_response_does_not_open_crop_ui(self):
+        self.runtime.image_triage_authority = FakeFlowAuthority("A2")
+        client = TestClient(create_app(runtime=self.runtime, incoming_dir=self.root / "incoming-a2"))
+
+        uploaded = client.post(
+            "/api/image",
+            files={"file": ("single.jpg", self.source.read_bytes(), "image/jpeg")},
+        )
+
+        self.assertEqual(uploaded.status_code, 200)
+        payload = uploaded.json()
+        self.assertEqual(payload["session"]["image_route"], "A2")
+        self.assertFalse(payload["session"]["a3"]["enabled"])
+        self.assertNotIn("裁剪", payload["text"])
+
+    def test_full_flow_a3_enters_existing_page_crop_flow(self):
+        authority = FakeFlowAuthority("A3")
+        self.runtime.image_triage_authority = authority
+
+        response = self.runtime.handle_image("full-flow-a3", self.source)
+
+        self.assertEqual(response.intent, "a3_page_ready")
+        self.assertEqual(authority.calls, 1)
+        self.assertEqual(self.runtime.page_observer.calls, 1)
+        self.assertEqual(self.a2.prechecked_calls, [])
+        snapshot = self.runtime.session_snapshot("full-flow-a3")
+        self.assertEqual(snapshot["image_route"], "A3")
+        self.assertTrue(snapshot["a3"]["enabled"])
+        self.assertEqual(snapshot["a3"]["phase"], A3_PHASE_WAIT_SELECTION)
+
+    def test_full_flow_a1_stops_without_a2_or_a3_processing(self):
+        authority = FakeFlowAuthority("A1")
+        self.runtime.image_triage_authority = authority
+
+        response = self.runtime.handle_image("full-flow-a1", self.source)
+
+        self.assertEqual(response.intent, "image_triage_stop")
+        self.assertEqual(response.protocol["code"], "TRIAGE_A1_STOPPED")
+        self.assertEqual(authority.calls, 1)
+        self.assertEqual(self.runtime.page_observer.calls, 0)
+        self.assertEqual(self.a2.prechecked_calls, [])
+        snapshot = self.runtime.session_snapshot("full-flow-a1")
+        self.assertEqual(snapshot["image_route"], "A1")
+        self.assertFalse(snapshot["a3"]["enabled"])
+        self.assertTrue(self.runtime.current_image_path("full-flow-a1").is_file())
 
     def test_verified_crop_carries_shared_context_into_a2_and_returns_to_remaining_unit(self):
         session_id = "a3-runtime-session"

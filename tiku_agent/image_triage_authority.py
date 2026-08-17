@@ -169,9 +169,22 @@ class ImageTriageAuthority:
         self.reply_client = reply_client or QwenTriageReplyClient()
 
     def decide(self, image_path: str | Path) -> ImageTriageDecision:
+        return self._decide(image_path, explain_routes={"A1", "A3"})
+
+    def decide_for_full_flow(self, image_path: str | Path) -> ImageTriageDecision:
+        """Route A3 into the implemented crop flow instead of explaining a limitation."""
+
+        return self._decide(image_path, explain_routes={"A1"})
+
+    def _decide(
+        self,
+        image_path: str | Path,
+        *,
+        explain_routes: set[str],
+    ) -> ImageTriageDecision:
         observation = self.observer.observe(image_path)
         handoff = build_handoff(str(image_path), observation)
-        if handoff.route == "A2":
+        if handoff.route not in explain_routes:
             return ImageTriageDecision(handoff=handoff)
         try:
             reply = self.reply_client(handoff)

@@ -24,7 +24,7 @@ from tiku_agent.a3_models import (
 )
 from tiku_agent.agent import AgentResponse
 from tiku_agent.session_artifacts import SessionArtifacts, session_key
-from tiku_agent.session_runtime import AgentSessionRuntime, ProgressReporter
+from tiku_agent.session_runtime import AgentProtocolError, AgentSessionRuntime, ProgressReporter
 from tiku_shared.model_costs import ModelCostCollector, SQLiteModelCostLedger, model_cost_scope
 from tiku_shared.request_protocol import RequestProtocol, new_request_id, new_search_id
 
@@ -66,6 +66,7 @@ _CHINESE_ORDINALS = {
 @dataclass
 class A3SessionState:
     session_id: str
+    entry_route: str = ""
     phase: str = A3_PHASE_IDLE
     source_page_path: str = ""
     page_understanding: dict[str, Any] = field(default_factory=dict)
@@ -80,6 +81,8 @@ class A3SessionState:
     last_error: str = ""
 
     def validate(self) -> None:
+        if self.entry_route not in {"", "A1", "A2", "A3"}:
+            raise ValueError(f"unknown image entry route: {self.entry_route}")
         if self.phase not in _A3_PHASES:
             raise ValueError(f"unknown A3 phase: {self.phase}")
         unit_ids = [str(item.get("unit_id") or "") for item in self.units]
@@ -95,7 +98,10 @@ class A3SessionState:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "A3SessionState":
-        state = cls(**dict(payload))
+        values = dict(payload)
+        if not values.get("entry_route") and values.get("source_page_path"):
+            values["entry_route"] = "A3"
+        state = cls(**values)
         for unit in state.units:
             unit["a2_context_text"] = _question_context_text(unit)
         state.validate()
@@ -235,6 +241,7 @@ class A3MvpRuntime:
         page_observer: A3PageObserver,
         crop_verifier: A3CropVerifier,
         unit_analyzer: A3UnitAnalyzer,
+        image_triage_authority: object | None = None,
         cost_ledger: SQLiteModelCostLedger | None = None,
     ) -> None:
         self.store = store
@@ -243,6 +250,7 @@ class A3MvpRuntime:
         self.page_observer = page_observer
         self.crop_verifier = crop_verifier
         self.unit_analyzer = unit_analyzer
+        self.image_triage_authority = image_triage_authority
         self.cost_ledger = cost_ledger
         self._locks = tuple(threading.RLock() for _ in range(64))
 
@@ -255,7 +263,6 @@ class A3MvpRuntime:
         progress: ProgressReporter | None = None,
         request_id: str = "",
     ) -> AgentResponse:
-        del identity_key
         clean = _clean_session_id(session_id)
         lock = self._lock(clean)
         with lock:
@@ -265,52 +272,20 @@ class A3MvpRuntime:
             persisted = self.artifacts.persist_image(clean, image_path)
             state = A3SessionState(
                 session_id=clean,
+                entry_route="A3" if self.image_triage_authority is None else "",
                 phase=A3_PHASE_UNDERSTANDING,
                 source_page_path=str(persisted),
                 task_revision=next_revision,
                 current_search_id=new_search_id(),
             )
             self.store.save(state)
-            if progress is not None:
-                progress("a3_understanding", "正在理解整页题目和图形关系…")
-            try:
-                understanding = self._call_model(
-                    state,
-                    "a3_page_understanding",
-                    lambda: self.page_observer.observe(persisted),
-                )
-            except Exception as exc:  # noqa: BLE001 - keep the upload available for retry.
-                state.phase = A3_PHASE_ERROR
-                state.last_error = type(exc).__name__
-                self.store.save(state)
-                return _response(
-                    "这次没能完成整页理解。题图已保留，你可以直接回复“重试”。",
-                    state,
-                    intent="a3_page_error",
-                    code="SERVICE_UNAVAILABLE",
-                )
-
-            state.page_understanding = understanding.to_dict(include_derived=True)
-            state.units = _flatten_units(state.page_understanding)
-            searchable = state.searchable_units
-            if len(searchable) == 1:
-                state.selected_unit_id = str(searchable[0]["unit_id"])
-                state.phase = A3_PHASE_CROP_REQUIRED
-                text = (
-                    f"我在这张图里识别到 1 道可以处理的题："
-                    f"「{searchable[0]['display_label']}」。已经为你选中，接下来裁剪它的单个结构图。"
-                )
-            elif searchable:
-                state.phase = A3_PHASE_WAIT_SELECTION
-                text = (
-                    f"我在这张图里识别到 {len(searchable)} 道可以处理的题。"
-                    "先选一道，我再带你裁剪对应的结构图。"
-                )
-            else:
-                state.phase = A3_PHASE_COMPLETE
-                text = "我理解了这张图，但没有找到结构、支座和外荷载都清晰完整的可检索题目。"
-            self.store.save(state)
-            return _response(text, state, intent="a3_page_ready")
+            return self._route_persisted_image(
+                state,
+                persisted,
+                identity_key=identity_key,
+                progress=progress,
+                request_id=request_id,
+            )
 
     def handle_text(
         self,
@@ -331,7 +306,30 @@ class A3MvpRuntime:
                     protocol=RequestProtocol.from_code("UPLOAD_REQUIRED").to_dict(),
                 )
             clean_text = str(text or "").strip()
+            if state.entry_route == "A2":
+                return self.a2_runtime.handle_text(
+                    clean,
+                    clean_text,
+                    identity_key=identity_key,
+                    progress=progress,
+                    request_id=request_id,
+                )
+            if state.entry_route == "A1":
+                return _response(
+                    "这张图没有进入题库检索，请重新上传新的题图。",
+                    state,
+                    intent="image_triage_stop",
+                    code="UPLOAD_REQUIRED",
+                )
             if state.phase == A3_PHASE_ERROR and clean_text in {"重试", "再试一次", "重新识别"}:
+                if not state.entry_route and self.image_triage_authority is not None:
+                    return self._route_persisted_image(
+                        state,
+                        Path(state.source_page_path),
+                        identity_key=identity_key,
+                        progress=progress,
+                        request_id=request_id,
+                    )
                 return self._retry_page_understanding(state, progress=progress)
             if state.phase in {A3_PHASE_WAIT_SELECTION, A3_PHASE_COMPLETE}:
                 unit_id, ambiguous = _resolve_unit_selection(clean_text, state.remaining_units)
@@ -635,7 +633,28 @@ class A3MvpRuntime:
                 "candidate_count": 0,
                 "chapter": "",
                 "search_id": "",
+                "image_route": "",
                 "a3": {"enabled": True, "phase": A3_PHASE_IDLE, "units": []},
+            }
+        if state.entry_route == "A2":
+            snapshot = dict(self.a2_runtime.session_snapshot(clean))
+            snapshot["session_valid"] = True
+            snapshot["has_active_image"] = bool(state.source_page_path)
+            snapshot["image_route"] = "A2"
+            snapshot["a3"] = {"enabled": False, "phase": A3_PHASE_IDLE, "units": []}
+            return snapshot
+        if state.entry_route != "A3":
+            return {
+                "session_valid": True,
+                "phase": state.phase,
+                "has_active_image": bool(state.source_page_path),
+                "task_revision": state.task_revision,
+                "candidate_generation": "",
+                "candidate_count": 0,
+                "chapter": "",
+                "search_id": state.current_search_id,
+                "image_route": state.entry_route,
+                "a3": {"enabled": False, "phase": A3_PHASE_IDLE, "units": []},
             }
         child = self.a2_runtime.session_snapshot(clean)
         if state.phase != A3_PHASE_A2_ACTIVE:
@@ -652,6 +671,7 @@ class A3MvpRuntime:
         snapshot = dict(child)
         snapshot["session_valid"] = True
         snapshot["has_active_image"] = bool(state.source_page_path)
+        snapshot["image_route"] = "A3"
         snapshot["a3"] = self._a3_snapshot(state)
         return snapshot
 
@@ -683,6 +703,121 @@ class A3MvpRuntime:
             for session_id in expired:
                 self.a2_runtime.clear(session_id)
         self.a2_runtime.purge_expired()
+
+    def _route_persisted_image(
+        self,
+        state: A3SessionState,
+        persisted: Path,
+        *,
+        identity_key: str,
+        progress: ProgressReporter | None,
+        request_id: str,
+    ) -> AgentResponse:
+        if self.image_triage_authority is not None:
+            if progress is not None:
+                progress("triage", "正在检查图片并决定处理路线…")
+            try:
+                decision = self._call_model(
+                    state,
+                    "image_triage",
+                    lambda: self.image_triage_authority.decide_for_full_flow(persisted),
+                )
+            except Exception as exc:  # noqa: BLE001 - normalize the model boundary.
+                state.entry_route = ""
+                state.phase = A3_PHASE_ERROR
+                state.last_error = type(exc).__name__
+                self.store.save(state)
+                raise AgentProtocolError(
+                    "图片检查暂时失败，请稍后重试。",
+                    code="SERVICE_UNAVAILABLE",
+                ) from exc
+
+            state.entry_route = decision.handoff.route
+            state.last_error = ""
+            if state.entry_route == "A1":
+                state.phase = A3_PHASE_COMPLETE
+                self.store.save(state)
+                return AgentResponse(
+                    text=decision.reply or "这张图片目前不适合进入结构力学题库检索，请重新上传完整清晰的题目图。",
+                    state={"phase": state.phase, "current_route": "A1"},
+                    intent="image_triage_stop",
+                    reply_source=decision.reply_source,
+                    fallback_reason=decision.fallback_reason,
+                    protocol=RequestProtocol.from_code(
+                        "TRIAGE_A1_STOPPED",
+                        search_id=state.current_search_id,
+                    ).to_dict(),
+                )
+            if state.entry_route == "A2":
+                state.phase = A3_PHASE_A2_ACTIVE
+                self.store.save(state)
+                if progress is not None:
+                    progress("searching", "图片适合直接检索，正在识别题目信息…")
+                response = self.a2_runtime.handle_prechecked_image(
+                    state.session_id,
+                    persisted,
+                    identity_key=identity_key,
+                    progress=progress,
+                    request_id=request_id,
+                )
+                child = self.a2_runtime.session_snapshot(state.session_id)
+                state.current_search_id = str(child.get("search_id") or state.current_search_id)
+                self.store.save(state)
+                return response
+
+        state.entry_route = "A3"
+        state.phase = A3_PHASE_UNDERSTANDING
+        self.store.save(state)
+        return self._understand_page(state, persisted, progress=progress)
+
+    def _understand_page(
+        self,
+        state: A3SessionState,
+        persisted: Path,
+        *,
+        progress: ProgressReporter | None,
+    ) -> AgentResponse:
+        if progress is not None:
+            progress("a3_understanding", "正在理解整页题目和图形关系…")
+        try:
+            understanding = self._call_model(
+                state,
+                "a3_page_understanding",
+                lambda: self.page_observer.observe(persisted),
+            )
+        except Exception as exc:  # noqa: BLE001 - keep the upload available for retry.
+            state.phase = A3_PHASE_ERROR
+            state.last_error = type(exc).__name__
+            self.store.save(state)
+            return _response(
+                "这次没能完成整页理解。题图已保留，你可以直接回复“重试”。",
+                state,
+                intent="a3_page_error",
+                code="SERVICE_UNAVAILABLE",
+            )
+
+        state.page_understanding = understanding.to_dict(include_derived=True)
+        state.units = _flatten_units(state.page_understanding)
+        state.last_error = ""
+        searchable = state.searchable_units
+        if len(searchable) == 1:
+            state.selected_unit_id = str(searchable[0]["unit_id"])
+            state.phase = A3_PHASE_CROP_REQUIRED
+            text = (
+                f"我在这张图里识别到 1 道可以处理的题："
+                f"「{searchable[0]['display_label']}」。已经为你选中，接下来裁剪它的单个结构图。"
+            )
+        elif searchable:
+            state.phase = A3_PHASE_WAIT_SELECTION
+            text = (
+                f"我在这张图里识别到 {len(searchable)} 道可以处理的题。"
+                "先选一道，我再带你裁剪对应的结构图。"
+            )
+        else:
+            state.phase = A3_PHASE_COMPLETE
+            text = "我理解了这张图，但没有找到结构、支座和外荷载都清晰完整的可检索题目。"
+        self.store.save(state)
+        return _response(text, state, intent="a3_page_ready")
 
     def _retry_page_understanding(
         self,

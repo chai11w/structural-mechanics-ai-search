@@ -179,6 +179,15 @@ class TikuAgent8891MvpTest(unittest.TestCase):
         self.assertEqual(tools.analysis_calls, 1)
         self.assertEqual(len(response.images), 1)
 
+    def test_prechecked_a2_entry_skips_triage_and_old_multi_question_check(self):
+        runtime, source, tools = self.make_runtime("A3")
+
+        response = runtime.handle_prechecked_image("session-prechecked-A2", source)
+
+        self.assertEqual(response.state["phase"], "WAIT_CANDIDATE_CHOICE")
+        self.assertEqual(tools.multi_calls, 0)
+        self.assertEqual(tools.analysis_calls, 1)
+
     def test_first_triage_failure_is_a_public_retryable_error(self):
         runtime, source, _tools = self.make_runtime("A2")
         runtime.image_triage_authority = FailingAuthority()

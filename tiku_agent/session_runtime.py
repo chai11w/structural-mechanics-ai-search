@@ -337,6 +337,53 @@ class AgentSessionRuntime:
             progress=progress,
         )
 
+    def handle_prechecked_image(
+        self,
+        session_id: str,
+        image_path: str | Path,
+        *,
+        identity_key: str = "",
+        progress: ProgressReporter | None = None,
+        request_id: str = "",
+    ) -> AgentResponse:
+        """Enter A2 after the authoritative A1/A2/A3 gate confirmed one complete question."""
+
+        clean_session_id = self._clean_session_id(session_id)
+        clean_request_id = str(request_id or "").strip() or new_request_id()
+        search_id = new_search_id()
+
+        def execute() -> AgentResponse:
+            self.purge_expired()
+            try:
+                persisted_image = self.artifacts.persist_image(clean_session_id, image_path)
+            except Exception as exc:  # noqa: BLE001 - normalize storage failures at the request boundary.
+                raise AgentProtocolError(
+                    "题图暂时无法保存，请重新上传。",
+                    code="UPLOAD_PERSIST_FAILED",
+                ) from exc
+            return self._run(
+                clean_session_id,
+                "image",
+                lambda agent: agent.handle_image(
+                    persisted_image,
+                    search_id=search_id,
+                    prechecked_single=True,
+                ),
+                identity_key=identity_key,
+                progress=progress,
+                request_id=clean_request_id,
+            )
+
+        return self._admit(
+            clean_session_id,
+            execute,
+            kind="image",
+            request_id=clean_request_id,
+            search_id=search_id,
+            identity_key=identity_key,
+            progress=progress,
+        )
+
     def _run_authoritative_image(
         self,
         session_id: str,

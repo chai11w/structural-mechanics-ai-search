@@ -101,6 +101,25 @@ class ImageTriageAuthorityTest(unittest.TestCase):
         self.assertEqual(decision.reply, "")
         self.assertEqual(decision.reply_source, "")
 
+    def test_full_flow_sends_a3_downstream_without_limitation_reply(self):
+        decision = ImageTriageAuthority(
+            FakeObserver("A3"),
+            lambda _handoff: self.fail("implemented A3 must continue without a limitation reply"),
+        ).decide_for_full_flow("question.jpg")
+
+        self.assertEqual(decision.handoff.route, "A3")
+        self.assertEqual(decision.reply, "")
+        self.assertEqual(decision.reply_source, "")
+
+    def test_full_flow_still_explains_a1(self):
+        decision = ImageTriageAuthority(
+            FakeObserver("A1"),
+            lambda _handoff: "A1 的自然说明",
+        ).decide_for_full_flow("question.jpg")
+
+        self.assertEqual(decision.handoff.route, "A1")
+        self.assertEqual(decision.reply, "A1 的自然说明")
+
     def test_reply_failure_keeps_the_safe_route_and_uses_chinese_fallback(self):
         def fail(_handoff):
             raise TimeoutError("late")
