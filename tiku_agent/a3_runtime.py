@@ -972,11 +972,11 @@ class A3MvpRuntime:
             state.phase = A3_PHASE_WAIT_SELECTION
             response.text = (
                 response.text.rstrip()
-                + f"\n\n这道题处理好了，这张图里还有 {len(remaining)} 道可以继续查。"
+                + f"这道题处理好了，这张图里还有 {len(remaining)} 道可以继续查。"
             )
         else:
             state.phase = A3_PHASE_COMPLETE
-            response.text = response.text.rstrip() + "\n\n这张图里的可处理题目已经全部完成。"
+            response.text = response.text.rstrip() + "这张图里的可处理题目已经全部完成。"
         self.store.save(state)
         return response
 

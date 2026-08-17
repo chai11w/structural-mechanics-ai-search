@@ -382,11 +382,24 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(kwargs["chapter"], "4力法")
 
         answered = self.runtime.handle_text(session_id, "选择候选 1")
-        self.assertIn("「四-2」的题库答案找到了", answered.text)
-        self.assertIn("还有 1 道", answered.text)
+        self.assertEqual(
+            answered.text,
+            "「四-2」的题库答案找到了，已经发给你。这道题处理好了，这张图里还有 1 道可以继续查。",
+        )
         a3 = self.runtime.session_snapshot(session_id)["a3"]
         self.assertEqual(a3["phase"], A3_PHASE_WAIT_SELECTION)
         self.assertEqual(a3["completed_unit_ids"], ["g1-u2"])
+
+        self.runtime.handle_text(session_id, "第1个")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
+        )
+        completed = self.runtime.handle_text(session_id, "选择候选 1")
+        self.assertEqual(
+            completed.text,
+            "「四-1」的题库答案找到了，已经发给你。这张图里的可处理题目已经全部完成。",
+        )
 
     def test_review_required_preserves_crop_draft_and_does_not_enter_a2(self):
         session_id = "a3-review-session"
