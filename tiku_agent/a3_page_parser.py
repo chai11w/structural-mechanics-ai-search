@@ -131,7 +131,12 @@ class A3PageGroup:
     shared_stem_text: str
     units: tuple[A3PageUnit, ...]
 
-    def to_dict(self, *, include_derived: bool = False) -> dict[str, Any]:
+    def to_dict(
+        self,
+        *,
+        include_derived: bool = False,
+        ordinal_offset: int = 0,
+    ) -> dict[str, Any]:
         data: dict[str, Any] = {
             "group_id": self.group_id,
             "parent_question_label": self.parent_question_label,
@@ -139,7 +144,7 @@ class A3PageGroup:
             "shared_stem_text": self.shared_stem_text,
             "units": [
                 unit.to_dict(
-                    display_label=build_display_label(unit, index + 1)
+                    display_label=build_display_label(unit, ordinal_offset + index + 1)
                     if include_derived
                     else None
                 )
@@ -179,6 +184,16 @@ class A3PageUnderstanding:
         return build_display_label(unit, index)
 
     def to_dict(self, *, include_derived: bool = False) -> dict[str, Any]:
+        groups: list[dict[str, Any]] = []
+        ordinal_offset = 0
+        for group in self.groups:
+            groups.append(
+                group.to_dict(
+                    include_derived=include_derived,
+                    ordinal_offset=ordinal_offset,
+                )
+            )
+            ordinal_offset += len(group.units)
         return {
             "schema_version": self.schema_version,
             "page_disposition": self.page_disposition,
@@ -186,9 +201,7 @@ class A3PageUnderstanding:
                 {"code": code, "evidence": evidence}
                 for code, evidence in self.reason_evidence
             ],
-            "groups": [
-                group.to_dict(include_derived=include_derived) for group in self.groups
-            ],
+            "groups": groups,
             "diagrams": [diagram.to_dict() for diagram in self.diagrams],
             "unassigned_content": [
                 {"text": text, "reason": reason}

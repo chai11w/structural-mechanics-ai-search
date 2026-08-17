@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 import unittest
 
 from tiku_agent.a3_page_parser import (
@@ -121,6 +122,38 @@ class A3PageParserTests(unittest.TestCase):
         self.assertEqual(
             output["groups"][0]["units"][0]["a2_context_text"],
             "用力法计算图示结构。",
+        )
+
+    def test_unlabelled_units_use_page_wide_ordinals_across_groups(self):
+        payload = valid_payload()
+        first_unit = payload["groups"][0]["units"][0]
+        first_unit["parent_question_label"] = ""
+        first_unit["question_label"] = ""
+        payload["groups"][0]["parent_question_label"] = ""
+        payload["groups"][0]["units"] = [first_unit]
+
+        second_unit = deepcopy(first_unit)
+        second_unit["unit_id"] = "g2-u1"
+        second_unit["diagram_ids"] = ["d2"]
+        payload["groups"].append({
+            "group_id": "g2",
+            "parent_question_label": "",
+            "parent_title_text": "",
+            "shared_stem_text": "",
+            "units": [second_unit],
+        })
+        second_diagram = deepcopy(payload["diagrams"][0])
+        second_diagram["diagram_id"] = "d2"
+        second_diagram["group_id"] = "g2"
+        second_diagram["unit_ids"] = ["g2-u1"]
+        payload["diagrams"].append(second_diagram)
+
+        result = parse_a3_page_understanding(payload)
+        output = result.to_dict(include_derived=True)
+
+        self.assertEqual(
+            [group["units"][0]["display_label"] for group in output["groups"]],
+            ["未标号题1", "未标号题2"],
         )
 
     def test_reject_duplicate_unit_id(self):
