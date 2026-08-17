@@ -104,6 +104,7 @@ class FakeA2Runtime:
         self.sessions = {}
         self.preanalyzed_calls = []
         self.text_calls = []
+        self.candidate_count = 1
 
     def handle_preanalyzed_image(self, session_id, image_path, **kwargs):
         self.preanalyzed_calls.append((session_id, Path(image_path), kwargs))
@@ -113,13 +114,16 @@ class FakeA2Runtime:
             "has_active_image": True,
             "task_revision": 1,
             "candidate_generation": "1:1",
-            "candidate_count": 1,
+            "candidate_count": self.candidate_count,
             "chapter": kwargs.get("chapter", ""),
             "search_id": "search_a2runtime",
         }
         return AgentResponse(
             text="我从题库里找到了最相似的一道题。",
-            state={"phase": "WAIT_CANDIDATE_CHOICE"},
+            state={
+                "phase": "WAIT_CANDIDATE_CHOICE",
+                "candidate_count": self.candidate_count,
+            },
             intent="search_image",
             protocol=RequestProtocol.from_code("REQUEST_SUCCEEDED").to_dict(),
         )
@@ -211,6 +215,10 @@ class A3RuntimeTests(unittest.TestCase):
             {"x": 0.25, "y": 0.2, "width": 0.5, "height": 0.5},
         )
         self.assertEqual(searched.intent, "search_image")
+        self.assertEqual(
+            searched.text,
+            "我从题库里找到了与「四-2」最相似的一道题。你看看是不是这道。",
+        )
         self.assertEqual(self.runtime.session_snapshot(session_id)["a3"]["phase"], A3_PHASE_A2_ACTIVE)
         _session, crop_path, kwargs = self.a2.preanalyzed_calls[0]
         with Image.open(crop_path) as crop_image:
@@ -222,6 +230,7 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(kwargs["chapter"], "4力法")
 
         answered = self.runtime.handle_text(session_id, "选择候选 1")
+        self.assertIn("「四-2」的题库答案找到了", answered.text)
         self.assertIn("还有 1 道", answered.text)
         a3 = self.runtime.session_snapshot(session_id)["a3"]
         self.assertEqual(a3["phase"], A3_PHASE_WAIT_SELECTION)
@@ -352,6 +361,24 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(a3["phase"], A3_PHASE_CROP_REQUIRED)
         self.assertEqual(a3["selected_unit"]["unit_id"], "g1-u1")
 
+    def test_active_a2_reselecting_current_unit_preserves_candidates(self):
+        session_id = "a3-active-same-unit"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+        )
+
+        response = self.runtime.select_unit(session_id, "g1-u2", task_revision=1)
+
+        self.assertEqual(response.intent, "a3_unit_already_selected")
+        self.assertIn("已有进度已保留", response.text)
+        self.assertIn(session_id, self.a2.sessions)
+        a3 = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(a3["phase"], A3_PHASE_A2_ACTIVE)
+        self.assertEqual(a3["selected_unit"]["unit_id"], "g1-u2")
+
     def test_active_a2_reselect_request_returns_to_page_units(self):
         session_id = "a3-active-reselect"
         self.runtime.handle_image(session_id, self.source)
@@ -361,7 +388,7 @@ class A3RuntimeTests(unittest.TestCase):
             {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
         )
 
-        response = self.runtime.handle_text(session_id, "换个题吧")
+        response = self.runtime.handle_text(session_id, "换个题重新搜")
 
         self.assertEqual(response.intent, "a3_reselect")
         self.assertIn("还有 2 道", response.text)
@@ -369,6 +396,76 @@ class A3RuntimeTests(unittest.TestCase):
         a3 = self.runtime.session_snapshot(session_id)["a3"]
         self.assertEqual(a3["phase"], A3_PHASE_WAIT_SELECTION)
         self.assertEqual(a3["selected_unit"]["unit_id"], "")
+
+    def test_active_a2_bare_question_number_clarifies_candidate_namespace(self):
+        session_id = "a3-active-namespace"
+        self.a2.candidate_count = 2
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+        )
+
+        response = self.runtime.handle_text(session_id, "第2题")
+
+        self.assertEqual(response.intent, "a3_namespace_clarification")
+        self.assertIn("候选 2", response.text)
+        self.assertIn("图片中的第 2 道题", response.text)
+        self.assertEqual(self.a2.text_calls, [])
+        self.assertEqual(
+            self.runtime.session_snapshot(session_id)["a3"]["phase"],
+            A3_PHASE_A2_ACTIVE,
+        )
+
+    def test_active_a2_explicit_candidate_stays_in_a2(self):
+        session_id = "a3-active-candidate"
+        self.a2.candidate_count = 2
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+        )
+
+        response = self.runtime.handle_text(session_id, "候选 2")
+
+        self.assertEqual(response.intent, "select_candidate")
+        self.assertEqual(self.a2.text_calls, [(session_id, "候选 2")])
+
+    def test_active_a2_explicit_image_question_switches_units(self):
+        session_id = "a3-active-image-question"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+        )
+
+        response = self.runtime.handle_text(session_id, "图片第1题")
+
+        self.assertEqual(response.intent, "a3_unit_selected")
+        self.assertEqual(self.a2.text_calls, [])
+        self.assertEqual(
+            self.runtime.session_snapshot(session_id)["a3"]["selected_unit"]["unit_id"],
+            "g1-u1",
+        )
+
+    def test_multiple_candidates_name_original_question(self):
+        session_id = "a3-multiple-candidates"
+        self.a2.candidate_count = 3
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u1")
+
+        response = self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+        )
+
+        self.assertEqual(
+            response.text,
+            "我从题库里找到了与「四-1」相似的 3 道题，已按相似度排序。",
+        )
 
     def test_active_a2_chapter_number_is_forwarded_instead_of_switching_units(self):
         session_id = "a3-active-chapter"

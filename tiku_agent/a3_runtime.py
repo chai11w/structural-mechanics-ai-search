@@ -408,6 +408,24 @@ class A3MvpRuntime:
                         intent="a3_unit_clarification",
                         code="CLARIFICATION_REQUIRED",
                     )
+                bare_rank = _active_bare_reference_rank(clean_text)
+                if bare_rank is not None:
+                    original_unit_id, original_ambiguous = _resolve_unit_selection(
+                        clean_text,
+                        state.remaining_units,
+                    )
+                    candidate_count = int(child.get("candidate_count") or 0)
+                    candidate_valid = 1 <= bare_rank <= candidate_count
+                    if original_ambiguous or (original_unit_id and candidate_valid):
+                        return _response(
+                            f"你是要选择候选 {bare_rank}，还是切换到图片中的第 {bare_rank} 道题？"
+                            f"请说“候选 {bare_rank}”或“图片第 {bare_rank} 题”。",
+                            state,
+                            intent="a3_namespace_clarification",
+                            code="CLARIFICATION_REQUIRED",
+                        )
+                    if original_unit_id:
+                        return self._select_locked(state, original_unit_id)
                 response = self.a2_runtime.handle_text(
                     clean,
                     clean_text,
@@ -725,6 +743,12 @@ class A3MvpRuntime:
                 intent="stale_action",
                 code="STALE_ACTION",
             )
+        if unit_id == state.selected_unit_id:
+            return _response(
+                f"当前正在处理「{unit['display_label']}」，已有进度已保留。",
+                state,
+                intent="a3_unit_already_selected",
+            )
         switching_from_a2 = state.phase == A3_PHASE_A2_ACTIVE
         if switching_from_a2:
             self.a2_runtime.clear(state.session_id)
@@ -784,8 +808,26 @@ class A3MvpRuntime:
             return response
         if child_phase != "ANSWERED":
             state.phase = A3_PHASE_A2_ACTIVE
+            selected = state.unit(state.selected_unit_id) or {}
+            display_label = str(selected.get("display_label") or "").strip()
+            candidate_count = int(response.state.get("candidate_count") or 0)
+            if child_phase == "WAIT_CANDIDATE_CHOICE" and display_label and candidate_count:
+                notice = ""
+                marker = "\n\n提示："
+                if marker in response.text:
+                    _base, _separator, suffix = response.text.partition(marker)
+                    notice = marker + suffix
+                response.text = (
+                    f"我从题库里找到了与「{display_label}」最相似的一道题。你看看是不是这道。"
+                    if candidate_count == 1
+                    else f"我从题库里找到了与「{display_label}」相似的 {candidate_count} 道题，已按相似度排序。"
+                ) + notice
             self.store.save(state)
             return response
+        selected = state.unit(state.selected_unit_id) or {}
+        display_label = str(selected.get("display_label") or "").strip()
+        if display_label and response.intent in {"select_candidate", "resend_answer"}:
+            response.text = f"「{display_label}」的题库答案找到了，已经发给你。"
         if state.selected_unit_id and state.selected_unit_id not in state.completed_unit_ids:
             state.completed_unit_ids.append(state.selected_unit_id)
         remaining = state.remaining_units
@@ -990,7 +1032,7 @@ def _is_a3_reselect_request(text: str) -> bool:
         return False
     return bool(
         re.fullmatch(
-            r"(?:算了)?(?:我)?(?:想|要)?(?:换|重选|重新选|切换)(?:一?道|个)?题(?:目)?(?:了)?(?:吧|呢|啊|呀)?",
+            r"(?:算了)?(?:我)?(?:想|要)?(?:换|重选|重新选|切换)(?:一?道|个)?题(?:目)?(?:(?:重新|再)?搜)?(?:了)?(?:吧|呢|啊|呀)?",
             clean,
         )
         or re.fullmatch(
@@ -1023,6 +1065,13 @@ def _resolve_active_unit_selection(
     if len(label_matches) > 1:
         return "", True
 
+    original_prefix = re.fullmatch(
+        r"(?:图片|原图)(?:中|里的?)?(第?[0-9]+(?:个|道)?题)",
+        clean,
+    )
+    if original_prefix:
+        return _resolve_unit_selection(original_prefix.group(1), units)
+
     if not re.search(r"(?:搜|查|选|换到|切换到)", clean):
         return "", False
     ordinal_matches = re.findall(r"第?([0-9]+)(?:个|道)?题", clean)
@@ -1034,6 +1083,20 @@ def _resolve_active_unit_selection(
         if 1 <= index <= len(units):
             return str(units[index - 1]["unit_id"]), False
     return "", False
+
+
+def _active_bare_reference_rank(text: str) -> int | None:
+    clean = re.sub(r"\s+", "", str(text or "")).strip("。！？,.!?")
+    numeric = re.fullmatch(r"第?([0-9]+)(?:个|道)?题", clean)
+    if numeric:
+        return int(numeric.group(1))
+    numeric_item = re.fullmatch(r"第([0-9]+)个", clean)
+    if numeric_item:
+        return int(numeric_item.group(1))
+    chinese = re.fullmatch(r"第([一二两三四五六七八九十])(?:个|道)?(?:题)?", clean)
+    if chinese:
+        return _CHINESE_ORDINALS[chinese.group(1)]
+    return None
 
 
 def _response(

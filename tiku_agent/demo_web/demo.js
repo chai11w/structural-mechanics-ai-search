@@ -533,10 +533,12 @@ function createA3UnitActions(rawA3) {
     if (!isCurrentList || current?.phase !== 'A2_ACTIVE' || remaining.length <= 1) return null;
     const host = document.createElement('div');
     host.className = 'a3-unit-actions';
+    host.dataset.a3Revision = String(a3.task_revision || 0);
     const switchButton = document.createElement('button');
     switchButton.type = 'button';
-    switchButton.className = 'a3-unit-choice';
-    switchButton.textContent = '换一道题';
+    switchButton.className = 'a3-unit-choice a3-switch-question';
+    switchButton.dataset.a3Revision = String(a3.task_revision || 0);
+    switchButton.textContent = '换题重新搜';
     switchButton.addEventListener('click', openA3Sheet);
     host.append(switchButton);
     return host;
@@ -544,6 +546,7 @@ function createA3UnitActions(rawA3) {
   if (!['WAIT_UNIT_SELECTION', 'CROP_REQUIRED', 'COMPLETE'].includes(a3.phase)) return null;
   const host = document.createElement('div');
   host.className = 'a3-unit-actions';
+  host.dataset.a3Revision = String(a3.task_revision || 0);
   const selectionAllowed = ['WAIT_UNIT_SELECTION', 'CROP_REQUIRED'].includes(current?.phase || '');
   a3.units.forEach((unit) => {
     const currentUnit = current?.units.find((item) => item.unit_id === unit.unit_id);
@@ -687,7 +690,8 @@ function createMediaCard(url, index, item) {
     const footer = document.createElement('figcaption');
     footer.className = 'media-footer';
     const label = document.createElement('span');
-    label.textContent = `候选 ${index + 1}`;
+    const originalLabel = String(item.a3?.selected_unit?.display_label || '').trim();
+    label.textContent = originalLabel ? `${originalLabel} · 候选 ${index + 1}` : `候选 ${index + 1}`;
     const choose = document.createElement('button');
     choose.type = 'button';
     choose.className = 'select-candidate';
@@ -702,7 +706,7 @@ function createMediaCard(url, index, item) {
       && actionContext.candidate_generation
       && actionContext.candidate_generation === String(sessionContext.candidate_generation || '');
     choose.disabled = !isCurrent;
-    choose.textContent = isCurrent ? '选择这道题' : '候选已失效';
+    choose.textContent = isCurrent ? '选择这个候选' : '候选已失效';
     choose.addEventListener('click', () => sendTextValue(`选择候选 ${index + 1}`, `选择候选 ${index + 1}`, actionContext));
     footer.append(label, choose);
     card.append(footer);
@@ -750,7 +754,8 @@ function addMessage(item, persist = true) {
     if (mediaKind(item) === 'answer') {
       const answerLabel = document.createElement('span');
       answerLabel.className = 'answer-label';
-      answerLabel.textContent = '题库答案';
+      const originalLabel = String(item.a3?.selected_unit?.display_label || '').trim();
+      answerLabel.textContent = originalLabel ? `${originalLabel} · 题库答案` : '题库答案';
       content.append(answerLabel);
     }
     const grid = document.createElement('div');
@@ -765,6 +770,7 @@ function addMessage(item, persist = true) {
   if (feedbackEligible) content.append(createMessageActions(item, article));
   article.append(content);
   chat.append(article);
+  syncA3ActionButtons();
   if (persist) remember(item);
   scrollToLatest();
   return article;
@@ -1204,6 +1210,7 @@ function invalidateCandidateActions() {
     button.disabled = true;
     button.textContent = '候选已失效';
   });
+  syncA3ActionButtons();
 }
 
 function a3Current() {
@@ -1233,9 +1240,22 @@ function syncA3ActionButtons() {
     const unit = a3?.units.find((item) => item.unit_id === button.dataset.a3UnitId);
     const sameRevision = Number(button.dataset.a3Revision || 0) === Number(a3?.task_revision || 0);
     const completed = Boolean(unit?.completed);
+    const selected = Boolean(unit?.selected);
     const selectionAllowed = ['WAIT_UNIT_SELECTION', 'CROP_REQUIRED'].includes(a3?.phase || '');
-    button.disabled = !unit || !sameRevision || !selectionAllowed || completed;
+    button.disabled = !unit || !sameRevision || !selectionAllowed || completed || selected;
     button.classList.toggle('is-complete', completed);
+  });
+  const actionGroups = Array.from(document.querySelectorAll('.a3-unit-actions'));
+  const currentGroups = actionGroups.filter((host) => (
+    Number(host.dataset.a3Revision || 0) === Number(a3?.task_revision || 0)
+  ));
+  const latestGroup = currentGroups.at(-1) || null;
+  actionGroups.forEach((host) => {
+    host.hidden = host !== latestGroup;
+  });
+  document.querySelectorAll('.a3-switch-question').forEach((button) => {
+    const host = button.closest('.a3-unit-actions');
+    button.disabled = !host || host.hidden || a3?.phase !== 'A2_ACTIVE';
   });
 }
 
@@ -1500,18 +1520,22 @@ function renderA3SheetUnits(a3 = a3Current()) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'a3-sheet-unit';
-    button.disabled = unit.completed;
-    button.setAttribute('aria-current', String(unit.unit_id === a3.selected_unit?.unit_id));
+    const isCurrent = unit.unit_id === a3.selected_unit?.unit_id;
+    button.disabled = unit.completed || isCurrent;
+    button.setAttribute('aria-current', String(isCurrent));
     const text = document.createElement('span');
     const title = document.createElement('strong');
     title.textContent = unit.display_label || '未标号题目';
     const detail = document.createElement('small');
-    detail.textContent = unit.completed ? '已完成' : (unit.title_text || '待裁剪');
+    detail.textContent = unit.completed
+      ? '已完成'
+      : isCurrent ? '当前正在处理' : (unit.title_text || '待裁剪');
     text.append(title, detail);
     const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     icon.setAttribute('viewBox', '0 0 24 24');
     icon.innerHTML = unit.completed ? '<path d="m5 12 4 4L19 6"/>' : '<path d="m9 18 6-6-6-6"/>';
-    button.append(text, icon);
+    button.append(text);
+    if (!isCurrent) button.append(icon);
     button.addEventListener('click', () => selectA3Unit(unit.unit_id, unit.display_label));
     a3SheetUnits.append(button);
   });
