@@ -524,12 +524,25 @@ function createRecoveryActions(actions, item = {}) {
 function createA3UnitActions(rawA3) {
   const a3 = normalizeA3Snapshot(rawA3);
   if (!a3 || !a3.units.length) return null;
-  if (!['WAIT_UNIT_SELECTION', 'CROP_REQUIRED', 'COMPLETE'].includes(a3.phase)) return null;
-  const host = document.createElement('div');
-  host.className = 'a3-unit-actions';
   const current = normalizeA3Snapshot(sessionContext.a3);
   const currentRevision = Number(current?.task_revision || 0);
   const isCurrentList = current && currentRevision === Number(a3.task_revision || 0);
+  if (a3.phase === 'A2_ACTIVE') {
+    const remaining = current?.units.filter((unit) => !unit.completed) || [];
+    if (!isCurrentList || current?.phase !== 'A2_ACTIVE' || remaining.length <= 1) return null;
+    const host = document.createElement('div');
+    host.className = 'a3-unit-actions';
+    const switchButton = document.createElement('button');
+    switchButton.type = 'button';
+    switchButton.className = 'a3-unit-choice';
+    switchButton.textContent = '换一道题';
+    switchButton.addEventListener('click', openA3Sheet);
+    host.append(switchButton);
+    return host;
+  }
+  if (!['WAIT_UNIT_SELECTION', 'CROP_REQUIRED', 'COMPLETE'].includes(a3.phase)) return null;
+  const host = document.createElement('div');
+  host.className = 'a3-unit-actions';
   const selectionAllowed = ['WAIT_UNIT_SELECTION', 'CROP_REQUIRED'].includes(current?.phase || '');
   a3.units.forEach((unit) => {
     const currentUnit = current?.units.find((item) => item.unit_id === unit.unit_id);

@@ -356,6 +356,56 @@ class A3MvpRuntime:
                     code="CLARIFICATION_REQUIRED",
                 )
             if state.phase == A3_PHASE_A2_ACTIVE:
+                child = self.a2_runtime.session_snapshot(clean)
+                if not child.get("session_valid") or str(child.get("phase") or "") in {
+                    "IDLE",
+                    "CANCELLED",
+                }:
+                    state.selected_unit_id = ""
+                    state.phase = (
+                        A3_PHASE_WAIT_SELECTION
+                        if state.remaining_units
+                        else A3_PHASE_COMPLETE
+                    )
+                    self.store.save(state)
+                    if state.phase == A3_PHASE_WAIT_SELECTION:
+                        unit_id, ambiguous = _resolve_unit_selection(
+                            clean_text,
+                            state.remaining_units,
+                        )
+                        if unit_id:
+                            return self._select_locked(state, unit_id)
+                        message = (
+                            "上一道已经停止了。你这句话里像是选了不止一道题，请再选一个。"
+                            if ambiguous
+                            else "上一道已经停止了。请从这张图的剩余题目中选一道。"
+                        )
+                        return _response(
+                            message,
+                            state,
+                            intent="a3_unit_clarification",
+                            code="CLARIFICATION_REQUIRED",
+                        )
+                    return _response(
+                        "上一道已经停止了，这张图里没有其他待处理题目。",
+                        state,
+                        intent="a3_complete",
+                    )
+                if _is_a3_reselect_request(clean_text):
+                    return self._return_to_unit_selection_locked(state)
+                unit_id, ambiguous = _resolve_active_unit_selection(
+                    clean_text,
+                    state.remaining_units,
+                )
+                if unit_id:
+                    return self._select_locked(state, unit_id)
+                if ambiguous:
+                    return _response(
+                        "你像是想切换题目，但我不能唯一确定是哪一道。请从题目列表中选一个。",
+                        state,
+                        intent="a3_unit_clarification",
+                        code="CLARIFICATION_REQUIRED",
+                    )
                 response = self.a2_runtime.handle_text(
                     clean,
                     clean_text,
@@ -650,7 +700,11 @@ class A3MvpRuntime:
     def _select_locked(self, state: A3SessionState, unit_id: str) -> AgentResponse:
         unit = state.unit(unit_id)
         if (
-            state.phase not in {A3_PHASE_WAIT_SELECTION, A3_PHASE_CROP_REQUIRED}
+            state.phase not in {
+                A3_PHASE_WAIT_SELECTION,
+                A3_PHASE_CROP_REQUIRED,
+                A3_PHASE_A2_ACTIVE,
+            }
             or
             unit is None
             or unit.get("searchability") != "searchable_candidate"
@@ -662,15 +716,41 @@ class A3MvpRuntime:
                 intent="stale_action",
                 code="STALE_ACTION",
             )
+        switching_from_a2 = state.phase == A3_PHASE_A2_ACTIVE
+        if switching_from_a2:
+            self.a2_runtime.clear(state.session_id)
         state.selected_unit_id = unit_id
         state.phase = A3_PHASE_CROP_REQUIRED
         state.crop_review_required = False
         state.last_error = ""
         self.store.save(state)
         return _response(
-            f"好，先查「{unit['display_label']}」。请裁剪它对应的单个结构图。",
+            (
+                f"好，已停止当前题，改查「{unit['display_label']}」。"
+                "请裁剪它对应的单个结构图。"
+                if switching_from_a2
+                else f"好，先查「{unit['display_label']}」。请裁剪它对应的单个结构图。"
+            ),
             state,
             intent="a3_unit_selected",
+        )
+
+    def _return_to_unit_selection_locked(self, state: A3SessionState) -> AgentResponse:
+        self.a2_runtime.clear(state.session_id)
+        state.selected_unit_id = ""
+        remaining = state.remaining_units
+        state.phase = A3_PHASE_WAIT_SELECTION if remaining else A3_PHASE_COMPLETE
+        state.crop_review_required = False
+        state.last_error = ""
+        self.store.save(state)
+        return _response(
+            (
+                f"好，已停止当前题。这张图里还有 {len(remaining)} 道可以选择。"
+                if remaining
+                else "好，已停止当前题。这张图里没有其他待处理题目。"
+            ),
+            state,
+            intent="a3_reselect" if remaining else "a3_complete",
         )
 
     def _after_a2_response(
@@ -679,6 +759,18 @@ class A3MvpRuntime:
         response: AgentResponse,
     ) -> AgentResponse:
         child_phase = str(response.state.get("phase") or "")
+        if response.intent == "cancel" or child_phase == "CANCELLED":
+            state.selected_unit_id = ""
+            remaining = state.remaining_units
+            state.phase = A3_PHASE_WAIT_SELECTION if remaining else A3_PHASE_COMPLETE
+            response.state["phase"] = state.phase
+            response.text = (
+                f"好，已停止这道题。这张图里还有 {len(remaining)} 道可以选择。"
+                if remaining
+                else "好，已停止这道题。这张图里没有其他待处理题目。"
+            )
+            self.store.save(state)
+            return response
         if child_phase != "ANSWERED":
             state.phase = A3_PHASE_A2_ACTIVE
             self.store.save(state)
@@ -845,6 +937,23 @@ def _resolve_unit_selection(text: str, units: list[dict[str, Any]]) -> tuple[str
     if len(set(exact_matches)) > 1:
         return "", True
 
+    contained_matches: set[str] = set()
+    for unit in units:
+        values = {
+            str(unit.get("display_label") or "").replace(" ", ""),
+            str(unit.get("question_label") or "").replace(" ", ""),
+        }
+        for value in values:
+            if not value:
+                continue
+            pattern = rf"(?<![0-9A-Za-z]){re.escape(value)}(?![0-9A-Za-z-])"
+            if re.search(pattern, clean):
+                contained_matches.add(str(unit["unit_id"]))
+    if len(contained_matches) == 1:
+        return next(iter(contained_matches)), False
+    if len(contained_matches) > 1:
+        return "", True
+
     numbers = [int(value) for value in re.findall(r"\d+", clean)]
     chinese = [value for char, value in _CHINESE_ORDINALS.items() if f"第{char}" in clean]
     ordinals = numbers or chinese
@@ -856,6 +965,55 @@ def _resolve_unit_selection(text: str, units: list[dict[str, Any]]) -> tuple[str
             return str(units[index - 1]["unit_id"]), False
     if len(chinese) == 1 and re.fullmatch(r"(?:要|搜|查|选)?第[一二两三四五六七八九十]个?(?:题)?", clean):
         index = chinese[0]
+        if 1 <= index <= len(units):
+            return str(units[index - 1]["unit_id"]), False
+    return "", False
+
+
+def _is_a3_reselect_request(text: str) -> bool:
+    clean = re.sub(r"[\s，,。！？!?]+", "", str(text or ""))
+    if not clean:
+        return False
+    return bool(
+        re.fullmatch(
+            r"(?:算了)?(?:我)?(?:想|要)?(?:换|重选|重新选|切换)(?:一?道|个)?题(?:目)?(?:了)?",
+            clean,
+        )
+        or re.fullmatch(r"(?:这|当前)(?:一?道|个)?题(?:目)?(?:不搜|不查|不要)(?:了)?", clean)
+    )
+
+
+def _resolve_active_unit_selection(
+    text: str,
+    units: list[dict[str, Any]],
+) -> tuple[str, bool]:
+    """Resolve only explicit cross-question requests while an A2 child is active."""
+
+    clean = re.sub(r"\s+", "", str(text or "")).strip("。！？,.!?")
+    if not clean or not units:
+        return "", False
+
+    label_matches: set[str] = set()
+    for unit in units:
+        label = str(unit.get("display_label") or "").replace(" ", "")
+        if not label:
+            continue
+        pattern = rf"(?<![0-9A-Za-z]){re.escape(label)}(?![0-9A-Za-z-])"
+        if re.search(pattern, clean):
+            label_matches.add(str(unit["unit_id"]))
+    if len(label_matches) == 1:
+        return next(iter(label_matches)), False
+    if len(label_matches) > 1:
+        return "", True
+
+    if not re.search(r"(?:搜|查|选|换到|切换到)", clean):
+        return "", False
+    ordinal_matches = re.findall(r"第?([0-9]+)(?:个|道)?题", clean)
+    indexes = {int(value) for value in ordinal_matches}
+    if len(indexes) > 1:
+        return "", True
+    if len(indexes) == 1:
+        index = next(iter(indexes))
         if 1 <= index <= len(units):
             return str(units[index - 1]["unit_id"]), False
     return "", False

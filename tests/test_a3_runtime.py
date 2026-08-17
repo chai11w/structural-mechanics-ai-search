@@ -95,6 +95,7 @@ class FakeA2Runtime:
     def __init__(self):
         self.sessions = {}
         self.preanalyzed_calls = []
+        self.text_calls = []
 
     def handle_preanalyzed_image(self, session_id, image_path, **kwargs):
         self.preanalyzed_calls.append((session_id, Path(image_path), kwargs))
@@ -115,7 +116,24 @@ class FakeA2Runtime:
             protocol=RequestProtocol.from_code("REQUEST_SUCCEEDED").to_dict(),
         )
 
-    def handle_text(self, session_id, _text, **_kwargs):
+    def handle_text(self, session_id, text, **_kwargs):
+        self.text_calls.append((session_id, text))
+        if text == "算了":
+            self.sessions.pop(session_id, None)
+            return AgentResponse(
+                text="好，已经取消了。",
+                state={"phase": "CANCELLED"},
+                intent="cancel",
+                protocol=RequestProtocol.from_code("REQUEST_SUCCEEDED").to_dict(),
+            )
+        if text == "2静定结构":
+            self.sessions[session_id]["phase"] = "WAIT_CANDIDATE_CHOICE"
+            return AgentResponse(
+                text="已按第 2 章继续检索。",
+                state={"phase": "WAIT_CANDIDATE_CHOICE"},
+                intent="set_chapter",
+                protocol=RequestProtocol.from_code("REQUEST_SUCCEEDED").to_dict(),
+            )
         self.sessions[session_id]["phase"] = "ANSWERED"
         return AgentResponse(
             text="找到了，答案发你了。",
@@ -194,10 +212,6 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertNotIn("10 kN", kwargs["context_text"])
         self.assertEqual(kwargs["chapter"], "4力法")
 
-        blocked_switch = self.runtime.select_unit(session_id, "g1-u1")
-        self.assertEqual(blocked_switch.intent, "stale_action")
-        self.assertEqual(self.runtime.session_snapshot(session_id)["a3"]["phase"], A3_PHASE_A2_ACTIVE)
-
         answered = self.runtime.handle_text(session_id, "选择候选 1")
         self.assertIn("还有 1 道", answered.text)
         a3 = self.runtime.session_snapshot(session_id)["a3"]
@@ -222,6 +236,139 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertTrue(a3["crop_draft"]["available"])
         self.assertEqual(a3["crop_draft"]["bounds"]["width"], 0.7)
 
+    def test_cancel_returns_to_page_units_and_natural_label_can_resume(self):
+        session_id = "a3-cancel-session"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+        )
+
+        cancelled = self.runtime.handle_text(session_id, "算了")
+
+        self.assertEqual(cancelled.intent, "cancel")
+        self.assertIn("还有 2 道", cancelled.text)
+        a3 = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(a3["phase"], A3_PHASE_WAIT_SELECTION)
+        self.assertEqual(a3["completed_unit_ids"], [])
+        self.assertEqual(a3["selected_unit"]["unit_id"], "")
+
+        resumed = self.runtime.handle_text(session_id, "我想搜 四-1")
+
+        self.assertEqual(resumed.intent, "a3_unit_selected")
+        self.assertEqual(
+            self.runtime.session_snapshot(session_id)["a3"]["selected_unit"]["unit_id"],
+            "g1-u1",
+        )
+
+    def test_missing_child_session_recovers_before_handling_current_selection(self):
+        session_id = "a3-missing-child-session"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+        )
+        self.a2.clear(session_id)
+
+        resumed = self.runtime.handle_text(session_id, "我想搜 四-1")
+
+        self.assertEqual(resumed.intent, "a3_unit_selected")
+        a3 = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(a3["phase"], A3_PHASE_CROP_REQUIRED)
+        self.assertEqual(a3["selected_unit"]["unit_id"], "g1-u1")
+
+    def test_active_a2_explicit_label_switches_without_forwarding_to_child(self):
+        session_id = "a3-active-text-switch"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+        )
+
+        switched = self.runtime.handle_text(session_id, "我想搜 四-1")
+
+        self.assertEqual(switched.intent, "a3_unit_selected")
+        self.assertIn("改查", switched.text)
+        self.assertEqual(self.a2.text_calls, [])
+        self.assertNotIn(session_id, self.a2.sessions)
+        a3 = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(a3["phase"], A3_PHASE_CROP_REQUIRED)
+        self.assertEqual(a3["selected_unit"]["unit_id"], "g1-u1")
+
+    def test_active_a2_selection_api_switches_to_another_unit(self):
+        session_id = "a3-active-button-switch"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+        )
+
+        switched = self.runtime.select_unit(session_id, "g1-u1", task_revision=1)
+
+        self.assertEqual(switched.intent, "a3_unit_selected")
+        self.assertNotIn(session_id, self.a2.sessions)
+        a3 = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(a3["phase"], A3_PHASE_CROP_REQUIRED)
+        self.assertEqual(a3["selected_unit"]["unit_id"], "g1-u1")
+
+    def test_active_a2_reselect_request_returns_to_page_units(self):
+        session_id = "a3-active-reselect"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+        )
+
+        response = self.runtime.handle_text(session_id, "算了，我想换个题")
+
+        self.assertEqual(response.intent, "a3_reselect")
+        self.assertIn("还有 2 道", response.text)
+        self.assertEqual(self.a2.text_calls, [])
+        a3 = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(a3["phase"], A3_PHASE_WAIT_SELECTION)
+        self.assertEqual(a3["selected_unit"]["unit_id"], "")
+
+    def test_active_a2_chapter_number_is_forwarded_instead_of_switching_units(self):
+        session_id = "a3-active-chapter"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+        )
+        self.a2.sessions[session_id]["phase"] = "WAIT_CHAPTER"
+
+        response = self.runtime.handle_text(session_id, "2静定结构")
+
+        self.assertEqual(response.intent, "set_chapter")
+        self.assertEqual(self.a2.text_calls, [(session_id, "2静定结构")])
+        a3 = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(a3["phase"], A3_PHASE_A2_ACTIVE)
+        self.assertEqual(a3["selected_unit"]["unit_id"], "g1-u2")
+
+    def test_active_a2_ambiguous_switch_request_requires_one_unit(self):
+        session_id = "a3-active-ambiguous-switch"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+        )
+
+        response = self.runtime.handle_text(session_id, "我想搜第1题和第2题")
+
+        self.assertEqual(response.intent, "a3_unit_clarification")
+        self.assertEqual(self.a2.text_calls, [])
+        self.assertEqual(
+            self.runtime.session_snapshot(session_id)["a3"]["phase"],
+            A3_PHASE_A2_ACTIVE,
+        )
+
     def test_fastapi_exposes_selection_crop_and_session_contract(self):
         client = TestClient(create_app(runtime=self.runtime, incoming_dir=self.root / "incoming"))
         uploaded = client.post("/api/image", files={"file": ("page.jpg", self.source.read_bytes(), "image/jpeg")})
@@ -243,6 +390,15 @@ class A3RuntimeTests(unittest.TestCase):
         events = [json.loads(line) for line in cropped.text.splitlines() if line]
         self.assertEqual(events[-1]["type"], "result")
         self.assertEqual(events[-1]["data"]["session"]["a3"]["phase"], A3_PHASE_A2_ACTIVE)
+
+        switched = client.post(
+            "/api/a3/select",
+            json={"unit_id": "g1-u2", "task_revision": 1},
+        )
+        self.assertEqual(switched.status_code, 200)
+        switched_a3 = switched.json()["session"]["a3"]
+        self.assertEqual(switched_a3["phase"], A3_PHASE_CROP_REQUIRED)
+        self.assertEqual(switched_a3["selected_unit"]["unit_id"], "g1-u2")
 
     def test_page_observer_returns_parser_error_to_bounded_schema_retry(self):
         invalid = _page_payload()
