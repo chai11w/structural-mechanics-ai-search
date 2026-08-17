@@ -20,11 +20,11 @@
 - `8891` 已完成隔离权威分流 MVP：A2 进入原检索，A1/A3 只生成受约束说明；分离绘制的荷载按结构语义归属。
 - `8892` 是无端口、始终 `review_required` 的 Paddle 离线质检器；已证明检测框和多尺度窗口能召回部分子图，但竖排拆分与完整性仍不可靠，现降为 V2。
 - `8896` 已实现 A3 人工裁剪主线：整页层只提取题号/题干并建立图形绑定，对外荷载只做存在与完整性门禁；parser 不把图内荷载、尺寸或节点标注拼入题干，详细荷载只在裁剪通过后由 A2 识别。A3 向每个 A2 单题传递“父题标题 + 公共题干 + 子题标题”，组级方法名称不会在会话交接时丢失。A3 始终持有整页目录并优先处理停止、返回列表和明确切题，A2 只处理当前单题；A2 中可用按钮或明确题号切题且不重新上传，章节数字继续交给 A2。其余选题、校验、答案返回及状态、Cookie、媒体和费用均隔离，桌面/手机 UI 沿用“力答”风格。
-- A3 真实回归覆盖 4 张页面，分别得到 `1 searchable + 1 uncertain`、4、4、9 个候选；明确题干的第 20 题已真实跑通裁剪校验、章节 2、候选、答案和返回剩余 3 题。全量 576 个测试通过。
+- A3 真实回归覆盖 4 张页面，分别得到 `1 searchable + 1 uncertain`、4、4、9 个候选；明确题干的第 20 题已真实跑通裁剪校验、章节 2、候选、答案和返回剩余 3 题。A3→A2 组级标题回归已补齐，全量 577 个测试通过。
 
 ## In Progress
 
-- 8896 进入用户验收和样本扩展阶段；优先收集裁剪 `review_required`、章节追问和多题连续检索的真实失败样本，再决定异常对话细化。
+- 8896 进入用户验收和样本扩展阶段；先复测题名含“力法”的真实样本，确认组级父题标题进入 A2 后可直接判章，再收集裁剪 `review_required`、章节追问和多题连续检索失败样本。
 - Paddle 候选、语义对齐、自动裁剪和人工回退仍属于 A3 V2；人工裁剪 MVP 稳定前继续暂停 splitter 优化。
 
 ## Not Implemented
@@ -79,17 +79,13 @@
 
 ## Next Best Step
 
-1. 让用户在 `http://127.0.0.1:8896` 用更多真实多题图验收，记录候选数量、裁剪拒绝原因和章节追问是否合理。
+1. 在 `http://127.0.0.1:8896` 重跑刚才题名含“力法”的真实样本，确认 A3 的父题标题、公共题干和子题标题进入 A2 后不再追问章节。
 2. 按真实失败样本细化 mismatch / incomplete / uncertain 的差异化回答，不先扩展自动裁剪。
 3. 人工裁剪闭环稳定后再启动 Paddle 自动裁剪 V2。
 
 ## Important Commands
 
 - `python -m unittest discover -s tests`
-- `python scripts/run_tiku_admin.py --help`
-- `python scripts/manage_tiku_admin.py --control-db .tmp_tiku_admin_8795/control.sqlite3 --import-invites <原哈希配置> --require-status-match`（灾备切换前严格只读预检）
-- 普通导入确认后添加 `--apply-import`（显式补入缺失记录，不覆盖后台状态）
-- `powershell -ExecutionPolicy Bypass -File scripts/switch_tiku_agent_8790_control.ps1`（灾备重切前只读预检）
 - `powershell -ExecutionPolicy Bypass -File scripts/tiku_admin_watchdog_8795.ps1`
 - `python scripts/run_tiku_agent_demo.py --help`
 - `python -B scripts/run_tiku_agent_8896.py`
