@@ -102,6 +102,7 @@ class A3SessionState:
         if not values.get("entry_route") and values.get("source_page_path"):
             values["entry_route"] = "A3"
         state = cls(**values)
+        _refresh_unlabelled_display_labels(state.units)
         for unit in state.units:
             unit["a2_context_text"] = _question_context_text(unit)
         state.validate()
@@ -1087,7 +1088,16 @@ def _flatten_units(page: Mapping[str, Any]) -> list[dict[str, Any]]:
                 item["parent_title_text"] = parent_title_text
                 item["a2_context_text"] = _question_context_text(item)
                 units.append(item)
+    _refresh_unlabelled_display_labels(units)
     return units
+
+
+def _refresh_unlabelled_display_labels(units: list[dict[str, Any]]) -> None:
+    for ordinal, unit in enumerate(units, start=1):
+        parent = str(unit.get("parent_question_label") or "").strip()
+        child = str(unit.get("question_label") or "").strip()
+        if not parent and not child:
+            unit["display_label"] = f"未标号题{ordinal}"
 
 
 def _question_context_text(unit: Mapping[str, Any]) -> str:

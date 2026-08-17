@@ -10,6 +10,7 @@ from tiku_agent.a3_models import A3UnitAnalysis, CropCompareResult, QwenA3PageOb
 from tiku_agent.a3_page_parser import parse_a3_page_understanding
 from tiku_agent.a3_runtime import (
     A3MvpRuntime,
+    A3SessionState,
     A3_PHASE_A2_ACTIVE,
     A3_PHASE_CROP_REQUIRED,
     A3_PHASE_WAIT_SELECTION,
@@ -283,6 +284,34 @@ class A3RuntimeTests(unittest.TestCase):
             page_observer=FakeObserver(),
             crop_verifier=self.verifier,
             unit_analyzer=FakeAnalyzer(),
+        )
+
+    def test_restored_unlabelled_units_receive_unique_page_ordinals(self):
+        state = A3SessionState.from_dict({
+            "session_id": "legacy-unlabelled",
+            "entry_route": "A3",
+            "phase": A3_PHASE_WAIT_SELECTION,
+            "units": [
+                {
+                    "unit_id": "g1-u1",
+                    "parent_question_label": "",
+                    "question_label": "",
+                    "display_label": "未标号题1",
+                    "searchability": "searchable_candidate",
+                },
+                {
+                    "unit_id": "g2-u1",
+                    "parent_question_label": "",
+                    "question_label": "",
+                    "display_label": "未标号题1",
+                    "searchability": "searchable_candidate",
+                },
+            ],
+        })
+
+        self.assertEqual(
+            [unit["display_label"] for unit in state.units],
+            ["未标号题1", "未标号题2"],
         )
 
     def test_full_flow_a2_skips_a3_crop_and_continues_in_original_a2(self):

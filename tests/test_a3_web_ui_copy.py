@@ -39,6 +39,10 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn(".a3-crop-header { min-width: 0;", self.style)
         self.assertIn("width: 100%; max-width: 42vw; margin: 2px auto 0", self.style)
 
+    def test_current_a3_buttons_refresh_their_derived_labels(self):
+        self.assertIn("button.textContent = unit.display_label || '未标号题目'", self.script)
+        self.assertIn("label.textContent = `${unit.display_label || '未标号题目'} · 已完成`", self.script)
+
     def test_crop_workspace_actions_do_not_repeat_in_chat(self):
         select_body = self.script[
             self.script.index("async function selectA3Unit"):

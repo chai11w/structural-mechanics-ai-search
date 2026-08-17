@@ -1271,6 +1271,11 @@ function syncA3ActionButtons() {
     const completed = Boolean(unit?.completed);
     const selected = Boolean(unit?.selected);
     const selectionAllowed = ['WAIT_UNIT_SELECTION', 'CROP_REQUIRED'].includes(a3?.phase || '');
+    if (unit && !completed) button.textContent = unit.display_label || '未标号题目';
+    else if (unit && completed) {
+      const label = button.querySelector('span');
+      if (label) label.textContent = `${unit.display_label || '未标号题目'} · 已完成`;
+    }
     button.disabled = !unit || !sameRevision || !selectionAllowed || completed || selected;
     button.classList.toggle('is-complete', completed);
   });
