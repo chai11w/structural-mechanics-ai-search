@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from tiku_shared.chapter_catalog import (
+    CHAPTER_DEFINITIONS,
+    LEGACY_CHAPTER_ALIASES,
+    SUPPORTED_STORAGE_KEYS,
+    parse_chapter_scope,
+    resolve_supported_chapter,
+)
 
-CHAPTERS = ["2静定结构", "3静定结构位移", "4力法", "5位移法", "6力矩分配", "7矩阵位移", "8影响线"]
+CHAPTERS = list(SUPPORTED_STORAGE_KEYS)
 
 STATE_IDLE = "IDLE"
 STATE_WAIT_CHAPTER = "WAIT_CHAPTER"
@@ -15,19 +21,11 @@ STATE_WAIT_QUESTION_CHOICE = "WAIT_QUESTION_CHOICE"
 STATE_WAIT_CANDIDATE_CHOICE = "WAIT_CANDIDATE_CHOICE"
 
 CHAPTER_ALIASES = {
-    "静定": "2静定结构",
-    "静定结构": "2静定结构",
-    "内力": "2静定结构",
-    "内力图": "2静定结构",
-    "位移": "3静定结构位移",
-    "图乘法": "3静定结构位移",
-    "单位荷载法": "3静定结构位移",
-    "力法": "4力法",
-    "位移法": "5位移法",
-    "力矩分配": "6力矩分配",
-    "矩阵位移": "7矩阵位移",
-    "影响线": "8影响线",
+    alias: definition.storage_key
+    for definition in CHAPTER_DEFINITIONS
+    for alias in definition.aliases
 }
+CHAPTER_ALIASES.update(LEGACY_CHAPTER_ALIASES)
 
 
 @dataclass
@@ -45,27 +43,9 @@ class IntentResult:
 
 
 def parse_chapter(text: str) -> str | None:
-    clean = _normalize_text(text)
-    if not clean:
-        return None
-    if clean.isdigit():
-        for chapter in CHAPTERS:
-            if chapter.startswith(clean):
-                return chapter
-    chapter_number = re.search(r"第?\s*([2-8二三四五六七八])\s*章", clean)
-    if chapter_number:
-        parsed = chinese_number_to_int(chapter_number.group(1))
-        if parsed is not None:
-            for chapter in CHAPTERS:
-                if chapter.startswith(str(parsed)):
-                    return chapter
-    for chapter in CHAPTERS:
-        if clean == chapter or clean in chapter or chapter in clean:
-            return chapter
-    for alias, chapter in CHAPTER_ALIASES.items():
-        if alias in clean:
-            return chapter
-    return None
+    # Preserve the legacy internal-number behavior until the strict scope
+    # result is wired into WAIT_CHAPTER and the other user-facing entrypoints.
+    return resolve_supported_chapter(text, allow_numeric=True)
 
 
 def chinese_number_to_int(text: str) -> int | None:
