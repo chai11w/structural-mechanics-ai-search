@@ -23,6 +23,7 @@ from tiku_agent.a3_models import (
     CropCompareResult,
 )
 from tiku_agent.agent import AgentResponse
+from tiku_agent.image_triage_authority import NO_EXTERNAL_LOAD_REPLY
 from tiku_agent.session_artifacts import SessionArtifacts, session_key
 from tiku_agent.session_runtime import AgentProtocolError, AgentSessionRuntime, ProgressReporter
 from tiku_shared.model_costs import ModelCostCollector, SQLiteModelCostLedger, model_cost_scope
@@ -814,7 +815,7 @@ class A3MvpRuntime:
                         state.last_error = "external_load_not_confirmed"
                         self.store.save(state)
                         return AgentResponse(
-                            text="未识别到图片中的真实外荷载，请重新上传外荷载清晰可见的题图。",
+                            text=NO_EXTERNAL_LOAD_REPLY,
                             state={"phase": state.phase, "current_route": "A1"},
                             intent="image_triage_stop",
                             protocol=RequestProtocol.from_code(

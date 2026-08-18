@@ -3,6 +3,7 @@ import unittest
 from tiku_agent.image_contracts import ImageTriageObservation
 from tiku_agent.image_triage_authority import (
     ImageTriageAuthority,
+    NO_EXTERNAL_LOAD_REPLY,
     QwenTriageReplyClient,
     normalize_triage_reply,
     triage_reply_is_usable,
@@ -44,6 +45,20 @@ class FakeObserver:
 
     def observe(self, _image_path):
         return self.value
+
+
+class NoLoadObserver:
+    def observe(self, _image_path):
+        return ImageTriageObservation(
+            route_candidate="A2",
+            question_count=1,
+            original_structure_count=1,
+            auxiliary_diagram_count=0,
+            has_actual_load_evidence=False,
+            has_structure_content=True,
+            image_recoverable=True,
+            raw_text="建议路线：A2\n明确没有真实外荷载。",
+        )
 
 
 class ImageTriageAuthorityTest(unittest.TestCase):
@@ -90,6 +105,16 @@ class ImageTriageAuthorityTest(unittest.TestCase):
                 self.assertEqual(decision.reply, f"{route} 的自然说明")
                 self.assertEqual(decision.reply_source, "qwen_triage_reply")
                 self.assertEqual(seen[0].observation.raw_text, observation(route).raw_text)
+
+    def test_no_load_a1_uses_fixed_user_copy_without_reply_model(self):
+        decision = ImageTriageAuthority(
+            NoLoadObserver(),
+            lambda _handoff: self.fail("no-load A1 must use fixed policy copy"),
+        ).decide_for_full_flow("question.jpg")
+
+        self.assertEqual(decision.handoff.route, "A1")
+        self.assertEqual(decision.reply, NO_EXTERNAL_LOAD_REPLY)
+        self.assertEqual(decision.reply_source, "fixed_policy")
 
     def test_a2_does_not_call_the_result_reply_model(self):
         decision = ImageTriageAuthority(

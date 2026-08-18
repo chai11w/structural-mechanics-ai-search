@@ -17,6 +17,10 @@ from .image_triage import QwenImageTriage, build_handoff
 
 DEFAULT_REPLY_MODEL = "qwen3.7-plus"
 DEFAULT_REPLY_ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+NO_EXTERNAL_LOAD_REPLY = (
+    "图片中未包含外荷载，力答只能处理有外荷载的大题，因此不能直接检索。"
+    "请补充包含清晰荷载信息的完整题目图片后重新上传。"
+)
 
 
 @dataclass(frozen=True)
@@ -184,6 +188,12 @@ class ImageTriageAuthority:
     ) -> ImageTriageDecision:
         observation = self.observer.observe(image_path)
         handoff = build_handoff(str(image_path), observation)
+        if handoff.route == "A1" and observation.has_actual_load_evidence is False:
+            return ImageTriageDecision(
+                handoff=handoff,
+                reply=NO_EXTERNAL_LOAD_REPLY,
+                reply_source="fixed_policy",
+            )
         if handoff.route not in explain_routes:
             return ImageTriageDecision(handoff=handoff)
         try:
