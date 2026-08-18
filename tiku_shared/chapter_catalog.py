@@ -202,7 +202,12 @@ def detect_non_chinese_problem_text(text: object) -> ChapterScopeResult | None:
     """
 
     raw = _normalize_visible_text(text)
-    if not raw or re.search(r"[\u3400-\u9fff]", raw) or _looks_like_symbolic_annotation(raw):
+    if (
+        not raw
+        or re.search(r"[\u3400-\u9fff]", raw)
+        or _looks_like_numeric_annotation(raw)
+        or _looks_like_symbolic_annotation(raw)
+    ):
         return None
     return ChapterScopeResult(
         status="unsupported",
@@ -378,12 +383,18 @@ def _normalize_visible_text(text: object) -> str:
     return unicodedata.normalize("NFKC", str(text or "")).strip()
 
 
+def _looks_like_numeric_annotation(text: str) -> bool:
+    return re.fullmatch(r"[0-9\s.,;:：，。/\\\-]+", text) is not None
+
+
 def _looks_like_symbolic_annotation(text: str) -> bool:
     """Recognize formula/load labels without treating English prose as empty."""
 
     if not text or not _SYMBOLIC_ANNOTATION_CHARS.fullmatch(text):
         return False
-    if not re.search(r"\d|=|[+\-*/^]", text):
+    has_operator = re.search(r"=|[+\-*/^]", text) is not None
+    has_variable_value = re.search(r"[A-Za-z]", text) is not None and re.search(r"\d", text) is not None
+    if not (has_operator or has_variable_value):
         return False
     for word in re.findall(r"[A-Za-z]+", text):
         normalized = word.lower()

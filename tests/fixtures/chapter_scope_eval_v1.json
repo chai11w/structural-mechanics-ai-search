@@ -1,0 +1,392 @@
+{
+  "schema_version": "chapter-scope-eval-v1",
+  "status": "approved_seed_set",
+  "description": "Deterministic chapter scope and language-boundary cases for image and chapter-reply entries.",
+  "cases": [
+    {
+      "id": "image_empty_text_asks",
+      "category": "image_missing_evidence",
+      "entry": "image",
+      "input": {"chapter_hint": "unknown", "chapter_confidence": 0.0, "visible_problem_text": ""},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "missing_visible_problem_text"}
+    },
+    {
+      "id": "image_formula_only_asks",
+      "category": "image_missing_evidence",
+      "entry": "image",
+      "input": {"chapter_hint": "4力法", "chapter_confidence": 0.99, "visible_problem_text": "EI=200, P=20"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "missing_visible_problem_text"}
+    },
+    {
+      "id": "image_load_labels_ask",
+      "category": "image_missing_evidence",
+      "entry": "image",
+      "input": {"chapter_hint": "unknown", "chapter_confidence": 0.0, "visible_problem_text": "q=20kN/m, M=10kN·m"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "missing_visible_problem_text"}
+    },
+    {
+      "id": "image_english_sentence_rejects",
+      "category": "language_gate",
+      "entry": "image",
+      "input": {"chapter_hint": "4力法", "chapter_confidence": 0.99, "visible_problem_text": "Find the bending moment of the beam"},
+      "expected": {"status": "unsupported", "topic_id": "non_chinese_question", "storage_key": null, "reason": "non_chinese_problem_text"}
+    },
+    {
+      "id": "image_english_formula_sentence_rejects",
+      "category": "language_gate",
+      "entry": "image",
+      "input": {"chapter_hint": "4力法", "chapter_confidence": 0.99, "visible_problem_text": "Calculate M=20 for the beam"},
+      "expected": {"status": "unsupported", "topic_id": "non_chinese_question", "storage_key": null, "reason": "non_chinese_problem_text"}
+    },
+    {
+      "id": "image_mixed_language_keeps_language_gate_open",
+      "category": "language_gate",
+      "entry": "image",
+      "input": {"chapter_hint": "unknown", "chapter_confidence": 0.0, "visible_problem_text": "求 beam 的弯矩图"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "no_valid_chapter_evidence"}
+    },
+    {
+      "id": "image_static_beam",
+      "category": "supported_alias",
+      "entry": "image",
+      "input": {"visible_problem_text": "求静定梁弯矩图"},
+      "expected": {"status": "supported", "topic_id": "static_internal_force", "storage_key": "2静定结构", "reason": "visible_problem_text_supported"}
+    },
+    {
+      "id": "image_static_frame",
+      "category": "supported_alias",
+      "entry": "image",
+      "input": {"visible_problem_text": "静定钢架内力分析"},
+      "expected": {"status": "supported", "topic_id": "static_internal_force", "storage_key": "2静定结构", "reason": "visible_problem_text_supported"}
+    },
+    {
+      "id": "image_static_displacement",
+      "category": "supported_alias",
+      "entry": "image",
+      "input": {"visible_problem_text": "静定结构位移"},
+      "expected": {"status": "supported", "topic_id": "static_displacement", "storage_key": "3静定结构位移", "reason": "visible_problem_text_supported"}
+    },
+    {
+      "id": "image_unit_load_method",
+      "category": "supported_alias",
+      "entry": "image",
+      "input": {"visible_problem_text": "用单位荷载法求位移"},
+      "expected": {"status": "supported", "topic_id": "static_displacement", "storage_key": "3静定结构位移", "reason": "visible_problem_text_supported"}
+    },
+    {
+      "id": "image_graphical_multiplication",
+      "category": "supported_alias",
+      "entry": "image",
+      "input": {"visible_problem_text": "图乘法求位移"},
+      "expected": {"status": "supported", "topic_id": "static_displacement", "storage_key": "3静定结构位移", "reason": "visible_problem_text_supported"}
+    },
+    {
+      "id": "image_force_method",
+      "category": "supported_alias",
+      "entry": "image",
+      "input": {"visible_problem_text": "请用力法计算超静定梁"},
+      "expected": {"status": "supported", "topic_id": "force_method", "storage_key": "4力法", "reason": "visible_problem_text_supported"}
+    },
+    {
+      "id": "image_displacement_method",
+      "category": "supported_alias",
+      "entry": "image",
+      "input": {"visible_problem_text": "转角位移法"},
+      "expected": {"status": "supported", "topic_id": "displacement_method", "storage_key": "5位移法", "reason": "visible_problem_text_supported"}
+    },
+    {
+      "id": "image_moment_distribution_method",
+      "category": "supported_alias",
+      "entry": "image",
+      "input": {"visible_problem_text": "弯矩分配法"},
+      "expected": {"status": "supported", "topic_id": "moment_distribution", "storage_key": "6力矩分配", "reason": "visible_problem_text_supported"}
+    },
+    {
+      "id": "image_asymptotic_method",
+      "category": "supported_alias",
+      "entry": "image",
+      "input": {"visible_problem_text": "渐近法"},
+      "expected": {"status": "supported", "topic_id": "moment_distribution", "storage_key": "6力矩分配", "reason": "visible_problem_text_supported"}
+    },
+    {
+      "id": "image_matrix_displacement_method",
+      "category": "supported_alias",
+      "entry": "image",
+      "input": {"visible_problem_text": "用矩阵位移法计算"},
+      "expected": {"status": "supported", "topic_id": "matrix_displacement", "storage_key": "7矩阵位移", "reason": "visible_problem_text_supported"}
+    },
+    {
+      "id": "image_influence_line",
+      "category": "supported_alias",
+      "entry": "image",
+      "input": {"visible_problem_text": "绘制影响线"},
+      "expected": {"status": "supported", "topic_id": "influence_line", "storage_key": "8影响线", "reason": "visible_problem_text_supported"}
+    },
+    {
+      "id": "image_structural_dynamics",
+      "category": "unsupported_topic",
+      "entry": "image",
+      "input": {"chapter_hint": "4力法", "chapter_confidence": 0.99, "visible_problem_text": "求结构动力学自振频率"},
+      "expected": {"status": "unsupported", "topic_id": "structural_dynamics", "storage_key": null, "reason": "visible_problem_text_unsupported"}
+    },
+    {
+      "id": "image_stability",
+      "category": "unsupported_topic",
+      "entry": "image",
+      "input": {"visible_problem_text": "压杆稳定"},
+      "expected": {"status": "unsupported", "topic_id": "stability", "storage_key": null, "reason": "visible_problem_text_unsupported"}
+    },
+    {
+      "id": "image_limit_load",
+      "category": "unsupported_topic",
+      "entry": "image",
+      "input": {"visible_problem_text": "极限荷载"},
+      "expected": {"status": "unsupported", "topic_id": "limit_load", "storage_key": null, "reason": "visible_problem_text_unsupported"}
+    },
+    {
+      "id": "image_english_topic_label",
+      "category": "unsupported_topic",
+      "entry": "image",
+      "input": {"visible_problem_text": "英文题目"},
+      "expected": {"status": "unsupported", "topic_id": "non_chinese_question", "storage_key": null, "reason": "visible_problem_text_unsupported"}
+    },
+    {
+      "id": "image_numeric_chapter",
+      "category": "ambiguous_input",
+      "entry": "image",
+      "input": {"visible_problem_text": "第九章"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "no_valid_chapter_evidence"}
+    },
+    {
+      "id": "image_plain_numeric_chapter",
+      "category": "ambiguous_input",
+      "entry": "image",
+      "input": {"visible_problem_text": "4"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "no_valid_chapter_evidence"}
+    },
+    {
+      "id": "image_fuzzy_vibration_phrase",
+      "category": "ambiguous_input",
+      "entry": "image",
+      "input": {"visible_problem_text": "好像是研究振动的那部分"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "no_valid_chapter_evidence"}
+    },
+    {
+      "id": "image_generic_internal_force",
+      "category": "ambiguous_input",
+      "entry": "image",
+      "input": {"visible_problem_text": "内力图"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "no_valid_chapter_evidence"}
+    },
+    {
+      "id": "image_generic_distribution",
+      "category": "ambiguous_input",
+      "entry": "image",
+      "input": {"visible_problem_text": "分配法"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "no_valid_chapter_evidence"}
+    },
+    {
+      "id": "image_superstatic_without_method",
+      "category": "ambiguous_input",
+      "entry": "image",
+      "input": {"visible_problem_text": "超静定梁"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "no_valid_chapter_evidence"}
+    },
+    {
+      "id": "image_model_high_confidence",
+      "category": "model_hint_validation",
+      "entry": "image",
+      "input": {"chapter_hint": "4力法", "chapter_confidence": 0.9, "visible_problem_text": "这是一道结构力学题"},
+      "expected": {"status": "supported", "topic_id": "force_method", "storage_key": "4力法", "reason": "model_chapter_hint"}
+    },
+    {
+      "id": "image_model_low_confidence",
+      "category": "model_hint_validation",
+      "entry": "image",
+      "input": {"chapter_hint": "4力法", "chapter_confidence": 0.4, "visible_problem_text": "这是一道结构力学题"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "low_confidence_chapter_hint"}
+    },
+    {
+      "id": "image_model_numeric_hint",
+      "category": "model_hint_validation",
+      "entry": "image",
+      "input": {"chapter_hint": "4", "chapter_confidence": 0.99, "visible_problem_text": "这是一道结构力学题"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "no_valid_chapter_evidence"}
+    },
+    {
+      "id": "image_model_unsupported_hint",
+      "category": "model_hint_validation",
+      "entry": "image",
+      "input": {"chapter_hint": "动力学", "chapter_confidence": 0.99, "visible_problem_text": "这是一道结构力学题"},
+      "expected": {"status": "unsupported", "topic_id": "structural_dynamics", "storage_key": null, "reason": "model_chapter_hint_unsupported"}
+    },
+    {
+      "id": "image_text_over_force_hint",
+      "category": "evidence_priority",
+      "entry": "image",
+      "input": {"chapter_hint": "5位移法", "chapter_confidence": 0.99, "visible_problem_text": "请用力法计算超静定梁"},
+      "expected": {"status": "supported", "topic_id": "force_method", "storage_key": "4力法", "reason": "visible_problem_text_supported"}
+    },
+    {
+      "id": "image_text_over_dynamic_hint",
+      "category": "evidence_priority",
+      "entry": "image",
+      "input": {"chapter_hint": "4力法", "chapter_confidence": 0.99, "visible_problem_text": "求结构动力学的自振频率"},
+      "expected": {"status": "unsupported", "topic_id": "structural_dynamics", "storage_key": null, "reason": "visible_problem_text_unsupported"}
+    },
+    {
+      "id": "image_text_over_moment_hint",
+      "category": "evidence_priority",
+      "entry": "image",
+      "input": {"chapter_hint": "4力法", "chapter_confidence": 0.99, "visible_problem_text": "请用弯矩分配法计算"},
+      "expected": {"status": "supported", "topic_id": "moment_distribution", "storage_key": "6力矩分配", "reason": "visible_problem_text_supported"}
+    },
+    {
+      "id": "image_model_alias_hint",
+      "category": "model_hint_validation",
+      "entry": "image",
+      "input": {"chapter_hint": "弯矩分配法", "chapter_confidence": 0.9, "visible_problem_text": "这是一道结构力学题"},
+      "expected": {"status": "supported", "topic_id": "moment_distribution", "storage_key": "6力矩分配", "reason": "model_chapter_hint"}
+    },
+    {
+      "id": "image_model_unknown_hint",
+      "category": "model_hint_validation",
+      "entry": "image",
+      "input": {"chapter_hint": "unknown", "chapter_confidence": 0.99, "visible_problem_text": "这是一道结构力学题"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "no_valid_chapter_evidence"}
+    },
+    {
+      "id": "image_boolean_confidence_is_not_numeric",
+      "category": "model_hint_validation",
+      "entry": "image",
+      "input": {"chapter_hint": "4力法", "chapter_confidence": true, "visible_problem_text": "这是一道结构力学题"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "low_confidence_chapter_hint"}
+    },
+    {
+      "id": "image_invalid_confidence_is_low",
+      "category": "model_hint_validation",
+      "entry": "image",
+      "input": {"chapter_hint": "4力法", "chapter_confidence": "not-a-number", "visible_problem_text": "这是一道结构力学题"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "low_confidence_chapter_hint"}
+    },
+    {
+      "id": "image_confidence_threshold_is_inclusive",
+      "category": "model_hint_validation",
+      "entry": "image",
+      "input": {"chapter_hint": "4力法", "chapter_confidence": 0.45, "visible_problem_text": "这是一道结构力学题"},
+      "expected": {"status": "supported", "topic_id": "force_method", "storage_key": "4力法", "reason": "model_chapter_hint"}
+    },
+    {
+      "id": "image_chinese_without_topic_or_hint",
+      "category": "ambiguous_input",
+      "entry": "image",
+      "input": {"chapter_hint": "unknown", "chapter_confidence": 0.0, "visible_problem_text": "题目如下"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "no_valid_chapter_evidence"}
+    },
+    {
+      "id": "reply_force_method",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "力法"},
+      "expected": {"status": "supported", "topic_id": "force_method", "storage_key": "4力法", "reason": "explicit_supported_alias"}
+    },
+    {
+      "id": "reply_moment_distribution",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "弯矩分配法"},
+      "expected": {"status": "supported", "topic_id": "moment_distribution", "storage_key": "6力矩分配", "reason": "explicit_supported_alias"}
+    },
+    {
+      "id": "reply_asymptotic_method",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "渐近法"},
+      "expected": {"status": "supported", "topic_id": "moment_distribution", "storage_key": "6力矩分配", "reason": "explicit_supported_alias"}
+    },
+    {
+      "id": "reply_dynamic",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "动力学"},
+      "expected": {"status": "unsupported", "topic_id": "structural_dynamics", "storage_key": null, "reason": "explicit_unsupported_topic"}
+    },
+    {
+      "id": "reply_numeric_dynamic",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "第九章动力学"},
+      "expected": {"status": "unsupported", "topic_id": "structural_dynamics", "storage_key": null, "reason": "explicit_unsupported_topic"}
+    },
+    {
+      "id": "reply_numeric_chapter",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "第九章"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "numeric_chapter_requires_textbook"}
+    },
+    {
+      "id": "reply_global_search_consent_needs_intent_layer",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "我不知道，你搜吧"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "no_explicit_topic_evidence"}
+    },
+    {
+      "id": "reply_fuzzy_vibration",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "好像是研究振动的那部分"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "no_explicit_topic_evidence"}
+    },
+    {
+      "id": "reply_generic_shear_distribution",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "剪力分配"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "no_explicit_topic_evidence"}
+    },
+    {
+      "id": "reply_static_displacement",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "静定结构位移"},
+      "expected": {"status": "supported", "topic_id": "static_displacement", "storage_key": "3静定结构位移", "reason": "explicit_supported_alias"}
+    },
+    {
+      "id": "reply_english_topic_label",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "英文题目"},
+      "expected": {"status": "unsupported", "topic_id": "non_chinese_question", "storage_key": null, "reason": "explicit_unsupported_topic"}
+    },
+    {
+      "id": "reply_superstatic_without_method",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "超静定梁"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "no_explicit_topic_evidence"}
+    },
+    {
+      "id": "reply_force_method_sentence",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "请按力法搜索"},
+      "expected": {"status": "supported", "topic_id": "force_method", "storage_key": "4力法", "reason": "explicit_supported_alias"}
+    },
+    {
+      "id": "reply_numeric_fourth_chapter",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "第4章"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "numeric_chapter_requires_textbook"}
+    },
+    {
+      "id": "reply_generic_internal_force",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "内力图"},
+      "expected": {"status": "uncertain", "topic_id": null, "storage_key": null, "reason": "no_explicit_topic_evidence"}
+    }
+  ]
+}

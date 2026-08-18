@@ -86,6 +86,10 @@ class ChapterCatalogTest(unittest.TestCase):
         self.assertEqual(result.status, "uncertain")
         self.assertEqual(result.reason, "missing_visible_problem_text")
 
+        numeric = resolve_image_scope("", 0.0, "4")
+        self.assertEqual(numeric.status, "uncertain")
+        self.assertEqual(numeric.reason, "no_valid_chapter_evidence")
+
     def test_image_scope_uses_explicit_text_before_model_hint(self):
         result = resolve_image_scope("5位移法", 0.99, "请用力法计算超静定梁")
         self.assertEqual(result.status, "supported")
