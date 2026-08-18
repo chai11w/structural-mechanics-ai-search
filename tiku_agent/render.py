@@ -30,11 +30,18 @@ def render_chapter_scope_prompt(
     include_supported_topics: bool = False,
     note: str = "",
 ) -> str:
-    text = "暂时无法判断这道题属于哪类，请告诉我题型或解题方法。"
     if include_supported_topics:
-        text += f"当前支持：{_supported_scope_text()}。"
+        text = (
+            "我还是不能确定这题属于哪一章。请告诉我章节名称或解题方法。"
+            f"当前支持：{_supported_scope_text()}。"
+        )
     elif state.global_search_offered:
-        text += "如果确实不知道，也可以回复“我不知道，你搜吧”。"
+        text = (
+            "我还不能确定这题属于哪一章。你知道的话直接告诉我章节名称或解题方法；"
+            "也可以让我全局搜索，不过会慢一点。"
+        )
+    else:
+        text = "我还不能确定这题属于哪一章。你知道的话直接告诉我章节名称或解题方法。"
     return append_notice(text, note)
 
 
@@ -48,7 +55,10 @@ def render_chapter_scope_unsupported(topic_id: str, display_name: str = "") -> s
 
 
 def render_supported_chapter_scopes() -> str:
-    return f"当前支持：{_supported_scope_text()}。"
+    return (
+        f"当前支持：{_supported_scope_text()}。"
+        "矩阵位移法和影响线仅支持含具体外荷载的题目。"
+    )
 
 
 def render_wait_chapter_conversation(category: str) -> str:

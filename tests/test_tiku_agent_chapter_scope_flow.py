@@ -134,7 +134,11 @@ class ChapterScopeFlowTests(unittest.TestCase):
         )
 
         self.assertEqual(response.state["phase"], STATE_WAIT_CHAPTER)
-        self.assertIn("题型或解题方法", response.text)
+        self.assertEqual(
+            response.text,
+            "我还不能确定这题属于哪一章。你知道的话直接告诉我章节名称或解题方法；"
+            "也可以让我全局搜索，不过会慢一点。",
+        )
         self.assertEqual(calls["coarse_chapters"], [])
 
     def test_direct_a2_non_chinese_question_is_rejected(self):
@@ -238,6 +242,26 @@ class ChapterScopeFlowTests(unittest.TestCase):
 
         self.assertEqual(calls["global"], 1)
         self.assertEqual(response.state["phase"], "WAIT_CANDIDATE_CHOICE")
+
+    def test_natural_global_search_reply_remains_supported(self):
+        for text in ("全题库搜一下", "可以，搜吧", "慢一点没关系，继续搜"):
+            with self.subTest(text=text):
+                agent, _response, calls = self._a3_to_a2(
+                    context_text="EI=200, P=20"
+                )
+
+                response = agent.handle_text(text)
+
+                self.assertEqual(calls["global"], 1)
+                self.assertEqual(response.state["phase"], "WAIT_CANDIDATE_CHOICE")
+
+    def test_supported_scope_answer_keeps_external_load_limits(self):
+        agent, _response, _calls = self._a3_to_a2(context_text="EI=200, P=20")
+        agent.enable_safe_answer_v0 = True
+
+        response = agent.handle_text("支持哪些章节")
+
+        self.assertIn("矩阵位移法和影响线仅支持含具体外荷载的题目", response.text)
 
     def test_model_chapter_alias_is_mapped_by_catalog_before_search(self):
         tools, calls = self._tools()

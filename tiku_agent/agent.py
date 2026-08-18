@@ -950,10 +950,13 @@ class TikuSearchAgent:
     @staticmethod
     def _is_unknown_global_search_consent(text: str) -> bool:
         compact = re.sub(r"[\s，。！？!?、,.：:；;]+", "", str(text or ""))
-        return re.fullmatch(
-            r"(?:我)?(?:确实)?不知道(?:章节|题型|哪一章)?(?:那就|你|麻烦你)?(?:帮我)?(?:全局)?(?:搜|搜索|找|查)(?:一下|吧|一下吧)?",
-            compact,
-        ) is not None
+        return any(
+            re.fullmatch(pattern, compact) is not None
+            for pattern in (
+                r"(?:我)?(?:确实)?不知道(?:章节|题型|哪一章)?(?:那就|你|麻烦你)?(?:帮我)?(?:全局)?(?:搜|搜索|找|查)(?:一下|吧|一下吧)?",
+                r"(?:可以|行|好|好的|同意)(?:那就)?(?:帮我)?(?:全局|全题库)?(?:搜|搜索|找|查)(?:一下|吧|一下吧)?",
+            )
+        )
 
     def _fail(self, error: str, result: ToolResult | None = None) -> AgentResponse:
         self.state.fail(error)
