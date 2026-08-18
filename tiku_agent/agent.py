@@ -150,6 +150,7 @@ class TikuSearchAgent:
         *,
         search_id: str = "",
         prechecked_single: bool = False,
+        context_text: str = "",
     ) -> AgentResponse:
         self._incoming_search_id = str(search_id or "").strip()
         self._turn_protocol = {}
@@ -165,6 +166,7 @@ class TikuSearchAgent:
             context,
             image_path=image_path,
             prechecked_single=prechecked_single,
+            context_text=context_text,
         )
 
     def handle_preanalyzed_image(
@@ -358,6 +360,7 @@ class TikuSearchAgent:
         *,
         image_path: str | Path | None = None,
         prechecked_single: bool = False,
+        context_text: str = "",
     ) -> AgentResponse:
         previous_action = str(
             self.state.last_intent.get("action") or self.state.last_intent.get("intent") or ""
@@ -436,6 +439,7 @@ class TikuSearchAgent:
             return self._start_image_search(
                 str(image_path or ""),
                 prechecked_single=True,
+                context_text=context_text,
             )
         return self._dispatch(
             adapt_decision_v2(decision, image_path=image_path),
@@ -521,6 +525,7 @@ class TikuSearchAgent:
         *,
         chapter_override: str = "",
         prechecked_single: bool = False,
+        context_text: str = "",
     ) -> AgentResponse:
         if not image_path:
             return self._fail("没有收到图片路径。")
@@ -586,7 +591,10 @@ class TikuSearchAgent:
                 },
             )
         else:
-            analyzed = self.tools.analyze_image(image_path, chapter="auto", config=self.config)
+            analyze_kwargs = {"chapter": "auto", "config": self.config}
+            if context_text:
+                analyze_kwargs["context_text"] = context_text
+            analyzed = self.tools.analyze_image(image_path, **analyze_kwargs)
         self._raise_if_image_search_cancelled()
         stopped = self._stop_for_tool_result(analyzed, allow_needs_input=True)
         if stopped is not None:

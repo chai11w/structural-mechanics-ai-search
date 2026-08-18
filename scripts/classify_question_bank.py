@@ -513,7 +513,19 @@ def tracked_qwen_request(
     )
 
 
-def qwen_extract_loads(image_path: Path, *, model: str, endpoint: str, api_key: str, timeout: int) -> dict:
+def qwen_extract_loads(
+    image_path: Path,
+    *,
+    model: str,
+    endpoint: str,
+    api_key: str,
+    timeout: int,
+    context_text: str = "",
+) -> dict:
+    context = str(context_text or "").strip()
+    user_text = "只输出JSON。"
+    if context:
+        user_text += "\n这是同一道题在整页图中提取出的题目描述，请结合它判断章节，但荷载必须以当前裁剪图中实际看见的箭头为准：\n" + context
     payload = {
         "model": model,
         "messages": [
@@ -522,7 +534,7 @@ def qwen_extract_loads(image_path: Path, *, model: str, endpoint: str, api_key: 
                 "role": "user",
                 "content": [
                     {"type": "image_url", "image_url": {"url": image_to_data_url(image_path)}},
-                    {"type": "text", "text": "只输出JSON。"},
+                    {"type": "text", "text": user_text},
                 ],
             },
         ],
@@ -549,7 +561,11 @@ def qwen_extract_loads(image_path: Path, *, model: str, endpoint: str, api_key: 
     usage = data.get("usage", {})
     chapter_hint = normalize_chapter_hint(parsed.get("chapter_hint"))
     chapter_confidence = normalize_chapter_confidence(parsed.get("chapter_confidence"))
-    visible_problem_text = str(parsed.get("visible_problem_text") or "").strip()
+    model_visible_text = str(parsed.get("visible_problem_text") or "").strip()
+    if context and model_visible_text and model_visible_text != context:
+        visible_problem_text = f"{context}\n{model_visible_text}"
+    else:
+        visible_problem_text = context or model_visible_text
     chapter_evidence = str(parsed.get("chapter_evidence") or "").strip()
     if chapter_hint == CHAPTER_UNKNOWN and not chapter_evidence:
         chapter_evidence = "未识别到明确章节线索"

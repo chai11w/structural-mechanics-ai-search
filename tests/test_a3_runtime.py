@@ -96,7 +96,11 @@ class FakeVerifier:
 
 
 class FakeAnalyzer:
+    def __init__(self):
+        self.calls = 0
+
     def analyze(self, _crop_path: Path, _context_text: str):
+        self.calls += 1
         return A3UnitAnalysis(
             loads=({"type": "集中", "raw": "P"},),
             chapter_hint="4力法",
@@ -131,7 +135,10 @@ class FakeA2Runtime:
         }
         return AgentResponse(
             text="我从题库里找到了最相似的一道题。",
-            state={"phase": "WAIT_CANDIDATE_CHOICE"},
+            state={
+                "phase": "WAIT_CANDIDATE_CHOICE",
+                "candidate_count": self.candidate_count,
+            },
             intent="search_image",
             protocol=RequestProtocol.from_code("REQUEST_SUCCEEDED").to_dict(),
         )
@@ -277,13 +284,14 @@ class A3RuntimeTests(unittest.TestCase):
         Image.new("RGB", (800, 600), "white").save(self.source)
         self.verifier = FakeVerifier()
         self.a2 = FakeA2Runtime()
+        self.analyzer = FakeAnalyzer()
         self.runtime = A3MvpRuntime(
             store=SQLiteA3SessionStore(self.root / "a3.sqlite3"),
             artifacts=SessionArtifacts(self.root / "sessions"),
             a2_runtime=self.a2,
             page_observer=FakeObserver(),
             crop_verifier=self.verifier,
-            unit_analyzer=FakeAnalyzer(),
+            unit_analyzer=self.analyzer,
         )
 
     def test_restored_unlabelled_units_receive_unique_page_ordinals(self):
@@ -415,14 +423,15 @@ class A3RuntimeTests(unittest.TestCase):
             "我从题库里找到了与「四-2」最相似的一道题。你看看是不是这道。",
         )
         self.assertEqual(self.runtime.session_snapshot(session_id)["a3"]["phase"], A3_PHASE_A2_ACTIVE)
-        _session, crop_path, kwargs = self.a2.preanalyzed_calls[0]
+        _session, crop_path, kwargs = self.a2.prechecked_calls[0]
         with Image.open(crop_path) as crop_image:
             self.assertEqual(crop_image.size, (400, 300))
         self.assertIn("用力法计算图示结构。", kwargs["context_text"])
         self.assertIn("试作图示刚架的 M 图。", kwargs["context_text"])
         self.assertIn("子题 2 条件", kwargs["context_text"])
         self.assertNotIn("10 kN", kwargs["context_text"])
-        self.assertEqual(kwargs["chapter"], "4力法")
+        self.assertEqual(self.a2.preanalyzed_calls, [])
+        self.assertEqual(self.analyzer.calls, 0)
 
         answered = self.runtime.handle_text(session_id, "选择候选 1")
         self.assertEqual(

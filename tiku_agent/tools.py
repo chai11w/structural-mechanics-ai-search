@@ -113,6 +113,7 @@ def analyze_image_tool(
     *,
     chapter: str | None = "auto",
     include_layout: bool = False,
+    context_text: str = "",
     config: AgentToolConfig | None = None,
 ) -> ToolResult:
     """Analyze a question image for layout, chapter hint, and loads.
@@ -126,7 +127,11 @@ def analyze_image_tool(
     path = Path(image_path)
     try:
         layout = qwen.analyze_layout(path) if include_layout else {"layout": "unknown"}
-        classified = qwen.classify_image(path)
+        classified = (
+            qwen.classify_image(path, context_text=context_text)
+            if context_text
+            else qwen.classify_image(path)
+        )
         effective_chapter = resolve_effective_chapter(chapter, classified)
         needs_manual_chapter = effective_chapter is None
         data = {

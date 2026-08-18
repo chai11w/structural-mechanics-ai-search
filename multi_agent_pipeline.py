@@ -102,9 +102,14 @@ class QwenClassifier:
         self.dimension_timeout = dimension_timeout
         self.use_cache = use_cache
 
-    def classify_image(self, image_path: str | Path) -> dict[str, Any]:
+    def classify_image(
+        self,
+        image_path: str | Path,
+        *,
+        context_text: str = "",
+    ) -> dict[str, Any]:
         path = Path(image_path)
-        cache_key = self._cache_key(path)
+        cache_key = self._cache_key(path, context_text=context_text)
         cache = self._load_cache() if self.use_cache else {}
         if self.use_cache and cache_key in cache:
             cached = dict(cache[cache_key])
@@ -127,6 +132,7 @@ class QwenClassifier:
             endpoint=self.endpoint,
             api_key=api_key,
             timeout=self.timeout,
+            context_text=context_text,
         )
         loads = [normalize_load_item(item) for item in extracted.get("loads", []) if isinstance(item, dict)]
         category, load_details = classify_loads(loads)
@@ -217,8 +223,12 @@ class QwenClassifier:
             self._save_cache(cache, self.dimension_cache_path)
         return {"normalized": normalized, "usage": usage, "from_cache": False}
 
-    def _cache_key(self, path: Path) -> str:
+    def _cache_key(self, path: Path, *, context_text: str = "") -> str:
         digest = hashlib.md5(path.read_bytes()).hexdigest()
+        context = str(context_text or "").strip()
+        if context:
+            context_digest = hashlib.md5(context.encode("utf-8")).hexdigest()
+            return f"{QWEN_CACHE_SCHEMA_VERSION}:{self.model}:{digest}:{context_digest}"
         return f"{QWEN_CACHE_SCHEMA_VERSION}:{self.model}:{digest}"
 
     def _load_cache(self, path: Path | None = None) -> dict[str, Any]:

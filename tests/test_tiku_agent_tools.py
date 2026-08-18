@@ -500,6 +500,25 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertEqual(result.code, "CHAPTER_REQUIRED")
         self.assertEqual(result.next_state, "WAIT_CHAPTER")
 
+    def test_analyze_image_forwards_a3_context_to_qwen(self):
+        seen = []
+
+        class FakeQwen:
+            def classify_image(self, _image_path, *, context_text=""):
+                seen.append(context_text)
+                return {
+                    "chapter_hint": "unknown",
+                    "chapter_confidence": 0.0,
+                    "loads": [{"type": "均布", "raw": "q"}, {"type": "均布", "raw": "q"}],
+                }
+
+        with patch("tiku_agent.tools._make_qwen", return_value=FakeQwen()):
+            result = analyze_image_tool("q.jpg", chapter="auto", context_text="用力法计算图示结构")
+
+        self.assertEqual(result.outcome, ToolOutcome.NEEDS_INPUT)
+        self.assertEqual(seen, ["用力法计算图示结构"])
+        self.assertEqual(len(result.data["loads"]), 2)
+
     def test_multi_image_tool_only_confirms_multi_without_detail_work(self):
         class FakeQwen:
             def analyze_image_scope(self, _image_path):

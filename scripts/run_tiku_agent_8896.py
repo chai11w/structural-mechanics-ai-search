@@ -13,7 +13,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from scripts.run_tiku_agent_demo import build_runtime as build_a2_runtime
-from tiku_agent.a3_models import QwenA3CropVerifier, QwenA3PageObserver, QwenA3UnitAnalyzer
+from tiku_agent.a3_models import QwenA3CropVerifier, QwenA3PageObserver
 from tiku_agent.a3_runtime import A3MvpRuntime, SQLiteA3SessionStore
 from tiku_agent.external_load_screen import ZhipuExternalLoadScreen
 from tiku_agent.fastapi_demo import create_app
@@ -63,7 +63,7 @@ def build_runtime(
         a2_runtime=a2_runtime,
         page_observer=page_observer or QwenA3PageObserver(timeout_seconds=model_timeout_seconds),
         crop_verifier=crop_verifier or QwenA3CropVerifier(timeout_seconds=model_timeout_seconds),
-        unit_analyzer=unit_analyzer or QwenA3UnitAnalyzer(timeout_seconds=model_timeout_seconds),
+        unit_analyzer=unit_analyzer,
         external_load_screen=ZhipuExternalLoadScreen(),
         image_triage_authority=authority,
         cost_ledger=SQLiteModelCostLedger(root / "model_costs.sqlite3"),

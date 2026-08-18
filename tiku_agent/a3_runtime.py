@@ -242,7 +242,7 @@ class A3MvpRuntime:
         a2_runtime: AgentSessionRuntime,
         page_observer: A3PageObserver,
         crop_verifier: A3CropVerifier,
-        unit_analyzer: A3UnitAnalyzer,
+        unit_analyzer: A3UnitAnalyzer | None = None,
         external_load_screen: Callable[[str | Path], str] | None = None,
         image_triage_authority: object | None = None,
         cost_ledger: SQLiteModelCostLedger | None = None,
@@ -252,6 +252,8 @@ class A3MvpRuntime:
         self.a2_runtime = a2_runtime
         self.page_observer = page_observer
         self.crop_verifier = crop_verifier
+        # Kept as an injection point for older callers; A3 no longer owns
+        # final load/chapter extraction after crop verification.
         self.unit_analyzer = unit_analyzer
         self.external_load_screen = external_load_screen
         self.image_triage_authority = image_triage_authority
@@ -589,55 +591,13 @@ class A3MvpRuntime:
             if progress is not None:
                 progress("a3_analyzing_unit", "校验通过，正在结合题干识别章节和荷载…")
             context_text = _question_context_text(selected)
-            try:
-                analysis = self._call_model(
-                    state,
-                    "a3_unit_analysis",
-                    lambda: self.unit_analyzer.analyze(crop_path, context_text),
-                )
-            except Exception as exc:  # noqa: BLE001 - preserve the verified draft.
-                state.phase = A3_PHASE_CROP_REQUIRED
-                state.last_error = type(exc).__name__
-                self.store.save(state)
-                return _response(
-                    "裁剪图校验已通过，但单题识别暂时没有完成。图片已保留，可以直接重试。",
-                    state,
-                    intent="a3_unit_analysis_error",
-                    code="SERVICE_UNAVAILABLE",
-                )
-            if not analysis.loads:
-                state.phase = A3_PHASE_CROP_REQUIRED
-                state.crop_review_required = True
-                state.crop_review_feedback = (
-                    "裁剪结果未通过，未识别到结构荷载，请重新裁剪。"
-                )
-                self.store.save(state)
-                return _response(
-                    state.crop_review_feedback,
-                    state,
-                    intent="a3_crop_review_required",
-                    code="CLARIFICATION_REQUIRED",
-                )
-
             state.phase = A3_PHASE_A2_ACTIVE
             state.last_error = ""
             self.store.save(state)
-            classified = {
-                "loads": list(analysis.loads),
-                "chapter_hint": analysis.chapter_hint,
-                "chapter_confidence": analysis.chapter_confidence,
-                "chapter_evidence": analysis.chapter_evidence,
-                "category": analysis.category,
-                "load_details": list(analysis.load_details),
-                "visible_problem_text": context_text,
-            }
-            response = self.a2_runtime.handle_preanalyzed_image(
+            response = self.a2_runtime.handle_prechecked_image(
                 clean,
                 crop_path,
-                loads=list(analysis.loads),
-                chapter=(analysis.chapter_hint if analysis.chapter_hint != "unknown" else ""),
                 context_text=context_text,
-                classified=classified,
                 identity_key=identity_key,
                 progress=progress,
                 request_id=request_id,
