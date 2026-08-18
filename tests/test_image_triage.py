@@ -61,6 +61,23 @@ class ImageTriageTest(unittest.TestCase):
         )
         self.assertEqual(finalize_route(observation), "A3")
 
+    def test_explicit_no_load_structural_diagram_stops_at_a1(self):
+        observation = ImageTriageObservation(
+            route_candidate="A2",
+            question_count=1,
+            original_structure_count=1,
+            auxiliary_diagram_count=0,
+            has_actual_load_evidence=False,
+            has_structure_content=True,
+            image_recoverable=True,
+            evidence=("结构完整，但明确没有真实外荷载",),
+        )
+
+        handoff = build_handoff("no-load-structure.jpg", observation)
+
+        self.assertEqual(handoff.route, "A1")
+        self.assertEqual(handoff.next_action, "stop")
+
     def test_clear_a1_stops_without_downstream_processing(self):
         observation = ImageTriageObservation(
             route_candidate="A1",

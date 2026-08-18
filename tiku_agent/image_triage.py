@@ -232,6 +232,11 @@ def _non_negative_int(value: object) -> int:
 def finalize_route(observation: ImageTriageObservation) -> Route:
     """Apply only high-risk A2/A1 guards; uncertain cases fall back to A3."""
 
+    # A structural diagram with an explicit no-load observation is a terminal
+    # A1 case. It must not be handed to A2 or left for A3 to invent a load.
+    if observation.has_actual_load_evidence is False:
+        return "A1"
+
     if observation.route_candidate == "A2":
         a2_facts = (
             observation.question_count == 1,

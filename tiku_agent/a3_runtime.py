@@ -242,6 +242,7 @@ class A3MvpRuntime:
         page_observer: A3PageObserver,
         crop_verifier: A3CropVerifier,
         unit_analyzer: A3UnitAnalyzer,
+        external_load_screen: Callable[[str | Path], str] | None = None,
         image_triage_authority: object | None = None,
         cost_ledger: SQLiteModelCostLedger | None = None,
     ) -> None:
@@ -251,6 +252,7 @@ class A3MvpRuntime:
         self.page_observer = page_observer
         self.crop_verifier = crop_verifier
         self.unit_analyzer = unit_analyzer
+        self.external_load_screen = external_load_screen
         self.image_triage_authority = image_triage_authority
         self.cost_ledger = cost_ledger
         self._locks = tuple(threading.RLock() for _ in range(64))
@@ -547,6 +549,42 @@ class A3MvpRuntime:
                     code="CLARIFICATION_REQUIRED",
                 )
 
+            if self.external_load_screen is not None:
+                try:
+                    load_verdict = str(
+                        self._call_model(
+                            state,
+                            "a3_external_load_screen",
+                            lambda: self.external_load_screen(crop_path),
+                        )
+                    ).strip().lower()
+                except Exception as exc:  # noqa: BLE001 - do not pass an unverified crop to A2.
+                    state.phase = A3_PHASE_CROP_REQUIRED
+                    state.crop_review_required = True
+                    state.crop_review_feedback = "裁剪结果暂时无法确认外荷载，请重新提交裁剪。"
+                    state.last_error = type(exc).__name__
+                    self.store.save(state)
+                    return _response(
+                        state.crop_review_feedback,
+                        state,
+                        intent="a3_crop_review_required",
+                        code="CLARIFICATION_REQUIRED",
+                    )
+                if load_verdict != "yes":
+                    state.phase = A3_PHASE_CROP_REQUIRED
+                    state.crop_review_required = True
+                    state.crop_review_feedback = (
+                        "裁剪结果未通过，未识别到结构荷载，请重新选择区域裁剪。"
+                    )
+                    state.last_error = "external_load_not_confirmed"
+                    self.store.save(state)
+                    return _response(
+                        state.crop_review_feedback,
+                        state,
+                        intent="a3_crop_review_required",
+                        code="CLARIFICATION_REQUIRED",
+                    )
+
             if progress is not None:
                 progress("a3_analyzing_unit", "校验通过，正在结合题干识别章节和荷载…")
             context_text = _question_context_text(selected)
@@ -752,6 +790,38 @@ class A3MvpRuntime:
                     ).to_dict(),
                 )
             if state.entry_route == "A2":
+                if self.external_load_screen is not None:
+                    try:
+                        load_verdict = str(
+                            self._call_model(
+                                state,
+                                "a3_external_load_screen",
+                                lambda: self.external_load_screen(persisted),
+                            )
+                        ).strip().lower()
+                    except Exception as exc:  # noqa: BLE001 - do not search without the gate.
+                        state.entry_route = ""
+                        state.phase = A3_PHASE_ERROR
+                        state.last_error = type(exc).__name__
+                        self.store.save(state)
+                        raise AgentProtocolError(
+                            "外荷载筛查暂时失败，请稍后重试。",
+                            code="SERVICE_UNAVAILABLE",
+                        ) from exc
+                    if load_verdict != "yes":
+                        state.entry_route = "A1"
+                        state.phase = A3_PHASE_COMPLETE
+                        state.last_error = "external_load_not_confirmed"
+                        self.store.save(state)
+                        return AgentResponse(
+                            text="未识别到图片中的真实外荷载，请重新上传外荷载清晰可见的题图。",
+                            state={"phase": state.phase, "current_route": "A1"},
+                            intent="image_triage_stop",
+                            protocol=RequestProtocol.from_code(
+                                "TRIAGE_A1_STOPPED",
+                                search_id=state.current_search_id,
+                            ).to_dict(),
+                        )
                 state.phase = A3_PHASE_A2_ACTIVE
                 self.store.save(state)
                 if progress is not None:

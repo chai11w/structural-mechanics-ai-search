@@ -350,6 +350,20 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertFalse(payload["session"]["a3"]["enabled"])
         self.assertNotIn("裁剪", payload["text"])
 
+    def test_direct_a2_route_is_reclassified_to_a1_when_load_screen_says_no(self):
+        authority = FakeFlowAuthority("A2")
+        self.runtime.image_triage_authority = authority
+        self.runtime.external_load_screen = lambda _path: "no"
+
+        response = self.runtime.handle_image("direct-a2-no-load", self.source)
+
+        self.assertEqual(response.intent, "image_triage_stop")
+        self.assertEqual(response.protocol["code"], "TRIAGE_A1_STOPPED")
+        self.assertEqual(self.a2.prechecked_calls, [])
+        snapshot = self.runtime.session_snapshot("direct-a2-no-load")
+        self.assertEqual(snapshot["image_route"], "A1")
+        self.assertEqual(snapshot["phase"], "COMPLETE")
+
     def test_full_flow_a3_enters_existing_page_crop_flow(self):
         authority = FakeFlowAuthority("A3")
         self.runtime.image_triage_authority = authority
@@ -455,6 +469,50 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(a3["crop_review_feedback"], response.text)
         self.assertTrue(a3["crop_draft"]["available"])
         self.assertEqual(a3["crop_draft"]["bounds"]["width"], 0.7)
+
+    def test_independent_no_load_screen_blocks_model_hallucination_before_a2(self):
+        session_id = "a3-no-load-screen-session"
+        self.runtime.external_load_screen = lambda _path: "no"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u1")
+
+        response = self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+        )
+
+        self.assertEqual(response.intent, "a3_crop_review_required")
+        self.assertEqual(
+            response.text,
+            "裁剪结果未通过，未识别到结构荷载，请重新选择区域裁剪。",
+        )
+        self.assertEqual(self.a2.preanalyzed_calls, [])
+        a3 = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(a3["phase"], A3_PHASE_CROP_REQUIRED)
+        self.assertTrue(a3["crop_review_required"])
+
+    def test_external_load_screen_error_fails_closed_before_a2(self):
+        session_id = "a3-load-screen-error-session"
+
+        def fail(_path):
+            raise TimeoutError("screen timed out")
+
+        self.runtime.external_load_screen = fail
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u1")
+
+        response = self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+        )
+
+        self.assertEqual(response.intent, "a3_crop_review_required")
+        self.assertEqual(response.text, "裁剪结果暂时无法确认外荷载，请重新提交裁剪。")
+        self.assertEqual(self.a2.preanalyzed_calls, [])
+        self.assertEqual(
+            self.runtime.session_snapshot(session_id)["a3"]["phase"],
+            A3_PHASE_CROP_REQUIRED,
+        )
 
     def test_review_required_names_the_selected_question_on_binding_mismatch(self):
         session_id = "a3-mismatch-session"
