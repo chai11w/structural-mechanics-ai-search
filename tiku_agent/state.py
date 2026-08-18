@@ -64,6 +64,8 @@ class AgentState:
     current_route: str = ""
     current_structure_type: str = ""
     current_search_id: str = ""
+    chapter_scope_status: str = ""
+    chapter_scope_topic_id: str = ""
 
     questions: list[dict] = field(default_factory=list)
     selected_question: int | None = None
@@ -98,6 +100,8 @@ class AgentState:
         current_route: str = "",
         current_structure_type: str = "",
         current_search_id: str = "",
+        chapter_scope_status: str = "",
+        chapter_scope_topic_id: str = "",
         questions: list[dict] | None = None,
         selected_question: int | None = None,
         previous_question: int | None = None,
@@ -134,6 +138,8 @@ class AgentState:
         self.current_route = current_route or route
         self.current_structure_type = current_structure_type or structure_type
         self.current_search_id = str(current_search_id or "")
+        self.chapter_scope_status = str(chapter_scope_status or "")
+        self.chapter_scope_topic_id = str(chapter_scope_topic_id or "")
         self.questions = list(questions or [])
         self.selected_question = selected_question
         self.previous_question = previous_question
@@ -229,6 +235,10 @@ class AgentState:
             raise ValueError("candidate_revision must not be negative")
         if self.pending_chapter and self.pending_chapter not in CHAPTERS:
             raise ValueError("pending_chapter must be a supported chapter")
+        if self.chapter_scope_status not in {"", "supported", "unsupported", "uncertain"}:
+            raise ValueError("chapter_scope_status must be a known scope status")
+        if self.chapter_scope_status == "unsupported" and not self.chapter_scope_topic_id:
+            raise ValueError("unsupported chapter scope requires a topic id")
         if not isinstance(self.global_search_offered, bool):
             raise ValueError("global_search_offered must be boolean")
         if len(self.attempted_candidate_keys) != len(set(self.attempted_candidate_keys)):
@@ -256,6 +266,8 @@ class AgentState:
         self.current_chapter = ""
         self.current_route = ""
         self.current_structure_type = ""
+        self.chapter_scope_status = ""
+        self.chapter_scope_topic_id = ""
         self.questions = []
         self.selected_question = None
         self.previous_question = None
@@ -271,12 +283,23 @@ class AgentState:
         self._reset_search_recovery()
         self.phase = PHASE_PROCESSING
 
-    def set_analysis(self, *, loads: list[dict], chapter: str = "", question_image_path: str = "") -> None:
+    def set_analysis(
+        self,
+        *,
+        loads: list[dict],
+        chapter: str = "",
+        question_image_path: str = "",
+        chapter_scope_status: str = "",
+        chapter_scope_topic_id: str = "",
+    ) -> None:
         self.current_loads = list(loads)
         self.current_chapter = chapter
+        self.chapter_scope_status = str(chapter_scope_status or "")
+        self.chapter_scope_topic_id = str(chapter_scope_topic_id or "")
         if question_image_path:
             self.current_question_image_path = str(question_image_path)
         self.phase = PHASE_READY_TO_ROUTE if chapter else STATE_WAIT_CHAPTER
+        self.validate()
 
     def set_chapter(self, chapter: str, *, corrected: bool = False) -> None:
         self.global_search_offered = False
@@ -288,6 +311,8 @@ class AgentState:
             self.last_answer_paths = []
             self._reset_search_recovery()
         self.current_chapter = chapter
+        self.chapter_scope_status = "supported"
+        self.chapter_scope_topic_id = ""
         self.phase = PHASE_READY_TO_ROUTE
 
     def correct_chapter(self, chapter: str) -> None:
@@ -415,6 +440,8 @@ class AgentState:
     def cancel(self) -> None:
         self.pending_chapter = ""
         self.global_search_offered = False
+        self.chapter_scope_status = ""
+        self.chapter_scope_topic_id = ""
         self._reset_search_recovery()
         self.phase = PHASE_CANCELLED
 

@@ -48,6 +48,7 @@ def build_runtime(
         enable_safe_answer_v0=True,
         enable_dimension_filter=True,
         enable_external_load_screen=False,
+        enable_chapter_scope_fallback=True,
     )
     authority = image_triage_authority
     if authority is None and enable_triage:

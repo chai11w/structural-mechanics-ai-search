@@ -27,6 +27,8 @@ class TikuAgentStateTest(unittest.TestCase):
                 "current_route",
                 "current_structure_type",
                 "current_search_id",
+                "chapter_scope_status",
+                "chapter_scope_topic_id",
                 "questions",
                 "selected_question",
                 "previous_question",
@@ -83,6 +85,8 @@ class TikuAgentStateTest(unittest.TestCase):
         legacy.pop("completed_questions")
         legacy.pop("pending_chapter")
         legacy.pop("global_search_offered")
+        legacy.pop("chapter_scope_status")
+        legacy.pop("chapter_scope_topic_id")
 
         restored = AgentState.from_dict(legacy)
 
@@ -90,6 +94,8 @@ class TikuAgentStateTest(unittest.TestCase):
         self.assertEqual(restored.completed_questions, [])
         self.assertEqual(restored.pending_chapter, "")
         self.assertFalse(restored.global_search_offered)
+        self.assertEqual(restored.chapter_scope_status, "")
+        self.assertEqual(restored.chapter_scope_topic_id, "")
 
     def test_global_search_offer_round_trips_and_is_consumed(self):
         state = AgentState(

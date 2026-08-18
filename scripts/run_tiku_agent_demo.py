@@ -52,6 +52,7 @@ def build_runtime(
     enable_external_load_screen: bool = True,
     external_load_timeout_seconds: float = 15.0,
     external_load_screen: Callable[[str | Path], str] | None = None,
+    enable_chapter_scope_fallback: bool = False,
 ) -> AgentSessionRuntime:
     """Build the 8790 runtime with bounded safe answers enabled by default."""
     root = Path(runtime_dir).resolve()
@@ -63,7 +64,7 @@ def build_runtime(
         )
 
     agent_factory = None
-    if enable_safe_answer_v0 or enable_dimension_filter:
+    if enable_safe_answer_v0 or enable_dimension_filter or enable_chapter_scope_fallback:
         def build_agent(state: AgentState) -> TikuSearchAgent:
             return TikuSearchAgent(
                 state=state,
@@ -74,6 +75,7 @@ def build_runtime(
                 ),
                 enable_safe_answer_v0=enable_safe_answer_v0,
                 safe_answer_generator_v0=generator,
+                enable_chapter_scope_fallback=enable_chapter_scope_fallback,
             )
 
         agent_factory = build_agent

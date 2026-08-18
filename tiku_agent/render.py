@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from tiku_agent.state import AgentState
+from tiku_shared.chapter_catalog import supported_topic_names
 
 
 def render_greeting() -> str:
@@ -21,6 +22,43 @@ def render_chapter_prompt(state: AgentState, *, note: str = "") -> str:
     else:
         text = "我还不能确定这题属于哪一章。你知道的话告诉我就行。"
     return append_notice(text, note)
+
+
+def render_chapter_scope_prompt(
+    state: AgentState,
+    *,
+    include_supported_topics: bool = False,
+    note: str = "",
+) -> str:
+    text = "暂时无法判断这道题属于哪类，请告诉我题型或解题方法。"
+    if include_supported_topics:
+        text += f"当前支持：{_supported_scope_text()}。"
+    elif state.global_search_offered:
+        text += "如果确实不知道，也可以回复“我不知道，你搜吧”。"
+    return append_notice(text, note)
+
+
+def render_chapter_scope_unsupported(topic_id: str, display_name: str = "") -> str:
+    if topic_id == "non_chinese_question":
+        return "识别到的题干没有中文，当前只处理含中文题干的题目。请上传含中文题干的版本。"
+    topic = str(display_name or "").strip()
+    if topic:
+        return f"这道题属于{topic}，当前题库暂不支持。当前支持：{_supported_scope_text()}。"
+    return f"这道题不在当前题库支持范围内。当前支持：{_supported_scope_text()}。"
+
+
+def render_supported_chapter_scopes() -> str:
+    return f"当前支持：{_supported_scope_text()}。"
+
+
+def render_wait_chapter_conversation(category: str) -> str:
+    if category == "greeting":
+        return "你好，我在。刚才那道题还在等待章节判断。"
+    return "不客气。刚才那道题还在等待章节判断。"
+
+
+def _supported_scope_text() -> str:
+    return "、".join(supported_topic_names())
 
 
 def render_multi_question_list(state: AgentState, *, note: str = "") -> str:

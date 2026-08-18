@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -58,6 +59,12 @@ from tiku_shared.request_protocol import (
     RequestProtocol,
     RequestStatus,
 )
+from tiku_shared.chapter_catalog import (
+    ChapterScopeResult,
+    UNSUPPORTED_TOPIC_DEFINITIONS,
+    parse_chapter_scope,
+    resolve_image_scope,
+)
 
 
 _CLARIFICATION_PROTOCOL_CODES = {
@@ -69,6 +76,15 @@ _CLARIFICATION_PROTOCOL_CODES = {
     "out_of_range": "SELECTION_OUT_OF_RANGE",
     "no_more_candidates": "NO_MORE_CANDIDATES",
 }
+
+_CHAPTER_SCOPE_LLM_SUPPLEMENT = """
+
+8896 章节兜底补充规则：
+- 仅当当前阶段为 WAIT_CHAPTER 时应用。
+- 用户用自然语言描述具体题型或方法时，输出 set_chapter，并把 chapter_override 写成该题型或方法的中文名称；不要猜教材章号或 Excel 目录名。支持与否均由后续代码目录校验。
+- 纯寒暄或致谢分别输出 greeting 或 small_talk；寒暄与明确题型同时出现时，题型动作优先。
+- 无法判断具体题型时输出 clarification，clarification_reason=missing_chapter。
+"""
 
 
 @dataclass
@@ -109,6 +125,7 @@ class TikuSearchAgent:
         progress_reporter: Callable[[str, str], None] | None = None,
         enable_safe_answer_v0: bool = False,
         safe_answer_generator_v0: SafeAnswerGeneratorV0 | None = None,
+        enable_chapter_scope_fallback: bool = False,
         image_search_cancelled: Callable[[], bool] | None = None,
         commit_image_candidates: Callable[[], bool] | None = None,
     ) -> None:
@@ -120,10 +137,12 @@ class TikuSearchAgent:
         self.progress_reporter = progress_reporter
         self.enable_safe_answer_v0 = enable_safe_answer_v0
         self.safe_answer_generator_v0 = safe_answer_generator_v0
+        self.enable_chapter_scope_fallback = bool(enable_chapter_scope_fallback)
         self.image_search_cancelled = image_search_cancelled
         self.commit_image_candidates = commit_image_candidates
         self._incoming_search_id = ""
         self._turn_protocol: dict[str, Any] = {}
+        self._model_chapter_scope: ChapterScopeResult | None = None
 
     def handle_image(
         self,
@@ -166,19 +185,33 @@ class TikuSearchAgent:
         self._incoming_search_id = str(search_id or "").strip()
         self._turn_protocol = {}
         self.state.start_search(str(image_path), search_id=self._incoming_search_id or None)
+        analysis = dict(classified or {})
+        analysis.setdefault("loads", list(loads or []))
+        analysis.setdefault("chapter_hint", clean_chapter or "unknown")
+        analysis.setdefault("chapter_confidence", 1.0 if clean_chapter else 0.0)
+        analysis.setdefault("visible_problem_text", str(context_text or "").strip())
+
+        scope: ChapterScopeResult | None = None
+        if self.enable_chapter_scope_fallback:
+            scope = self._resolve_analysis_scope(analysis)
+            clean_chapter = scope.storage_key if scope.status == "supported" else ""
         self.state.set_analysis(
             loads=list(loads or []),
             chapter=clean_chapter,
             question_image_path=str(image_path),
+            chapter_scope_status=scope.status if scope is not None else "",
+            chapter_scope_topic_id=(scope.topic_id or "") if scope is not None else "",
         )
-        analysis = dict(classified or {})
-        analysis.setdefault("loads", list(loads or []))
-        analysis.setdefault("chapter_hint", clean_chapter or "unknown")
-        analysis.setdefault("visible_problem_text", str(context_text or "").strip())
+        if scope is not None and scope.status == "unsupported":
+            return self._chapter_scope_unsupported_response(scope)
         if self.state.phase == "WAIT_CHAPTER":
             self.state.offer_global_search()
             return self._response(
-                render.render_chapter_prompt(self.state),
+                (
+                    render.render_chapter_scope_prompt(self.state)
+                    if self.enable_chapter_scope_fallback
+                    else render.render_chapter_prompt(self.state)
+                ),
                 IntentResult("search_image"),
             )
         return self._run_search(
@@ -189,17 +222,68 @@ class TikuSearchAgent:
     def handle_text(self, text: str) -> AgentResponse:
         self._incoming_search_id = ""
         self._turn_protocol = {}
+        self._model_chapter_scope = None
+        if self.enable_chapter_scope_fallback and self.state.phase == "WAIT_CHAPTER":
+            text_scope = parse_chapter_scope(text)
+            if self.state.chapter_scope_topic_id == "non_chinese_question" and text_scope.status != "uncertain":
+                return self._current_chapter_scope_unsupported_response()
+            if text_scope.status == "unsupported":
+                self.state.chapter_scope_status = text_scope.status
+                self.state.chapter_scope_topic_id = text_scope.topic_id or ""
+                self.state.global_search_offered = False
+                return self._chapter_scope_unsupported_response(text_scope)
+            if text_scope.status == "supported":
+                context = build_runtime_context_v2(self.state)
+                decision = ActionDecisionV2(
+                    action="set_chapter",
+                    chapter_override=text_scope.storage_key,
+                    chapter_target="current_question",
+                    source="rule",
+                    confidence=1.0,
+                    reason="代码识别到明确章节或解题方法",
+                )
+                return self._dispatch_v2(decision, context)
+            if text_scope.reason == "numeric_chapter_requires_textbook":
+                return self._chapter_scope_clarification_response(
+                    include_supported_topics=(
+                        self.state.last_intent.get("action") == "clarification"
+                    ),
+                )
+            if self.state.global_search_offered and self._is_unknown_global_search_consent(text):
+                context = build_runtime_context_v2(self.state)
+                decision = ActionDecisionV2(
+                    action="global_search",
+                    source="rule",
+                    confidence=1.0,
+                    reason="用户明确表示不知道章节并同意题库内全局搜索",
+                )
+                return self._dispatch_v2(decision, context)
         if self.enable_safe_answer_v0:
             grounded_reply = render_grounded_safe_answer_v0(text)
             if grounded_reply is not None:
                 return AgentResponse(
-                    text=grounded_reply,
+                    text=(
+                        render.render_supported_chapter_scopes()
+                        if self.enable_chapter_scope_fallback
+                        else grounded_reply
+                    ),
                     state=self.state.to_dict(),
                     intent="safe_answer",
                     reply_source="grounded_fact",
                 )
             safe_decision = evaluate_safe_answer_policy(text)
             if safe_decision.eligible:
+                if (
+                    self.enable_chapter_scope_fallback
+                    and self.state.phase == "WAIT_CHAPTER"
+                    and safe_decision.category in {"greeting", "courtesy"}
+                ):
+                    return AgentResponse(
+                        text=render.render_wait_chapter_conversation(safe_decision.category),
+                        state=self.state.to_dict(),
+                        intent="safe_answer",
+                        reply_source="fixed_fallback",
+                    )
                 if safe_decision.category == "general":
                     context = build_runtime_context_v2(self.state)
                     decision = decide_intent_v2(
@@ -207,7 +291,10 @@ class TikuSearchAgent:
                         context,
                         llm_client=self._v2_llm_client(),
                     )
-                    if decision.action in TASK_ACTIONS | SAFETY_ACTIONS:
+                    if (
+                        self.enable_chapter_scope_fallback
+                        and self.state.phase == "WAIT_CHAPTER"
+                    ) or decision.action in TASK_ACTIONS | SAFETY_ACTIONS:
                         return self._dispatch_v2(decision, context)
                 return self._safe_answer_response(text, safe_decision.category)
         context = build_runtime_context_v2(self.state)
@@ -272,7 +359,72 @@ class TikuSearchAgent:
         image_path: str | Path | None = None,
         prechecked_single: bool = False,
     ) -> AgentResponse:
+        previous_action = str(
+            self.state.last_intent.get("action") or self.state.last_intent.get("intent") or ""
+        )
+        if (
+            self.enable_chapter_scope_fallback
+            and context.phase == "WAIT_CHAPTER"
+            and decision.action == "set_chapter"
+            and decision.source == "context_llm"
+        ):
+            validated_scope = parse_chapter_scope(decision.chapter_override)
+            if self.state.chapter_scope_topic_id == "non_chinese_question":
+                return self._current_chapter_scope_unsupported_response()
+            if validated_scope.status == "unsupported":
+                return self._chapter_scope_unsupported_response(validated_scope)
+            if validated_scope.status == "supported":
+                decision = ActionDecisionV2(
+                    action="set_chapter",
+                    chapter_override=validated_scope.storage_key,
+                    chapter_target=decision.chapter_target or "current_question",
+                    source="validator",
+                    confidence=1.0,
+                    reason="模型章节结果已通过共享目录校验并映射为存储键",
+                )
+            else:
+                decision = ActionDecisionV2(
+                    action="clarification",
+                    clarification_reason="missing_chapter",
+                    source="validator",
+                    confidence=1.0,
+                    reason="模型章节结果未通过共享目录校验",
+                )
         self.state.remember_intent(decision.to_dict())
+        if self.enable_chapter_scope_fallback and context.phase == "WAIT_CHAPTER":
+            if decision.action == "out_of_scope":
+                if (
+                    self._model_chapter_scope is not None
+                    and self._model_chapter_scope.status == "unsupported"
+                ):
+                    return self._chapter_scope_unsupported_response(
+                        self._model_chapter_scope
+                    )
+                self.state.global_search_offered = False
+                return AgentResponse(
+                    text=render.render_chapter_scope_unsupported("", ""),
+                    state=self.state.to_dict(),
+                    intent=decision.action,
+                    protocol=RequestProtocol.from_code(
+                        "REQUEST_OUT_OF_SCOPE",
+                        search_id=self.state.current_search_id,
+                    ).to_dict(),
+                )
+            if decision.action in {"greeting", "small_talk"}:
+                category = "greeting" if decision.action == "greeting" else "courtesy"
+                return AgentResponse(
+                    text=render.render_wait_chapter_conversation(category),
+                    state=self.state.to_dict(),
+                    intent=decision.action,
+                    protocol=RequestProtocol.from_code(
+                        "REQUEST_SUCCEEDED",
+                        search_id=self.state.current_search_id,
+                    ).to_dict(),
+                )
+            if decision.action == "clarification":
+                return self._chapter_scope_clarification_response(
+                    include_supported_topics=previous_action == "clarification",
+                )
         if is_reply_shell_action(decision.action):
             return AgentResponse(
                 text=render_reply_shell_v2(decision, context),
@@ -293,7 +445,25 @@ class TikuSearchAgent:
     def _v2_llm_client(self) -> Callable[[str], dict[str, Any]] | None:
         if not self.use_llm_intent:
             return None
-        return self.llm_client or call_qwen_decision_v2
+        client = self.llm_client or call_qwen_decision_v2
+        if not self.enable_chapter_scope_fallback:
+            return client
+
+        def validate_model_chapter(prompt: str) -> dict[str, Any]:
+            payload = dict(client(prompt + _CHAPTER_SCOPE_LLM_SUPPLEMENT))
+            if payload.get("action") != "set_chapter":
+                return payload
+            scope = parse_chapter_scope(payload.get("chapter_override"))
+            self._model_chapter_scope = scope
+            if scope.status == "supported":
+                payload["chapter_override"] = scope.storage_key
+            elif scope.status == "unsupported":
+                payload["action"] = "out_of_scope"
+                payload["chapter_override"] = None
+                payload["chapter_target"] = None
+            return payload
+
+        return validate_model_chapter
 
     def _dispatch(self, intent: IntentResult, *, remember: bool = True) -> AgentResponse:
         if remember:
@@ -409,6 +579,10 @@ class TikuSearchAgent:
                     "image_path": image_path,
                     "loads": scope_analysis.get("loads", []),
                     "chapter": chapter_hint,
+                    "chapter_hint": scope_analysis.get("chapter_hint", "unknown"),
+                    "chapter_confidence": scope_analysis.get("chapter_confidence", 0.0),
+                    "visible_problem_text": scope_analysis.get("visible_problem_text", ""),
+                    "classified": scope_analysis,
                 },
             )
         else:
@@ -417,19 +591,44 @@ class TikuSearchAgent:
         stopped = self._stop_for_tool_result(analyzed, allow_needs_input=True)
         if stopped is not None:
             return stopped
+        scope: ChapterScopeResult | None = None
+        resolved_chapter = pending_chapter or analyzed.data.get("chapter") or ""
+        if self.enable_chapter_scope_fallback:
+            scope = self._resolve_analysis_scope(analyzed.data)
+            if pending_chapter and scope.status != "unsupported":
+                resolved_chapter = pending_chapter
+                scope_status = "supported"
+                scope_topic_id = ""
+            else:
+                resolved_chapter = scope.storage_key if scope.status == "supported" else ""
+                scope_status = scope.status
+                scope_topic_id = scope.topic_id or ""
+        else:
+            scope_status = ""
+            scope_topic_id = ""
         self.state.set_analysis(
             loads=analyzed.data.get("loads", []),
-            chapter=pending_chapter or analyzed.data.get("chapter") or "",
+            chapter=resolved_chapter,
             question_image_path=analyzed.data.get("image_path") or image_path,
+            chapter_scope_status=scope_status,
+            chapter_scope_topic_id=scope_topic_id,
         )
+        if scope is not None and scope.status == "unsupported" and not resolved_chapter:
+            return self._chapter_scope_unsupported_response(scope)
         if pending_chapter:
             self.state.consume_pending_chapter()
         if self.state.phase == "WAIT_CHAPTER":
             self.state.offer_global_search()
             self._raise_if_image_search_cancelled()
             return self._response(
-                render.render_chapter_prompt(
-                    self.state, note=self._join_notices(notices)
+                (
+                    render.render_chapter_scope_prompt(
+                        self.state, note=self._join_notices(notices)
+                    )
+                    if self.enable_chapter_scope_fallback
+                    else render.render_chapter_prompt(
+                        self.state, note=self._join_notices(notices)
+                    )
                 ),
                 IntentResult("search_image"),
             )
@@ -650,6 +849,111 @@ class TikuSearchAgent:
         paths = list(answered.data.get("copied_paths") or answered.data.get("answer_paths") or [])
         self.state.set_answer_paths([str(path) for path in paths])
         return self._response(render.render_answer(self.state), intent, images=self.state.last_answer_paths)
+
+    @staticmethod
+    def _resolve_analysis_scope(payload: dict[str, Any]) -> ChapterScopeResult:
+        classified = payload.get("classified")
+        source = classified if isinstance(classified, dict) else {}
+
+        def value(name: str, default: Any) -> Any:
+            return source[name] if name in source else payload.get(name, default)
+
+        return resolve_image_scope(
+            chapter_hint=value("chapter_hint", payload.get("chapter") or ""),
+            chapter_confidence=value("chapter_confidence", 0.0),
+            visible_problem_text=value("visible_problem_text", ""),
+        )
+
+    def _chapter_scope_unsupported_response(
+        self,
+        scope: ChapterScopeResult,
+    ) -> AgentResponse:
+        self.state.current_chapter = ""
+        self.state.chapter_scope_status = "unsupported"
+        self.state.chapter_scope_topic_id = scope.topic_id or ""
+        self.state.global_search_offered = False
+        self.state.phase = "WAIT_CHAPTER"
+        self.state.remember_intent(
+            {
+                "action": "out_of_scope",
+                "source": "chapter_scope",
+                "topic_id": scope.topic_id or "",
+            }
+        )
+        return AgentResponse(
+            text=render.render_chapter_scope_unsupported(
+                scope.topic_id or "",
+                scope.display_name or "",
+            ),
+            state=self.state.to_dict(),
+            intent="out_of_scope",
+            protocol=RequestProtocol.from_code(
+                "REQUEST_OUT_OF_SCOPE",
+                search_id=self.state.current_search_id,
+            ).to_dict(),
+        )
+
+    def _current_chapter_scope_unsupported_response(self) -> AgentResponse:
+        topic_id = self.state.chapter_scope_topic_id
+        definition = next(
+            (item for item in UNSUPPORTED_TOPIC_DEFINITIONS if item.topic_id == topic_id),
+            None,
+        )
+        if definition is None:
+            return AgentResponse(
+                text=render.render_chapter_scope_unsupported(topic_id),
+                state=self.state.to_dict(),
+                intent="out_of_scope",
+                protocol=RequestProtocol.from_code(
+                    "REQUEST_OUT_OF_SCOPE",
+                    search_id=self.state.current_search_id,
+                ).to_dict(),
+            )
+        return self._chapter_scope_unsupported_response(
+            ChapterScopeResult(
+                status="unsupported",
+                topic_id=definition.topic_id,
+                display_name=definition.display_name,
+                reason="persisted_unsupported_scope",
+            )
+        )
+
+    def _chapter_scope_clarification_response(
+        self,
+        *,
+        include_supported_topics: bool = False,
+    ) -> AgentResponse:
+        self.state.phase = "WAIT_CHAPTER"
+        if self.state.chapter_scope_topic_id != "non_chinese_question":
+            self.state.chapter_scope_status = "uncertain"
+            self.state.chapter_scope_topic_id = ""
+        self.state.remember_intent(
+            {
+                "action": "clarification",
+                "clarification_reason": "missing_chapter",
+                "source": "chapter_scope",
+            }
+        )
+        return AgentResponse(
+            text=render.render_chapter_scope_prompt(
+                self.state,
+                include_supported_topics=include_supported_topics,
+            ),
+            state=self.state.to_dict(),
+            intent="clarification",
+            protocol=RequestProtocol.from_code(
+                "CHAPTER_REQUIRED",
+                search_id=self.state.current_search_id,
+            ).to_dict(),
+        )
+
+    @staticmethod
+    def _is_unknown_global_search_consent(text: str) -> bool:
+        compact = re.sub(r"[\s，。！？!?、,.：:；;]+", "", str(text or ""))
+        return re.fullmatch(
+            r"(?:我)?(?:确实)?不知道(?:章节|题型|哪一章)?(?:那就|你|麻烦你)?(?:帮我)?(?:全局)?(?:搜|搜索|找|查)(?:一下|吧|一下吧)?",
+            compact,
+        ) is not None
 
     def _fail(self, error: str, result: ToolResult | None = None) -> AgentResponse:
         self.state.fail(error)
