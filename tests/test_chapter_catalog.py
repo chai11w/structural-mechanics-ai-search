@@ -5,6 +5,7 @@ from tiku_shared.chapter_catalog import (
     SUPPORTED_STORAGE_KEYS,
     detect_non_chinese_problem_text,
     parse_chapter_scope,
+    resolve_image_scope,
     resolve_supported_chapter,
     supported_topic_names,
 )
@@ -44,6 +45,11 @@ class ChapterCatalogTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(parse_chapter_scope(text).status, "uncertain")
 
+    def test_negative_static_prefix_does_not_match_static_alias(self):
+        for text in ("超静定梁", "不静定结构位移", "非静定钢架"):
+            with self.subTest(text=text):
+                self.assertEqual(parse_chapter_scope(text).status, "uncertain")
+
     def test_english_questions_are_out_of_scope_but_foreign_is_not_a_topic_alias(self):
         result = parse_chapter_scope("英文题目")
         self.assertEqual(result.status, "unsupported")
@@ -55,13 +61,63 @@ class ChapterCatalogTest(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.status, "unsupported")
         self.assertEqual(result.topic_id, "non_chinese_question")
-
-        self.assertIsNone(detect_non_chinese_problem_text("求图示梁的弯矩图，EI=200"))
         self.assertEqual(
-            detect_non_chinese_problem_text("EI=200, P=20").status,
+            detect_non_chinese_problem_text("Calculate M=20 for the beam").status,
             "unsupported",
         )
+
+        self.assertIsNone(detect_non_chinese_problem_text("求图示梁的弯矩图，EI=200"))
+        self.assertIsNone(detect_non_chinese_problem_text("EI=200, P=20"))
         self.assertIsNone(detect_non_chinese_problem_text(""))
+
+    def test_image_scope_keeps_empty_description_in_clarification(self):
+        result = resolve_image_scope("4力法", 0.99, "")
+        self.assertEqual(result.status, "uncertain")
+        self.assertEqual(result.reason, "missing_visible_problem_text")
+
+    def test_image_scope_rejects_non_chinese_description_before_model_hint(self):
+        result = resolve_image_scope("4力法", 0.99, "Find the bending moment of the beam")
+        self.assertEqual(result.status, "unsupported")
+        self.assertEqual(result.topic_id, "non_chinese_question")
+        self.assertEqual(result.reason, "non_chinese_problem_text")
+
+    def test_image_scope_treats_formula_only_text_as_missing_description(self):
+        result = resolve_image_scope("4力法", 0.99, "EI=200, P=20")
+        self.assertEqual(result.status, "uncertain")
+        self.assertEqual(result.reason, "missing_visible_problem_text")
+
+    def test_image_scope_uses_explicit_text_before_model_hint(self):
+        result = resolve_image_scope("5位移法", 0.99, "请用力法计算超静定梁")
+        self.assertEqual(result.status, "supported")
+        self.assertEqual(result.storage_key, "4力法")
+        self.assertEqual(result.reason, "visible_problem_text_supported")
+
+    def test_image_scope_stops_on_explicit_unsupported_text(self):
+        result = resolve_image_scope("4力法", 0.99, "求结构动力学的自振频率")
+        self.assertEqual(result.status, "unsupported")
+        self.assertEqual(result.topic_id, "structural_dynamics")
+        self.assertEqual(result.reason, "visible_problem_text_unsupported")
+
+    def test_image_scope_requires_confidence_for_model_hint(self):
+        high = resolve_image_scope("4力法", 0.90, "这是一道结构力学题")
+        self.assertEqual(high.status, "supported")
+        self.assertEqual(high.storage_key, "4力法")
+        self.assertEqual(high.reason, "model_chapter_hint")
+
+        low = resolve_image_scope("4力法", 0.40, "这是一道结构力学题")
+        self.assertEqual(low.status, "uncertain")
+        self.assertEqual(low.reason, "low_confidence_chapter_hint")
+
+    def test_image_scope_rejects_unsupported_model_hint(self):
+        result = resolve_image_scope("动力学", 0.99, "这是一道结构力学题")
+        self.assertEqual(result.status, "unsupported")
+        self.assertEqual(result.topic_id, "structural_dynamics")
+        self.assertEqual(result.reason, "model_chapter_hint_unsupported")
+
+    def test_image_scope_does_not_treat_numeric_hint_as_storage_key(self):
+        result = resolve_image_scope("4", 0.99, "这是一道结构力学题")
+        self.assertEqual(result.status, "uncertain")
+        self.assertEqual(result.reason, "no_valid_chapter_evidence")
 
     def test_explicit_unsupported_topics_stop_before_numeric_chapter(self):
         result = parse_chapter_scope("第九章动力学")

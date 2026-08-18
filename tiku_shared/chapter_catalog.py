@@ -9,9 +9,10 @@ supported chapter.
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 
@@ -193,13 +194,15 @@ def detect_non_chinese_problem_text(text: object) -> ChapterScopeResult | None:
 
     This is intended for OCR text supplied by an image boundary, not for raw
     image bytes.  Empty text means no description was recognized and must stay
-    eligible for chapter clarification.  Any non-empty description without a
-    Chinese character is rejected; one Chinese character is enough to keep it
-    eligible for normal chapter parsing.
+    eligible for chapter clarification.  A non-empty natural-language
+    description without a Chinese character is rejected; one Chinese
+    character is enough to keep it eligible for normal chapter parsing.
+    Formula/load-label fragments such as ``EI=200, P=20`` are treated as
+    missing description instead of as an English question.
     """
 
-    raw = unicodedata.normalize("NFKC", str(text or "")).strip()
-    if not raw or re.search(r"[\u3400-\u9fff]", raw):
+    raw = _normalize_visible_text(text)
+    if not raw or re.search(r"[\u3400-\u9fff]", raw) or _looks_like_symbolic_annotation(raw):
         return None
     return ChapterScopeResult(
         status="unsupported",
@@ -208,6 +211,57 @@ def detect_non_chinese_problem_text(text: object) -> ChapterScopeResult | None:
         matched_text=raw[:60],
         reason="non_chinese_problem_text",
     )
+
+
+def resolve_image_scope(
+    chapter_hint: object = "",
+    chapter_confidence: object = 0.0,
+    visible_problem_text: object = "",
+    *,
+    min_confidence: float = 0.45,
+) -> ChapterScopeResult:
+    """Resolve the chapter scope at an image boundary before runtime routing.
+
+    The visible problem text is deterministic evidence and therefore takes
+    precedence over a model-produced hint.  A model hint can only select a
+    supported storage key after it has passed the same catalog parser, has
+    sufficient confidence, and has non-empty visible problem text.  This
+    function deliberately returns the catalog's three states instead of
+    returning a chapter string that callers might search unconditionally.
+    """
+
+    visible_text = _normalize_visible_text(visible_problem_text)
+    if _looks_like_symbolic_annotation(visible_text):
+        # Load labels and formula fragments are not a problem description.
+        visible_text = ""
+
+    language_scope = detect_non_chinese_problem_text(visible_text)
+    if language_scope is not None:
+        return language_scope
+
+    text_scope = parse_chapter_scope(visible_text)
+    if text_scope.status == "unsupported":
+        return replace(text_scope, reason="visible_problem_text_unsupported")
+    if text_scope.status == "supported":
+        return replace(text_scope, reason="visible_problem_text_supported")
+
+    # The image prompts require visible text before a chapter prediction is
+    # trusted.  An empty OCR result therefore remains a clarification case,
+    # even when a stale or overconfident model hint is present.
+    if not _compact(visible_text):
+        return _uncertain("missing_visible_problem_text")
+
+    hint_scope = parse_chapter_scope(chapter_hint)
+    if hint_scope.status == "unsupported":
+        return replace(hint_scope, reason="model_chapter_hint_unsupported")
+
+    confidence = _coerce_confidence(chapter_confidence)
+    threshold = _coerce_confidence(min_confidence, default=0.45)
+    if hint_scope.status == "supported" and confidence >= threshold:
+        return replace(hint_scope, reason="model_chapter_hint")
+    if hint_scope.status == "supported":
+        return _uncertain("low_confidence_chapter_hint", matched_text=hint_scope.matched_text)
+    return _uncertain("no_valid_chapter_evidence")
 
 
 def resolve_supported_chapter(text: object, *, allow_numeric: bool = False) -> str | None:
@@ -241,24 +295,102 @@ def supported_topic_names() -> tuple[str, ...]:
 
 
 def _find_alias(normalized: str, definitions: tuple[object, ...]):
-    candidates: list[tuple[object, str]] = []
+    candidates: list[tuple[int, int, object, str]] = []
     for definition in definitions:
         aliases = definition.aliases if isinstance(definition, ChapterDefinition) else definition.aliases
         for alias in aliases:
             compact_alias = _compact(alias)
-            if compact_alias and compact_alias in normalized:
-                candidates.append((definition, compact_alias))
-    candidates.sort(key=lambda item: len(item[1]), reverse=True)
-    return candidates[0] if candidates else None
+            if compact_alias and _contains_catalog_alias(normalized, compact_alias, definition):
+                if isinstance(definition, ChapterDefinition):
+                    if compact_alias in {_compact(item) for item in definition.method_aliases}:
+                        priority = 3
+                    elif compact_alias in {_compact(definition.storage_key), _compact(definition.display_name)}:
+                        priority = 2
+                    else:
+                        priority = 1
+                else:
+                    priority = 2
+                candidates.append((priority, len(compact_alias), definition, compact_alias))
+    if not candidates:
+        return None
+    _, _, definition, alias = max(candidates, key=lambda item: (item[0], item[1]))
+    return definition, alias
+
+
+def _contains_catalog_alias(normalized: str, alias: str, definition: object) -> bool:
+    if not isinstance(definition, ChapterDefinition):
+        return alias in normalized
+    if definition.topic_id not in {"static_internal_force", "static_displacement"}:
+        return alias in normalized
+    # “超静定/不静定/非静定” must not satisfy the positive “静定...” aliases.
+    pattern = rf"(?<![超不非]){re.escape(alias)}"
+    return re.search(pattern, normalized) is not None
 
 
 def _uncertain(reason: str, *, matched_text: str = "") -> ChapterScopeResult:
     return ChapterScopeResult(status="uncertain", matched_text=matched_text, reason=reason)
 
 
+def _coerce_confidence(value: object, *, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return default
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(confidence):
+        return default
+    return max(0.0, min(1.0, confidence))
+
+
 def _compact(text: object) -> str:
     normalized = unicodedata.normalize("NFKC", str(text or "")).strip().replace("　", " ")
     return re.sub(r"[\s，。！？!?、,.：:；;“”\"'‘’（）()]+", "", normalized).lower()
+
+
+_SYMBOLIC_ANNOTATION_CHARS = re.compile(r"^[A-Za-z0-9_\s.,;=+\-*/^()·°²³⁴⁵⁶⁷⁸⁹]+$")
+_SYMBOLIC_WORDS = {
+    "alpha",
+    "beta",
+    "cos",
+    "delta",
+    "ea",
+    "ei",
+    "gamma",
+    "kpa",
+    "kn",
+    "ln",
+    "log",
+    "mpa",
+    "n",
+    "pa",
+    "rad",
+    "sin",
+    "sqrt",
+    "sigma",
+    "tan",
+    "theta",
+    "omega",
+}
+
+
+def _normalize_visible_text(text: object) -> str:
+    return unicodedata.normalize("NFKC", str(text or "")).strip()
+
+
+def _looks_like_symbolic_annotation(text: str) -> bool:
+    """Recognize formula/load labels without treating English prose as empty."""
+
+    if not text or not _SYMBOLIC_ANNOTATION_CHARS.fullmatch(text):
+        return False
+    if not re.search(r"\d|=|[+\-*/^]", text):
+        return False
+    for word in re.findall(r"[A-Za-z]+", text):
+        normalized = word.lower()
+        if len(normalized) <= 3 or normalized in _SYMBOLIC_WORDS:
+            continue
+        return False
+    return True
 
 
 def _looks_like_chapter_number(text: str) -> bool:
