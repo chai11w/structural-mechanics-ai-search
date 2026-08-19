@@ -175,18 +175,67 @@ class A3PageParserTests(unittest.TestCase):
         with self.assertRaisesRegex(A3PageParseError, "no original_structure"):
             parse_a3_page_understanding(payload)
 
-    def test_reject_empty_group(self):
+    def test_remove_unreferenced_empty_group_and_preserve_text(self):
         payload = valid_payload()
         payload["groups"].append(
             {
                 "group_id": "g2",
-                "parent_question_label": "",
+                "parent_question_label": "五",
+                "parent_title_text": "计算图示结构。",
+                "shared_stem_text": "荷载如图所示。",
+                "units": [],
+            }
+        )
+        result = parse_a3_page_understanding(payload)
+
+        self.assertEqual([group.group_id for group in result.groups], ["g1"])
+        self.assertEqual(
+            result.unassigned_content,
+            (
+                ("五", "unreferenced_empty_group:g2:parent_question_label"),
+                ("计算图示结构。", "unreferenced_empty_group:g2:parent_title_text"),
+                ("荷载如图所示。", "unreferenced_empty_group:g2:shared_stem_text"),
+            ),
+        )
+        self.assertIn("unreferenced_empty_group_removed:g2", result.warnings)
+
+    def test_reject_referenced_empty_group(self):
+        payload = valid_payload()
+        payload["groups"].append(
+            {
+                "group_id": "g2",
+                "parent_question_label": "五",
                 "parent_title_text": "",
                 "shared_stem_text": "",
                 "units": [],
             }
         )
+        payload["diagrams"].append(
+            {
+                "diagram_id": "d2",
+                "role": "dimension_or_annotation",
+                "group_id": "g2",
+                "unit_ids": [],
+                "status": "clear",
+                "evidence": "group reference",
+            }
+        )
         with self.assertRaisesRegex(A3PageParseError, "empty groups"):
+            parse_a3_page_understanding(payload)
+
+    def test_reject_page_with_only_unreferenced_empty_groups(self):
+        payload = valid_payload()
+        payload["groups"] = [
+            {
+                "group_id": "g2",
+                "parent_question_label": "五",
+                "parent_title_text": "",
+                "shared_stem_text": "",
+                "units": [],
+            }
+        ]
+        payload["diagrams"] = []
+        with self.assertRaisesRegex(A3PageParseError, "after removing"):
             parse_a3_page_understanding(payload)
 
     def test_reject_invalid_reason_code(self):

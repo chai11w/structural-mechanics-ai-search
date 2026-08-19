@@ -306,9 +306,10 @@ def parse_a3_page_understanding(
 
     if isinstance(payload, str):
         data, warnings = _decode_json(payload)
+        warnings = list(warnings)
     else:
         data = _object(payload, "A3 output")
-        warnings = ()
+        warnings = []
     _reject_extra_keys(
         data,
         {
@@ -345,6 +346,50 @@ def parse_a3_page_understanding(
     raw_groups = _array(data.get("groups"), "groups")
     if not raw_groups:
         raise A3PageParseError("groups cannot be empty", code="empty_groups")
+
+    # Qwen can leave trailing text in an empty group when a dense page ends
+    # with a partially visible question. Only discard that group when no
+    # diagram claims it; a claimed empty group remains unsafe to interpret.
+    raw_diagrams = _array(data.get("diagrams"), "diagrams")
+    referenced_group_ids: set[str] = set()
+    for diagram_index, raw_diagram in enumerate(raw_diagrams):
+        diagram = _object(raw_diagram, f"diagrams[{diagram_index}]")
+        referenced_group_id = _text(diagram.get("group_id"), "diagram.group_id")
+        if referenced_group_id:
+            referenced_group_ids.add(referenced_group_id)
+
+    empty_group_ids: set[str] = set()
+    retained_group_count = 0
+    removed_unassigned: list[tuple[str, str]] = []
+    preflight_group_ids: set[str] = set()
+    for group_index, raw_group in enumerate(raw_groups):
+        group = _object(raw_group, f"groups[{group_index}]")
+        _reject_extra_keys(
+            group,
+            {"group_id", "parent_question_label", "parent_title_text", "shared_stem_text", "units"},
+            f"groups[{group_index}]",
+        )
+        group_id = _text(group.get("group_id"), "group_id")
+        if not group_id or group_id in preflight_group_ids:
+            raise A3PageParseError("group ids must be non-empty and unique", code="duplicate_id")
+        preflight_group_ids.add(group_id)
+        raw_units = _array(group.get("units"), f"groups[{group_index}].units")
+        if raw_units:
+            retained_group_count += 1
+            continue
+        if group_id in referenced_group_ids:
+            raise A3PageParseError("empty groups are not allowed", code="empty_group")
+        empty_group_ids.add(group_id)
+        for field_name in ("parent_question_label", "parent_title_text", "shared_stem_text"):
+            text = _text(group.get(field_name), field_name)
+            if text:
+                removed_unassigned.append(
+                    (text, f"unreferenced_empty_group:{group_id}:{field_name}")
+                )
+        warnings.append(f"unreferenced_empty_group_removed:{group_id}")
+    if not retained_group_count:
+        raise A3PageParseError("groups cannot be empty after removing unreferenced empty groups", code="empty_groups")
+
     groups: list[A3PageGroup] = []
     group_ids: set[str] = set()
     unit_ids: set[str] = set()
@@ -359,6 +404,8 @@ def parse_a3_page_understanding(
         group_id = _text(group.get("group_id"), "group_id")
         if not group_id or group_id in group_ids:
             raise A3PageParseError("group ids must be non-empty and unique", code="duplicate_id")
+        if group_id in empty_group_ids:
+            continue
         group_ids.add(group_id)
         raw_units = _array(group.get("units"), f"groups[{group_index}].units")
         if not raw_units:
@@ -450,7 +497,7 @@ def parse_a3_page_understanding(
 
     diagrams: list[A3PageDiagram] = []
     diagram_ids: set[str] = set()
-    for index, raw_diagram in enumerate(_array(data.get("diagrams"), "diagrams")):
+    for index, raw_diagram in enumerate(raw_diagrams):
         diagram = _object(raw_diagram, f"diagrams[{index}]")
         _reject_extra_keys(
             diagram,
@@ -536,7 +583,7 @@ def parse_a3_page_understanding(
 
     unknowns = _string_list(data.get("unknowns"), "unknowns")
     raw_unassigned = _array(data.get("unassigned_content"), "unassigned_content")
-    unassigned: list[tuple[str, str]] = []
+    unassigned: list[tuple[str, str]] = list(removed_unassigned)
     for index, raw_item in enumerate(raw_unassigned):
         item = _object(raw_item, f"unassigned_content[{index}]")
         unassigned.append((_text(item.get("text"), "unassigned_content.text"), _text(item.get("reason"), "unassigned_content.reason")))
@@ -557,5 +604,5 @@ def parse_a3_page_understanding(
         unassigned_content=tuple(unassigned),
         unknowns=unknowns,
         schema_version=version,
-        warnings=warnings,
+        warnings=tuple(warnings),
     )

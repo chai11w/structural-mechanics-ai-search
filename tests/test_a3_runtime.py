@@ -837,6 +837,14 @@ class A3RuntimeTests(unittest.TestCase):
             "shared_stem_text": "",
             "units": [],
         })
+        invalid["diagrams"].append({
+            "diagram_id": "empty-group-diagram",
+            "role": "dimension_or_annotation",
+            "group_id": "empty-group",
+            "unit_ids": [],
+            "status": "clear",
+            "evidence": "empty group reference",
+        })
         outputs = [json.dumps(invalid, ensure_ascii=False), json.dumps(_page_payload(), ensure_ascii=False)]
 
         class RetryObserver(QwenA3PageObserver):
