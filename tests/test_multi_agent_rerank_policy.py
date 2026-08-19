@@ -25,6 +25,21 @@ class MultiAgentRerankPolicyTest(unittest.TestCase):
 
         self.assertEqual(selected, [])
 
+    def test_bounded_image_pool_preserves_all_three_candidates(self):
+        results = [
+            {"rank": 1, "path": "a.jpg", "score": 0.64, "name": "a.jpg"},
+            {"rank": 2, "path": "b.jpg", "score": 0.20, "name": "b.jpg"},
+            {"rank": 3, "path": "c.jpg", "score": 0.10, "name": "c.jpg"},
+        ]
+
+        selected = select_rerank_candidates(
+            results,
+            "main",
+            preserve_bounded_pool=True,
+        )
+
+        self.assertEqual([item["path"] for item in selected], ["a.jpg", "b.jpg", "c.jpg"])
+
 
 if __name__ == "__main__":
     unittest.main()

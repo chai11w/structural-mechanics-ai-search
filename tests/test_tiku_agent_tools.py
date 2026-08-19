@@ -639,7 +639,7 @@ class TikuAgentToolsTest(unittest.TestCase):
 
         def fake_rerank(query_image_path, rerank_input, top_n=3):
             self.assertEqual(query_image_path, "query.jpg")
-            self.assertEqual([item["path"] for item in rerank_input], ["q1.jpg"])
+            self.assertEqual([item["path"] for item in rerank_input], ["q1.jpg", "q2.jpg", "q3.jpg"])
             self.assertEqual(top_n, 3)
             return [
                 {
@@ -685,22 +685,22 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertEqual(result.data["best_final_score"], 0.375)
         self.assertIn("可靠相似题", result.error)
 
-    def test_agent_rerank_skips_model_when_no_candidate_reaches_threshold(self):
+    def test_agent_rerank_keeps_bounded_low_score_pool_for_model_comparison(self):
         candidates = [
             {"rank": 1, "path": "q1.jpg", "score": 0.50, "name": "q1.jpg"},
             {"rank": 2, "path": "q2.jpg", "score": 0.40, "name": "q2.jpg"},
         ]
 
-        with patch("tiku_agent.tools.search.rerank_candidates") as rerank:
+        with patch("tiku_agent.tools.search.rerank_candidates", return_value=[]) as rerank:
             result = rerank_candidates_tool("query.jpg", candidates, route="main", rerank_top=3)
 
         self.assertTrue(result.ok)
         self.assertEqual(result.tool, "rerank_candidates")
         self.assertFalse(result.data["reranked"])
-        self.assertEqual(result.outcome, ToolOutcome.SUCCESS)
-        self.assertEqual(result.code, "RERANK_NOT_REQUIRED")
-        self.assertEqual(rerank.call_count, 0)
-        self.assertEqual([item["path"] for item in result.data["visible_candidates"]], ["q1.jpg"])
+        self.assertEqual(result.outcome, ToolOutcome.PARTIAL)
+        self.assertEqual(result.code, "RERANK_EMPTY_COARSE_FALLBACK")
+        self.assertEqual(rerank.call_count, 1)
+        self.assertEqual([item["path"] for item in result.data["visible_candidates"]], ["q1.jpg", "q2.jpg"])
         self.assertIn("粗筛", result.data["rerank_note"])
 
     def test_agent_rerank_falls_back_to_coarse_candidates_when_incomplete(self):
@@ -725,7 +725,7 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertEqual(result.outcome, ToolOutcome.PARTIAL)
         self.assertEqual(result.code, "RERANK_INCOMPLETE_COARSE_FALLBACK")
         self.assertFalse(result.data["reranked"])
-        self.assertEqual([item["path"] for item in result.data["visible_candidates"]], ["q1.jpg"])
+        self.assertEqual([item["path"] for item in result.data["visible_candidates"]], ["q1.jpg", "q2.jpg"])
         self.assertTrue(all(item["rerank_status"] == "incomplete" for item in result.data["visible_candidates"]))
         self.assertIn("回退粗筛", result.data["rerank_note"])
 

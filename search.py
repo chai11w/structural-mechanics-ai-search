@@ -22,6 +22,7 @@ import sys
 import argparse
 import shutil
 import time
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
@@ -58,18 +59,41 @@ ROOT = Path(cfg.get("root", r"D:\桌面\答疑、帮做\结构力学\帮做"))
 ANSWER_OUTPUT = Path(cfg.get("answer_output", r"D:\桌面\答疑、帮做\答案输出"))
 LAST_SEARCH_FILE = ROOT / "_last_search.json"
 ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY") or cfg.get("zhipuai_api_key", "")
+DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY") or cfg.get("dashscope_api_key", "")
 TOP_K = cfg.get("top_k", 3)
 RERANK_MIN_LOAD_SCORE = 0.5
 DISPLAY_ALL_SCORE = 0.9
 DISPLAY_RELIABLE_MIN_SCORE = 0.8
 DISPLAY_MAX_RESULTS = 3
+RERANK_FALLBACK_POOL_SIZE = 3
 RERANK_LOAD_WEIGHT = 0.5
 RERANK_VISION_WEIGHT = 0.5
 LENGTH_TIE_FINAL_FLOOR = 0.9
 DEFAULT_ZHIPU_RERANK_MODEL = cfg.get("zhipu_rerank_model", "glm-4.6v")
+DEFAULT_QWEN_RERANK_MODEL = cfg.get("qwen_rerank_model", "qwen3.7-plus")
+DEFAULT_QWEN_RERANK_ENDPOINT = cfg.get(
+    "qwen_rerank_endpoint",
+    "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+)
+DEFAULT_RERANK_PROVIDER = str(cfg.get("rerank_provider", "zhipu") or "zhipu").strip().lower()
+QWEN_RERANK_ENABLE_THINKING = bool(cfg.get("qwen_rerank_enable_thinking", False))
+
+
+def default_rerank_model(provider=None):
+    provider = str(provider or DEFAULT_RERANK_PROVIDER).strip().lower()
+    return DEFAULT_QWEN_RERANK_MODEL if provider == "qwen" else DEFAULT_ZHIPU_RERANK_MODEL
+
+
+DEFAULT_RERANK_MODEL = default_rerank_model()
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 _PATH_REPAIR_BACKUPS = set()
 _PATH_REPAIR_BACKUP_DIR = None
+
+_QWEN_PROMPT_PATH = Path(__file__).parent / "tiku_agent" / "prompts" / "rerank_shape_v2_1_candidate.txt"
+try:
+    DEFAULT_QWEN_RERANK_PROMPT = _QWEN_PROMPT_PATH.read_text(encoding="utf-8")
+except OSError:
+    DEFAULT_QWEN_RERANK_PROMPT = ""
 
 SYSTEM_PROMPT = """从图片中提取所有外部荷载信息。严格按以下JSON格式输出，不要输出任何其他内容。
 
@@ -461,6 +485,7 @@ RERANK_CONCURRENT_MAX_WORKERS = 10
 RERANK_PRIMARY_TIMEOUT_SECONDS = 8.0
 RERANK_RETRY_TIMEOUT_SECONDS = 10.0
 RERANK_RETRY_MAX_CANDIDATES = 3
+RERANK_RETRY_MAX_WORKERS = 1
 
 
 LENGTH_TIE_PROMPT = """你是结构力学搜题结果打平复核器。候选题已经被判定为高度相似。
@@ -480,14 +505,123 @@ LENGTH_TIE_PROMPT = """你是结构力学搜题结果打平复核器。候选题
 {"score":0.95,"reason":"理由不超过20字"}"""
 
 
+def _model_content_text(content):
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text") or ""))
+        return "".join(parts).strip()
+    return str(content or "").strip()
+
+
+def _parse_rerank_response(raw_text):
+    raw_text = str(raw_text or "").strip()
+    raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
+    raw_text = re.sub(r"\s*```$", "", raw_text)
+    parsed = json.loads(raw_text)
+    score = float(parsed.get("score", 0))
+    score = max(0.0, min(1.0, score))
+    return score, str(parsed.get("reason", "")).strip()
+
+
+def _score_candidate_pair_qwen(
+    query_image_path,
+    candidate_path,
+    *,
+    prompt,
+    timeout_seconds,
+    model,
+    endpoint=DEFAULT_QWEN_RERANK_ENDPOINT,
+    enable_thinking=QWEN_RERANK_ENABLE_THINKING,
+):
+    if not DASHSCOPE_API_KEY:
+        raise RuntimeError("DASHSCOPE_API_KEY is not configured")
+    content = [
+        {"type": "text", "text": prompt},
+        {"type": "text", "text": "查询题图片："},
+        {
+            "type": "image_url",
+            "image_url": {"url": encode_rerank_image_base64(query_image_path)},
+        },
+        {"type": "text", "text": "候选题图片："},
+        {
+            "type": "image_url",
+            "image_url": {"url": encode_rerank_image_base64(candidate_path)},
+        },
+    ]
+    payload = {
+        "model": model or DEFAULT_QWEN_RERANK_MODEL,
+        "messages": [
+            {"role": "system", "content": "你只输出JSON。"},
+            {"role": "user", "content": content},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 128,
+        "enable_thinking": bool(enable_thinking),
+    }
+    request = urllib.request.Request(
+        endpoint or DEFAULT_QWEN_RERANK_ENDPOINT,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    def read_response():
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    response = timed_model_call(
+        read_response,
+        provider="dashscope",
+        model=payload["model"],
+        call_type=(
+            "qwen_length_tie_break"
+            if prompt == LENGTH_TIE_PROMPT
+            else "qwen_shape_rerank"
+        ),
+        usage_getter=lambda value: value.get("usage", {}),
+        request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
+    )
+    choices = response.get("choices") or []
+    if not choices:
+        raise ValueError("Qwen response has no choices")
+    message = choices[0].get("message") or {}
+    return _parse_rerank_response(_model_content_text(message.get("content")))
+
+
 def score_candidate_pair(
     client,
     query_image_path,
     candidate_path,
     prompt=RERANK_PROMPT,
     timeout_seconds=None,
-    model=DEFAULT_ZHIPU_RERANK_MODEL,
+    model=None,
+    provider="zhipu",
+    endpoint=None,
+    enable_thinking=None,
 ):
+    provider = str(provider or "zhipu").strip().lower()
+    if provider not in {"zhipu", "qwen"}:
+        raise ValueError(f"unsupported rerank provider: {provider}")
+    if provider == "qwen":
+        return _score_candidate_pair_qwen(
+            query_image_path,
+            candidate_path,
+            prompt=prompt,
+            timeout_seconds=timeout_seconds,
+            model=model or DEFAULT_QWEN_RERANK_MODEL,
+            endpoint=endpoint or DEFAULT_QWEN_RERANK_ENDPOINT,
+            enable_thinking=(
+                QWEN_RERANK_ENABLE_THINKING
+                if enable_thinking is None
+                else bool(enable_thinking)
+            ),
+        )
+    if client is None:
+        raise RuntimeError("Zhipu client is required for zhipu rerank")
     content = [
         {"type": "text", "text": prompt},
         {"type": "text", "text": "查询题图片："},
@@ -523,13 +657,7 @@ def score_candidate_pair(
         usage_getter=lambda value: getattr(value, "usage", None),
         request_id_getter=lambda value: str(getattr(value, "request_id", "") or getattr(value, "id", "")),
     )
-    raw_text = resp.choices[0].message.content.strip()
-    raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
-    raw_text = re.sub(r"\s*```$", "", raw_text)
-    parsed = json.loads(raw_text)
-    score = float(parsed.get("score", 0))
-    score = max(0.0, min(1.0, score))
-    return score, str(parsed.get("reason", "")).strip()
+    return _parse_rerank_response(_model_content_text(resp.choices[0].message.content))
 
 
 def compute_final_rerank_score(load_score, rerank_score):
@@ -543,7 +671,10 @@ def apply_length_tie_break(
     query_image_path,
     scored,
     timeout_seconds=None,
-    model=DEFAULT_ZHIPU_RERANK_MODEL,
+    model=None,
+    provider="zhipu",
+    endpoint=None,
+    enable_thinking=None,
 ):
     perfect = [item for item in scored if float(item.get("final_score") or 0) >= 0.999]
     if len(perfect) <= 1:
@@ -552,13 +683,22 @@ def apply_length_tie_break(
     for item in perfect:
         path = Path(item["path"])
         try:
+            pair_options = {
+                "prompt": LENGTH_TIE_PROMPT,
+                "timeout_seconds": timeout_seconds,
+                "model": model,
+            }
+            if provider != "zhipu" or endpoint is not None or enable_thinking is not None:
+                pair_options.update(
+                    provider=provider,
+                    endpoint=endpoint,
+                    enable_thinking=enable_thinking,
+                )
             length_score, length_reason = score_candidate_pair(
                 client,
                 query_image_path,
                 str(path),
-                prompt=LENGTH_TIE_PROMPT,
-                timeout_seconds=timeout_seconds,
-                model=model,
+                **pair_options,
             )
         except Exception as exc:  # noqa: BLE001
             print(f"WARNING: 候选 {item['rank']} 杆长复核失败: {exc}")
@@ -602,24 +742,43 @@ def score_rerank_candidate(
     client=None,
     timeout_seconds=None,
     collect_timing=False,
-    model=DEFAULT_ZHIPU_RERANK_MODEL,
+    model=None,
+    provider="zhipu",
+    endpoint=None,
+    enable_thinking=None,
 ):
     # The SDK retries by default. For an explicit per-candidate deadline, retries
     # would turn a 1s timeout into several delayed attempts, so disable them.
-    client = client or ZhipuAI(
-        api_key=ZHIPUAI_API_KEY,
-        max_retries=0 if timeout_seconds is not None else 3,
-    )
+    provider = str(provider or "zhipu").strip().lower()
+    if provider not in {"zhipu", "qwen"}:
+        raise ValueError(f"unsupported rerank provider: {provider}")
+    model = model or default_rerank_model(provider)
+    if provider == "zhipu" and client is None:
+        client = ZhipuAI(
+            api_key=ZHIPUAI_API_KEY,
+            max_retries=0 if timeout_seconds is not None else 3,
+        )
     path = Path(candidate["path"])
     started = time.perf_counter() if collect_timing else None
     status = "completed"
     try:
+        pair_options = {
+            "timeout_seconds": timeout_seconds,
+            "model": model,
+        }
+        if provider == "qwen" and DEFAULT_QWEN_RERANK_PROMPT:
+            pair_options["prompt"] = DEFAULT_QWEN_RERANK_PROMPT
+        if provider != "zhipu" or endpoint is not None or enable_thinking is not None:
+            pair_options.update(
+                provider=provider,
+                endpoint=endpoint,
+                enable_thinking=enable_thinking,
+            )
         score, reason = score_candidate_pair(
             client,
             query_image_path,
             str(path),
-            timeout_seconds=timeout_seconds,
-            model=model,
+            **pair_options,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"WARNING: 候选 {candidate['rank']} 复筛失败: {exc}")
@@ -649,7 +808,10 @@ def finalize_rerank_results(
     scored,
     top_n=DISPLAY_MAX_RESULTS,
     timeout_seconds=None,
-    model=DEFAULT_ZHIPU_RERANK_MODEL,
+    model=None,
+    provider="zhipu",
+    endpoint=None,
+    enable_thinking=None,
 ):
     scored = apply_length_tie_break(
         client,
@@ -657,15 +819,18 @@ def finalize_rerank_results(
         scored,
         timeout_seconds=timeout_seconds,
         model=model,
+        provider=provider,
+        endpoint=endpoint,
+        enable_thinking=enable_thinking,
     )
     scored.sort(
         key=lambda x: (
-            x.get("final_score", 0),
-            x.get("length_score", 1),
-            x.get("score", 0),
-            x.get("rerank_score", 0),
+            -float(x.get("final_score") or 0),
+            -float(x.get("length_score") if x.get("length_score") is not None else 1),
+            -float(x.get("score") or 0),
+            -float(x.get("rerank_score") or 0),
+            int(x.get("rank") or 0),
         ),
-        reverse=True,
     )
     return scored
 
@@ -674,8 +839,16 @@ def rerank_candidates(
     query_image_path,
     candidates,
     top_n=DISPLAY_MAX_RESULTS,
-    model=DEFAULT_ZHIPU_RERANK_MODEL,
+    model=None,
+    provider=None,
+    endpoint=None,
+    enable_thinking=None,
     max_workers=None,
+    candidate_timeout_seconds=None,
+    retry_timeout_seconds=None,
+    retry_max_candidates=None,
+    retry_max_workers=None,
+    retry_failed_candidates=False,
 ):
     """Rerank candidates with the shared bounded-concurrency policy."""
     return rerank_candidates_concurrent(
@@ -683,10 +856,31 @@ def rerank_candidates(
         candidates,
         top_n=top_n,
         max_workers=max_workers or RERANK_CONCURRENT_MAX_WORKERS,
-        candidate_timeout_seconds=RERANK_PRIMARY_TIMEOUT_SECONDS,
-        retry_timeout_seconds=RERANK_RETRY_TIMEOUT_SECONDS,
-        retry_max_candidates=RERANK_RETRY_MAX_CANDIDATES,
+        candidate_timeout_seconds=(
+            RERANK_PRIMARY_TIMEOUT_SECONDS
+            if candidate_timeout_seconds is None
+            else candidate_timeout_seconds
+        ),
+        retry_timeout_seconds=(
+            RERANK_RETRY_TIMEOUT_SECONDS
+            if retry_timeout_seconds is None
+            else retry_timeout_seconds
+        ),
+        retry_max_candidates=(
+            RERANK_RETRY_MAX_CANDIDATES
+            if retry_max_candidates is None
+            else retry_max_candidates
+        ),
+        retry_max_workers=(
+            RERANK_RETRY_MAX_WORKERS
+            if retry_max_workers is None
+            else retry_max_workers
+        ),
+        retry_failed_candidates=retry_failed_candidates,
         model=model,
+        provider=provider or DEFAULT_RERANK_PROVIDER,
+        endpoint=endpoint,
+        enable_thinking=enable_thinking,
     )
 
 
@@ -724,8 +918,13 @@ def rerank_candidates_concurrent(
     candidate_timeout_seconds=None,
     retry_timeout_seconds=None,
     retry_max_candidates=0,
+    retry_max_workers=1,
+    retry_failed_candidates=False,
     on_candidate_scored=None,
-    model=DEFAULT_ZHIPU_RERANK_MODEL,
+    model=None,
+    provider=None,
+    endpoint=None,
+    enable_thinking=None,
 ):
     """Concurrent rerank with bounded timeouts and a selective retry.
 
@@ -740,6 +939,9 @@ def rerank_candidates_concurrent(
     if not usable:
         return []
 
+    provider = str(provider or DEFAULT_RERANK_PROVIDER).strip().lower()
+    model = model or default_rerank_model(provider)
+
     workers = max(1, min(int(max_workers or 1), len(usable)))
     scored = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -752,34 +954,58 @@ def rerank_candidates_concurrent(
                 timeout_seconds=candidate_timeout_seconds,
                 collect_timing=on_candidate_scored is not None,
                 model=model,
+                provider=provider,
+                endpoint=endpoint,
+                enable_thinking=enable_thinking,
             )
             for candidate in usable
         ]
         for future in as_completed(futures):
             item = future.result()
             scored.append(item)
-    timed_out = [item for item in scored if item.get("rerank_status") == "timeout"]
+    retryable_statuses = {"timeout"}
+    if retry_failed_candidates:
+        retryable_statuses.add("failed")
+    retryable = [item for item in scored if item.get("rerank_status") in retryable_statuses]
     retry_limit = max(0, int(retry_max_candidates or 0))
-    for first_attempt in sorted(timed_out, key=lambda item: float(item.get("score") or 0), reverse=True)[:retry_limit]:
-        retried = score_rerank_candidate(
-            query_image_path,
-            first_attempt,
-            timeout_seconds=retry_timeout_seconds,
-            collect_timing=on_candidate_scored is not None,
-            model=model,
-        )
-        initial_seconds = float(first_attempt.get("rerank_seconds") or 0)
-        retry_seconds = float(retried.get("rerank_seconds") or 0)
-        retried["rerank_attempts"] = 2
-        retried["rerank_initial_seconds"] = round(initial_seconds, 3)
-        retried["rerank_retry_seconds"] = round(retry_seconds, 3)
-        retried["rerank_seconds"] = round(initial_seconds + retry_seconds, 3)
-        if retried.get("rerank_status") == "completed":
-            retried["rerank_status"] = "retried"
-        scored = [
-            retried if item.get("path") == first_attempt.get("path") else item
-            for item in scored
-        ]
+    retry_batch = sorted(
+        retryable,
+        key=lambda item: float(item.get("score") or 0),
+        reverse=True,
+    )[:retry_limit]
+    if retry_batch:
+        retry_workers = max(1, min(int(retry_max_workers or 1), len(retry_batch)))
+        with ThreadPoolExecutor(max_workers=retry_workers) as executor:
+            retry_futures = {
+                submit_with_model_cost_context(
+                    executor,
+                    score_rerank_candidate,
+                    query_image_path,
+                    first_attempt,
+                    timeout_seconds=retry_timeout_seconds,
+                    collect_timing=on_candidate_scored is not None,
+                    model=model,
+                    provider=provider,
+                    endpoint=endpoint,
+                    enable_thinking=enable_thinking,
+                ): first_attempt
+                for first_attempt in retry_batch
+            }
+            for future in as_completed(retry_futures):
+                first_attempt = retry_futures[future]
+                retried = future.result()
+                initial_seconds = float(first_attempt.get("rerank_seconds") or 0)
+                retry_seconds = float(retried.get("rerank_seconds") or 0)
+                retried["rerank_attempts"] = 2
+                retried["rerank_initial_seconds"] = round(initial_seconds, 3)
+                retried["rerank_retry_seconds"] = round(retry_seconds, 3)
+                retried["rerank_seconds"] = round(initial_seconds + retry_seconds, 3)
+                if retried.get("rerank_status") == "completed":
+                    retried["rerank_status"] = "retried"
+                scored = [
+                    retried if item.get("path") == first_attempt.get("path") else item
+                    for item in scored
+                ]
 
     if not rerank_results_complete(scored):
         note = "部分候选两次复筛仍未完成，已回退粗筛排序。"
@@ -793,10 +1019,12 @@ def rerank_candidates_concurrent(
         for item in scored:
             on_candidate_scored(dict(item))
 
-    client = ZhipuAI(
-        api_key=ZHIPUAI_API_KEY,
-        max_retries=0 if candidate_timeout_seconds is not None else 3,
-    )
+    client = None
+    if provider == "zhipu":
+        client = ZhipuAI(
+            api_key=ZHIPUAI_API_KEY,
+            max_retries=0 if candidate_timeout_seconds is not None else 3,
+        )
     return finalize_rerank_results(
         client,
         query_image_path,
@@ -804,6 +1032,9 @@ def rerank_candidates_concurrent(
         top_n=top_n,
         timeout_seconds=candidate_timeout_seconds,
         model=model,
+        provider=provider,
+        endpoint=endpoint,
+        enable_thinking=enable_thinking,
     )
 
 
@@ -826,18 +1057,67 @@ def select_coarse_results(results):
     return perfect or [max(results, key=display_similarity_score)]
 
 
+def select_rerank_pool(results, pool_size=RERANK_FALLBACK_POOL_SIZE):
+    """Build a bounded visual-rerank pool without discarding perfect matches.
+
+    Perfect coarse matches stay together. When fewer than ``pool_size`` perfect
+    matches exist, the next coarse-ranked candidates fill the bounded pool.
+    This is a model-call bound, not the user-facing display count.
+    """
+    if not results:
+        return []
+
+    ordered = list(results)
+    ordered.sort(
+        key=lambda item: (
+            -display_similarity_score(item),
+            int(item.get("rank") or 0) if isinstance(item, dict) else 0,
+        )
+    )
+    perfect = [item for item in ordered if display_similarity_score(item) >= 1.0]
+    if len(perfect) >= pool_size:
+        return perfect
+
+    selected = list(perfect)
+    seen = {
+        str(item.get("path")) if isinstance(item, dict) else str(item)
+        for item in selected
+    }
+    for item in ordered:
+        key = str(item.get("path")) if isinstance(item, dict) else str(item)
+        if key in seen:
+            continue
+        selected.append(item)
+        seen.add(key)
+        if len(selected) >= pool_size:
+            break
+    return selected
+
+
 def select_display_results(
     results,
     all_score=DISPLAY_ALL_SCORE,
     reliable_min_score=DISPLAY_RELIABLE_MIN_SCORE,
 ):
-    """Show all >=90% results, one best >=80% result, or no unreliable result."""
+    """Keep all high-similarity results, otherwise show a bounded top-three.
+
+    The 90% rule remains an inclusive group. When no candidate reaches it,
+    reliable candidates are still shown by rank instead of collapsing to one
+    result, which avoids hiding the correct answer while the score calibration
+    is being improved.
+    """
     if not results:
         return []
 
-    very_high = [item for item in results if display_similarity_score(item) >= all_score]
-    reliable = [item for item in results if display_similarity_score(item) >= reliable_min_score]
-    selected = very_high or ([max(reliable, key=display_similarity_score)] if reliable else [])
+    very_high = [
+        item for item in results
+        if display_similarity_score(item) >= all_score
+    ]
+    reliable = [
+        item for item in results
+        if display_similarity_score(item) >= reliable_min_score
+    ]
+    selected = very_high or reliable[:DISPLAY_MAX_RESULTS]
 
     renumbered = []
     for rank, item in enumerate(selected, 1):
@@ -1234,7 +1514,15 @@ def resolve_question_path(question_path, chapter_name=None, update_excel=False):
     return ROOT / old_rel, old_rel, False
 
 
-def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, rerank_top=DISPLAY_MAX_RESULTS):
+def search(
+    query_loads,
+    chapter_name,
+    top_k=TOP_K,
+    rerank_image_path=None,
+    rerank_top=DISPLAY_MAX_RESULTS,
+    rerank_provider=None,
+    rerank_model=None,
+):
     scan = scan_chapter_candidates(query_loads, chapter_name, ROOT)
     if scan is None:
         print(f"ERROR: Chapter '{chapter_name}' not found")
@@ -1242,8 +1530,9 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
 
     results = scan.scored
 
-    # 粗筛只保留全部 100% 匹配；没有 100% 时只保留最相似的 1 个。
-    top = select_coarse_results(results)
+    # Image rerank gets a bounded pool. Plain load search keeps the legacy
+    # coarse display policy so it does not suddenly expose extra candidates.
+    top = select_rerank_pool(results) if rerank_image_path else select_coarse_results(results)
 
     if not top or top[0][0] == 0:
         print("(未找到高相似度匹配，以下是章节内最近题目)")
@@ -1277,7 +1566,13 @@ def search(query_loads, chapter_name, top_k=TOP_K, rerank_image_path=None, reran
 
     filtered_rerank_paths = [item for item in all_paths if item["score"] >= RERANK_MIN_LOAD_SCORE]
     if rerank_image_path and filtered_rerank_paths:
-        reranked = rerank_candidates(rerank_image_path, filtered_rerank_paths, rerank_top)
+        reranked = rerank_candidates(
+            rerank_image_path,
+            filtered_rerank_paths,
+            rerank_top,
+            provider=rerank_provider,
+            model=rerank_model,
+        )
         if reranked and rerank_results_complete(reranked):
             reranked = select_display_results(reranked)
             if not reranked:
@@ -1461,7 +1756,9 @@ def main():
     p_search.add_argument("--loads", help="荷载 JSON 字符串")
     p_search.add_argument("--chapter", required=True, help="章节名称，如 '2静定结构'")
     p_search.add_argument("--top", type=int, default=TOP_K, help=f"返回条数 (默认 {TOP_K})")
-    p_search.add_argument("--rerank", action="store_true", help="对图片搜索的粗筛结果进行 LLM 复筛，并按复筛相似度阈值输出")
+    p_search.add_argument("--rerank", action="store_true", help="对图片搜索的粗筛结果进行 LLM 复筛")
+    p_search.add_argument("--rerank-provider", choices=("zhipu", "qwen"), default=None, help="视觉复筛提供方，默认读取配置")
+    p_search.add_argument("--rerank-model", default=None, help="视觉复筛模型，默认按提供方读取配置")
 
     # store
     p_store = sub.add_parser("store", help="储存新题目")
@@ -1506,7 +1803,14 @@ def main():
         rerank_image_path = query_image_path if args.rerank else None
         if args.rerank and not rerank_image_path:
             print("WARNING: --rerank 只支持 --image 搜索，当前跳过复筛")
-        search(query_loads, args.chapter, args.top or TOP_K, rerank_image_path=rerank_image_path)
+        search(
+            query_loads,
+            args.chapter,
+            args.top or TOP_K,
+            rerank_image_path=rerank_image_path,
+            rerank_provider=args.rerank_provider,
+            rerank_model=args.rerank_model,
+        )
 
     elif args.cmd == "store":
         store(

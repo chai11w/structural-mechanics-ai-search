@@ -812,6 +812,14 @@ def rerank_candidates_tool(
     route: str,
     rerank_top: int = search.DISPLAY_MAX_RESULTS,
     force_rerank: bool = False,
+    rerank_provider: str | None = None,
+    rerank_model: str | None = None,
+    max_workers: int | None = None,
+    candidate_timeout_seconds: float | None = None,
+    retry_timeout_seconds: float | None = None,
+    retry_max_candidates: int | None = None,
+    retry_max_workers: int | None = None,
+    retry_failed_candidates: bool = False,
 ) -> ToolResult:
     """Rerank coarse candidates and return visible candidates only.
 
@@ -824,7 +832,11 @@ def rerank_candidates_tool(
             code="NO_CANDIDATES_TO_RERANK",
             data={"reranked": False, "visible_candidates": []},
         )
-    coarse_candidates = search.select_coarse_results(candidates)
+    coarse_candidates = (
+        search.select_rerank_pool(candidates)
+        if query_image_path
+        else search.select_coarse_results(candidates)
+    )
     if not query_image_path:
         return ToolResult.partial(
             code="RERANK_SKIPPED_NO_IMAGE",
@@ -835,14 +847,37 @@ def rerank_candidates_tool(
         )
 
     try:
-        rerank_input = select_rerank_candidates(coarse_candidates, route)
+        rerank_input = select_rerank_candidates(
+            coarse_candidates,
+            route,
+            preserve_bounded_pool=True,
+        )
         if not rerank_input:
             return ToolResult.success(
                 code="RERANK_NOT_REQUIRED",
                 data={"reranked": False, "visible_candidates": _renumber(coarse_candidates), "rerank_note": "候选未达到复筛阈值，已显示粗筛结果。"},
                 next_state="WAIT_CANDIDATE_CHOICE",
             )
-        reranked = search.rerank_candidates(query_image_path, rerank_input, top_n=rerank_top)
+        rerank_options: dict[str, Any] = {"top_n": rerank_top}
+        optional_policy = {
+            "provider": rerank_provider,
+            "model": rerank_model,
+            "max_workers": max_workers,
+            "candidate_timeout_seconds": candidate_timeout_seconds,
+            "retry_timeout_seconds": retry_timeout_seconds,
+            "retry_max_candidates": retry_max_candidates,
+            "retry_max_workers": retry_max_workers,
+        }
+        rerank_options.update(
+            {key: value for key, value in optional_policy.items() if value is not None}
+        )
+        if retry_failed_candidates:
+            rerank_options["retry_failed_candidates"] = True
+        reranked = search.rerank_candidates(
+            query_image_path,
+            rerank_input,
+            **rerank_options,
+        )
         if reranked and search.rerank_results_complete(reranked):
             displayed = search.select_display_results(reranked)
             visible = normalize_rerank_results(displayed)

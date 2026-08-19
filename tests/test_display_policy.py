@@ -36,7 +36,7 @@ class SharedDisplayPolicyTest(unittest.TestCase):
             {"rank": 4, "final_score": 0.86},
         ]
         selected = search.select_display_results(below_ninety)
-        self.assertEqual([item["final_score"] for item in selected], [0.89])
+        self.assertEqual([item["final_score"] for item in selected], [0.89, 0.88, 0.87])
 
         at_reliable_boundary = [
             {"rank": 1, "final_score": 0.80},
@@ -59,6 +59,18 @@ class SharedDisplayPolicyTest(unittest.TestCase):
             inspect.signature(MultiAgentCoordinator.search_image).parameters["rerank_top"].default,
             search.DISPLAY_MAX_RESULTS,
         )
+
+    def test_rerank_pool_fills_to_three_without_perfect_match(self):
+        results = [(0.74, "a"), (0.68, "b"), (0.61, "c"), (0.55, "d")]
+        self.assertEqual(search.select_rerank_pool(results), results[:3])
+
+    def test_rerank_pool_fills_fewer_than_three_perfect_matches(self):
+        results = [(1.0, "a"), (1.0, "b"), (0.65, "c"), (0.6, "d")]
+        self.assertEqual(search.select_rerank_pool(results), results[:3])
+
+    def test_rerank_pool_keeps_all_perfect_matches(self):
+        results = [(1.0, "a"), (1.0, "b"), (1.0, "c"), (1.0, "d"), (0.8, "e")]
+        self.assertEqual(search.select_rerank_pool(results), results[:4])
 
     def test_multi_agent_cli_enables_dimension_filter_by_default_with_rollback(self):
         parser = build_multi_agent_parser()

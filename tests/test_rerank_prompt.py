@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import search
 import unittest
 from pathlib import Path
@@ -118,6 +119,47 @@ class RerankPromptTest(unittest.TestCase):
         self.assertEqual(search.compute_final_rerank_score(0.1, 0.95), 0.525)
         self.assertEqual(search.compute_final_rerank_score(0.5, 2.0), 0.75)
 
+    def test_qwen_rerank_adapter_parses_json_and_tracks_request_shape(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "id": "qwen-test",
+                        "choices": [
+                            {"message": {"content": '{"score":0.83,"reason":"结构和荷载对应"}'}},
+                        ],
+                        "usage": {"input_tokens": 12, "output_tokens": 4},
+                    }
+                ).encode("utf-8")
+
+        with (
+            patch("search.DASHSCOPE_API_KEY", "test-key"),
+            patch("search.encode_rerank_image_base64", side_effect=["data:query", "data:candidate"]),
+            patch("search.urllib.request.urlopen", return_value=Response()) as urlopen,
+        ):
+            score, reason = search.score_candidate_pair(
+                None,
+                "query.jpg",
+                "candidate.jpg",
+                provider="qwen",
+                model="qwen3.7-plus",
+                timeout_seconds=2,
+            )
+
+        self.assertAlmostEqual(score, 0.83)
+        self.assertEqual(reason, "结构和荷载对应")
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "qwen3.7-plus")
+        self.assertFalse(payload["enable_thinking"])
+        self.assertEqual(payload["messages"][1]["content"][2]["image_url"]["url"], "data:query")
+
     def test_concurrent_rerank_matches_serial_scoring_order(self):
         query = "query.jpg"
         candidates = [
@@ -181,6 +223,30 @@ class RerankPromptTest(unittest.TestCase):
                 candidate_timeout_seconds=1,
                 retry_timeout_seconds=2,
                 retry_max_candidates=1,
+            )
+
+        self.assertTrue(search.rerank_results_complete(results))
+        self.assertEqual(results[0]["rerank_status"], "retried")
+        self.assertEqual(results[0]["rerank_attempts"], 2)
+        self.assertAlmostEqual(results[0]["final_score"], 0.85)
+
+    def test_failed_candidate_is_retried_and_ranked_when_retry_succeeds(self):
+        candidates = [{"rank": 1, "path": "limited.jpg", "name": "limited.jpg", "score": 0.8}]
+        responses = [RuntimeError("API reach limit"), (0.9, "补评完成")]
+
+        with (
+            patch("search.prepare_rerank_candidates", return_value=candidates),
+            patch("search.ZhipuAI", return_value=object()),
+            patch("search.score_candidate_pair", side_effect=responses),
+        ):
+            results = search.rerank_candidates_concurrent(
+                "query.jpg",
+                candidates,
+                max_workers=1,
+                candidate_timeout_seconds=1,
+                retry_timeout_seconds=2,
+                retry_max_candidates=1,
+                retry_failed_candidates=True,
             )
 
         self.assertTrue(search.rerank_results_complete(results))

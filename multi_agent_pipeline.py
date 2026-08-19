@@ -269,7 +269,7 @@ class RuleRouter:
 
 
 class MultiAgentCoordinator:
-    """Coordinate Qwen classification, rule routing, retrieval, and Zhipu rerank."""
+    """Coordinate Qwen classification, rule routing, retrieval, and visual rerank."""
 
     def __init__(
         self,
@@ -295,7 +295,8 @@ class MultiAgentCoordinator:
         *,
         rerank: bool = True,
         rerank_top: int = search.DISPLAY_MAX_RESULTS,
-        rerank_model: str = search.DEFAULT_ZHIPU_RERANK_MODEL,
+        rerank_model: str | None = None,
+        rerank_provider: str | None = None,
         rerank_workers: int | None = None,
         classified: dict[str, Any] | None = None,
     ) -> PipelineResult:
@@ -307,6 +308,7 @@ class MultiAgentCoordinator:
             rerank=rerank,
             rerank_top=rerank_top,
             rerank_model=rerank_model,
+            rerank_provider=rerank_provider,
             rerank_workers=rerank_workers,
             classified=classified,
         )
@@ -325,7 +327,8 @@ class MultiAgentCoordinator:
         query_image_path: str | None = None,
         rerank: bool = False,
         rerank_top: int = search.DISPLAY_MAX_RESULTS,
-        rerank_model: str = search.DEFAULT_ZHIPU_RERANK_MODEL,
+        rerank_model: str | None = None,
+        rerank_provider: str | None = None,
         rerank_workers: int | None = None,
         force_rerank: bool = False,
         status_callback=None,
@@ -377,6 +380,7 @@ class MultiAgentCoordinator:
             route.excel_root,
             self.top_k,
             structure_type=structure_type if route.route == "symbolic" else None,
+            for_rerank=bool(rerank and query_image_path),
         )
         structure_filter_applied = any(item.get("structure_filter") for item in results)
         results, dimension_filter = apply_dimension_prefilter(
@@ -391,15 +395,22 @@ class MultiAgentCoordinator:
         reranked = False
         rerank_note = ""
         if rerank and query_image_path and results:
-            rerank_input = select_rerank_candidates(results, route.route)
+            rerank_input = select_rerank_candidates(
+                results,
+                route.route,
+                preserve_bounded_pool=True,
+            )
             if status_callback and rerank_input:
-                status_callback("Zhipu复筛中...")
+                status_callback(
+                    f"{(rerank_provider or search.DEFAULT_RERANK_PROVIDER).upper()}复筛中..."
+                )
             if rerank_input:
                 zhipu_results = search.rerank_candidates(
                     query_image_path,
                     rerank_input,
                     top_n=rerank_top,
                     model=rerank_model,
+                    provider=rerank_provider,
                     max_workers=rerank_workers,
                 )
                 if zhipu_results and search.rerank_results_complete(zhipu_results):
@@ -523,6 +534,7 @@ def rank_bank_candidates(
     excel_root: Path,
     top_k: int,
     structure_type: str | None = None,
+    for_rerank: bool = False,
 ) -> list[dict[str, Any]]:
     filter_type = normalize_structure_type(structure_type)
     scan = search.scan_chapter_candidates(
@@ -534,7 +546,11 @@ def rank_bank_candidates(
     )
     if scan is None:
         return []
-    top = search.select_coarse_results(scan.scored)
+    top = (
+        search.select_rerank_pool(scan.scored)
+        if for_rerank
+        else search.select_coarse_results(scan.scored)
+    )
     top = [item for item in top if item[0] > 0]
 
     results = []
@@ -629,9 +645,21 @@ def rerank_threshold_for_route(route: str) -> float:
     return search.RERANK_MIN_LOAD_SCORE
 
 
-def select_rerank_candidates(results: list[dict[str, Any]], route: str) -> list[dict[str, Any]]:
-    """Keep rerank-threshold candidates; do not skip just because the pool is small."""
+def select_rerank_candidates(
+    results: list[dict[str, Any]],
+    route: str,
+    *,
+    preserve_bounded_pool: bool = False,
+) -> list[dict[str, Any]]:
+    """Select visual candidates, preserving a deliberately bounded pool.
+
+    Existing callers can retain the route threshold. The image rerank path
+    passes ``preserve_bounded_pool`` so its top-three coarse pool is not
+    silently reduced again by a second threshold.
+    """
     threshold = rerank_threshold_for_route(route)
+    if preserve_bounded_pool and len(results) <= search.RERANK_FALLBACK_POOL_SIZE:
+        threshold = 0.0
     selected = []
     seen_paths = set()
 
