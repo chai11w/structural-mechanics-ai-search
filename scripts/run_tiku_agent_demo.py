@@ -13,7 +13,7 @@ BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-from tiku_agent.agent import TikuSearchAgent
+from tiku_agent.agent import AgentToolbox, TikuSearchAgent
 from tiku_agent.external_load_screen import ZhipuExternalLoadScreen
 from tiku_agent.fastapi_demo import create_app
 from tiku_agent.feedback_store import SQLiteFeedbackStore
@@ -28,7 +28,7 @@ from tiku_agent.session_runtime import AgentSessionRuntime
 from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_log import JsonlTaskLogger
-from tiku_agent.tools import AgentToolConfig
+from tiku_agent.tools import AgentToolConfig, rerank_candidates_tool
 from tiku_admin.auth import SQLiteInviteAccess
 from tiku_admin.control_store import SQLiteControlStore
 from tiku_shared.model_costs import SQLiteModelCostLedger
@@ -53,6 +53,7 @@ def build_runtime(
     external_load_timeout_seconds: float = 15.0,
     external_load_screen: Callable[[str | Path], str] | None = None,
     enable_chapter_scope_fallback: bool = False,
+    rerank_policy: dict[str, object] | None = None,
 ) -> AgentSessionRuntime:
     """Build the 8790 runtime with bounded safe answers enabled by default."""
     root = Path(runtime_dir).resolve()
@@ -64,10 +65,22 @@ def build_runtime(
         )
 
     agent_factory = None
-    if enable_safe_answer_v0 or enable_dimension_filter or enable_chapter_scope_fallback:
+    scoped_tools = None
+    if rerank_policy:
+        policy = dict(rerank_policy)
+
+        def rerank_with_policy(query_image_path, candidates, **kwargs):
+            options = dict(kwargs)
+            options.update(policy)
+            return rerank_candidates_tool(query_image_path, candidates, **options)
+
+        scoped_tools = AgentToolbox(rerank_candidates=rerank_with_policy)
+
+    if enable_safe_answer_v0 or enable_dimension_filter or enable_chapter_scope_fallback or scoped_tools:
         def build_agent(state: AgentState) -> TikuSearchAgent:
             return TikuSearchAgent(
                 state=state,
+                tools=scoped_tools,
                 config=AgentToolConfig(
                     runtime_dir=root,
                     session_dir=artifacts.session_dir(state.session_id),

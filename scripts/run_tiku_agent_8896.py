@@ -28,8 +28,8 @@ DEFAULT_PORT = 8896
 DEFAULT_RUNTIME_DIR = BASE / ".tmp_tiku_agent_a3_mvp_8896"
 SESSION_COOKIE = "tiku_agent_8896_session"
 A2_RERANK_POLICY = {
-    "provider": "qwen",
-    "model": "qwen3.7-plus",
+    "rerank_provider": "qwen",
+    "rerank_model": "qwen3.7-plus",
     "max_workers": 8,
     "candidate_timeout_seconds": 12.0,
     "retry_timeout_seconds": 12.0,

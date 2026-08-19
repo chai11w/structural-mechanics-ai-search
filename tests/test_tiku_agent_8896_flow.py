@@ -1,8 +1,10 @@
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts.run_tiku_agent_8896 import (
+    A2_RERANK_POLICY,
     DEFAULT_PORT,
     DEFAULT_RUNTIME_DIR,
     SESSION_COOKIE,
@@ -51,6 +53,30 @@ class TikuAgent8896FlowTest(unittest.TestCase):
             self.assertTrue(agent_8896.enable_chapter_scope_fallback)
             self.assertFalse(agent_8790.enable_chapter_scope_fallback)
             self.assertIsInstance(runtime_8896.external_load_screen, ZhipuExternalLoadScreen)
+
+    def test_8896_passes_qwen_policy_with_tool_parameter_names(self):
+        with tempfile.TemporaryDirectory() as temp, patch(
+            "scripts.run_tiku_agent_demo.rerank_candidates_tool"
+        ) as rerank_tool:
+            rerank_tool.return_value = object()
+            runtime = build_runtime(Path(temp), enable_triage=False)
+            agent = runtime.a2_runtime.agent_factory(AgentState())
+            candidates = [{"rank": 1, "path": "candidate.jpg", "score": 1.0}]
+
+            agent.tools.rerank_candidates(
+                "query.jpg",
+                candidates,
+                route="symbolic",
+            )
+
+            rerank_tool.assert_called_once_with(
+                "query.jpg",
+                candidates,
+                route="symbolic",
+                **A2_RERANK_POLICY,
+            )
+            self.assertEqual(A2_RERANK_POLICY["rerank_provider"], "qwen")
+            self.assertEqual(A2_RERANK_POLICY["rerank_model"], "qwen3.7-plus")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@
 ## Implemented
 
 - 共享层：尺寸模块负责解析、约束、缓存和 Qwen 识别；视觉复筛池无满分时取粗筛前 3 个，满分不足 3 个时补齐，超时/失败回退粗筛；展示保留 >=90% 全部候选，否则最多展示可靠 Top 3。图片编码器覆盖各入口并统一压缩大图，源文件不变；8793 保留稳定快照。
-- 视觉复筛已支持配置选择 Zhipu `glm-4.6v` 或 DashScope Qwen `qwen3.7-plus`；首轮 10 并发对照后仅隔离 8896 A2 切为 Qwen + 当前 V1 Prompt，8788/8790/CLI 共享默认仍为 Zhipu，V4/V5 暂不切换。
+- 视觉复筛已支持配置选择 Zhipu `glm-4.6v` 或 DashScope Qwen `qwen3.7-plus`；隔离 8896 A2 已重启并显式使用 `rerank_provider=qwen`、`rerank_model=qwen3.7-plus` 和当前 V1 Prompt，8788/8790/CLI 共享默认仍为 Zhipu，V4/V5 暂不切换。8896 首次部署曾因进程未重启仍运行旧 Zhipu，随后又因 policy 键误写为 `provider/model` 触发本地 `TypeError`；现已补齐 policy 注入、参数名回归测试并修复。
 - 共享章节目录保留七个存储键和 `supported|unsupported|uncertain` 三态；收紧“内力/内力图/分配法”，方法名优先并排除“超/不/非静定”误匹配。`resolve_image_scope()` 依次检查非中文自然语言、题干支持范围和合法高置信模型提示；`EI=200, P=20` 等公式按无题干处理。55 条章节评测全部通过。
 - 字母库全局搜索仅在章节判断失败且用户授权后执行；支持章节问题走零模型代码事实回答，混有搜题指令时仍走 Intent V2。
 - 8790 具备有界执行、同会话串行、过期清理、媒体 no-store、安全响应头和中文错误；各类错误可恢复、评价或重试，部分结果降级显示；8793 未刷新。
