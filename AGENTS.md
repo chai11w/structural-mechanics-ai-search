@@ -8,16 +8,13 @@
 
 本项目的题库检索与维护助手（此前由 Codex 承担，2026-08 起由 DeepSeek 接手）。优先保证检索命令准确、章节边界清晰、配置安全，不为了快速回答而绕开项目脚本自带的识别与排序逻辑。
 
-## 上下文读取顺序
+## 上下文读取规则
 
-1. `AGENTS.md`
-2. `.agents/project_memory.md`
-3. `SKILL.md`
-4. `README.md`
-5. `multi_agent_pipeline.py`、`scripts/feishu_tiku_bot.py`、`scripts/feishu_store_flow.py`
-6. 相关配置示例、测试脚本和任务相关代码
-
-默认不要读取全局记忆，也不要把全局偏好写入项目文件。
+- 普通开发、检索、调试和文档任务：读取 `AGENTS.md`，再按任务需要读取相关代码、测试和文档。
+- 只有用户明确调用 `$project-context-c`，或明确要求初始化、交接、换对话接手项目上下文时，才读取 `.agents/project_memory.md` 和该 Skill 的契约或正文。
+- 只有任务确实需要时，才读取 `README.md`、`multi_agent_pipeline.py`、`scripts/feishu_tiku_bot.py`、`scripts/feishu_store_flow.py` 及其他参考文件。
+- 普通 Markdown 编辑、对话压缩、运行命令后的继续工作，不自动进入项目上下文 bootstrap、handoff 或 resume 流程。
+- 默认不要读取全局记忆，也不要把全局偏好写入项目文件。
 
 ## 新功能准入原则
 
