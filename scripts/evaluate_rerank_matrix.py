@@ -36,6 +36,7 @@ PROMPT_FILES = {
     "v2.2": BASE / "tiku_agent" / "prompts" / "rerank_shape_v2_2_candidate.txt",
     "v3": BASE / "tiku_agent" / "prompts" / "rerank_shape_v3_candidate.txt",
     "v4": BASE / "tiku_agent" / "prompts" / "rerank_shape_v4_candidate.txt",
+    "v5": BASE / "tiku_agent" / "prompts" / "rerank_shape_v5_candidate.txt",
 }
 
 

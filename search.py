@@ -490,6 +490,9 @@ def _load_qwen_rerank_prompt(version):
     if version == "v4":
         path = Path(__file__).parent / "tiku_agent" / "prompts" / "rerank_shape_v4_candidate.txt"
         return path.read_text(encoding="utf-8")
+    if version == "v5":
+        path = Path(__file__).parent / "tiku_agent" / "prompts" / "rerank_shape_v5_candidate.txt"
+        return path.read_text(encoding="utf-8")
     raise ValueError(f"unsupported qwen rerank prompt version: {version}")
 
 
