@@ -49,6 +49,7 @@ _A3_PHASES = {
     A3_PHASE_COMPLETE,
     A3_PHASE_ERROR,
 }
+_A3_PAGE_ERROR_RETENTION = timedelta(days=30)
 _CHINESE_ORDINALS = {
     "一": 1,
     "二": 2,
@@ -80,6 +81,7 @@ class A3SessionState:
     task_revision: int = 0
     current_search_id: str = ""
     last_error: str = ""
+    last_error_detail: str = ""
 
     def validate(self) -> None:
         if self.entry_route not in {"", "A1", "A2", "A3"}:
@@ -158,6 +160,25 @@ class SQLiteA3SessionStore:
                 "CREATE INDEX IF NOT EXISTS idx_a3_sessions_expires_at "
                 "ON a3_sessions(expires_at)"
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS a3_page_errors (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_key TEXT NOT NULL,
+                    search_id TEXT NOT NULL,
+                    task_kind TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    error_type TEXT NOT NULL,
+                    error_code TEXT NOT NULL,
+                    error_message TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_a3_page_errors_created_at "
+                "ON a3_page_errors(created_at)"
+            )
 
     def load(self, session_id: str) -> A3SessionState | None:
         clean = str(session_id or "").strip()
@@ -211,6 +232,51 @@ class SQLiteA3SessionStore:
                     [(value,) for value in session_ids],
                 )
         return session_ids
+
+    def record_page_error(
+        self,
+        state: A3SessionState,
+        *,
+        task_kind: str,
+        diagnostic: Mapping[str, str],
+    ) -> None:
+        now = self._timestamp()
+        cutoff = (now - _A3_PAGE_ERROR_RETENTION).isoformat()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM a3_page_errors WHERE created_at < ?", (cutoff,))
+            conn.execute(
+                """
+                INSERT INTO a3_page_errors (
+                    session_key, search_id, task_kind, phase,
+                    error_type, error_code, error_message, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_key(state.session_id),
+                    state.current_search_id,
+                    str(task_kind),
+                    state.phase,
+                    diagnostic.get("error_type", ""),
+                    diagnostic.get("error_code", ""),
+                    diagnostic.get("error_message", ""),
+                    now.isoformat(),
+                ),
+            )
+
+    def recent_page_errors(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        bounded_limit = min(100, max(1, int(limit)))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT search_id, task_kind, phase, error_type, error_code,
+                       error_message, created_at
+                FROM a3_page_errors
+                ORDER BY event_id DESC
+                LIMIT ?
+                """,
+                (bounded_limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     @contextmanager
     def _connect(self):
@@ -822,6 +888,7 @@ class A3MvpRuntime:
         except Exception as exc:  # noqa: BLE001 - keep the upload available for retry.
             state.phase = A3_PHASE_ERROR
             state.last_error = type(exc).__name__
+            self._record_page_error(state, exc, task_kind="a3_page_understanding")
             self.store.save(state)
             return _response(
                 "这次没能完成整页理解。题图已保留，你可以直接回复“重试”。",
@@ -833,6 +900,7 @@ class A3MvpRuntime:
         state.page_understanding = understanding.to_dict(include_derived=True)
         state.units = _flatten_units(state.page_understanding)
         state.last_error = ""
+        state.last_error_detail = ""
         searchable = state.searchable_units
         if len(searchable) == 1:
             state.selected_unit_id = str(searchable[0]["unit_id"])
@@ -869,6 +937,7 @@ class A3MvpRuntime:
             )
         except A3ModelError as exc:
             state.last_error = type(exc).__name__
+            self._record_page_error(state, exc, task_kind="a3_page_understanding_retry")
             self.store.save(state)
             return _response(
                 "这次仍然没能完成整页理解。题图还在，可以稍后继续重试。",
@@ -879,6 +948,7 @@ class A3MvpRuntime:
         state.page_understanding = understanding.to_dict(include_derived=True)
         state.units = _flatten_units(state.page_understanding)
         state.last_error = ""
+        state.last_error_detail = ""
         searchable = state.searchable_units
         if len(searchable) == 1:
             state.selected_unit_id = str(searchable[0]["unit_id"])
@@ -1103,8 +1173,57 @@ class A3MvpRuntime:
                 except Exception:  # noqa: BLE001 - observability must not break A3.
                     pass
 
+    def _record_page_error(
+        self,
+        state: A3SessionState,
+        exc: Exception,
+        *,
+        task_kind: str,
+    ) -> None:
+        diagnostic = _page_error_diagnostic(exc)
+        state.last_error_detail = _page_error_summary(diagnostic)
+        try:
+            self.store.record_page_error(
+                state,
+                task_kind=task_kind,
+                diagnostic=diagnostic,
+            )
+        except Exception:  # noqa: BLE001 - diagnostics must not break A3.
+            pass
+
     def _lock(self, session_id: str) -> threading.RLock:
         return self._locks[hash(session_id) % len(self._locks)]
+
+
+def _page_error_diagnostic(exc: Exception) -> dict[str, str]:
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+
+    specific = next(
+        (item for item in chain if str(getattr(item, "code", "")).strip()),
+        chain[-1],
+    )
+    code = str(getattr(specific, "code", "") or "").strip()
+    message = re.sub(r"\s+", " ", str(specific)).strip() or "no error message"
+    message = f"{type(specific).__name__}: {message}"[:500]
+    return {
+        "error_type": type(exc).__name__,
+        "error_code": code,
+        "error_message": message,
+    }
+
+
+def _page_error_summary(diagnostic: Mapping[str, str]) -> str:
+    label = str(diagnostic.get("error_type") or "A3PageError")
+    code = str(diagnostic.get("error_code") or "").strip()
+    if code:
+        label = f"{label}/{code}"
+    return f"{label}: {diagnostic.get('error_message') or 'no error message'}"[:700]
 
 
 def _flatten_units(page: Mapping[str, Any]) -> list[dict[str, Any]]:

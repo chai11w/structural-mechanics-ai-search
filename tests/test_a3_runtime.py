@@ -6,8 +6,13 @@ import unittest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from tiku_agent.a3_models import A3UnitAnalysis, CropCompareResult, QwenA3PageObserver
-from tiku_agent.a3_page_parser import parse_a3_page_understanding
+from tiku_agent.a3_models import (
+    A3ModelError,
+    A3UnitAnalysis,
+    CropCompareResult,
+    QwenA3PageObserver,
+)
+from tiku_agent.a3_page_parser import A3PageParseError, parse_a3_page_understanding
 from tiku_agent.a3_runtime import (
     A3MvpRuntime,
     A3SessionState,
@@ -850,6 +855,38 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(len(result.searchable_units), 2)
         self.assertEqual(len(observer.requests), 2)
         self.assertIn("empty groups are not allowed", observer.requests[1])
+
+    def test_page_schema_failure_persists_specific_diagnostic(self):
+        class FailingObserver:
+            def observe(self, _image_path):
+                try:
+                    raise A3PageParseError(
+                        "diagram unit_ids must reference existing units",
+                        code="invalid_reference",
+                    )
+                except A3PageParseError as exc:
+                    raise A3ModelError("invalid A3 page understanding output") from exc
+
+        self.runtime.page_observer = FailingObserver()
+
+        response = self.runtime.handle_image("page-error-session", self.source)
+
+        self.assertEqual(response.intent, "a3_page_error")
+        state = self.runtime.store.load("page-error-session")
+        self.assertIsNotNone(state)
+        self.assertEqual(state.last_error, "A3ModelError")
+        self.assertIn("invalid_reference", state.last_error_detail)
+        self.assertIn("diagram unit_ids", state.last_error_detail)
+
+        events = self.runtime.store.recent_page_errors()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["task_kind"], "a3_page_understanding")
+        self.assertEqual(events[0]["error_type"], "A3ModelError")
+        self.assertEqual(events[0]["error_code"], "invalid_reference")
+        self.assertIn("A3PageParseError", events[0]["error_message"])
+
+        self.runtime.store.clear("page-error-session")
+        self.assertEqual(len(self.runtime.store.recent_page_errors()), 1)
 
 
 if __name__ == "__main__":
