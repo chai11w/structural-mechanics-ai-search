@@ -883,7 +883,11 @@ class A3MvpRuntime:
             understanding = self._call_model(
                 state,
                 "a3_page_understanding",
-                lambda: self.page_observer.observe(persisted),
+                lambda: self._observe_page(
+                    state,
+                    persisted,
+                    task_kind="a3_page_understanding",
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - keep the upload available for retry.
             state.phase = A3_PHASE_ERROR
@@ -933,7 +937,11 @@ class A3MvpRuntime:
             understanding = self._call_model(
                 state,
                 "a3_page_understanding_retry",
-                lambda: self.page_observer.observe(Path(state.source_page_path)),
+                lambda: self._observe_page(
+                    state,
+                    Path(state.source_page_path),
+                    task_kind="a3_page_understanding_retry",
+                ),
             )
         except A3ModelError as exc:
             state.last_error = type(exc).__name__
@@ -1187,6 +1195,47 @@ class A3MvpRuntime:
                 state,
                 task_kind=task_kind,
                 diagnostic=diagnostic,
+            )
+        except Exception:  # noqa: BLE001 - diagnostics must not break A3.
+            pass
+
+    def _observe_page(
+        self,
+        state: A3SessionState,
+        image_path: Path,
+        *,
+        task_kind: str,
+    ):
+        observe_with_diagnostics = getattr(
+            self.page_observer,
+            "observe_with_diagnostics",
+            None,
+        )
+        if not callable(observe_with_diagnostics):
+            return self.page_observer.observe(image_path)
+        return observe_with_diagnostics(
+            image_path,
+            on_validation_error=lambda attempt, exc: self._record_page_validation_error(
+                state,
+                exc,
+                task_kind=task_kind,
+                attempt=attempt,
+            ),
+        )
+
+    def _record_page_validation_error(
+        self,
+        state: A3SessionState,
+        exc: Exception,
+        *,
+        task_kind: str,
+        attempt: int,
+    ) -> None:
+        try:
+            self.store.record_page_error(
+                state,
+                task_kind=f"{task_kind}_schema_attempt_{max(1, int(attempt))}",
+                diagnostic=_page_error_diagnostic(exc),
             )
         except Exception:  # noqa: BLE001 - diagnostics must not break A3.
             pass

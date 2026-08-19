@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 import urllib.request
 
 from scripts.classify_question_bank import (
@@ -248,6 +248,14 @@ class QwenA3PageObserver(_QwenVisionClient):
         self.max_attempts = min(2, max(1, int(max_attempts)))
 
     def observe(self, image_path: Path) -> A3PageUnderstanding:
+        return self.observe_with_diagnostics(image_path)
+
+    def observe_with_diagnostics(
+        self,
+        image_path: Path,
+        *,
+        on_validation_error: Callable[[int, Exception], None] | None = None,
+    ) -> A3PageUnderstanding:
         last_error: Exception | None = None
         for attempt in range(self.max_attempts):
             retry_instruction = ""
@@ -274,6 +282,11 @@ class QwenA3PageObserver(_QwenVisionClient):
                 return parse_a3_page_understanding(content)
             except Exception as exc:  # noqa: BLE001 - one bounded schema retry.
                 last_error = exc
+                if on_validation_error is not None:
+                    try:
+                        on_validation_error(attempt + 1, exc)
+                    except Exception:  # noqa: BLE001 - diagnostics must not break correction.
+                        pass
         raise A3ModelError("invalid A3 page understanding output") from last_error
 
 

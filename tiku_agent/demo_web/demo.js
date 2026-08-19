@@ -52,6 +52,7 @@ const a3ExampleCanvas = $('#a3-example-canvas');
 const TEXT_TIMEOUT_MS = 60000;
 const IMAGE_TIMEOUT_MS = 90000;
 const A3_TIMEOUT_MS = 180000;
+const A3_TEXT_RETRY_TIMEOUT_MS = 100000;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 const IMAGE_TARGET_BYTES = 1024 * 1024;
 const IMAGE_MAX_DIMENSION = 2560;
@@ -1697,11 +1698,14 @@ async function sendTextValue(value, displayValue = value, actionContext = null) 
   let pending = null;
   setBusy(true);
   setStatus('working', '正在处理…');
+  const timeoutMs = sessionContext.a3?.enabled && sessionContext.a3?.phase === 'ERROR'
+    ? A3_TEXT_RETRY_TIMEOUT_MS
+    : TEXT_TIMEOUT_MS;
   try {
     const data = await requestStream('/api/message/stream', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text: clean, ...(actionContext ? { action_context: actionContext } : {}) }),
-    }, TEXT_TIMEOUT_MS, '请求等待时间过长，请稍后重试。', (event) => {
+    }, timeoutMs, '请求等待时间过长，请稍后重试。', (event) => {
       if (operation !== operationVersion) return;
       if (!pending) pending = addMessage({ message: event.message, variant: 'pending' }, false);
       else updatePendingMessage(pending, event.message);

@@ -105,6 +105,11 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn("message, variant: 'error', recoveryActions, noticeKey", self.script)
         self.assertIn("if (noticeKey) activeFailureNotices.add(noticeKey)", self.script)
 
+    def test_a3_error_text_retry_waits_100_seconds(self):
+        self.assertIn("const A3_TEXT_RETRY_TIMEOUT_MS = 100000", self.script)
+        self.assertIn("sessionContext.a3?.phase === 'ERROR'", self.script)
+        self.assertIn("}, timeoutMs, '请求等待时间过长，请稍后重试。'", self.script)
+
 
 if __name__ == "__main__":
     unittest.main()

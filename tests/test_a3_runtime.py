@@ -849,12 +849,44 @@ class A3RuntimeTests(unittest.TestCase):
                 return outputs[len(self.requests) - 1]
 
         observer = RetryObserver()
+        failures = []
 
-        result = observer.observe(self.source)
+        result = observer.observe_with_diagnostics(
+            self.source,
+            on_validation_error=lambda attempt, exc: failures.append((attempt, exc)),
+        )
 
         self.assertEqual(len(result.searchable_units), 2)
         self.assertEqual(len(observer.requests), 2)
         self.assertIn("empty groups are not allowed", observer.requests[1])
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0][0], 1)
+        self.assertEqual(failures[0][1].code, "empty_group")
+
+    def test_recovered_page_schema_failure_is_persisted(self):
+        class RecoveringObserver:
+            def observe_with_diagnostics(self, _image_path, *, on_validation_error):
+                on_validation_error(
+                    1,
+                    A3PageParseError(
+                        "diagram unit_ids must reference existing units",
+                        code="invalid_reference",
+                    ),
+                )
+                return parse_a3_page_understanding(_page_payload())
+
+        self.runtime.page_observer = RecoveringObserver()
+
+        response = self.runtime.handle_image("recovered-page-session", self.source)
+
+        self.assertEqual(response.intent, "a3_page_ready")
+        events = self.runtime.store.recent_page_errors()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(
+            events[0]["task_kind"],
+            "a3_page_understanding_schema_attempt_1",
+        )
+        self.assertEqual(events[0]["error_code"], "invalid_reference")
 
     def test_page_schema_failure_persists_specific_diagnostic(self):
         class FailingObserver:
