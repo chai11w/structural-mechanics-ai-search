@@ -12,7 +12,7 @@
 - 图片到检索链路：用 Qwen 识别题图中的荷载与可见题干信息，再进入本地题库检索。
 - 适度放开的自动章节：先单独抄取图片中实际可见的题干；没有题干的纯结构图直接要求用户手动选择，有题干时再按明确方法文字、典型题型文字和结构信息识别章节，并全量记录章节判断样本用于后续优化。
 - 主库 / 字母库分流：数值荷载题和未赋值字母荷载题分开维护，字母题通过编码归一化和结构类型筛选后复用相似度算法。
-- 候选视觉复筛：由 `rerank_provider` 配置为 Zhipu `glm-4.6v` 或 DashScope Qwen `qwen3.7-plus`；当前生产默认保持 Zhipu，Qwen 适配先在对照评测和隔离线路验证。复筛候选池最多 3 个（满分候选可全部保留），超时或失败仍整体回退粗筛。
+- 候选视觉复筛：由 `rerank_provider` 配置为 Zhipu `glm-4.6v` 或 DashScope Qwen `qwen3.7-plus`；首轮 10 并发对照中 Qwen + 当前 V1 Prompt 的 Top-1 命中率和同类召回明显优于其他组合，因此只在隔离的 8896 A2 线路切为该组合。现有 8788/8790 线路仍保持 Zhipu，避免未经线上样本验证直接影响正在使用的服务。最新 V4 Prompt 暂不切换，因为在固定样本上把同类候选普遍压低。复筛候选池最多 3 个（满分候选可全部保留），超时或失败仍整体回退粗筛。
 - 多题图处理：飞书端支持一张图片中包含多道题，先给出题号、章节、荷载摘要，再按用户选择逐题检索。
 - 题库维护闭环：支持漏存审计、飞书新增题目入库、候选错题删除；写入 live Excel 前会备份。
 
@@ -290,6 +290,7 @@ copy config.example.json config.local.json
   "rerank_provider": "zhipu",
   "zhipu_rerank_model": "glm-4.6v",
   "qwen_rerank_model": "qwen3.7-plus",
+  "qwen_rerank_prompt_version": "v1",
   "qwen_rerank_endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
   "qwen_rerank_enable_thinking": false,
   "dimension_filter_enabled": true,
@@ -303,7 +304,7 @@ copy config.example.json config.local.json
 python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter auto
 ```
 
-临时使用 Qwen 视觉复筛：
+临时切换视觉复筛提供方：
 
 ```powershell
 python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter auto --rerank-provider qwen --rerank-model qwen3.7-plus
@@ -312,7 +313,7 @@ python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter
 Prompt/提供方对照评测（显式运行才会发送题图并产生外部模型费用）：
 
 ```powershell
-python scripts/evaluate_rerank_matrix.py --prompts v1 v4 --providers zhipu qwen
+python scripts/evaluate_rerank_matrix.py --prompts v1 v4 --providers zhipu qwen --workers 10
 ```
 
 多 Agent CLI 默认开启尺寸复筛；如需临时回退：

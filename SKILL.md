@@ -49,7 +49,7 @@ python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter
 对照 Prompt 和提供方（会向选定的外部模型发送题图，运行前需确认 API 费用与数据范围）：
 
 ```powershell
-python scripts/evaluate_rerank_matrix.py --prompts v1 v4 --providers zhipu qwen
+python scripts/evaluate_rerank_matrix.py --prompts v1 v4 --providers zhipu qwen --workers 10
 ```
 
 多 Agent CLI 默认对字母库大候选池启用 V5.2 尺寸复筛；如需临时回退：
@@ -111,8 +111,8 @@ python scripts/feishu_tiku_bot.py dry-run-flow --image "D:\path\to\question.jpg"
 - CLI 图片检索需要显式添加 `--rerank` 才启用复筛。
 - 实验多 Agent CLI 支持 `--chapter auto`。自动章节只在 Qwen 输出非 `unknown`、置信度不低于 `0.45` 时使用；4/5/6/7/8 章仍主要依赖明确方法词或强方法步骤证据，纯结构图、荷载、支座、尺寸、EI 不能自动猜章节。
 - 复筛池中的候选不因数量少而跳过；有限复筛池最多 3 个，候选分数只影响排序，不在视觉层提前删除。
-- 复筛 Prompt 应比较候选图和查询图的结构拓扑、支座连接以及荷载位置/方向/分布；尺寸、文字、节点编号和题号不作为主要差异。当前生产 Prompt 仍是旧版 shape-only，Qwen load-aware Prompt 先经过对照评测再切换。
-- 复筛提供方由 `rerank_provider` 配置为 `zhipu` 或 `qwen`，默认保持智谱 `glm-4.6v`；Qwen 默认模型为 `qwen3.7-plus`。首轮单候选 8 秒超时后，会按粗筛分从高到低最多单独补评 3 个，每个补评 10 秒；若仍有候选未完成，整次结果回退为粗筛排序并提示“复筛未完成”，不会混合未验证视觉分和最终排序。
+- 复筛 Prompt 应比较候选图和查询图的结构拓扑、支座连接以及荷载位置/方向/分布；尺寸、文字、节点编号和题号不作为主要差异。当前生产使用 V1 shape-only Prompt，粗筛荷载分仍以独立 50% 权重参与最终分；V4 load-aware Prompt 已完成首轮对照，但同类召回不足，暂不切换。
+- 复筛提供方由 `rerank_provider` 配置为 `zhipu` 或 `qwen`；共享 8788/8790/CLI 默认仍是智谱 `glm-4.6v`，隔离 8896 A2 使用评测胜出的 Qwen `qwen3.7-plus` + V1 Prompt。首轮单候选 8 秒超时后，会按粗筛分从高到低最多单独补评 3 个，每个补评 10 秒；若仍有候选未完成，整次结果回退为粗筛排序并提示“复筛未完成”，不会混合未验证视觉分和最终排序。
 - 如果复筛后最终相似度 100% 的候选超过 1 个，会额外按杆件长度、跨长、高度和整体比例做打平复核。
 - 复筛后的用户可见结果只显示最终相似度。
 - 复筛结果保留 `>=90%` 的全部候选；没有候选达到 90% 时，按排序最多展示 Top 3 个达到暂定可靠门槛的候选；最高分低于可靠门槛时返回“未找到可靠相似题”。这个规则只用于正常完成的复筛结果，不改变复筛池；复筛超时、失败或不完整时仍回退粗筛排序。`_last_search.json` 会按最终显示排序重写，低于可靠门槛时会清空，避免旧排名被继续取答案。

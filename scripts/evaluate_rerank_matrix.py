@@ -3,12 +3,13 @@
 The script is intentionally opt-in: importing it does not call a provider.
 Running it sends the selected query/candidate images to the configured
 providers and writes raw per-case results plus recall, false-high, separation,
-and per-query Top-1 metrics to an isolated temporary directory.
+per-query Top-1, and estimated cost metrics to an isolated temporary directory.
 """
 
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import sys
 import time
@@ -23,6 +24,11 @@ if str(BASE) not in sys.path:
 
 import search
 from scripts.evaluate_shape_rerank_prompt import PAIRS
+from tiku_shared.model_costs import (
+    ModelCostCollector,
+    model_cost_scope,
+    submit_with_model_cost_context,
+)
 
 
 PROMPT_FILES = {
@@ -59,6 +65,33 @@ def score_one(provider: str, model: str, prompt: str, query: Path, candidate: Pa
         "reason": reason,
         "seconds": round(time.perf_counter() - started, 3),
         "ok": True,
+    }
+
+
+def run_case(case, timeout: float):
+    order, repeat, prompt_name, prompt, provider, model, pair, query, candidate = case
+    result = {"ok": False, "score": None, "reason": "", "seconds": 0.0}
+    started = time.perf_counter()
+    try:
+        result = score_one(provider, model, prompt, query, candidate, timeout)
+    except Exception as exc:  # noqa: BLE001 - preserve per-case failures.
+        result.update(
+            {
+                "reason": f"{type(exc).__name__}: {exc}",
+                "seconds": round(time.perf_counter() - started, 3),
+            }
+        )
+    return {
+        "order": order,
+        "repeat": repeat,
+        "prompt": prompt_name,
+        "provider": provider,
+        "model": model,
+        "name": pair.name,
+        "same_shape": pair.same_shape,
+        "query": str(query),
+        "candidate": str(candidate),
+        "result": result,
     }
 
 
@@ -141,6 +174,38 @@ def summarize(rows, *, same_threshold=0.8, false_high_threshold=0.9):
     return output
 
 
+def summarize_costs(collector):
+    records = collector.records()
+    by_provider = {}
+    for record in records:
+        key = (record.provider, record.model)
+        bucket = by_provider.setdefault(
+            key,
+            {"calls": 0, "estimated_cost_micros": 0, "priced_calls": 0},
+        )
+        bucket["calls"] += 1
+        bucket["estimated_cost_micros"] += record.estimated_cost_micros
+        bucket["priced_calls"] += record.pricing_status == "priced"
+    return {
+        "recorded_calls": len(records),
+        "estimated_cost_cny": round(
+            sum(record.estimated_cost_micros for record in records) / 1_000_000,
+            6,
+        ),
+        "priced_calls": sum(record.pricing_status == "priced" for record in records),
+        "by_provider": [
+            {
+                "provider": provider,
+                "model": model,
+                "calls": bucket["calls"],
+                "priced_calls": bucket["priced_calls"],
+                "estimated_cost_cny": round(bucket["estimated_cost_micros"] / 1_000_000, 6),
+            }
+            for (provider, model), bucket in sorted(by_provider.items())
+        ],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compare rerank prompts and providers on fixed image pairs.")
     parser.add_argument(
@@ -154,6 +219,12 @@ def main() -> int:
     parser.add_argument("--zhipu-model", default=search.DEFAULT_ZHIPU_RERANK_MODEL)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=10,
+        help="并发调用上限，默认 10；只影响评测，不改变生产复筛策略",
+    )
     parser.add_argument(
         "--same-threshold",
         type=float,
@@ -179,6 +250,8 @@ def main() -> int:
         raise RuntimeError("DASHSCOPE_API_KEY is not configured")
     if args.repeat < 1:
         raise ValueError("--repeat must be >= 1")
+    if args.workers < 1:
+        raise ValueError("--workers must be >= 1")
 
     prompts = {name: prompt_text(name) for name in args.prompts}
     expected_calls = len(PAIRS) * len(prompts) * len(args.providers) * args.repeat
@@ -192,10 +265,11 @@ def main() -> int:
             for pair in PAIRS
             if not (search.ROOT / pair.candidate).is_file()
         ]
-        print(json.dumps({"prompts": list(prompts), "providers": args.providers, "repeat": args.repeat, "expected_calls": expected_calls, "missing_images": missing}, ensure_ascii=False, indent=2))
+        print(json.dumps({"prompts": list(prompts), "providers": args.providers, "repeat": args.repeat, "workers": args.workers, "expected_calls": expected_calls, "missing_images": missing}, ensure_ascii=False, indent=2))
         return 0 if not missing else 2
 
-    rows = []
+    cases = []
+    order = 0
     for repeat in range(args.repeat):
         for prompt_name, prompt in prompts.items():
             for provider in args.providers:
@@ -203,37 +277,52 @@ def main() -> int:
                 for pair in PAIRS:
                     query = search.ROOT / pair.query
                     candidate = search.ROOT / pair.candidate
-                    result = {"ok": False, "score": None, "reason": "", "seconds": 0.0}
-                    started = time.perf_counter()
-                    try:
-                        result = score_one(provider, model, prompt, query, candidate, args.timeout)
-                    except Exception as exc:  # noqa: BLE001 - preserve per-case failures.
-                        result.update({"reason": f"{type(exc).__name__}: {exc}", "seconds": round(time.perf_counter() - started, 3)})
-                    rows.append(
-                        {
-                            "repeat": repeat + 1,
-                            "prompt": prompt_name,
-                            "provider": provider,
-                            "model": model,
-                            "name": pair.name,
-                            "same_shape": pair.same_shape,
-                            "query": str(query),
-                            "candidate": str(candidate),
-                            "result": result,
-                        }
+                    cases.append(
+                        (
+                            order,
+                            repeat + 1,
+                            prompt_name,
+                            prompt,
+                            provider,
+                            model,
+                            pair,
+                            query,
+                            candidate,
+                        )
                     )
-                    print(
-                        f"{prompt_name}/{provider}/{pair.name}: "
-                        f"{result['score']} {result['seconds']}s {result['reason']}"
-                    )
+                    order += 1
+
+    rows = []
+    collector = ModelCostCollector(
+        run_id=f"rerank-matrix-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
+    with model_cost_scope(collector):
+        with ThreadPoolExecutor(max_workers=min(args.workers, len(cases))) as executor:
+            futures = [
+                submit_with_model_cost_context(executor, run_case, case, args.timeout)
+                for case in cases
+            ]
+            for future in as_completed(futures):
+                row = future.result()
+                rows.append(row)
+                result = row["result"]
+                print(
+                    f"{row['prompt']}/{row['provider']}/{row['name']}: "
+                    f"{result['score']} {result['seconds']}s {result['reason']}"
+                )
+    rows.sort(key=lambda row: row["order"])
+    for row in rows:
+        row.pop("order", None)
 
     payload = {
         "prompts": list(prompts),
         "providers": args.providers,
         "repeat": args.repeat,
+        "workers": args.workers,
         "pair_count": len(PAIRS),
         "same_threshold": args.same_threshold,
         "false_high_threshold": args.false_high_threshold,
+        "cost_summary": summarize_costs(collector),
         "summary": summarize(
             rows,
             same_threshold=args.same_threshold,

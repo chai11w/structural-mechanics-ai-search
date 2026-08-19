@@ -110,6 +110,13 @@ class RerankPromptTest(unittest.TestCase):
         self.assertIn("支座符号细节", search.RERANK_PROMPT)
         self.assertNotIn("荷载位置和方向", search.RERANK_PROMPT)
 
+    def test_qwen_v1_prompt_version_reuses_current_prompt(self):
+        self.assertEqual(search._load_qwen_rerank_prompt("v1"), search.RERANK_PROMPT)
+
+    def test_qwen_v4_prompt_version_is_load_aware(self):
+        prompt = search._load_qwen_rerank_prompt("v4")
+        self.assertIn("荷载的类型、作用位置、方向和分布范围", prompt)
+
     def test_legacy_rerank_prompt_kept_for_comparison(self):
         self.assertNotEqual(search.LEGACY_RERANK_PROMPT, search.SHAPE_RERANK_PROMPT)
         self.assertIn("荷载位置和方向", search.LEGACY_RERANK_PROMPT)
@@ -176,8 +183,11 @@ class RerankPromptTest(unittest.TestCase):
             prompt=search.RERANK_PROMPT,
             timeout_seconds=None,
             model=search.DEFAULT_ZHIPU_RERANK_MODEL,
+            provider=None,
+            endpoint=None,
+            enable_thinking=None,
         ):
-            del client, query_image_path, prompt, timeout_seconds, model
+            del client, query_image_path, prompt, timeout_seconds, model, provider, endpoint, enable_thinking
             name = Path(candidate_path).name
             return vision_scores[name], name
 

@@ -27,6 +27,16 @@ from tiku_shared.model_costs import SQLiteModelCostLedger
 DEFAULT_PORT = 8896
 DEFAULT_RUNTIME_DIR = BASE / ".tmp_tiku_agent_a3_mvp_8896"
 SESSION_COOKIE = "tiku_agent_8896_session"
+A2_RERANK_POLICY = {
+    "provider": "qwen",
+    "model": "qwen3.7-plus",
+    "max_workers": 8,
+    "candidate_timeout_seconds": 12.0,
+    "retry_timeout_seconds": 12.0,
+    "retry_max_candidates": 8,
+    "retry_max_workers": 2,
+    "retry_failed_candidates": True,
+}
 
 
 def build_runtime(
@@ -50,6 +60,7 @@ def build_runtime(
         enable_dimension_filter=True,
         enable_external_load_screen=False,
         enable_chapter_scope_fallback=True,
+        rerank_policy=A2_RERANK_POLICY,
     )
     authority = image_triage_authority
     if authority is None and enable_triage:

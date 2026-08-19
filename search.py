@@ -77,6 +77,7 @@ DEFAULT_QWEN_RERANK_ENDPOINT = cfg.get(
 )
 DEFAULT_RERANK_PROVIDER = str(cfg.get("rerank_provider", "zhipu") or "zhipu").strip().lower()
 QWEN_RERANK_ENABLE_THINKING = bool(cfg.get("qwen_rerank_enable_thinking", False))
+QWEN_RERANK_PROMPT_VERSION = str(cfg.get("qwen_rerank_prompt_version", "v1") or "v1").strip().lower()
 
 
 def default_rerank_model(provider=None):
@@ -478,6 +479,24 @@ reason 必须少于6个汉字。"""
 
 
 RERANK_PROMPT = SHAPE_RERANK_PROMPT
+
+
+def _load_qwen_rerank_prompt(version):
+    version = str(version or "v1").strip().lower()
+    if version in {"v1", "current", "shape"}:
+        return RERANK_PROMPT
+    if version == "v2.1":
+        return DEFAULT_QWEN_RERANK_PROMPT
+    if version == "v4":
+        path = Path(__file__).parent / "tiku_agent" / "prompts" / "rerank_shape_v4_candidate.txt"
+        return path.read_text(encoding="utf-8")
+    raise ValueError(f"unsupported qwen rerank prompt version: {version}")
+
+
+try:
+    DEFAULT_QWEN_RERANK_PROMPT = _load_qwen_rerank_prompt(QWEN_RERANK_PROMPT_VERSION)
+except (OSError, ValueError):
+    DEFAULT_QWEN_RERANK_PROMPT = RERANK_PROMPT
 
 # Shared defaults for Feishu, CLI, and the isolated Agent. Keep the first
 # pass bounded, then retry only the most promising timed-out candidates.
