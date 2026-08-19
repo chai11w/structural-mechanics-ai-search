@@ -12,7 +12,7 @@ from scripts.run_tiku_agent_8896 import (
     build_runtime,
 )
 from scripts.run_tiku_agent_demo import build_runtime as build_a2_runtime
-from tiku_agent.external_load_screen import ZhipuExternalLoadScreen
+from tiku_agent.external_load_screen import QwenExternalLoadScreen
 from tiku_agent.state import AgentState
 
 
@@ -52,7 +52,7 @@ class TikuAgent8896FlowTest(unittest.TestCase):
 
             self.assertTrue(agent_8896.enable_chapter_scope_fallback)
             self.assertFalse(agent_8790.enable_chapter_scope_fallback)
-            self.assertIsInstance(runtime_8896.external_load_screen, ZhipuExternalLoadScreen)
+            self.assertIsInstance(runtime_8896.external_load_screen, QwenExternalLoadScreen)
 
     def test_8896_passes_qwen_policy_with_tool_parameter_names(self):
         with tempfile.TemporaryDirectory() as temp, patch(

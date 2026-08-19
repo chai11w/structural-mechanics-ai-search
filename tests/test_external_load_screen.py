@@ -8,7 +8,7 @@ from unittest.mock import patch
 import urllib.request
 from uuid import uuid4
 
-from tiku_agent.external_load_screen import ZhipuExternalLoadScreen
+from tiku_agent.external_load_screen import QwenExternalLoadScreen, ZhipuExternalLoadScreen
 from tiku_shared.model_costs import ModelCostCollector, model_cost_scope
 
 
@@ -70,6 +70,34 @@ class ExternalLoadScreenTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "unexpected"):
                 screen(self.image)
+
+    def test_qwen_normalizes_yes_and_records_dashscope_cost(self):
+        collector = ModelCostCollector(run_id="qwen-screen-test")
+        response = FakeResponse(
+            {
+                "id": "request-qwen-1",
+                "choices": [{"message": {"content": "yes"}}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 1},
+            }
+        )
+        screen = QwenExternalLoadScreen(api_key="test-key", timeout_seconds=15)
+
+        with patch.object(
+            urllib.request, "urlopen", return_value=response
+        ) as urlopen, model_cost_scope(collector):
+            verdict = screen(self.image)
+
+        self.assertEqual(verdict, "yes")
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "qwen3.7-plus")
+        self.assertFalse(payload["enable_thinking"])
+        self.assertNotIn("thinking", payload)
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 15)
+        record = collector.records()[0]
+        self.assertEqual(record.provider, "dashscope")
+        self.assertEqual(record.call_type, "external_load_screen")
+        self.assertEqual(record.total_tokens, 13)
 
 
 if __name__ == "__main__":
