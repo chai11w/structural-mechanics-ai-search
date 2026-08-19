@@ -820,6 +820,9 @@ def rerank_candidates_tool(
     retry_max_candidates: int | None = None,
     retry_max_workers: int | None = None,
     retry_failed_candidates: bool = False,
+    display_by_rerank_score: bool = False,
+    display_all_score: float = 0.95,
+    display_fallback_top_n: int = search.DISPLAY_MAX_RESULTS,
 ) -> ToolResult:
     """Rerank coarse candidates and return visible candidates only.
 
@@ -879,7 +882,15 @@ def rerank_candidates_tool(
             **rerank_options,
         )
         if reranked and search.rerank_results_complete(reranked):
-            displayed = search.select_display_results(reranked)
+            displayed = (
+                search.select_rerank_score_display_results(
+                    reranked,
+                    all_score=display_all_score,
+                    fallback_limit=display_fallback_top_n,
+                )
+                if display_by_rerank_score
+                else search.select_display_results(reranked)
+            )
             visible = normalize_rerank_results(displayed)
             if not visible:
                 return ToolResult.no_match(

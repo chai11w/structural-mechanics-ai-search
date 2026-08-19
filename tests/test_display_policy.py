@@ -51,6 +51,29 @@ class SharedDisplayPolicyTest(unittest.TestCase):
         ]
         self.assertEqual(search.select_display_results(below_reliable), [])
 
+    def test_rerank_score_policy_includes_ninety_five_percent_and_ignores_final_score(self):
+        results = [
+            {"rank": 1, "coarse_rank": 4, "score": 1.0, "rerank_score": 0.95, "final_score": 0.975},
+            {"rank": 2, "coarse_rank": 1, "score": 1.0, "rerank_score": 1.0, "final_score": 0.60},
+            {"rank": 3, "coarse_rank": 2, "score": 1.0, "rerank_score": 0.94, "final_score": 0.99},
+        ]
+
+        selected = search.select_rerank_score_display_results(results, all_score=0.95)
+
+        self.assertEqual([item["rerank_score"] for item in selected], [1.0, 0.95])
+
+    def test_rerank_score_policy_falls_back_to_visual_top_three_without_no_match(self):
+        results = [
+            {"rank": 1, "coarse_rank": 1, "score": 1.0, "rerank_score": 0.40},
+            {"rank": 2, "coarse_rank": 2, "score": 1.0, "rerank_score": 0.80},
+            {"rank": 3, "coarse_rank": 3, "score": 1.0, "rerank_score": 0.70},
+            {"rank": 4, "coarse_rank": 4, "score": 1.0, "rerank_score": 0.60},
+        ]
+
+        selected = search.select_rerank_score_display_results(results, all_score=0.95)
+
+        self.assertEqual([item["rerank_score"] for item in selected], [0.80, 0.70, 0.60])
+
     def test_agent_feishu_and_pipeline_share_default_display_limit(self):
         self.assertEqual(AgentToolConfig().rerank_top, search.DISPLAY_MAX_RESULTS)
         self.assertEqual(FeishuTikuOptions().rerank_top, search.DISPLAY_MAX_RESULTS)

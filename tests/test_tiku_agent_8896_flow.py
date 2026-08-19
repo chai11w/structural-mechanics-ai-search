@@ -77,6 +77,10 @@ class TikuAgent8896FlowTest(unittest.TestCase):
             )
             self.assertEqual(A2_RERANK_POLICY["rerank_provider"], "qwen")
             self.assertEqual(A2_RERANK_POLICY["rerank_model"], "qwen3.7-plus")
+            self.assertEqual(A2_RERANK_POLICY["max_workers"], 10)
+            self.assertTrue(A2_RERANK_POLICY["display_by_rerank_score"])
+            self.assertEqual(A2_RERANK_POLICY["display_all_score"], 0.95)
+            self.assertEqual(A2_RERANK_POLICY["display_fallback_top_n"], 3)
 
 
 if __name__ == "__main__":

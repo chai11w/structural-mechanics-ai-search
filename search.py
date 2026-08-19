@@ -1152,6 +1152,42 @@ def select_display_results(
     return renumbered
 
 
+def select_rerank_score_display_results(
+    results,
+    all_score=0.95,
+    fallback_limit=DISPLAY_MAX_RESULTS,
+):
+    """Display all high visual scores, or the visual Top-N as a fallback.
+
+    This policy deliberately ignores the blended final score. Coarse load
+    similarity remains a tie-breaker, while a low visual score never turns a
+    non-empty rerank result into "no match".
+    """
+    if not results:
+        return []
+
+    ordered = sorted(
+        results,
+        key=lambda item: (
+            -float(item.get("rerank_score") or 0),
+            -float(item.get("score") or 0),
+            int(item.get("coarse_rank") or item.get("rank") or 0),
+        ),
+    )
+    very_high = [
+        item for item in ordered
+        if float(item.get("rerank_score") or 0) >= float(all_score)
+    ]
+    selected = very_high or ordered[:max(1, int(fallback_limit))]
+
+    renumbered = []
+    for rank, item in enumerate(selected, 1):
+        copied = dict(item)
+        copied["rank"] = rank
+        renumbered.append(copied)
+    return renumbered
+
+
 def compute_similarity(query_loads, db_loads):
     """类型级相似度：每类取交集/各自总数的 min，0/0 跳过，返回 0~1"""
     def group_by_type(loads):

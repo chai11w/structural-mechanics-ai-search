@@ -685,6 +685,34 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertEqual(result.data["best_final_score"], 0.375)
         self.assertIn("可靠相似题", result.error)
 
+    def test_agent_can_display_by_rerank_score_with_top_three_fallback(self):
+        candidates = [
+            {"rank": 1, "path": "q1.jpg", "score": 1.0, "name": "q1.jpg"},
+            {"rank": 2, "path": "q2.jpg", "score": 1.0, "name": "q2.jpg"},
+            {"rank": 3, "path": "q3.jpg", "score": 1.0, "name": "q3.jpg"},
+            {"rank": 4, "path": "q4.jpg", "score": 1.0, "name": "q4.jpg"},
+        ]
+        reranked = [
+            {**item, "rerank_score": score, "final_score": 0.99, "rerank_status": "completed"}
+            for item, score in zip(candidates, (0.40, 0.80, 0.70, 0.60))
+        ]
+
+        with patch("tiku_agent.tools.search.rerank_candidates", return_value=reranked):
+            result = rerank_candidates_tool(
+                "query.jpg",
+                candidates,
+                route="main",
+                display_by_rerank_score=True,
+                display_all_score=0.95,
+                display_fallback_top_n=3,
+            )
+
+        self.assertEqual(result.code, "RERANK_COMPLETED")
+        self.assertEqual(
+            [item["path"] for item in result.data["visible_candidates"]],
+            ["q2.jpg", "q3.jpg", "q4.jpg"],
+        )
+
     def test_agent_rerank_keeps_bounded_low_score_pool_for_model_comparison(self):
         candidates = [
             {"rank": 1, "path": "q1.jpg", "score": 0.50, "name": "q1.jpg"},

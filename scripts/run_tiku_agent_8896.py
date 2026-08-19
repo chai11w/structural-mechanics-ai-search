@@ -30,12 +30,15 @@ SESSION_COOKIE = "tiku_agent_8896_session"
 A2_RERANK_POLICY = {
     "rerank_provider": "qwen",
     "rerank_model": "qwen3.7-plus",
-    "max_workers": 8,
+    "max_workers": 10,
     "candidate_timeout_seconds": 12.0,
     "retry_timeout_seconds": 12.0,
     "retry_max_candidates": 8,
     "retry_max_workers": 2,
     "retry_failed_candidates": True,
+    "display_by_rerank_score": True,
+    "display_all_score": 0.95,
+    "display_fallback_top_n": 3,
 }
 
 

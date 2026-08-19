@@ -684,7 +684,7 @@ def normalize_rerank_results(results: list[dict[str, Any]]) -> list[dict[str, An
             "path": item["path"],
             "name": item.get("name") or search._rel_path_from_question_path(item["path"]),
             "score": item.get("score", 0),
-            "coarse_rank": item.get("rank"),
+            "coarse_rank": item.get("coarse_rank", item.get("rank")),
             "rerank_score": item.get("rerank_score"),
             "final_score": item.get("final_score"),
             "length_score": item.get("length_score"),
