@@ -74,6 +74,14 @@ def _page_payload() -> dict:
     }
 
 
+def _single_page_payload() -> dict:
+    payload = _page_payload()
+    payload["a3_reason_evidence"] = []
+    payload["groups"][0]["units"] = payload["groups"][0]["units"][:1]
+    payload["diagrams"] = payload["diagrams"][:1]
+    return payload
+
+
 class FakeObserver:
     def __init__(self):
         self.calls = 0
@@ -81,6 +89,11 @@ class FakeObserver:
     def observe(self, _image_path: Path):
         self.calls += 1
         return parse_a3_page_understanding(_page_payload())
+
+
+class FakeSingleObserver:
+    def observe(self, _image_path: Path):
+        return parse_a3_page_understanding(_single_page_payload())
 
 
 class FakeVerifier:
@@ -141,6 +154,23 @@ class FakeAutoCropper:
                     binding_evidence="右侧结构图",
                 ),
             ),
+            unknowns=(),
+        )
+
+
+class FakeSingleAutoCropper:
+    def ground(self, _image_path, _units, _page_understanding):
+        return A3AutoCropPage(
+            page_status="ready",
+            targets=(A3AutoCropTarget(
+                target_id="c001",
+                unit_id="g1-u1",
+                question_label="四-1",
+                bbox=(80, 100, 920, 700),
+                status="auto_ready",
+                reason_codes=(),
+                binding_evidence="唯一结构图",
+            ),),
             unknowns=(),
         )
 
@@ -463,6 +493,29 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertTrue(snapshot["auto_crop_overlay_available"])
         self.assertTrue(runtime.current_auto_crop_overlay_path("auto-page").is_file())
         self.assertEqual(load_calls, [])
+
+    def test_single_auto_crop_validates_and_enters_a2_without_user_selection(self):
+        load_calls = []
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "single-auto.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "single-auto-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeSingleObserver(),
+            crop_verifier=self.verifier,
+            auto_cropper=FakeSingleAutoCropper(),
+            external_load_screen=lambda path: load_calls.append(Path(path)) or "yes",
+        )
+
+        response = runtime.handle_image("single-auto", self.source)
+
+        self.assertEqual(response.intent, "search_image")
+        snapshot = runtime.session_snapshot("single-auto")["a3"]
+        self.assertEqual(snapshot["phase"], A3_PHASE_A2_ACTIVE)
+        self.assertEqual(snapshot["requested_unit_ids"], ["g1-u1"])
+        self.assertEqual(snapshot["units"][0]["validation_status"], "auto_ready")
+        self.assertEqual(self.verifier.calls, ["g1-u1"])
+        self.assertEqual(len(load_calls), 1)
+        self.assertEqual(len(self.a2.prechecked_calls), 1)
 
     def test_prepare_only_validates_requested_auto_crops_then_directly_enters_a2(self):
         load_calls = []

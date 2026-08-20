@@ -428,7 +428,12 @@ class A3MvpRuntime:
                         progress=progress,
                         request_id=request_id,
                     )
-                return self._retry_page_understanding(state, progress=progress)
+                return self._retry_page_understanding(
+                    state,
+                    identity_key=identity_key,
+                    progress=progress,
+                    request_id=request_id,
+                )
             if state.phase in {A3_PHASE_WAIT_SELECTION, A3_PHASE_COMPLETE}:
                 unit_id, ambiguous = _resolve_unit_selection(clean_text, state.remaining_units)
                 if unit_id:
@@ -638,61 +643,74 @@ class A3MvpRuntime:
                     code="STALE_ACTION",
                 )
 
-            state.requested_unit_ids = requested
-            state.selected_unit_id = ""
-            state.phase = A3_PHASE_AUTO_VALIDATING
-            self.store.save(state)
-            candidates = [
-                unit_id
-                for unit_id in requested
-                if self._auto_crop_can_validate(state, unit_id)
-            ]
-            if progress is not None:
-                progress(
-                    "a3_auto_validating",
-                    f"正在并发校验 {len(candidates)} 张自动裁图…"
-                    if candidates
-                    else "所选题目需要人工裁剪，正在准备…",
-                )
-
-            results: dict[str, dict[str, Any]] = {}
-            if candidates:
-                workers = min(self.auto_crop_max_workers, len(candidates))
-                with ThreadPoolExecutor(max_workers=workers) as executor:
-                    futures = {
-                        executor.submit(self._validate_auto_crop, state, unit_id): unit_id
-                        for unit_id in candidates
-                    }
-                    for future in as_completed(futures):
-                        unit_id = futures[future]
-                        try:
-                            results[unit_id] = future.result()
-                        except Exception as exc:  # noqa: BLE001 - isolate one crop failure.
-                            results[unit_id] = {
-                                "validation_status": "manual_required",
-                                "external_load_status": "error",
-                                "verification_checks": {},
-                                "error_type": type(exc).__name__,
-                            }
-
-            for unit_id in requested:
-                record = state.auto_crops.setdefault(unit_id, {})
-                if unit_id in results:
-                    record.update(results[unit_id])
-                elif record.get("validation_status") != "auto_ready":
-                    record["validation_status"] = "manual_required"
-            state.phase = A3_PHASE_WAIT_SELECTION
-            self.store.save(state)
-            ready = sum(
-                state.auto_crops.get(unit_id, {}).get("validation_status") == "auto_ready"
-                for unit_id in requested
+            ready, manual = self._prepare_units_locked(
+                state,
+                requested,
+                progress=progress,
             )
-            manual = len(requested) - ready
             text = f"已准备 {len(requested)} 道题：{ready} 道可以直接检索"
             if manual:
                 text += f"，{manual} 道需要人工裁剪"
             text += "。请选择一道继续。"
             return _response(text, state, intent="a3_units_prepared")
+
+    def _prepare_units_locked(
+        self,
+        state: A3SessionState,
+        requested: Sequence[str],
+        *,
+        progress: ProgressReporter | None,
+    ) -> tuple[int, int]:
+        state.requested_unit_ids = list(requested)
+        state.selected_unit_id = ""
+        state.phase = A3_PHASE_AUTO_VALIDATING
+        self.store.save(state)
+        candidates = [
+            unit_id
+            for unit_id in requested
+            if self._auto_crop_can_validate(state, unit_id)
+        ]
+        if progress is not None:
+            progress(
+                "a3_auto_validating",
+                f"正在并发校验 {len(candidates)} 张自动裁图…"
+                if candidates
+                else "所选题目需要人工裁剪，正在准备…",
+            )
+
+        results: dict[str, dict[str, Any]] = {}
+        if candidates:
+            workers = min(self.auto_crop_max_workers, len(candidates))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(self._validate_auto_crop, state, unit_id): unit_id
+                    for unit_id in candidates
+                }
+                for future in as_completed(futures):
+                    unit_id = futures[future]
+                    try:
+                        results[unit_id] = future.result()
+                    except Exception as exc:  # noqa: BLE001 - isolate one crop failure.
+                        results[unit_id] = {
+                            "validation_status": "manual_required",
+                            "external_load_status": "error",
+                            "verification_checks": {},
+                            "error_type": type(exc).__name__,
+                        }
+
+        for unit_id in requested:
+            record = state.auto_crops.setdefault(unit_id, {})
+            if unit_id in results:
+                record.update(results[unit_id])
+            elif record.get("validation_status") != "auto_ready":
+                record["validation_status"] = "manual_required"
+        state.phase = A3_PHASE_WAIT_SELECTION
+        self.store.save(state)
+        ready = sum(
+            state.auto_crops.get(unit_id, {}).get("validation_status") == "auto_ready"
+            for unit_id in requested
+        )
+        return ready, len(requested) - ready
 
     def _auto_crop_can_validate(self, state: A3SessionState, unit_id: str) -> bool:
         record = state.auto_crops.get(unit_id) or {}
@@ -1113,14 +1131,22 @@ class A3MvpRuntime:
         state.entry_route = "A3"
         state.phase = A3_PHASE_UNDERSTANDING
         self.store.save(state)
-        return self._understand_page(state, persisted, progress=progress)
+        return self._understand_page(
+            state,
+            persisted,
+            identity_key=identity_key,
+            progress=progress,
+            request_id=request_id,
+        )
 
     def _understand_page(
         self,
         state: A3SessionState,
         persisted: Path,
         *,
+        identity_key: str,
         progress: ProgressReporter | None,
+        request_id: str,
     ) -> AgentResponse:
         if progress is not None:
             progress("a3_understanding", "正在理解整页题目和图形关系…")
@@ -1150,7 +1176,9 @@ class A3MvpRuntime:
             state,
             understanding,
             persisted,
+            identity_key=identity_key,
             progress=progress,
+            request_id=request_id,
             retry=False,
         )
 
@@ -1158,7 +1186,9 @@ class A3MvpRuntime:
         self,
         state: A3SessionState,
         *,
+        identity_key: str,
         progress: ProgressReporter | None,
+        request_id: str,
     ) -> AgentResponse:
         if progress is not None:
             progress("a3_understanding", "正在重新理解整页题目…")
@@ -1186,7 +1216,9 @@ class A3MvpRuntime:
             state,
             understanding,
             Path(state.source_page_path),
+            identity_key=identity_key,
             progress=progress,
+            request_id=request_id,
             retry=True,
         )
 
@@ -1196,7 +1228,9 @@ class A3MvpRuntime:
         understanding: Any,
         persisted: Path,
         *,
+        identity_key: str,
         progress: ProgressReporter | None,
+        request_id: str,
         retry: bool,
     ) -> AgentResponse:
         state.page_understanding = understanding.to_dict(include_derived=True)
@@ -1222,6 +1256,16 @@ class A3MvpRuntime:
         if self.auto_cropper is not None:
             self._ground_auto_crops(state, persisted, progress=progress)
             if state.auto_crop_enabled:
+                if len(searchable) == 1:
+                    unit_id = str(searchable[0]["unit_id"])
+                    self._prepare_units_locked(state, [unit_id], progress=progress)
+                    return self._select_locked(
+                        state,
+                        unit_id,
+                        identity_key=identity_key,
+                        progress=progress,
+                        request_id=request_id,
+                    )
                 state.phase = A3_PHASE_WAIT_SELECTION
                 self.store.save(state)
                 text = (
