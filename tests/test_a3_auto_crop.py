@@ -70,11 +70,19 @@ class A3AutoCropContractTests(unittest.TestCase):
         with self.assertRaisesRegex(A3AutoCropError, "every allowed unit"):
             parse_a3_auto_crop_page(payload, expected_units=EXPECTED_UNITS)
 
-    def test_model_cannot_relabel_or_invent_unit(self):
+    def test_model_label_cannot_override_authoritative_unit_label(self):
         payload = _payload()
         payload["targets"][0]["question_label"] = "四-9"
 
-        with self.assertRaisesRegex(A3AutoCropError, "question_label"):
+        page = parse_a3_auto_crop_page(payload, expected_units=EXPECTED_UNITS)
+
+        self.assertEqual(page.targets[0].question_label, "四-1")
+
+    def test_model_cannot_invent_unit_id(self):
+        payload = _payload()
+        payload["targets"][0]["unit_id"] = "g1-u9"
+
+        with self.assertRaisesRegex(A3AutoCropError, "not allowed"):
             parse_a3_auto_crop_page(payload, expected_units=EXPECTED_UNITS)
 
     def test_equivalent_label_punctuation_is_canonicalized_by_unit_id(self):

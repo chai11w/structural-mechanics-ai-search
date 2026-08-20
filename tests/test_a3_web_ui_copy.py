@@ -32,6 +32,15 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn(".lightbox { position: fixed; z-index: 120", self.style)
         self.assertIn(".a3-sheet-backdrop, .a3-example-backdrop { position: fixed; z-index: 80", self.style)
 
+    def test_manual_fallback_keeps_available_page_overlay(self):
+        manual_body = self.script[
+            self.script.index("function renderA3SheetUnits"):
+            self.script.index("function renderA3AutoSheetUnits")
+        ]
+
+        self.assertIn("a3SheetOverlay.hidden = !a3.auto_crop_overlay_available", manual_body)
+        self.assertIn("/api/a3/overlay?revision=", manual_body)
+
     def test_searched_a3_unit_is_visually_and_functionally_closed(self):
         self.assertIn("searched: Boolean(unit.searched)", self.script)
         self.assertIn("host.disabled = closed || unit.selected", self.script)

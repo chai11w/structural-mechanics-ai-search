@@ -613,12 +613,12 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(response.intent, "a3_page_ready")
         snapshot = runtime.session_snapshot("all-manual")["a3"]
         self.assertFalse(snapshot["auto_crop_enabled"])
+        self.assertTrue(snapshot["auto_crop_overlay_available"])
         selected = runtime.select_unit("all-manual", "g1-u1", task_revision=1)
         self.assertEqual(selected.intent, "a3_unit_selected")
-        self.assertEqual(
-            runtime.session_snapshot("all-manual")["a3"]["phase"],
-            A3_PHASE_CROP_REQUIRED,
-        )
+        selected_snapshot = runtime.session_snapshot("all-manual")["a3"]
+        self.assertEqual(selected_snapshot["phase"], A3_PHASE_CROP_REQUIRED)
+        self.assertEqual(selected_snapshot["crop_draft"]["bounds"]["x"], 0.08)
 
     def test_full_flow_a1_stops_without_a2_or_a3_processing(self):
         authority = FakeFlowAuthority("A1")

@@ -1643,7 +1643,10 @@ function renderA3SheetUnits(a3 = a3Current()) {
     return;
   }
   a3SheetSubtitle.textContent = '选择其他题目后会重新裁剪并搜索';
-  a3SheetOverlay.hidden = true;
+  a3SheetOverlay.hidden = !a3.auto_crop_overlay_available;
+  if (a3.auto_crop_overlay_available) {
+    a3SheetOverlayImage.src = `/api/a3/overlay?revision=${encodeURIComponent(a3.task_revision)}`;
+  }
   a3SheetFooter.hidden = true;
   a3.units.forEach((unit) => {
     const button = document.createElement('button');

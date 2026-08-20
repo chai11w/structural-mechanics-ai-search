@@ -30,7 +30,7 @@ reason_codes 只允许：ambiguous_binding、incomplete_structure、multiple_str
   "targets": [{
     "target_id": "c001",
     "unit_id": "原样复制 allowed_units 中的 unit_id",
-    "question_label": "原样复制对应 display_label",
+    "question_label": "复制对应 display_label，仅供审阅，绑定以 unit_id 为准",
     "bbox": [0,0,1000,1000],
     "status": "auto_ready|review_required|no_target",
     "reason_codes": [],

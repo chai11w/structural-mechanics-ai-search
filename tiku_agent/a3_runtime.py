@@ -1374,14 +1374,15 @@ class A3MvpRuntime:
                     record["error_type"] = type(exc).__name__
             records[target.unit_id] = record
         state.auto_crops = records
+        has_bounds = any(record.get("bounds") for record in records.values())
+        if has_bounds:
+            try:
+                state.auto_crop_overlay_path = str(self._write_auto_crop_overlay(state))
+            except Exception:  # noqa: BLE001 - overlay is optional, clean crops remain usable.
+                state.auto_crop_overlay_path = ""
         if page.page_status == "manual_required":
             state.auto_crop_enabled = False
-            state.auto_crop_overlay_path = ""
             return
-        try:
-            state.auto_crop_overlay_path = str(self._write_auto_crop_overlay(state))
-        except Exception:  # noqa: BLE001 - review overlay is optional, clean crops remain usable.
-            state.auto_crop_overlay_path = ""
 
     def _select_locked(
         self,
@@ -1458,15 +1459,14 @@ class A3MvpRuntime:
         state.crop_review_required = False
         state.crop_review_feedback = ""
         state.last_error = ""
-        if state.auto_crop_enabled:
-            auto_bounds = dict(auto_record.get("bounds") or {})
-            auto_path = str(auto_record.get("path") or "")
-            if auto_bounds:
-                state.crop_drafts[unit_id] = {
-                    "path": auto_path,
-                    "bounds": auto_bounds,
-                    "source": "auto_suggestion",
-                }
+        auto_bounds = dict(auto_record.get("bounds") or {})
+        auto_path = str(auto_record.get("path") or "")
+        if auto_bounds:
+            state.crop_drafts[unit_id] = {
+                "path": auto_path,
+                "bounds": auto_bounds,
+                "source": "auto_suggestion",
+            }
         self.store.save(state)
         return _response(
             (
