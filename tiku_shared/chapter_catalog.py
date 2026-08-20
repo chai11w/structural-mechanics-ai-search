@@ -68,6 +68,7 @@ CHAPTER_DEFINITIONS = (
         display_name="静定结构受力",
         storage_key="2静定结构",
         textbook_aliases=("静定结构", "静定梁", "静定刚架", "静定钢架", "静定桁架"),
+        method_aliases=("结点法", "节点法", "截面法"),
     ),
     ChapterDefinition(
         topic_id="static_displacement",

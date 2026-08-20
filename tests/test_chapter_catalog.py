@@ -29,7 +29,17 @@ class ChapterCatalogTest(unittest.TestCase):
         self.assertEqual(len(supported_topic_names()), 7)
 
     def test_supported_method_aliases_map_to_one_storage_key(self):
-        for text in ("力法", "弯矩分配", "弯矩分配法", "渐近法", "矩阵位移法", "图乘法"):
+        for text in (
+            "力法",
+            "弯矩分配",
+            "弯矩分配法",
+            "渐近法",
+            "矩阵位移法",
+            "图乘法",
+            "结点法",
+            "节点法",
+            "截面法",
+        ):
             with self.subTest(text=text):
                 result = parse_chapter_scope(text)
                 self.assertEqual(result.status, "supported")
@@ -39,6 +49,9 @@ class ChapterCatalogTest(unittest.TestCase):
         self.assertEqual(parse_chapter_scope("弯矩分配法").storage_key, "6力矩分配")
         self.assertEqual(parse_chapter_scope("弯矩分配").storage_key, "6力矩分配")
         self.assertEqual(parse_chapter_scope("渐近法").storage_key, "6力矩分配")
+        self.assertEqual(parse_chapter_scope("结点法").storage_key, "2静定结构")
+        self.assertEqual(parse_chapter_scope("节点法").storage_key, "2静定结构")
+        self.assertEqual(parse_chapter_scope("截面法").storage_key, "2静定结构")
 
     def test_generic_force_or_distribution_words_do_not_select_a_chapter(self):
         for text in ("内力", "内力图", "剪力分配", "分配法"):

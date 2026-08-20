@@ -60,6 +60,20 @@
       "expected": {"status": "supported", "topic_id": "static_internal_force", "storage_key": "2静定结构", "reason": "visible_problem_text_supported"}
     },
     {
+      "id": "image_method_of_joints",
+      "category": "supported_alias",
+      "entry": "image",
+      "input": {"visible_problem_text": "用结点法计算桁架各杆内力"},
+      "expected": {"status": "supported", "topic_id": "static_internal_force", "storage_key": "2静定结构", "reason": "visible_problem_text_supported"}
+    },
+    {
+      "id": "image_method_of_sections",
+      "category": "supported_alias",
+      "entry": "image",
+      "input": {"visible_problem_text": "用截面法计算桁架指定杆件内力"},
+      "expected": {"status": "supported", "topic_id": "static_internal_force", "storage_key": "2静定结构", "reason": "visible_problem_text_supported"}
+    },
+    {
       "id": "image_static_displacement",
       "category": "supported_alias",
       "entry": "image",
@@ -289,6 +303,27 @@
       "entry": "chapter_reply",
       "input": {"text": "力法"},
       "expected": {"status": "supported", "topic_id": "force_method", "storage_key": "4力法", "reason": "explicit_supported_alias"}
+    },
+    {
+      "id": "reply_method_of_joints",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "结点法"},
+      "expected": {"status": "supported", "topic_id": "static_internal_force", "storage_key": "2静定结构", "reason": "explicit_supported_alias"}
+    },
+    {
+      "id": "reply_method_of_joints_common_spelling",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "节点法"},
+      "expected": {"status": "supported", "topic_id": "static_internal_force", "storage_key": "2静定结构", "reason": "explicit_supported_alias"}
+    },
+    {
+      "id": "reply_method_of_sections",
+      "category": "chapter_reply",
+      "entry": "chapter_reply",
+      "input": {"text": "截面法"},
+      "expected": {"status": "supported", "topic_id": "static_internal_force", "storage_key": "2静定结构", "reason": "explicit_supported_alias"}
     },
     {
       "id": "reply_moment_distribution",

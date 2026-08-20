@@ -33,6 +33,17 @@ class IntentV2Test(unittest.TestCase):
         classifier = decide_intent_v2("查第二道题", context)
         self.assertEqual(classifier.question_index, 2)
 
+    def test_static_truss_methods_select_chapter_two(self):
+        context = ConversationContextV2(
+            phase="WAIT_CHAPTER",
+            has_active_image=True,
+        )
+        for text in ("结点法", "节点法", "截面法"):
+            with self.subTest(text=text):
+                decision = decide_intent_v2(text, context)
+                self.assertEqual(decision.action, "set_chapter")
+                self.assertEqual(decision.chapter_override, "2静定结构")
+
     def test_bare_number_follows_active_namespace_and_out_of_range_clarifies(self):
         allowed = ConversationContextV2(
             phase="ANSWERED",

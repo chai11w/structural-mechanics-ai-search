@@ -117,6 +117,19 @@ class AssignedSymbolicRoutingTest(unittest.TestCase):
         self.assertEqual(chapter, "2静定结构")
         self.assertEqual(confidence, 0.9)
 
+    def test_visible_static_truss_method_can_select_chapter_two(self):
+        for method in ("结点法", "节点法", "截面法"):
+            with self.subTest(method=method):
+                chapter, confidence, _ = guard_chapter_prediction(
+                    "2静定结构",
+                    0.9,
+                    f"用{method}计算图示桁架指定杆件的内力",
+                    visible_problem_text=f"用{method}计算图示桁架指定杆件的内力",
+                )
+
+                self.assertEqual(chapter, "2静定结构")
+                self.assertEqual(confidence, 0.9)
+
     def test_unquoted_force_method_text_is_explicit_chapter_evidence(self):
         chapter, confidence, evidence = guard_chapter_prediction(
             "4力法",
