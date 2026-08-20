@@ -6,6 +6,7 @@ from tiku_agent.a3_auto_crop import (
     A3AutoCropError,
     GlmA3AutoCropper,
     build_allowed_units,
+    expand_normalized_bbox,
     normalized_bbox_to_bounds,
     parse_a3_auto_crop_page,
 )
@@ -108,6 +109,20 @@ class A3AutoCropContractTests(unittest.TestCase):
         self.assertEqual(
             normalized_bbox_to_bounds((100, 200, 650, 800)),
             {"x": 0.1, "y": 0.2, "width": 0.55, "height": 0.6},
+        )
+
+    def test_bbox_expansion_adds_five_percent_per_side_with_page_caps(self):
+        self.assertEqual(
+            expand_normalized_bbox((100, 200, 500, 600)),
+            (80, 180, 520, 620),
+        )
+        self.assertEqual(
+            expand_normalized_bbox((5, 5, 105, 105)),
+            (0, 0, 115, 115),
+        )
+        self.assertEqual(
+            expand_normalized_bbox((100, 100, 900, 900)),
+            (70, 70, 930, 930),
         )
 
     def test_allowed_units_preserve_only_text_and_binding_evidence(self):

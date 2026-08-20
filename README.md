@@ -145,7 +145,7 @@ python -B scripts/run_tiku_agent_8896.py
 
 默认访问 `http://127.0.0.1:8896`，独立 Cookie 为 `tiku_agent_8896_session`，分流、A3/A2 会话、裁剪图、模型费用和反馈数据都位于 `.tmp_tiku_agent_a3_mvp_8896/`。上传新题或切换子题只重置当前检索状态，已经显示的题图、裁剪图、候选和答案继续保留到会话过期；新建对话或最后一次操作 2 小时后才统一清理。8896 与 8790 的 A2 和 A3→A2 入口共用严格章节三态及 Qwen 视觉复筛策略；8788 与参数式 CLI 默认策略不变。`--disable-auto-crop` 可原位回退到 V0 人工裁剪，`--disable-triage` 只用于本地诊断固定 A3 路径。
 
-8790 现使用 `scripts/run_tiku_agent_8790.py` 将上述 A1/A2/A3 与 A3-V1 自动裁图提升为生产业务内核，并继续通过 `.tmp_tiku_admin_8795/control.sqlite3` 使用原邀请码认证。运行数据仍保存在 `.tmp_tiku_agent_v2_prod_8790/`；旧 `session.db` 不复用为 A3 会话库，新流程使用独立的 `a3_sessions.sqlite3` 与 `a3_sessions/`。本轮暂不保证 8795 对 A3 子 A2 费用和新反馈的完整汇总。
+8790 现使用 `scripts/run_tiku_agent_8790.py` 将上述 A1/A2/A3 与 A3-V1 自动裁图提升为生产业务内核，并继续通过 `.tmp_tiku_admin_8795/control.sqlite3` 使用原邀请码认证。GLM 原始框会保留为 `model_bbox`；实际裁图在四边各增加原框尺寸的 5%，单边限制为整页归一化坐标的 1%～3%，减少支座、荷载和杆件贴边导致的误判。运行数据仍保存在 `.tmp_tiku_agent_v2_prod_8790/`；旧 `session.db` 不复用为 A3 会话库，新流程使用独立的 `a3_sessions.sqlite3` 与 `a3_sessions/`。本轮暂不保证 8795 对 A3 子 A2 费用和新反馈的完整汇总。
 
 长期本地运行使用 `scripts/tiku_agent_watchdog_8896.ps1`：它只管理 8896 和 `.tmp_tiku_agent_a3_mvp_8896/`，每 20 秒检查一次 `/health`，失败时重启 8896，不复用 8790 的运行状态。本机计划任务名为 `Tiku Agent A3 8896`，在用户登录时隐藏启动该看门狗；日志和 PID 位于运行目录的 `service_logs/`。
 

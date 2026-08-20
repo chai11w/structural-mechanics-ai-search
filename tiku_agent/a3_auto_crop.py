@@ -23,6 +23,9 @@ A3_AUTO_REASON_CODES = {
     "crop_boundary_uncertain",
     "unsupported_diagram",
 }
+A3_AUTO_CROP_PADDING_RATIO = 0.05
+A3_AUTO_CROP_MIN_PADDING = 10
+A3_AUTO_CROP_MAX_PADDING = 30
 
 
 class A3AutoCropError(RuntimeError):
@@ -244,6 +247,30 @@ def normalized_bbox_to_bounds(bbox: Sequence[int]) -> dict[str, float]:
         "width": (x2 - x1) / 1000.0,
         "height": (y2 - y1) / 1000.0,
     }
+
+
+def expand_normalized_bbox(
+    bbox: Sequence[int],
+    *,
+    padding_ratio: float = A3_AUTO_CROP_PADDING_RATIO,
+    min_padding: int = A3_AUTO_CROP_MIN_PADDING,
+    max_padding: int = A3_AUTO_CROP_MAX_PADDING,
+) -> tuple[int, int, int, int]:
+    """Add bounded safety space around a model bbox in the 0..1000 frame."""
+    parsed = _bbox(list(bbox), allow_none=False)
+    assert parsed is not None
+    x1, y1, x2, y2 = parsed
+    ratio = max(0.0, float(padding_ratio))
+    lower = max(0, int(min_padding))
+    upper = max(lower, int(max_padding))
+    pad_x = min(upper, max(lower, round((x2 - x1) * ratio)))
+    pad_y = min(upper, max(lower, round((y2 - y1) * ratio)))
+    return (
+        max(0, x1 - pad_x),
+        max(0, y1 - pad_y),
+        min(1000, x2 + pad_x),
+        min(1000, y2 + pad_y),
+    )
 
 
 def _bbox(value: object, *, allow_none: bool) -> tuple[int, int, int, int] | None:

@@ -18,6 +18,7 @@ from PIL import Image, ImageDraw, ImageOps
 
 from tiku_agent.a3_auto_crop import (
     A3AutoCropper,
+    expand_normalized_bbox,
     normalized_bbox_to_bounds,
 )
 from tiku_agent.a3_models import (
@@ -1344,16 +1345,22 @@ class A3MvpRuntime:
         }
         records: dict[str, dict[str, Any]] = {}
         for target in page.targets:
-            bounds = (
-                normalized_bbox_to_bounds(target.bbox)
+            crop_bbox = (
+                expand_normalized_bbox(target.bbox)
                 if target.bbox is not None
+                else None
+            )
+            bounds = (
+                normalized_bbox_to_bounds(crop_bbox)
+                if crop_bbox is not None
                 else {}
             )
             record: dict[str, Any] = {
                 "target_id": target.target_id,
                 "unit_id": target.unit_id,
                 "question_label": target.question_label,
-                "bbox": list(target.bbox) if target.bbox is not None else None,
+                "model_bbox": list(target.bbox) if target.bbox is not None else None,
+                "bbox": list(crop_bbox) if crop_bbox is not None else None,
                 "bounds": bounds,
                 "grounding_status": target.status,
                 "validation_status": (
