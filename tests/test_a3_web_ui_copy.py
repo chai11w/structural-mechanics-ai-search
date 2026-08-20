@@ -32,6 +32,12 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn(".lightbox { position: fixed; z-index: 120", self.style)
         self.assertIn(".a3-sheet-backdrop, .a3-example-backdrop { position: fixed; z-index: 80", self.style)
 
+    def test_searched_a3_unit_is_visually_and_functionally_closed(self):
+        self.assertIn("searched: Boolean(unit.searched)", self.script)
+        self.assertIn("host.disabled = closed || unit.selected", self.script)
+        self.assertIn("已检索，不可重复进入", self.script)
+        self.assertIn(".a3-auto-unit:disabled .a3-auto-unit-arrow { color: #282825", self.style)
+
     def test_mobile_crop_box_can_move_and_resize(self):
         page = (ROOT / "tiku_agent" / "demo_web" / "index.html").read_text(encoding="utf-8")
 

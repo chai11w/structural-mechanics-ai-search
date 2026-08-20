@@ -301,6 +301,7 @@ function normalizeA3Snapshot(value) {
       display_label: String(unit.display_label || ''),
       title_text: String(unit.title_text || ''),
       completed: Boolean(unit.completed),
+      searched: Boolean(unit.searched),
       selected: Boolean(unit.selected),
       requested: Boolean(unit.requested),
       grounding_status: String(unit.grounding_status || ''),
@@ -315,6 +316,7 @@ function normalizeA3Snapshot(value) {
       context_text: String(value.selected_unit.context_text || ''),
     } : { unit_id: '', display_label: '', context_text: '' },
     completed_unit_ids: Array.isArray(value.completed_unit_ids) ? value.completed_unit_ids.map(String) : [],
+    searched_unit_ids: Array.isArray(value.searched_unit_ids) ? value.searched_unit_ids.map(String) : [],
     remaining_count: Number(value.remaining_count || 0),
     requested_unit_ids: Array.isArray(value.requested_unit_ids) ? value.requested_unit_ids.map(String) : [],
     auto_crop_page_status: String(value.auto_crop_page_status || ''),
@@ -547,7 +549,7 @@ function createA3UnitActions(rawA3) {
   const currentRevision = Number(current?.task_revision || 0);
   const isCurrentList = current && currentRevision === Number(a3.task_revision || 0);
   if (a3.phase === 'A2_ACTIVE') {
-    const remaining = current?.units.filter((unit) => !unit.completed) || [];
+    const remaining = current?.units.filter((unit) => !unit.completed && !unit.searched) || [];
     if (!isCurrentList || current?.phase !== 'A2_ACTIVE' || remaining.length <= 1) return null;
     const host = document.createElement('div');
     host.className = 'a3-unit-actions';
@@ -568,7 +570,7 @@ function createA3UnitActions(rawA3) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'a3-unit-choice a3-open-auto-selection';
-    const prepared = a3.units.filter((unit) => unit.requested && !unit.completed).length;
+    const prepared = a3.units.filter((unit) => unit.requested && !unit.completed && !unit.searched).length;
     button.textContent = prepared ? `查看已准备题目（${prepared}）` : '选择要查询的题目';
     button.addEventListener('click', openA3Sheet);
     host.append(button);
@@ -582,17 +584,21 @@ function createA3UnitActions(rawA3) {
   a3.units.forEach((unit) => {
     const currentUnit = current?.units.find((item) => item.unit_id === unit.unit_id);
     const completed = Boolean(currentUnit?.completed || unit.completed);
+    const searched = Boolean(currentUnit?.searched || unit.searched);
+    const closed = completed || searched;
     const button = document.createElement('button');
     button.type = 'button';
     button.className = `a3-unit-choice${completed ? ' is-complete' : ''}`;
     button.dataset.a3UnitId = unit.unit_id;
     button.dataset.a3Revision = String(a3.task_revision || 0);
-    button.disabled = !isCurrentList || !selectionAllowed || completed || !currentUnit;
+    button.disabled = !isCurrentList || !selectionAllowed || closed || !currentUnit;
     if (completed) {
       button.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>';
       const label = document.createElement('span');
       label.textContent = `${unit.display_label} · 已完成`;
       button.append(label);
+    } else if (searched) {
+      button.textContent = `${unit.display_label || '未标号题目'} · 已检索`;
     } else {
       button.textContent = unit.display_label || '未标号题目';
     }
@@ -1293,14 +1299,17 @@ function syncA3ActionButtons() {
     const unit = a3?.units.find((item) => item.unit_id === button.dataset.a3UnitId);
     const sameRevision = Number(button.dataset.a3Revision || 0) === Number(a3?.task_revision || 0);
     const completed = Boolean(unit?.completed);
+    const searched = Boolean(unit?.searched);
+    const closed = completed || searched;
     const selected = Boolean(unit?.selected);
     const selectionAllowed = ['WAIT_UNIT_SELECTION', 'CROP_REQUIRED'].includes(a3?.phase || '');
-    if (unit && !completed) button.textContent = unit.display_label || '未标号题目';
+    if (unit && searched) button.textContent = `${unit.display_label || '未标号题目'} · 已检索`;
+    else if (unit && !completed) button.textContent = unit.display_label || '未标号题目';
     else if (unit && completed) {
       const label = button.querySelector('span');
       if (label) label.textContent = `${unit.display_label || '未标号题目'} · 已完成`;
     }
-    button.disabled = !unit || !sameRevision || !selectionAllowed || completed || selected;
+    button.disabled = !unit || !sameRevision || !selectionAllowed || closed || selected;
     button.classList.toggle('is-complete', completed);
   });
   const actionGroups = Array.from(document.querySelectorAll('.a3-unit-actions'));
@@ -1414,7 +1423,7 @@ function openA3Crop({ force = false } = {}) {
   const contextText = String(selected.context_text || '').trim();
   a3Context.hidden = !contextText;
   a3ContextText.textContent = contextText;
-  a3Reselect.hidden = a3.units.filter((unit) => !unit.completed).length <= 1;
+  a3Reselect.hidden = a3.units.filter((unit) => !unit.completed && !unit.searched).length <= 1;
   const serverDraft = validA3Bounds(a3.crop_draft?.bounds);
   a3Bounds = validA3Bounds(a3LocalDrafts.get(key)) || serverDraft;
   if (a3Bounds) a3LocalDrafts.set(key, { ...a3Bounds });
@@ -1641,7 +1650,7 @@ function renderA3SheetUnits(a3 = a3Current()) {
     button.type = 'button';
     button.className = 'a3-sheet-unit';
     const isCurrent = unit.unit_id === a3.selected_unit?.unit_id;
-    button.disabled = unit.completed || isCurrent;
+    button.disabled = unit.completed || unit.searched || isCurrent;
     button.setAttribute('aria-current', String(isCurrent));
     const text = document.createElement('span');
     const title = document.createElement('strong');
@@ -1649,6 +1658,7 @@ function renderA3SheetUnits(a3 = a3Current()) {
     const detail = document.createElement('small');
     detail.textContent = unit.completed
       ? '已完成'
+      : unit.searched ? '已检索'
       : isCurrent ? '当前正在处理' : (unit.title_text || '待裁剪');
     text.append(title, detail);
     const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -1662,7 +1672,7 @@ function renderA3SheetUnits(a3 = a3Current()) {
 }
 
 function renderA3AutoSheetUnits(a3) {
-  const currentIds = new Set(a3.units.filter((unit) => !unit.completed && !unit.requested).map((unit) => unit.unit_id));
+  const currentIds = new Set(a3.units.filter((unit) => !unit.completed && !unit.searched && !unit.requested).map((unit) => unit.unit_id));
   Array.from(a3PrepareSelection).forEach((unitId) => {
     if (!currentIds.has(unitId)) a3PrepareSelection.delete(unitId);
   });
@@ -1671,12 +1681,13 @@ function renderA3AutoSheetUnits(a3) {
   if (a3.auto_crop_overlay_available) {
     a3SheetOverlayImage.src = `/api/a3/overlay?revision=${encodeURIComponent(a3.task_revision)}`;
   }
-  a3SheetFooter.hidden = !a3.units.some((unit) => !unit.completed && !unit.requested);
+  a3SheetFooter.hidden = !a3.units.some((unit) => !unit.completed && !unit.searched && !unit.requested);
   a3.units.forEach((unit) => {
     const prepared = unit.requested;
     const host = document.createElement(prepared ? 'button' : 'label');
     if (prepared) host.type = 'button';
-    host.className = `a3-auto-unit${unit.completed ? ' is-complete' : ''}${prepared ? ' is-prepared' : ''}`;
+    const closed = unit.completed || unit.searched;
+    host.className = `a3-auto-unit${closed ? ' is-closed' : ''}${prepared ? ' is-prepared' : ''}`;
     const visual = document.createElement('span');
     visual.className = 'a3-auto-unit-visual';
     if (unit.crop_available) {
@@ -1693,6 +1704,7 @@ function renderA3AutoSheetUnits(a3) {
     title.textContent = unit.display_label || '未标号题目';
     const detail = document.createElement('small');
     if (unit.completed) detail.textContent = '已完成';
+    else if (unit.searched) detail.textContent = '已检索，不可重复进入';
     else if (unit.validation_status === 'auto_ready') detail.textContent = '已校验，可直接检索';
     else if (unit.requested) detail.textContent = '需要人工裁剪';
     else if (unit.grounding_status === 'auto_ready') detail.textContent = '待千问校验';
@@ -1703,15 +1715,15 @@ function renderA3AutoSheetUnits(a3) {
     if (prepared) {
       const arrow = document.createElement('span');
       arrow.className = 'a3-auto-unit-arrow';
-      arrow.textContent = unit.completed ? '已完成' : '继续';
+      arrow.textContent = unit.completed ? '已完成' : unit.searched ? '已检索' : '继续';
       host.append(arrow);
-      host.disabled = unit.completed || unit.selected;
+      host.disabled = closed || unit.selected;
       if (!host.disabled) host.addEventListener('click', () => selectA3Unit(unit.unit_id));
     } else {
       const input = document.createElement('input');
       input.type = 'checkbox';
       input.checked = a3PrepareSelection.has(unit.unit_id);
-      input.disabled = unit.completed;
+      input.disabled = closed;
       input.addEventListener('change', () => {
         if (input.checked) a3PrepareSelection.add(unit.unit_id);
         else a3PrepareSelection.delete(unit.unit_id);

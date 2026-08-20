@@ -84,6 +84,7 @@ class A3SessionState:
     units: list[dict[str, Any]] = field(default_factory=list)
     selected_unit_id: str = ""
     completed_unit_ids: list[str] = field(default_factory=list)
+    searched_unit_ids: list[str] = field(default_factory=list)
     crop_drafts: dict[str, dict[str, Any]] = field(default_factory=dict)
     auto_crop_enabled: bool = False
     auto_crop_page: dict[str, Any] = field(default_factory=dict)
@@ -109,6 +110,8 @@ class A3SessionState:
             raise ValueError("selected A3 unit is unavailable")
         if any(value not in unit_ids for value in self.completed_unit_ids):
             raise ValueError("completed A3 unit is unavailable")
+        if any(value not in unit_ids for value in self.searched_unit_ids):
+            raise ValueError("searched A3 unit is unavailable")
         if any(value not in unit_ids for value in self.requested_unit_ids):
             raise ValueError("requested A3 unit is unavailable")
         if any(value not in unit_ids for value in self.auto_crops):
@@ -145,8 +148,8 @@ class A3SessionState:
 
     @property
     def remaining_units(self) -> list[dict[str, Any]]:
-        completed = set(self.completed_unit_ids)
-        return [item for item in self.searchable_units if item["unit_id"] not in completed]
+        closed = set(self.completed_unit_ids) | set(self.searched_unit_ids)
+        return [item for item in self.searchable_units if item["unit_id"] not in closed]
 
 
 class SQLiteA3SessionStore:
@@ -1218,13 +1221,14 @@ class A3MvpRuntime:
 
         if self.auto_cropper is not None:
             self._ground_auto_crops(state, persisted, progress=progress)
-            state.phase = A3_PHASE_WAIT_SELECTION
-            self.store.save(state)
-            text = (
-                f"已经识别并定位到 {len(searchable)} 道可处理题目。"
-                "请选择要查询的题目，我只校验你选中的裁图。"
-            )
-            return _response(text, state, intent="a3_auto_crops_ready")
+            if state.auto_crop_enabled:
+                state.phase = A3_PHASE_WAIT_SELECTION
+                self.store.save(state)
+                text = (
+                    f"已经识别并定位到 {len(searchable)} 道可处理题目。"
+                    "请选择要查询的题目，我只校验你选中的裁图。"
+                )
+                return _response(text, state, intent="a3_auto_crops_ready")
 
         if len(searchable) == 1:
             state.selected_unit_id = str(searchable[0]["unit_id"])
@@ -1270,6 +1274,7 @@ class A3MvpRuntime:
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - automatic crop always degrades to manual.
+            state.auto_crop_enabled = False
             state.auto_crop_page = {
                 "schema_version": "a3-page-crops-v1",
                 "page_status": "manual_required",
@@ -1325,6 +1330,10 @@ class A3MvpRuntime:
                     record["error_type"] = type(exc).__name__
             records[target.unit_id] = record
         state.auto_crops = records
+        if page.page_status == "manual_required":
+            state.auto_crop_enabled = False
+            state.auto_crop_overlay_path = ""
+            return
         try:
             state.auto_crop_overlay_path = str(self._write_auto_crop_overlay(state))
         except Exception:  # noqa: BLE001 - review overlay is optional, clean crops remain usable.
@@ -1350,6 +1359,7 @@ class A3MvpRuntime:
             unit is None
             or unit.get("searchability") != "searchable_candidate"
             or unit_id in state.completed_unit_ids
+            or unit_id in state.searched_unit_ids
         ):
             return _response(
                 "这道题当前不能选择，请从剩余题目中选一道。",
@@ -1366,6 +1376,13 @@ class A3MvpRuntime:
         switching_from_a2 = state.phase == A3_PHASE_A2_ACTIVE
         if switching_from_a2:
             self.a2_runtime.clear(state.session_id, preserve_artifacts=True)
+            previous_unit_id = state.selected_unit_id
+            if (
+                previous_unit_id
+                and previous_unit_id not in state.completed_unit_ids
+                and previous_unit_id not in state.searched_unit_ids
+            ):
+                state.searched_unit_ids.append(previous_unit_id)
         state.selected_unit_id = unit_id
         auto_record = state.auto_crops.get(unit_id) or {}
         if state.auto_crop_enabled and auto_record.get("validation_status") == "auto_ready":
@@ -1424,6 +1441,13 @@ class A3MvpRuntime:
 
     def _return_to_unit_selection_locked(self, state: A3SessionState) -> AgentResponse:
         self.a2_runtime.clear(state.session_id, preserve_artifacts=True)
+        previous_unit_id = state.selected_unit_id
+        if (
+            previous_unit_id
+            and previous_unit_id not in state.completed_unit_ids
+            and previous_unit_id not in state.searched_unit_ids
+        ):
+            state.searched_unit_ids.append(previous_unit_id)
         state.selected_unit_id = ""
         remaining = state.remaining_units
         state.phase = A3_PHASE_WAIT_SELECTION if remaining else A3_PHASE_COMPLETE
@@ -1565,6 +1589,7 @@ class A3MvpRuntime:
 
     def _a3_snapshot(self, state: A3SessionState) -> dict[str, Any]:
         completed = set(state.completed_unit_ids)
+        searched = set(state.searched_unit_ids)
         units = []
         for item in state.units:
             if item.get("searchability") != "searchable_candidate":
@@ -1575,6 +1600,7 @@ class A3MvpRuntime:
                 "display_label": item["display_label"],
                 "title_text": item.get("title_text") or "",
                 "completed": item["unit_id"] in completed,
+                "searched": item["unit_id"] in searched,
                 "selected": item["unit_id"] == state.selected_unit_id,
                 "requested": item["unit_id"] in state.requested_unit_ids,
                 "grounding_status": str(auto.get("grounding_status") or ""),
@@ -1596,6 +1622,7 @@ class A3MvpRuntime:
                 "context_text": _question_context_text(selected),
             },
             "completed_unit_ids": list(state.completed_unit_ids),
+            "searched_unit_ids": list(state.searched_unit_ids),
             "remaining_count": len(state.remaining_units),
             "requested_unit_ids": list(state.requested_unit_ids),
             "auto_crop_page_status": str(state.auto_crop_page.get("page_status") or ""),

@@ -77,6 +77,18 @@ class A3AutoCropContractTests(unittest.TestCase):
         with self.assertRaisesRegex(A3AutoCropError, "question_label"):
             parse_a3_auto_crop_page(payload, expected_units=EXPECTED_UNITS)
 
+    def test_equivalent_label_punctuation_is_canonicalized_by_unit_id(self):
+        payload = _payload()
+        payload["targets"][0]["question_label"] = "四（1）"
+        expected = [
+            {"unit_id": "g1-u1", "display_label": "四-(1)"},
+            EXPECTED_UNITS[1],
+        ]
+
+        page = parse_a3_auto_crop_page(payload, expected_units=expected)
+
+        self.assertEqual(page.targets[0].question_label, "四-(1)")
+
     def test_page_summary_cannot_block_or_promote_individual_targets(self):
         payload = _payload()
         payload["page_status"] = "manual_required"

@@ -248,7 +248,8 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .a3-auto-unit { width: 100%; min-height: 92px; display: grid; grid-template-columns: auto 112px minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 9px; border: 1px solid #dfdfda; border-radius: 8px; background: #fff; color: #282825; text-align: left; cursor: pointer; }
 .a3-auto-unit:hover { border-color: #aaa9a3; background: #fafaf8; }
 .a3-auto-unit.is-prepared { grid-template-columns: 112px minmax(0,1fr) auto; }
-.a3-auto-unit.is-complete { opacity: .66; cursor: default; }
+.a3-auto-unit.is-closed, .a3-auto-unit:disabled { color: #282825; background: #f1f1ee; opacity: .72; cursor: default; }
+.a3-auto-unit:disabled .a3-auto-unit-arrow { color: #282825; }
 .a3-auto-unit > input { width: 18px; height: 18px; margin: 0 1px; accent-color: #0f766e; }
 .a3-auto-unit-visual { width: 112px; aspect-ratio: 4 / 3; display: grid; place-items: center; overflow: hidden; border: 1px solid #e3e3de; border-radius: 5px; background: #f3f3ef; color: #7a7a73; font-size: 10px; text-align: center; }
 .a3-auto-unit-visual img { width: 100%; height: 100%; object-fit: contain; background: #fff; }

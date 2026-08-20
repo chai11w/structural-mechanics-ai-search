@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 from typing import Any, Mapping, Protocol, Sequence
+import unicodedata
 
 from tiku_agent.glm_vision import DEFAULT_GLM_MODEL, call_glm_json
 
@@ -200,8 +202,11 @@ def parse_a3_auto_crop_page(
         if status != "no_target" and bbox is None:
             raise A3AutoCropError("crop target bbox is required")
         question_label = str(target.get("question_label") or "").strip()
-        if question_label != expected[unit_id]:
+        if not question_label or _label_key(question_label) != _label_key(expected[unit_id]):
             raise A3AutoCropError("question_label must match the allowed unit")
+        # unit_id is authoritative; keep the server label after accepting harmless
+        # punctuation and full-width differences in the model echo.
+        question_label = expected[unit_id]
         reason_codes = tuple(
             _enum(value, A3_AUTO_REASON_CODES, "reason code")
             for value in _array(target.get("reason_codes"), "reason_codes")
@@ -282,3 +287,8 @@ def _enum(value: object, allowed: set[str], field: str) -> str:
     if clean not in allowed:
         raise A3AutoCropError(f"invalid {field}")
     return clean
+
+
+def _label_key(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE)

@@ -106,7 +106,8 @@ class FakeVerifier:
 
 
 class FakeAutoCropper:
-    def __init__(self, *, second_status="review_required", error=None):
+    def __init__(self, *, first_status="auto_ready", second_status="review_required", error=None):
+        self.first_status = first_status
         self.second_status = second_status
         self.error = error
         self.calls = []
@@ -115,17 +116,19 @@ class FakeAutoCropper:
         self.calls.append((Path(image_path), [unit["unit_id"] for unit in units], page_understanding))
         if self.error is not None:
             raise self.error
+        first_bbox = (80, 100, 470, 460) if self.first_status != "no_target" else None
         second_bbox = (520, 100, 920, 480) if self.second_status != "no_target" else None
+        auto_count = sum(status == "auto_ready" for status in (self.first_status, self.second_status))
         return A3AutoCropPage(
-            page_status="ready" if self.second_status == "auto_ready" else "partially_ready",
+            page_status="ready" if auto_count == 2 else "partially_ready" if auto_count else "manual_required",
             targets=(
                 A3AutoCropTarget(
                     target_id="c001",
                     unit_id="g1-u1",
                     question_label="四-1",
-                    bbox=(80, 100, 470, 460),
-                    status="auto_ready",
-                    reason_codes=(),
+                    bbox=first_bbox,
+                    status=self.first_status,
+                    reason_codes=("crop_boundary_uncertain",) if self.first_status == "review_required" else (),
                     binding_evidence="左侧结构图",
                 ),
                 A3AutoCropTarget(
@@ -530,13 +533,39 @@ class A3RuntimeTests(unittest.TestCase):
 
         response = runtime.handle_image("grounding-error", self.source)
 
-        self.assertEqual(response.intent, "a3_auto_crops_ready")
+        self.assertEqual(response.intent, "a3_page_ready")
         snapshot = runtime.session_snapshot("grounding-error")["a3"]
         self.assertEqual(snapshot["phase"], A3_PHASE_WAIT_SELECTION)
+        self.assertFalse(snapshot["auto_crop_enabled"])
         self.assertTrue(all(
             unit["validation_status"] == "manual_required"
             for unit in snapshot["units"]
         ))
+
+    def test_all_manual_grounding_skips_prepare_and_uses_v0_selection(self):
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "all-manual.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "all-manual-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            auto_cropper=FakeAutoCropper(
+                first_status="review_required",
+                second_status="no_target",
+            ),
+        )
+
+        response = runtime.handle_image("all-manual", self.source)
+
+        self.assertEqual(response.intent, "a3_page_ready")
+        snapshot = runtime.session_snapshot("all-manual")["a3"]
+        self.assertFalse(snapshot["auto_crop_enabled"])
+        selected = runtime.select_unit("all-manual", "g1-u1", task_revision=1)
+        self.assertEqual(selected.intent, "a3_unit_selected")
+        self.assertEqual(
+            runtime.session_snapshot("all-manual")["a3"]["phase"],
+            A3_PHASE_CROP_REQUIRED,
+        )
 
     def test_full_flow_a1_stops_without_a2_or_a3_processing(self):
         authority = FakeFlowAuthority("A1")
@@ -803,11 +832,17 @@ class A3RuntimeTests(unittest.TestCase):
         response = self.runtime.handle_text(session_id, "换个题重新搜")
 
         self.assertEqual(response.intent, "a3_reselect")
-        self.assertIn("还有 2 道", response.text)
+        self.assertIn("还有 1 道", response.text)
         self.assertEqual(self.a2.text_calls, [])
         a3 = self.runtime.session_snapshot(session_id)["a3"]
         self.assertEqual(a3["phase"], A3_PHASE_WAIT_SELECTION)
         self.assertEqual(a3["selected_unit"]["unit_id"], "")
+        self.assertEqual(a3["searched_unit_ids"], ["g1-u2"])
+        self.assertTrue(a3["units"][1]["searched"])
+
+        repeated = self.runtime.select_unit(session_id, "g1-u2", task_revision=1)
+
+        self.assertEqual(repeated.intent, "stale_action")
 
     def test_active_a2_bare_question_number_clarifies_candidate_namespace(self):
         session_id = "a3-active-namespace"
