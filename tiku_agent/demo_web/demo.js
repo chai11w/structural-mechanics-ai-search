@@ -44,6 +44,12 @@ const a3Submit = $('#a3-submit');
 const a3SheetBackdrop = $('#a3-sheet-backdrop');
 const a3SheetClose = $('#a3-sheet-close');
 const a3SheetUnits = $('#a3-sheet-units');
+const a3SheetSubtitle = $('#a3-sheet-subtitle');
+const a3SheetOverlay = $('#a3-sheet-overlay');
+const a3SheetOverlayImage = $('#a3-sheet-overlay-image');
+const a3SheetFooter = $('#a3-sheet-footer');
+const a3SheetCount = $('#a3-sheet-count');
+const a3Prepare = $('#a3-prepare');
 const a3ExampleButton = $('#a3-example-button');
 const a3ExampleBackdrop = $('#a3-example-backdrop');
 const a3ExampleClose = $('#a3-example-close');
@@ -66,6 +72,7 @@ const LEGACY_EXPIRED_MEDIA_MESSAGE = '题图或结果图片已失效，请重新
 const A3_INLINE_ONLY_INTENTS = new Set([
   'a3_unit_selected', 'a3_unit_already_selected', 'a3_crop_review_required',
 ]);
+const a3PrepareSelection = new Set();
 const ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp']);
 const ALLOWED_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp']);
 const FEEDBACK_OPTIONS = {
@@ -287,6 +294,7 @@ function normalizeA3Snapshot(value) {
   if (!value || typeof value !== 'object' || value.enabled !== true) return null;
   return {
     enabled: true,
+    auto_crop_enabled: Boolean(value.auto_crop_enabled),
     phase: String(value.phase || ''),
     units: Array.isArray(value.units) ? value.units.map((unit) => ({
       unit_id: String(unit.unit_id || ''),
@@ -294,6 +302,12 @@ function normalizeA3Snapshot(value) {
       title_text: String(unit.title_text || ''),
       completed: Boolean(unit.completed),
       selected: Boolean(unit.selected),
+      requested: Boolean(unit.requested),
+      grounding_status: String(unit.grounding_status || ''),
+      validation_status: String(unit.validation_status || ''),
+      crop_available: Boolean(unit.crop_available),
+      auto_bounds: validA3Bounds(unit.auto_bounds),
+      reason_codes: Array.isArray(unit.reason_codes) ? unit.reason_codes.map(String) : [],
     })) : [],
     selected_unit: value.selected_unit && typeof value.selected_unit === 'object' ? {
       unit_id: String(value.selected_unit.unit_id || ''),
@@ -302,6 +316,9 @@ function normalizeA3Snapshot(value) {
     } : { unit_id: '', display_label: '', context_text: '' },
     completed_unit_ids: Array.isArray(value.completed_unit_ids) ? value.completed_unit_ids.map(String) : [],
     remaining_count: Number(value.remaining_count || 0),
+    requested_unit_ids: Array.isArray(value.requested_unit_ids) ? value.requested_unit_ids.map(String) : [],
+    auto_crop_page_status: String(value.auto_crop_page_status || ''),
+    auto_crop_overlay_available: Boolean(value.auto_crop_overlay_available),
     crop_review_required: Boolean(value.crop_review_required),
     crop_review_feedback: String(value.crop_review_feedback || ''),
     crop_draft: value.crop_draft && typeof value.crop_draft === 'object' ? value.crop_draft : {},
@@ -542,6 +559,19 @@ function createA3UnitActions(rawA3) {
     switchButton.textContent = '换题重新搜';
     switchButton.addEventListener('click', openA3Sheet);
     host.append(switchButton);
+    return host;
+  }
+  if (a3.auto_crop_enabled && a3.phase === 'WAIT_UNIT_SELECTION') {
+    const host = document.createElement('div');
+    host.className = 'a3-unit-actions';
+    host.dataset.a3Revision = String(a3.task_revision || 0);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'a3-unit-choice a3-open-auto-selection';
+    const prepared = a3.units.filter((unit) => unit.requested && !unit.completed).length;
+    button.textContent = prepared ? `查看已准备题目（${prepared}）` : '选择要查询的题目';
+    button.addEventListener('click', openA3Sheet);
+    host.append(button);
     return host;
   }
   if (!['WAIT_UNIT_SELECTION', 'CROP_REQUIRED', 'COMPLETE'].includes(a3.phase)) return null;
@@ -1318,6 +1348,7 @@ function syncA3Interface() {
   }
   if (a3KnownRevision && a3KnownRevision !== a3.task_revision) {
     a3LocalDrafts.clear();
+    a3PrepareSelection.clear();
     a3DismissedKey = '';
   }
   a3KnownRevision = a3.task_revision;
@@ -1339,11 +1370,15 @@ async function selectA3Unit(unitId) {
   setBusy(true);
   setStatus('working', '正在准备裁剪…');
   try {
-    const data = await request('/api/a3/select', {
+    const data = await requestStream('/api/a3/select/stream', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ unit_id: unitId, task_revision: Number(a3Current()?.task_revision || 0) }),
-    }, TEXT_TIMEOUT_MS, '选题超时，请重新选择。');
+    }, A3_TIMEOUT_MS, '选题或搜题等待超时，请重新选择。', (event) => {
+      if (operation !== operationVersion) return;
+      pending.querySelector('.message-content')?.replaceChildren(document.createTextNode(event.message));
+      setStatus('working', event.message);
+    });
     if (operation !== operationVersion) return;
     pending.remove();
     const response = responseItem(data);
@@ -1594,6 +1629,13 @@ async function submitA3Crop() {
 function renderA3SheetUnits(a3 = a3Current()) {
   if (!a3SheetUnits || !a3) return;
   a3SheetUnits.replaceChildren();
+  if (a3.auto_crop_enabled) {
+    renderA3AutoSheetUnits(a3);
+    return;
+  }
+  a3SheetSubtitle.textContent = '选择其他题目后会重新裁剪并搜索';
+  a3SheetOverlay.hidden = true;
+  a3SheetFooter.hidden = true;
   a3.units.forEach((unit) => {
     const button = document.createElement('button');
     button.type = 'button';
@@ -1619,9 +1661,117 @@ function renderA3SheetUnits(a3 = a3Current()) {
   });
 }
 
+function renderA3AutoSheetUnits(a3) {
+  const currentIds = new Set(a3.units.filter((unit) => !unit.completed && !unit.requested).map((unit) => unit.unit_id));
+  Array.from(a3PrepareSelection).forEach((unitId) => {
+    if (!currentIds.has(unitId)) a3PrepareSelection.delete(unitId);
+  });
+  a3SheetSubtitle.textContent = '可多选；只校验你准备查询的裁图';
+  a3SheetOverlay.hidden = !a3.auto_crop_overlay_available;
+  if (a3.auto_crop_overlay_available) {
+    a3SheetOverlayImage.src = `/api/a3/overlay?revision=${encodeURIComponent(a3.task_revision)}`;
+  }
+  a3SheetFooter.hidden = !a3.units.some((unit) => !unit.completed && !unit.requested);
+  a3.units.forEach((unit) => {
+    const prepared = unit.requested;
+    const host = document.createElement(prepared ? 'button' : 'label');
+    if (prepared) host.type = 'button';
+    host.className = `a3-auto-unit${unit.completed ? ' is-complete' : ''}${prepared ? ' is-prepared' : ''}`;
+    const visual = document.createElement('span');
+    visual.className = 'a3-auto-unit-visual';
+    if (unit.crop_available) {
+      const image = document.createElement('img');
+      image.src = `/api/a3/crop/${encodeURIComponent(unit.unit_id)}?revision=${encodeURIComponent(a3.task_revision)}`;
+      image.alt = `${unit.display_label || '未标号题目'}自动裁图`;
+      visual.append(image);
+    } else {
+      visual.textContent = '需手动裁剪';
+    }
+    const copy = document.createElement('span');
+    copy.className = 'a3-auto-unit-copy';
+    const title = document.createElement('strong');
+    title.textContent = unit.display_label || '未标号题目';
+    const detail = document.createElement('small');
+    if (unit.completed) detail.textContent = '已完成';
+    else if (unit.validation_status === 'auto_ready') detail.textContent = '已校验，可直接检索';
+    else if (unit.requested) detail.textContent = '需要人工裁剪';
+    else if (unit.grounding_status === 'auto_ready') detail.textContent = '待千问校验';
+    else if (unit.crop_available) detail.textContent = '自动框需要人工确认';
+    else detail.textContent = '选择后使用人工裁剪';
+    copy.append(title, detail);
+    host.append(visual, copy);
+    if (prepared) {
+      const arrow = document.createElement('span');
+      arrow.className = 'a3-auto-unit-arrow';
+      arrow.textContent = unit.completed ? '已完成' : '继续';
+      host.append(arrow);
+      host.disabled = unit.completed || unit.selected;
+      if (!host.disabled) host.addEventListener('click', () => selectA3Unit(unit.unit_id));
+    } else {
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = a3PrepareSelection.has(unit.unit_id);
+      input.disabled = unit.completed;
+      input.addEventListener('change', () => {
+        if (input.checked) a3PrepareSelection.add(unit.unit_id);
+        else a3PrepareSelection.delete(unit.unit_id);
+        updateA3PrepareFooter();
+      });
+      host.prepend(input);
+    }
+    a3SheetUnits.append(host);
+  });
+  updateA3PrepareFooter();
+}
+
+function updateA3PrepareFooter() {
+  const count = a3PrepareSelection.size;
+  a3SheetCount.textContent = count ? `已选择 ${count} 道` : '尚未选择';
+  a3Prepare.disabled = isBusy || count === 0;
+  a3Prepare.textContent = count ? `校验所选 ${count} 道题` : '校验所选题目';
+}
+
+async function prepareA3Units() {
+  const a3 = a3Current();
+  const unitIds = Array.from(a3PrepareSelection);
+  if (!a3?.auto_crop_enabled || !unitIds.length || isBusy) return;
+  const operation = ++operationVersion;
+  setBusy(true);
+  updateA3PrepareFooter();
+  setStatus('working', '正在并发校验所选裁图…');
+  try {
+    const data = await requestStream('/api/a3/prepare/stream', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ unit_ids: unitIds, task_revision: Number(a3.task_revision || 0) }),
+    }, A3_TIMEOUT_MS, '裁图校验等待超时，请重新选择。', (event) => {
+      if (operation !== operationVersion) return;
+      a3SheetCount.textContent = event.message;
+      setStatus('working', event.message);
+    });
+    if (operation !== operationVersion) return;
+    const response = responseItem(data);
+    a3PrepareSelection.clear();
+    addMessage(response);
+    setResponseStatus(data);
+    renderA3SheetUnits();
+  } catch (error) {
+    if (operation !== operationVersion) return;
+    addMessage({
+      message: error.message || '裁图校验失败，请重新选择。',
+      variant: 'error', recoveryActions: error.recoveryActions || [],
+      ...protocolFields(error),
+    });
+    setStatus('error', '裁图校验失败');
+  } finally {
+    if (operation !== operationVersion) return;
+    setBusy(false);
+    updateA3PrepareFooter();
+  }
+}
+
 function openA3Sheet() {
   const a3 = a3Current();
-  if (!a3 || a3.units.length <= 1) return;
+  if (!a3 || (!a3.auto_crop_enabled && a3.units.length <= 1)) return;
   renderA3SheetUnits(a3);
   a3SheetBackdrop.hidden = false;
   a3SheetClose.focus();
@@ -2000,6 +2150,11 @@ a3CropBack.addEventListener('click', () => requestCloseA3Crop({ dismiss: true })
 a3Reselect.addEventListener('click', openA3Sheet);
 a3SheetClose.addEventListener('click', closeA3Sheet);
 a3SheetBackdrop.addEventListener('click', (event) => { if (event.target === a3SheetBackdrop) closeA3Sheet(); });
+a3Prepare.addEventListener('click', prepareA3Units);
+a3SheetOverlay.addEventListener('click', () => {
+  if (!a3SheetOverlayImage.src) return;
+  openLightbox(a3SheetOverlayImage.src, '自动裁剪标签预览');
+});
 a3ExampleButton.addEventListener('click', openA3Example);
 a3ExampleClose.addEventListener('click', closeA3Example);
 a3ExampleBackdrop.addEventListener('click', (event) => { if (event.target === a3ExampleBackdrop) closeA3Example(); });

@@ -22,6 +22,16 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn("选择图片中的题目", page)
         self.assertIn("选择其他题目后会重新裁剪并搜索", page)
 
+    def test_auto_crop_sheet_supports_multi_select_and_overlay_above_sheet(self):
+        page = (ROOT / "tiku_agent" / "demo_web" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('id="a3-prepare"', page)
+        self.assertIn('id="a3-sheet-overlay"', page)
+        self.assertIn("requestStream('/api/a3/prepare/stream'", self.script)
+        self.assertIn("a3PrepareSelection", self.script)
+        self.assertIn(".lightbox { position: fixed; z-index: 120", self.style)
+        self.assertIn(".a3-sheet-backdrop, .a3-example-backdrop { position: fixed; z-index: 80", self.style)
+
     def test_mobile_crop_box_can_move_and_resize(self):
         page = (ROOT / "tiku_agent" / "demo_web" / "index.html").read_text(encoding="utf-8")
 

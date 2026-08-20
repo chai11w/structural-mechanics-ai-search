@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -11,10 +12,14 @@ from pathlib import Path
 import re
 import sqlite3
 import threading
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
+from tiku_agent.a3_auto_crop import (
+    A3AutoCropper,
+    normalized_bbox_to_bounds,
+)
 from tiku_agent.a3_models import (
     A3CropVerifier,
     A3ModelError,
@@ -32,6 +37,8 @@ from tiku_shared.request_protocol import RequestProtocol, new_request_id, new_se
 
 A3_PHASE_IDLE = "IDLE"
 A3_PHASE_UNDERSTANDING = "UNDERSTANDING_PAGE"
+A3_PHASE_AUTO_GROUNDING = "AUTO_GROUNDING_PAGE"
+A3_PHASE_AUTO_VALIDATING = "AUTO_VALIDATING_CROPS"
 A3_PHASE_WAIT_SELECTION = "WAIT_UNIT_SELECTION"
 A3_PHASE_CROP_REQUIRED = "CROP_REQUIRED"
 A3_PHASE_VERIFYING = "VERIFYING_CROP"
@@ -42,6 +49,8 @@ A3_PHASE_ERROR = "ERROR"
 _A3_PHASES = {
     A3_PHASE_IDLE,
     A3_PHASE_UNDERSTANDING,
+    A3_PHASE_AUTO_GROUNDING,
+    A3_PHASE_AUTO_VALIDATING,
     A3_PHASE_WAIT_SELECTION,
     A3_PHASE_CROP_REQUIRED,
     A3_PHASE_VERIFYING,
@@ -76,6 +85,11 @@ class A3SessionState:
     selected_unit_id: str = ""
     completed_unit_ids: list[str] = field(default_factory=list)
     crop_drafts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    auto_crop_enabled: bool = False
+    auto_crop_page: dict[str, Any] = field(default_factory=dict)
+    auto_crops: dict[str, dict[str, Any]] = field(default_factory=dict)
+    auto_crop_overlay_path: str = ""
+    requested_unit_ids: list[str] = field(default_factory=list)
     crop_review_required: bool = False
     crop_review_feedback: str = ""
     task_revision: int = 0
@@ -95,6 +109,10 @@ class A3SessionState:
             raise ValueError("selected A3 unit is unavailable")
         if any(value not in unit_ids for value in self.completed_unit_ids):
             raise ValueError("completed A3 unit is unavailable")
+        if any(value not in unit_ids for value in self.requested_unit_ids):
+            raise ValueError("requested A3 unit is unavailable")
+        if any(value not in unit_ids for value in self.auto_crops):
+            raise ValueError("automatic crop is bound to an unavailable unit")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -308,6 +326,8 @@ class A3MvpRuntime:
         a2_runtime: AgentSessionRuntime,
         page_observer: A3PageObserver,
         crop_verifier: A3CropVerifier,
+        auto_cropper: A3AutoCropper | None = None,
+        auto_crop_max_workers: int = 10,
         unit_analyzer: A3UnitAnalyzer | None = None,
         external_load_screen: Callable[[str | Path], str] | None = None,
         image_triage_authority: object | None = None,
@@ -318,6 +338,8 @@ class A3MvpRuntime:
         self.a2_runtime = a2_runtime
         self.page_observer = page_observer
         self.crop_verifier = crop_verifier
+        self.auto_cropper = auto_cropper
+        self.auto_crop_max_workers = max(1, min(10, int(auto_crop_max_workers)))
         # Kept as an injection point for older callers; A3 no longer owns
         # final load/chapter extraction after crop verification.
         self.unit_analyzer = unit_analyzer
@@ -347,6 +369,7 @@ class A3MvpRuntime:
                 entry_route="A3" if self.image_triage_authority is None else "",
                 phase=A3_PHASE_UNDERSTANDING,
                 source_page_path=str(persisted),
+                auto_crop_enabled=self.auto_cropper is not None,
                 task_revision=next_revision,
                 current_search_id=new_search_id(),
             )
@@ -406,7 +429,13 @@ class A3MvpRuntime:
             if state.phase in {A3_PHASE_WAIT_SELECTION, A3_PHASE_COMPLETE}:
                 unit_id, ambiguous = _resolve_unit_selection(clean_text, state.remaining_units)
                 if unit_id:
-                    return self._select_locked(state, unit_id)
+                    return self._select_locked(
+                        state,
+                        unit_id,
+                        identity_key=identity_key,
+                        progress=progress,
+                        request_id=request_id,
+                    )
                 message = (
                     "你这句话里像是选了不止一道题。当前一次只处理一道，请再选一个。"
                     if ambiguous
@@ -446,7 +475,13 @@ class A3MvpRuntime:
                             state.remaining_units,
                         )
                         if unit_id:
-                            return self._select_locked(state, unit_id)
+                            return self._select_locked(
+                                state,
+                                unit_id,
+                                identity_key=identity_key,
+                                progress=progress,
+                                request_id=request_id,
+                            )
                         message = (
                             "上一道已经停止了。你这句话里像是选了不止一道题，请再选一个。"
                             if ambiguous
@@ -470,7 +505,13 @@ class A3MvpRuntime:
                     state.remaining_units,
                 )
                 if unit_id:
-                    return self._select_locked(state, unit_id)
+                    return self._select_locked(
+                        state,
+                        unit_id,
+                        identity_key=identity_key,
+                        progress=progress,
+                        request_id=request_id,
+                    )
                 if ambiguous:
                     return _response(
                         "你像是想切换题目，但我不能唯一确定是哪一道。请从题目列表中选一个。",
@@ -495,7 +536,13 @@ class A3MvpRuntime:
                             code="CLARIFICATION_REQUIRED",
                         )
                     if original_unit_id:
-                        return self._select_locked(state, original_unit_id)
+                        return self._select_locked(
+                            state,
+                            original_unit_id,
+                            identity_key=identity_key,
+                            progress=progress,
+                            request_id=request_id,
+                        )
                 response = self.a2_runtime.handle_text(
                     clean,
                     clean_text,
@@ -516,9 +563,10 @@ class A3MvpRuntime:
         unit_id: str,
         *,
         task_revision: int | None = None,
+        identity_key: str = "",
+        progress: ProgressReporter | None = None,
         request_id: str = "",
     ) -> AgentResponse:
-        del request_id
         clean = _clean_session_id(session_id)
         with self._lock(clean):
             state = self.store.load(clean)
@@ -535,7 +583,192 @@ class A3MvpRuntime:
                     intent="stale_action",
                     code="STALE_ACTION",
                 )
-            return self._select_locked(state, str(unit_id or "").strip())
+            return self._select_locked(
+                state,
+                str(unit_id or "").strip(),
+                identity_key=identity_key,
+                progress=progress,
+                request_id=request_id,
+            )
+
+    def prepare_units(
+        self,
+        session_id: str,
+        unit_ids: Sequence[str],
+        *,
+        task_revision: int | None = None,
+        progress: ProgressReporter | None = None,
+        request_id: str = "",
+    ) -> AgentResponse:
+        del request_id
+        clean = _clean_session_id(session_id)
+        requested = list(dict.fromkeys(str(value or "").strip() for value in unit_ids))
+        if not requested or any(not value for value in requested):
+            return AgentResponse(
+                text="请至少选择一道要查询的题目。",
+                intent="a3_prepare_required",
+                protocol=RequestProtocol.from_code("CLARIFICATION_REQUIRED").to_dict(),
+            )
+        with self._lock(clean):
+            state = self.store.load(clean)
+            if state is None or not state.auto_crop_enabled:
+                return AgentResponse(
+                    text="当前自动裁剪任务已失效，请重新上传题图。",
+                    intent="stale_action",
+                    protocol=RequestProtocol.from_code("STALE_ACTION").to_dict(),
+                )
+            if task_revision is not None and int(task_revision) != state.task_revision:
+                return _response(
+                    "这是上一张题图的准备操作，已经失效。请使用当前题目列表。",
+                    state,
+                    intent="stale_action",
+                    code="STALE_ACTION",
+                )
+            remaining_ids = {str(unit["unit_id"]) for unit in state.remaining_units}
+            if state.phase not in {A3_PHASE_WAIT_SELECTION, A3_PHASE_CROP_REQUIRED} or any(
+                value not in remaining_ids for value in requested
+            ):
+                return _response(
+                    "所选题目已经失效，请从当前列表重新选择。",
+                    state,
+                    intent="stale_action",
+                    code="STALE_ACTION",
+                )
+
+            state.requested_unit_ids = requested
+            state.selected_unit_id = ""
+            state.phase = A3_PHASE_AUTO_VALIDATING
+            self.store.save(state)
+            candidates = [
+                unit_id
+                for unit_id in requested
+                if self._auto_crop_can_validate(state, unit_id)
+            ]
+            if progress is not None:
+                progress(
+                    "a3_auto_validating",
+                    f"正在并发校验 {len(candidates)} 张自动裁图…"
+                    if candidates
+                    else "所选题目需要人工裁剪，正在准备…",
+                )
+
+            results: dict[str, dict[str, Any]] = {}
+            if candidates:
+                workers = min(self.auto_crop_max_workers, len(candidates))
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = {
+                        executor.submit(self._validate_auto_crop, state, unit_id): unit_id
+                        for unit_id in candidates
+                    }
+                    for future in as_completed(futures):
+                        unit_id = futures[future]
+                        try:
+                            results[unit_id] = future.result()
+                        except Exception as exc:  # noqa: BLE001 - isolate one crop failure.
+                            results[unit_id] = {
+                                "validation_status": "manual_required",
+                                "external_load_status": "error",
+                                "verification_checks": {},
+                                "error_type": type(exc).__name__,
+                            }
+
+            for unit_id in requested:
+                record = state.auto_crops.setdefault(unit_id, {})
+                if unit_id in results:
+                    record.update(results[unit_id])
+                elif record.get("validation_status") != "auto_ready":
+                    record["validation_status"] = "manual_required"
+            state.phase = A3_PHASE_WAIT_SELECTION
+            self.store.save(state)
+            ready = sum(
+                state.auto_crops.get(unit_id, {}).get("validation_status") == "auto_ready"
+                for unit_id in requested
+            )
+            manual = len(requested) - ready
+            text = f"已准备 {len(requested)} 道题：{ready} 道可以直接检索"
+            if manual:
+                text += f"，{manual} 道需要人工裁剪"
+            text += "。请选择一道继续。"
+            return _response(text, state, intent="a3_units_prepared")
+
+    def _auto_crop_can_validate(self, state: A3SessionState, unit_id: str) -> bool:
+        record = state.auto_crops.get(unit_id) or {}
+        path = Path(str(record.get("path") or ""))
+        return (
+            record.get("grounding_status") == "auto_ready"
+            and record.get("validation_status") != "auto_ready"
+            and path.is_file()
+        )
+
+    def _validate_auto_crop(
+        self,
+        state: A3SessionState,
+        unit_id: str,
+    ) -> dict[str, Any]:
+        selected = state.unit(unit_id)
+        record = state.auto_crops.get(unit_id) or {}
+        crop_path = Path(str(record.get("path") or ""))
+        if selected is None or not crop_path.is_file():
+            return {
+                "validation_status": "manual_required",
+                "external_load_status": "not_run",
+                "verification_checks": {},
+                "error_type": "auto_crop_unavailable",
+            }
+        try:
+            verdict = self._call_model(
+                state,
+                "a3_auto_crop_compare",
+                lambda: self.crop_verifier.verify(
+                    Path(state.source_page_path),
+                    crop_path,
+                    selected,
+                    state.page_understanding,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - automatic crop degrades to manual.
+            return {
+                "validation_status": "manual_required",
+                "external_load_status": "not_run",
+                "verification_checks": {},
+                "error_type": type(exc).__name__,
+            }
+        checks = dict(verdict.checks)
+        if not verdict.verified:
+            return {
+                "validation_status": "manual_required",
+                "external_load_status": "not_run",
+                "verification_checks": checks,
+                "error_type": "crop_review_required",
+            }
+        if self.external_load_screen is None:
+            return {
+                "validation_status": "auto_ready",
+                "external_load_status": "not_configured",
+                "verification_checks": checks,
+                "error_type": "",
+            }
+        try:
+            load_status = str(
+                self._call_model(
+                    state,
+                    "a3_auto_external_load_screen",
+                    lambda: self.external_load_screen(crop_path),
+                )
+            ).strip().lower()
+        except Exception as exc:  # noqa: BLE001 - independent gate is fail-closed.
+            return {
+                "validation_status": "manual_required",
+                "external_load_status": "error",
+                "verification_checks": checks,
+                "error_type": type(exc).__name__,
+            }
+        return {
+            "validation_status": "auto_ready" if load_status == "yes" else "manual_required",
+            "external_load_status": load_status,
+            "verification_checks": checks,
+            "error_type": "" if load_status == "yes" else "external_load_not_confirmed",
+        }
 
     def handle_crop(
         self,
@@ -681,8 +914,17 @@ class A3MvpRuntime:
         state = self.store.load(_clean_session_id(session_id))
         if state is None:
             return None
-        draft = state.crop_drafts.get(str(unit_id or "").strip()) or {}
+        clean_unit_id = str(unit_id or "").strip()
+        draft = state.crop_drafts.get(clean_unit_id) or state.auto_crops.get(clean_unit_id) or {}
         path = Path(str(draft.get("path") or "")).resolve()
+        crop_dir = (self.artifacts.session_dir(state.session_id) / "crops").resolve()
+        return path if path.is_file() and path.parent == crop_dir else None
+
+    def current_auto_crop_overlay_path(self, session_id: str) -> Path | None:
+        state = self.store.load(_clean_session_id(session_id))
+        if state is None or not state.auto_crop_overlay_path:
+            return None
+        path = Path(state.auto_crop_overlay_path).resolve()
         crop_dir = (self.artifacts.session_dir(state.session_id) / "crops").resolve()
         return path if path.is_file() and path.parent == crop_dir else None
 
@@ -901,29 +1143,13 @@ class A3MvpRuntime:
                 code="SERVICE_UNAVAILABLE",
             )
 
-        state.page_understanding = understanding.to_dict(include_derived=True)
-        state.units = _flatten_units(state.page_understanding)
-        state.last_error = ""
-        state.last_error_detail = ""
-        searchable = state.searchable_units
-        if len(searchable) == 1:
-            state.selected_unit_id = str(searchable[0]["unit_id"])
-            state.phase = A3_PHASE_CROP_REQUIRED
-            text = (
-                f"我在这张图里识别到 1 道可以处理的题："
-                f"「{searchable[0]['display_label']}」。已经为你选中，接下来裁剪它的单个结构图。"
-            )
-        elif searchable:
-            state.phase = A3_PHASE_WAIT_SELECTION
-            text = (
-                f"我在这张图里识别到 {len(searchable)} 道可以处理的题。"
-                "先选一道，我再带你裁剪对应的结构图。"
-            )
-        else:
-            state.phase = A3_PHASE_COMPLETE
-            text = "我理解了这张图，但没有找到结构、支座和外荷载都清晰完整的可检索题目。"
-        self.store.save(state)
-        return _response(text, state, intent="a3_page_ready")
+        return self._finish_page_understanding(
+            state,
+            understanding,
+            persisted,
+            progress=progress,
+            retry=False,
+        )
 
     def _retry_page_understanding(
         self,
@@ -953,25 +1179,166 @@ class A3MvpRuntime:
                 intent="a3_page_error",
                 code="SERVICE_UNAVAILABLE",
             )
+        return self._finish_page_understanding(
+            state,
+            understanding,
+            Path(state.source_page_path),
+            progress=progress,
+            retry=True,
+        )
+
+    def _finish_page_understanding(
+        self,
+        state: A3SessionState,
+        understanding: Any,
+        persisted: Path,
+        *,
+        progress: ProgressReporter | None,
+        retry: bool,
+    ) -> AgentResponse:
         state.page_understanding = understanding.to_dict(include_derived=True)
         state.units = _flatten_units(state.page_understanding)
+        state.selected_unit_id = ""
+        state.requested_unit_ids = []
+        state.auto_crop_page = {}
+        state.auto_crops = {}
+        state.auto_crop_overlay_path = ""
         state.last_error = ""
         state.last_error_detail = ""
         searchable = state.searchable_units
+        if not searchable:
+            state.phase = A3_PHASE_COMPLETE
+            self.store.save(state)
+            text = (
+                "这张图里仍然没有识别到可以进入搜题的完整结构题。"
+                if retry
+                else "我理解了这张图，但没有找到结构、支座和外荷载都清晰完整的可检索题目。"
+            )
+            return _response(text, state, intent="a3_page_ready")
+
+        if self.auto_cropper is not None:
+            self._ground_auto_crops(state, persisted, progress=progress)
+            state.phase = A3_PHASE_WAIT_SELECTION
+            self.store.save(state)
+            text = (
+                f"已经识别并定位到 {len(searchable)} 道可处理题目。"
+                "请选择要查询的题目，我只校验你选中的裁图。"
+            )
+            return _response(text, state, intent="a3_auto_crops_ready")
+
         if len(searchable) == 1:
             state.selected_unit_id = str(searchable[0]["unit_id"])
             state.phase = A3_PHASE_CROP_REQUIRED
-            text = f"已经识别到「{searchable[0]['display_label']}」，接下来裁剪它的单个结构图。"
-        elif searchable:
-            state.phase = A3_PHASE_WAIT_SELECTION
-            text = f"这次识别到 {len(searchable)} 道可以处理的题。请先选一道。"
+            text = (
+                f"已经识别到「{searchable[0]['display_label']}」，接下来裁剪它的单个结构图。"
+                if retry
+                else f"我在这张图里识别到 1 道可以处理的题："
+                f"「{searchable[0]['display_label']}」。已经为你选中，接下来裁剪它的单个结构图。"
+            )
         else:
-            state.phase = A3_PHASE_COMPLETE
-            text = "这张图里仍然没有识别到可以进入搜题的完整结构题。"
+            state.phase = A3_PHASE_WAIT_SELECTION
+            text = (
+                f"这次识别到 {len(searchable)} 道可以处理的题。请先选一道。"
+                if retry
+                else f"我在这张图里识别到 {len(searchable)} 道可以处理的题。"
+                "先选一道，我再带你裁剪对应的结构图。"
+            )
         self.store.save(state)
         return _response(text, state, intent="a3_page_ready")
 
-    def _select_locked(self, state: A3SessionState, unit_id: str) -> AgentResponse:
+    def _ground_auto_crops(
+        self,
+        state: A3SessionState,
+        persisted: Path,
+        *,
+        progress: ProgressReporter | None,
+    ) -> None:
+        if self.auto_cropper is None:
+            return
+        state.phase = A3_PHASE_AUTO_GROUNDING
+        self.store.save(state)
+        if progress is not None:
+            progress("a3_auto_grounding", "正在一次定位整页所有可检索结构图…")
+        try:
+            page = self._call_model(
+                state,
+                "a3_auto_crop_grounding",
+                lambda: self.auto_cropper.ground(
+                    persisted,
+                    state.searchable_units,
+                    state.page_understanding,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - automatic crop always degrades to manual.
+            state.auto_crop_page = {
+                "schema_version": "a3-page-crops-v1",
+                "page_status": "manual_required",
+                "unknowns": ["grounding_error"],
+            }
+            state.auto_crops = {
+                str(unit["unit_id"]): {
+                    "grounding_status": "error",
+                    "validation_status": "manual_required",
+                    "reason_codes": ["grounding_error"],
+                    "error_type": type(exc).__name__,
+                }
+                for unit in state.searchable_units
+            }
+            self._record_page_error(state, exc, task_kind="a3_auto_crop_grounding")
+            state.last_error = ""
+            return
+
+        state.auto_crop_page = {
+            "schema_version": page.schema_version,
+            "page_status": page.page_status,
+            "unknowns": list(page.unknowns),
+        }
+        records: dict[str, dict[str, Any]] = {}
+        for target in page.targets:
+            bounds = (
+                normalized_bbox_to_bounds(target.bbox)
+                if target.bbox is not None
+                else {}
+            )
+            record: dict[str, Any] = {
+                "target_id": target.target_id,
+                "unit_id": target.unit_id,
+                "question_label": target.question_label,
+                "bbox": list(target.bbox) if target.bbox is not None else None,
+                "bounds": bounds,
+                "grounding_status": target.status,
+                "validation_status": (
+                    "pending" if target.status == "auto_ready" else "manual_required"
+                ),
+                "reason_codes": list(target.reason_codes),
+                "binding_evidence": target.binding_evidence,
+                "verification_checks": {},
+                "external_load_status": "not_run",
+            }
+            if bounds:
+                try:
+                    crop_path = self._crop_source_for_unit(state, target.unit_id, bounds)
+                    record["path"] = str(crop_path)
+                except Exception as exc:  # noqa: BLE001 - isolate one invalid crop.
+                    record["validation_status"] = "manual_required"
+                    record["reason_codes"] = [*record["reason_codes"], "crop_write_error"]
+                    record["error_type"] = type(exc).__name__
+            records[target.unit_id] = record
+        state.auto_crops = records
+        try:
+            state.auto_crop_overlay_path = str(self._write_auto_crop_overlay(state))
+        except Exception:  # noqa: BLE001 - review overlay is optional, clean crops remain usable.
+            state.auto_crop_overlay_path = ""
+
+    def _select_locked(
+        self,
+        state: A3SessionState,
+        unit_id: str,
+        *,
+        identity_key: str = "",
+        progress: ProgressReporter | None = None,
+        request_id: str = "",
+    ) -> AgentResponse:
         unit = state.unit(unit_id)
         if (
             state.phase not in {
@@ -1000,17 +1367,56 @@ class A3MvpRuntime:
         if switching_from_a2:
             self.a2_runtime.clear(state.session_id, preserve_artifacts=True)
         state.selected_unit_id = unit_id
+        auto_record = state.auto_crops.get(unit_id) or {}
+        if state.auto_crop_enabled and auto_record.get("validation_status") == "auto_ready":
+            crop_path = Path(str(auto_record.get("path") or ""))
+            if crop_path.is_file():
+                state.crop_drafts[unit_id] = {
+                    "path": str(crop_path),
+                    "bounds": dict(auto_record.get("bounds") or {}),
+                    "source": "auto",
+                }
+                state.phase = A3_PHASE_A2_ACTIVE
+                state.crop_review_required = False
+                state.crop_review_feedback = ""
+                state.last_error = ""
+                self.store.save(state)
+                if progress is not None:
+                    progress("searching", "自动裁图已通过校验，正在进入题库检索…")
+                response = self.a2_runtime.handle_prechecked_image(
+                    state.session_id,
+                    crop_path,
+                    context_text=_question_context_text(unit),
+                    identity_key=identity_key,
+                    progress=progress,
+                    request_id=request_id,
+                )
+                return self._after_a2_response(state, response)
+
         state.phase = A3_PHASE_CROP_REQUIRED
         state.crop_review_required = False
         state.crop_review_feedback = ""
         state.last_error = ""
+        if state.auto_crop_enabled:
+            auto_bounds = dict(auto_record.get("bounds") or {})
+            auto_path = str(auto_record.get("path") or "")
+            if auto_bounds:
+                state.crop_drafts[unit_id] = {
+                    "path": auto_path,
+                    "bounds": auto_bounds,
+                    "source": "auto_suggestion",
+                }
         self.store.save(state)
         return _response(
             (
                 f"好，已停止当前题，改查「{unit['display_label']}」。"
                 "请裁剪它对应的单个结构图。"
                 if switching_from_a2
-                else f"好，先查「{unit['display_label']}」。请裁剪它对应的单个结构图。"
+                else (
+                    f"「{unit['display_label']}」的自动裁图需要人工确认。请调整裁剪范围后提交。"
+                    if state.auto_crop_enabled
+                    else f"好，先查「{unit['display_label']}」。请裁剪它对应的单个结构图。"
+                )
             ),
             state,
             intent="a3_unit_selected",
@@ -1091,18 +1497,32 @@ class A3MvpRuntime:
         return response
 
     def _crop_source(self, state: A3SessionState, bounds: dict[str, float]) -> Path:
+        return self._crop_source_for_unit(state, state.selected_unit_id, bounds)
+
+    def _crop_source_for_unit(
+        self,
+        state: A3SessionState,
+        unit_id: str,
+        bounds: Mapping[str, Any],
+    ) -> Path:
         source = Path(state.source_page_path)
         target_dir = self.artifacts.session_dir(state.session_id) / "crops"
         target_dir.mkdir(parents=True, exist_ok=True)
-        safe_id = sha256(state.selected_unit_id.encode("utf-8")).hexdigest()[:20]
+        safe_id = sha256(str(unit_id).encode("utf-8")).hexdigest()[:20]
         target = target_dir / f"{safe_id}.jpg"
         with Image.open(source) as opened:
             image = ImageOps.exif_transpose(opened).convert("RGB")
             width, height = image.size
-            left = max(0, min(width - 1, round(bounds["x"] * width)))
-            top = max(0, min(height - 1, round(bounds["y"] * height)))
-            right = max(left + 1, min(width, round((bounds["x"] + bounds["width"]) * width)))
-            bottom = max(top + 1, min(height, round((bounds["y"] + bounds["height"]) * height)))
+            left = max(0, min(width - 1, round(float(bounds["x"]) * width)))
+            top = max(0, min(height - 1, round(float(bounds["y"]) * height)))
+            right = max(
+                left + 1,
+                min(width, round((float(bounds["x"]) + float(bounds["width"])) * width)),
+            )
+            bottom = max(
+                top + 1,
+                min(height, round((float(bounds["y"]) + float(bounds["height"])) * height)),
+            )
             image.crop((left, top, right, bottom)).save(
                 target,
                 format="JPEG",
@@ -1111,23 +1531,63 @@ class A3MvpRuntime:
             )
         return target.resolve()
 
+    def _write_auto_crop_overlay(self, state: A3SessionState) -> Path:
+        source = Path(state.source_page_path)
+        target_dir = self.artifacts.session_dir(state.session_id) / "crops"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / "a3_auto_crop_overlay.jpg"
+        with Image.open(source) as opened:
+            image = ImageOps.exif_transpose(opened).convert("RGB")
+        draw = ImageDraw.Draw(image)
+        width, height = image.size
+        line_width = max(2, round(min(width, height) * 0.004))
+        for index, unit in enumerate(state.searchable_units, 1):
+            record = state.auto_crops.get(str(unit.get("unit_id") or "")) or {}
+            bounds = record.get("bounds") or {}
+            if not bounds:
+                continue
+            x1 = round(float(bounds["x"]) * width)
+            y1 = round(float(bounds["y"]) * height)
+            x2 = round((float(bounds["x"]) + float(bounds["width"])) * width)
+            y2 = round((float(bounds["y"]) + float(bounds["height"])) * height)
+            ready = record.get("grounding_status") == "auto_ready"
+            color = "#159447" if ready else "#c17a00"
+            draw.rectangle((x1, y1, x2, y2), outline=color, width=line_width)
+            label = f"C{index} {unit.get('display_label') or ''}".strip()
+            label_y = max(0, y1 - max(16, line_width * 5))
+            draw.rectangle(
+                (x1, label_y, min(width, x1 + max(54, len(label) * 9)), y1),
+                fill=color,
+            )
+            draw.text((x1 + 4, label_y + 2), label, fill="white")
+        image.save(target, format="JPEG", quality=92, optimize=True)
+        return target.resolve()
+
     def _a3_snapshot(self, state: A3SessionState) -> dict[str, Any]:
         completed = set(state.completed_unit_ids)
         units = []
         for item in state.units:
             if item.get("searchability") != "searchable_candidate":
                 continue
+            auto = state.auto_crops.get(str(item["unit_id"])) or {}
             units.append({
                 "unit_id": item["unit_id"],
                 "display_label": item["display_label"],
                 "title_text": item.get("title_text") or "",
                 "completed": item["unit_id"] in completed,
                 "selected": item["unit_id"] == state.selected_unit_id,
+                "requested": item["unit_id"] in state.requested_unit_ids,
+                "grounding_status": str(auto.get("grounding_status") or ""),
+                "validation_status": str(auto.get("validation_status") or ""),
+                "crop_available": bool(auto.get("path")),
+                "auto_bounds": dict(auto.get("bounds") or {}),
+                "reason_codes": list(auto.get("reason_codes") or []),
             })
         selected = state.unit(state.selected_unit_id) or {}
         draft = state.crop_drafts.get(state.selected_unit_id) or {}
         return {
             "enabled": True,
+            "auto_crop_enabled": state.auto_crop_enabled,
             "phase": state.phase,
             "units": units,
             "selected_unit": {
@@ -1137,6 +1597,9 @@ class A3MvpRuntime:
             },
             "completed_unit_ids": list(state.completed_unit_ids),
             "remaining_count": len(state.remaining_units),
+            "requested_unit_ids": list(state.requested_unit_ids),
+            "auto_crop_page_status": str(state.auto_crop_page.get("page_status") or ""),
+            "auto_crop_overlay_available": bool(state.auto_crop_overlay_path),
             "crop_review_required": state.crop_review_required,
             "crop_review_feedback": state.crop_review_feedback,
             "crop_draft": {

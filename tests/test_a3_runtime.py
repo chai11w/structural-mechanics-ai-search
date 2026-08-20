@@ -6,6 +6,7 @@ import unittest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from tiku_agent.a3_auto_crop import A3AutoCropPage, A3AutoCropTarget
 from tiku_agent.a3_models import (
     A3ModelError,
     A3UnitAnalysis,
@@ -92,11 +93,52 @@ class FakeVerifier:
         "external_loads_complete": True,
         "image_clear": True,
     }
+    def __init__(self):
+        self.calls = []
+
     def verify(self, _page, _crop, selected, _understanding):
+        self.calls.append(selected["unit_id"])
         return CropCompareResult(
             selected_unit_id=selected["unit_id"],
             verdict=self.verdict,
             checks=dict(self.checks),
+        )
+
+
+class FakeAutoCropper:
+    def __init__(self, *, second_status="review_required", error=None):
+        self.second_status = second_status
+        self.error = error
+        self.calls = []
+
+    def ground(self, image_path, units, page_understanding):
+        self.calls.append((Path(image_path), [unit["unit_id"] for unit in units], page_understanding))
+        if self.error is not None:
+            raise self.error
+        second_bbox = (520, 100, 920, 480) if self.second_status != "no_target" else None
+        return A3AutoCropPage(
+            page_status="ready" if self.second_status == "auto_ready" else "partially_ready",
+            targets=(
+                A3AutoCropTarget(
+                    target_id="c001",
+                    unit_id="g1-u1",
+                    question_label="四-1",
+                    bbox=(80, 100, 470, 460),
+                    status="auto_ready",
+                    reason_codes=(),
+                    binding_evidence="左侧结构图",
+                ),
+                A3AutoCropTarget(
+                    target_id="c002",
+                    unit_id="g1-u2",
+                    question_label="四-2",
+                    bbox=second_bbox,
+                    status=self.second_status,
+                    reason_codes=("crop_boundary_uncertain",) if self.second_status == "review_required" else (),
+                    binding_evidence="右侧结构图",
+                ),
+            ),
+            unknowns=(),
         )
 
 
@@ -391,6 +433,110 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(snapshot["image_route"], "A3")
         self.assertTrue(snapshot["a3"]["enabled"])
         self.assertEqual(snapshot["a3"]["phase"], A3_PHASE_WAIT_SELECTION)
+
+    def test_auto_crop_flow_grounds_page_once_and_keeps_partial_results(self):
+        cropper = FakeAutoCropper()
+        load_calls = []
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "auto-a3.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "auto-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            auto_cropper=cropper,
+            external_load_screen=lambda path: load_calls.append(Path(path)) or "yes",
+        )
+
+        response = runtime.handle_image("auto-page", self.source)
+
+        self.assertEqual(response.intent, "a3_auto_crops_ready")
+        self.assertEqual(len(cropper.calls), 1)
+        snapshot = runtime.session_snapshot("auto-page")["a3"]
+        self.assertTrue(snapshot["auto_crop_enabled"])
+        self.assertEqual(snapshot["auto_crop_page_status"], "partially_ready")
+        self.assertEqual(snapshot["units"][0]["grounding_status"], "auto_ready")
+        self.assertEqual(snapshot["units"][1]["grounding_status"], "review_required")
+        self.assertTrue(snapshot["units"][0]["crop_available"])
+        self.assertTrue(snapshot["auto_crop_overlay_available"])
+        self.assertTrue(runtime.current_auto_crop_overlay_path("auto-page").is_file())
+        self.assertEqual(load_calls, [])
+
+    def test_prepare_only_validates_requested_auto_crops_then_directly_enters_a2(self):
+        load_calls = []
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "prepare-a3.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "prepare-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            auto_cropper=FakeAutoCropper(second_status="auto_ready"),
+            external_load_screen=lambda path: load_calls.append(Path(path)) or "yes",
+        )
+        runtime.handle_image("prepare-page", self.source)
+
+        prepared = runtime.prepare_units(
+            "prepare-page",
+            ["g1-u1"],
+            task_revision=1,
+        )
+
+        self.assertEqual(prepared.intent, "a3_units_prepared")
+        snapshot = runtime.session_snapshot("prepare-page")["a3"]
+        self.assertEqual(snapshot["units"][0]["validation_status"], "auto_ready")
+        self.assertEqual(snapshot["units"][1]["validation_status"], "pending")
+        self.assertEqual(self.verifier.calls, ["g1-u1"])
+        self.assertEqual(len(load_calls), 1)
+
+        selected = runtime.select_unit("prepare-page", "g1-u1", task_revision=1)
+
+        self.assertEqual(selected.intent, "search_image")
+        self.assertEqual(runtime.session_snapshot("prepare-page")["a3"]["phase"], A3_PHASE_A2_ACTIVE)
+        self.assertEqual(len(self.a2.prechecked_calls), 1)
+        _session, crop_path, kwargs = self.a2.prechecked_calls[0]
+        self.assertTrue(crop_path.is_file())
+        self.assertIn("子题 1 条件", kwargs["context_text"])
+
+    def test_selected_review_target_uses_existing_manual_crop_with_prefilled_bounds(self):
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "manual-fallback.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "manual-fallback-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            auto_cropper=FakeAutoCropper(),
+            external_load_screen=lambda _path: "yes",
+        )
+        runtime.handle_image("manual-fallback", self.source)
+        runtime.prepare_units("manual-fallback", ["g1-u2"], task_revision=1)
+
+        response = runtime.select_unit("manual-fallback", "g1-u2", task_revision=1)
+
+        self.assertEqual(response.intent, "a3_unit_selected")
+        snapshot = runtime.session_snapshot("manual-fallback")["a3"]
+        self.assertEqual(snapshot["phase"], A3_PHASE_CROP_REQUIRED)
+        self.assertTrue(snapshot["crop_draft"]["available"])
+        self.assertEqual(snapshot["crop_draft"]["bounds"]["x"], 0.52)
+        self.assertEqual(self.verifier.calls, [])
+
+    def test_grounding_error_degrades_every_unit_to_manual_without_page_error(self):
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "grounding-error.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "grounding-error-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            auto_cropper=FakeAutoCropper(error=RuntimeError("service unavailable")),
+        )
+
+        response = runtime.handle_image("grounding-error", self.source)
+
+        self.assertEqual(response.intent, "a3_auto_crops_ready")
+        snapshot = runtime.session_snapshot("grounding-error")["a3"]
+        self.assertEqual(snapshot["phase"], A3_PHASE_WAIT_SELECTION)
+        self.assertTrue(all(
+            unit["validation_status"] == "manual_required"
+            for unit in snapshot["units"]
+        ))
 
     def test_full_flow_a1_stops_without_a2_or_a3_processing(self):
         authority = FakeFlowAuthority("A1")
@@ -810,6 +956,46 @@ class A3RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(next_page.status_code, 200)
         self.assertEqual(client.get(crop_data["submitted_crop"]).status_code, 200)
+
+    def test_fastapi_exposes_auto_prepare_overlay_and_direct_a2_stream(self):
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "auto-api.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "auto-api-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            auto_cropper=FakeAutoCropper(second_status="auto_ready"),
+            external_load_screen=lambda _path: "yes",
+        )
+        client = TestClient(create_app(runtime=runtime, incoming_dir=self.root / "auto-api-incoming"))
+        uploaded = client.post(
+            "/api/image",
+            files={"file": ("page.jpg", self.source.read_bytes(), "image/jpeg")},
+        )
+        self.assertEqual(uploaded.status_code, 200)
+        self.assertEqual(uploaded.json()["intent"], "a3_auto_crops_ready")
+        self.assertEqual(client.get("/api/a3/overlay").status_code, 200)
+        self.assertEqual(client.get("/api/a3/crop/g1-u1").status_code, 200)
+
+        prepared = client.post(
+            "/api/a3/prepare/stream",
+            json={"unit_ids": ["g1-u1", "g1-u2"], "task_revision": 1},
+        )
+        events = [json.loads(line) for line in prepared.text.splitlines() if line]
+        self.assertEqual(events[-1]["type"], "result")
+        units = events[-1]["data"]["session"]["a3"]["units"]
+        self.assertTrue(all(unit["validation_status"] == "auto_ready" for unit in units))
+
+        selected = client.post(
+            "/api/a3/select/stream",
+            json={"unit_id": "g1-u2", "task_revision": 1},
+        )
+        select_events = [json.loads(line) for line in selected.text.splitlines() if line]
+        self.assertEqual(select_events[-1]["type"], "result")
+        select_data = select_events[-1]["data"]
+        self.assertEqual(select_data["intent"], "search_image")
+        self.assertEqual(select_data["session"]["a3"]["phase"], A3_PHASE_A2_ACTIVE)
+        self.assertTrue(select_data["submitted_crop"].startswith("/api/media/"))
 
     def test_uploading_next_page_keeps_previous_upload_available(self):
         client = TestClient(create_app(runtime=self.runtime, incoming_dir=self.root / "incoming"))

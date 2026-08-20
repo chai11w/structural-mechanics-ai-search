@@ -725,6 +725,108 @@ def create_app(
                 cookie_name=session_cookie,
             )
 
+        @app.post("/api/a3/select/stream")
+        async def a3_select_stream(request: Request) -> StreamingResponse:
+            try:
+                payload = await request.json()
+            except Exception as exc:  # noqa: BLE001 - malformed external input.
+                raise HTTPException(status_code=400, detail="invalid json") from exc
+            if not isinstance(payload, dict):
+                raise HTTPException(status_code=400, detail="json object is required")
+            unit_id = str(payload.get("unit_id") or "").strip()
+            if not unit_id:
+                raise HTTPException(status_code=400, detail="unit_id is required")
+            try:
+                task_revision = int(payload.get("task_revision"))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="task_revision is required") from exc
+            session_id = _session_id(request, cookie_name=session_cookie)
+
+            def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
+                kwargs: dict[str, object] = {
+                    "task_revision": task_revision,
+                    "progress": progress,
+                    "request_id": _request_id(request),
+                }
+                identity_key = _identity_key(request)
+                if identity_key:
+                    kwargs["identity_key"] = identity_key
+                response = runtime.select_unit(  # type: ignore[attr-defined]
+                    session_id,
+                    unit_id,
+                    **kwargs,
+                )
+                submitted_crop = (
+                    runtime.current_crop_path(session_id, unit_id)  # type: ignore[attr-defined]
+                    if runtime.session_snapshot(session_id).get("a3", {}).get("phase") == "A2_ACTIVE"
+                    else None
+                )
+                return _agent_payload(
+                    response,
+                    runtime,
+                    session_id,
+                    submitted_crop=submitted_crop,
+                )
+
+            result = StreamingResponse(
+                _stream_agent_events(
+                    execute,
+                    request_id=_request_id(request),
+                    search_id=str(runtime.session_snapshot(session_id).get("search_id") or ""),
+                ),
+                media_type="application/x-ndjson",
+            )
+            _set_session_cookie(
+                result,
+                session_id,
+                secure_cookie=_is_secure_request(request),
+                cookie_name=session_cookie,
+            )
+            return result
+
+        @app.post("/api/a3/prepare/stream")
+        async def a3_prepare_stream(request: Request) -> StreamingResponse:
+            try:
+                payload = await request.json()
+            except Exception as exc:  # noqa: BLE001 - malformed external input.
+                raise HTTPException(status_code=400, detail="invalid json") from exc
+            if not isinstance(payload, dict) or not isinstance(payload.get("unit_ids"), list):
+                raise HTTPException(status_code=400, detail="unit_ids array is required")
+            unit_ids = [str(value or "").strip() for value in payload["unit_ids"]]
+            if not unit_ids or any(not value for value in unit_ids):
+                raise HTTPException(status_code=400, detail="unit_ids are required")
+            try:
+                task_revision = int(payload.get("task_revision"))
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail="task_revision is required") from exc
+            session_id = _session_id(request, cookie_name=session_cookie)
+
+            def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
+                response = runtime.prepare_units(  # type: ignore[attr-defined]
+                    session_id,
+                    unit_ids,
+                    task_revision=task_revision,
+                    progress=progress,
+                    request_id=_request_id(request),
+                )
+                return _agent_payload(response, runtime, session_id)
+
+            result = StreamingResponse(
+                _stream_agent_events(
+                    execute,
+                    request_id=_request_id(request),
+                    search_id=str(runtime.session_snapshot(session_id).get("search_id") or ""),
+                ),
+                media_type="application/x-ndjson",
+            )
+            _set_session_cookie(
+                result,
+                session_id,
+                secure_cookie=_is_secure_request(request),
+                cookie_name=session_cookie,
+            )
+            return result
+
         @app.post("/api/a3/crop/stream")
         async def a3_crop_stream(request: Request) -> StreamingResponse:
             try:
@@ -796,6 +898,18 @@ def create_app(
             )
             if path is None:
                 raise HTTPException(status_code=404, detail="crop not found")
+            return FileResponse(path, headers={"Cache-Control": "private, no-store"})
+
+        @app.get("/api/a3/overlay")
+        def get_a3_overlay(request: Request) -> FileResponse:
+            session_id = str(request.cookies.get(session_cookie) or "").strip()
+            path = (
+                runtime.current_auto_crop_overlay_path(session_id)  # type: ignore[attr-defined]
+                if session_id
+                else None
+            )
+            if path is None:
+                raise HTTPException(status_code=404, detail="overlay not found")
             return FileResponse(path, headers={"Cache-Control": "private, no-store"})
 
     return app

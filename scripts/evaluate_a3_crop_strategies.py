@@ -24,6 +24,7 @@ from scripts.classify_question_bank import parse_model_json
 from tiku_agent.a3_crop_strategy_eval import (
     build_direct_grounding_prompt,
     build_paddle_binding_prompt,
+    call_mimo_json,
     call_qwen_json,
     export_normalized_boxes,
     parse_direct_grounding,
@@ -31,6 +32,7 @@ from tiku_agent.a3_crop_strategy_eval import (
     render_paddle_candidate_overlay,
     write_json,
 )
+from tiku_agent.glm_vision import call_glm_json
 from tiku_agent.a3_region_cropper import crop_a3_regions, write_crop_manifest
 from tiku_agent.image_region_mapper import (
     QwenA3RegionObserver,
@@ -46,15 +48,21 @@ STRATEGIES = {
     "2": "02_ppstructure_qwen37",
     "3a": "03a_qwen37_grounding",
     "3b": "03b_qwen38_grounding",
+    "3c": "03c_mimo_v25_pro_grounding",
+    "3d": "03d_mimo_v25_grounding",
+    "3e": "03e_glm5v_turbo_grounding",
 }
 PRICE_CNY_PER_MILLION_TOKENS = {
     "qwen3.7-plus": {"input": 1.6, "output": 6.4},
     "qwen3.8-max": {"input": 12.0, "output": 36.0},
+    "mimo-v2.5-pro": {"input": 3.0, "output": 6.0},
+    "mimo-v2.5": {"input": 3.0, "output": 6.0},
+    "glm-5v-turbo": {"input": 5.0, "output": 22.0},
 }
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Compare four isolated A3 automatic-crop strategies.")
+    parser = argparse.ArgumentParser(description="Compare isolated A3 automatic-crop strategies.")
     parser.add_argument(
         "--images-dir",
         type=Path,
@@ -94,15 +102,42 @@ def main() -> int:
         else (BASE / "output" / f"a3_crop_eval_{datetime.now():%Y%m%d_%H%M%S}").resolve()
     )
     output_dir.mkdir(parents=True, exist_ok=True)
+    run_config_path = output_dir / "run_config.json"
+    previous_config: dict[str, Any] = {}
+    if run_config_path.exists():
+        try:
+            loaded_config = json.loads(run_config_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_config, dict):
+                previous_config = loaded_config
+        except (OSError, json.JSONDecodeError):
+            previous_config = {}
+    combined_strategies: list[str] = []
+    existing_strategy_values = [
+        value
+        for value, dirname in STRATEGIES.items()
+        if any((output_dir / dirname).glob("*/result.json"))
+    ]
+    # Derive the persisted list from actual result directories plus the
+    # current invocation; stale strategies removed from an evaluation must
+    # not remain in run_config metadata.
+    for value in [*existing_strategy_values, *args.strategies]:
+        if value in STRATEGIES and value not in combined_strategies:
+            combined_strategies.append(value)
     write_json(
-        output_dir / "run_config.json",
+        run_config_path,
         {
             "schema_version": "a3-crop-eval-run-v1",
-            "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "created_at": previous_config.get("created_at") or datetime.now().astimezone().isoformat(timespec="seconds"),
             "images_dir": str(images_dir),
             "image_count": len(images),
-            "strategies": args.strategies,
-            "models": {"qwen37": args.qwen37_model, "qwen38": args.qwen38_model},
+            "strategies": combined_strategies,
+            "models": {
+                "qwen37": args.qwen37_model,
+                "qwen38": args.qwen38_model,
+                "mimo_pro": "mimo-v2.5-pro",
+                "mimo": "mimo-v2.5",
+                "glm": "glm-5v-turbo",
+            },
             "pricing_cny_per_million_tokens": PRICE_CNY_PER_MILLION_TOKENS,
             "pricing_note": "Run-time estimate only; supplier billing is authoritative.",
             "timeout_seconds": args.timeout_seconds,
@@ -114,6 +149,15 @@ def main() -> int:
         _run_paddle_extraction(args.paddle_python, images_dir, output_dir / "paddle_layout")
 
     records: list[dict[str, Any]] = []
+    # When adding a new strategy to an existing evaluation, preserve all
+    # previously completed records so the review page remains a single table.
+    for existing_strategy in STRATEGIES:
+        if existing_strategy in args.strategies:
+            continue
+        for image_path in images:
+            existing_path = output_dir / STRATEGIES[existing_strategy] / image_path.stem / "result.json"
+            if existing_path.exists():
+                records.append(json.loads(existing_path.read_text(encoding="utf-8")))
     for strategy in args.strategies:
         for image_path in images:
             strategy_dir = output_dir / STRATEGIES[strategy] / image_path.stem
@@ -148,7 +192,7 @@ def main() -> int:
                         model=args.qwen37_model,
                         timeout_seconds=args.timeout_seconds,
                     )
-                else:
+                elif strategy == "3b":
                     record = _run_direct_grounding(
                         image_path,
                         strategy_dir,
@@ -156,6 +200,31 @@ def main() -> int:
                         model=args.qwen38_model,
                         timeout_seconds=args.timeout_seconds,
                     )
+                elif strategy == "3c":
+                    record = _run_mimo_grounding(
+                        image_path,
+                        strategy_dir,
+                        strategy="3c",
+                        model="mimo-v2.5-pro",
+                        timeout_seconds=args.timeout_seconds,
+                    )
+                elif strategy == "3d":
+                    record = _run_mimo_grounding(
+                        image_path,
+                        strategy_dir,
+                        strategy="3d",
+                        model="mimo-v2.5",
+                        timeout_seconds=args.timeout_seconds,
+                    )
+                else:
+                    record = _run_glm_grounding(
+                        image_path,
+                        strategy_dir,
+                        strategy="3e",
+                        model="glm-5v-turbo",
+                        timeout_seconds=args.timeout_seconds,
+                    )
+
             except Exception as exc:  # noqa: BLE001 - preserve the rest of the paid evaluation batch.
                 record = _base_record(strategy, image_path)
                 record.update(
@@ -333,6 +402,92 @@ def _run_direct_grounding(
         model=model,
         timeout_seconds=timeout_seconds,
         call_type="qwen_a3_direct_grounding_eval",
+    )
+    raw_path = output_dir / "raw_model_response.txt"
+    raw_path.write_text(response.raw_text, encoding="utf-8")
+    normalized = parse_direct_grounding(response.payload)
+    normalized_path = write_json(output_dir / "normalized.json", normalized)
+    artifacts = export_normalized_boxes(
+        image_path,
+        normalized["targets"],
+        output_dir / "crops",
+        id_field="target_id",
+        normalized_1000=True,
+    )
+    return {
+        **_base_record(strategy, image_path),
+        "status": "completed",
+        "model": model,
+        "page_status": normalized["page_status"],
+        "reason_codes": normalized["unknowns"],
+        "crop_count": len(normalized["targets"]),
+        "usage": response.usage_dict(),
+        "artifacts": {
+            "raw_model_response": str(raw_path),
+            "normalized": str(normalized_path),
+            **artifacts,
+        },
+    }
+
+
+def _run_mimo_grounding(
+    image_path: Path,
+    output_dir: Path,
+    *,
+    strategy: str,
+    model: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    response = call_mimo_json(
+        [image_path],
+        prompt=build_direct_grounding_prompt(),
+        model=model,
+        timeout_seconds=timeout_seconds,
+        call_type="mimo_a3_direct_grounding_eval",
+    )
+    raw_path = output_dir / "raw_model_response.txt"
+    raw_path.write_text(response.raw_text, encoding="utf-8")
+    normalized = parse_direct_grounding(response.payload)
+    normalized_path = write_json(output_dir / "normalized.json", normalized)
+    artifacts = export_normalized_boxes(
+        image_path,
+        normalized["targets"],
+        output_dir / "crops",
+        id_field="target_id",
+        normalized_1000=True,
+    )
+    return {
+        **_base_record(strategy, image_path),
+        "status": "completed",
+        "model": model,
+        "page_status": normalized["page_status"],
+        "reason_codes": normalized["unknowns"],
+        "crop_count": len(normalized["targets"]),
+        "usage": response.usage_dict(),
+        "artifacts": {
+            "raw_model_response": str(raw_path),
+            "normalized": str(normalized_path),
+            **artifacts,
+        },
+    }
+
+
+def _run_glm_grounding(
+    image_path: Path,
+    output_dir: Path,
+    *,
+    strategy: str,
+    model: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    response = call_glm_json(
+        [image_path],
+        prompt=build_direct_grounding_prompt(),
+        model=model,
+        timeout_seconds=timeout_seconds,
+        call_type="glm_a3_direct_grounding_eval",
     )
     raw_path = output_dir / "raw_model_response.txt"
     raw_path.write_text(response.raw_text, encoding="utf-8")

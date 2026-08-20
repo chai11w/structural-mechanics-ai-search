@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+import urllib.error
 import urllib.request
 
 from PIL import Image, ImageDraw, ImageOps
@@ -164,8 +165,12 @@ def call_qwen_json(
     )
 
     def request_data() -> dict[str, Any]:
-        with urllib.request.urlopen(request, timeout=max(1.0, timeout_seconds)) as response:
-            value = json.loads(response.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(request, timeout=max(1.0, timeout_seconds)) as response:
+                value = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:800]
+            raise RuntimeError(f"Qwen HTTP {exc.code}: {detail}") from exc
         if not isinstance(value, dict):
             raise ValueError("model response must be an object")
         return value
@@ -193,6 +198,117 @@ def call_qwen_json(
         model=model,
         prompt_tokens=_non_negative_int(usage.get("prompt_tokens")),
         completion_tokens=_non_negative_int(usage.get("completion_tokens")),
+        total_tokens=_non_negative_int(usage.get("total_tokens")),
+    )
+
+
+def call_mimo_json(
+    image_paths: Sequence[str | Path],
+    *,
+    prompt: str,
+    model: str,
+    user_text: str = "只输出 JSON。",
+    api_key: str | None = None,
+    endpoint: str = "https://api.xiaomimimo.com/v1/chat/completions",
+    timeout_seconds: float = 180.0,
+    max_tokens: int = 3000,
+    call_type: str = "mimo_a3_crop_eval",
+) -> QwenJsonResponse:
+    """Call MiMo's OpenAI-compatible multimodal endpoint once."""
+
+    key = str(api_key or os.environ.get("MIMO_API_KEY", "")).strip()
+    if not key:
+        raise RuntimeError("MIMO_API_KEY is not configured")
+    image_urls = [
+        image_to_model_data_url(Path(image_path), normalize_orientation=True)
+        for image_path in image_paths
+    ]
+    # MiMo's Pro model exposes multimodal input through Responses API; the
+    # standard model remains on the OpenAI Chat Completions-compatible route.
+    use_responses = model == "mimo-v2.5-pro"
+    if use_responses:
+        endpoint = "https://api.xiaomimimo.com/v1/responses"
+        input_content = [
+            {"type": "input_image", "image_url": url} for url in image_urls
+        ]
+        input_content.append({"type": "input_text", "text": user_text})
+        request_payload = {
+            "model": model,
+            "instructions": prompt,
+            "input": [{"role": "user", "content": input_content}],
+            "max_output_tokens": max(256, int(max_tokens)),
+            "stream": False,
+            "reasoning": {"effort": "none"},
+        }
+    else:
+        content: list[dict[str, Any]] = [
+            {"type": "image_url", "image_url": {"url": url}} for url in image_urls
+        ]
+        content.append({"type": "text", "text": user_text})
+        request_payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": content},
+            ],
+            "temperature": 0,
+            "max_completion_tokens": max(256, int(max_tokens)),
+            "thinking": {"type": "disabled"},
+        }
+    request = urllib.request.Request(
+        str(endpoint).strip(),
+        data=json.dumps(request_payload, ensure_ascii=False).encode("utf-8"),
+        headers={"api-key": key, "Content-Type": "application/json"},
+        method="POST",
+    )
+
+    def request_data() -> dict[str, Any]:
+        try:
+            with urllib.request.urlopen(request, timeout=max(1.0, timeout_seconds)) as response:
+                value = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:800]
+            raise RuntimeError(f"MiMo HTTP {exc.code}: {detail}") from exc
+        if not isinstance(value, dict):
+            raise ValueError("model response must be an object")
+        return value
+
+    data = timed_model_call(
+        request_data,
+        provider="mimo",
+        model=model,
+        call_type=call_type,
+        usage_getter=lambda value: value.get("usage", {}),
+        request_id_getter=lambda value: str(value.get("id") or ""),
+    )
+    if use_responses:
+        raw_content = data.get("output_text")
+        if not raw_content:
+            for item in data.get("output", []):
+                for part in item.get("content", []) if isinstance(item, dict) else []:
+                    if isinstance(part, dict) and part.get("type") == "output_text":
+                        raw_content = part.get("text")
+                        break
+                if raw_content:
+                    break
+        if not raw_content:
+            raise ValueError("invalid MiMo Responses response envelope")
+    else:
+        try:
+            raw_content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ValueError("invalid MiMo response envelope") from exc
+    raw_text = raw_content if isinstance(raw_content, str) else json.dumps(raw_content, ensure_ascii=False)
+    parsed = parse_model_json(raw_text)
+    if not isinstance(parsed, dict):
+        raise ValueError("MiMo JSON output must be an object")
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    return QwenJsonResponse(
+        payload=parsed,
+        raw_text=raw_text,
+        model=str(data.get("model") or model),
+        prompt_tokens=_non_negative_int(usage.get("prompt_tokens") or usage.get("input_tokens")),
+        completion_tokens=_non_negative_int(usage.get("completion_tokens") or usage.get("output_tokens")),
         total_tokens=_non_negative_int(usage.get("total_tokens")),
     )
 
