@@ -24,6 +24,10 @@ class TikuAgentWatchdog8896Test(unittest.TestCase):
         self.assertIn("Start-Sleep -Seconds 20", self.script)
         self.assertIn('Set-Content -LiteralPath $WatchdogPidFile -Value $PID', self.script)
 
+    def test_watchdog_exposes_manual_crop_rollback_switch(self):
+        self.assertIn("[switch]$DisableAutoCrop", self.script)
+        self.assertIn('$arguments += "--disable-auto-crop"', self.script)
+
 
 if __name__ == "__main__":
     unittest.main()

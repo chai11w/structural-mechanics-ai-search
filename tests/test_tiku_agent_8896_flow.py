@@ -12,6 +12,7 @@ from scripts.run_tiku_agent_8896 import (
     build_runtime,
 )
 from scripts.run_tiku_agent_demo import build_runtime as build_a2_runtime
+from tiku_agent.a3_auto_crop import GlmA3AutoCropper
 from tiku_agent.external_load_screen import QwenExternalLoadScreen
 from tiku_agent.state import AgentState
 
@@ -24,6 +25,20 @@ class TikuAgent8896FlowTest(unittest.TestCase):
         self.assertEqual(DEFAULT_RUNTIME_DIR.name, ".tmp_tiku_agent_a3_mvp_8896")
         self.assertEqual(SESSION_COOKIE, "tiku_agent_8896_session")
         self.assertTrue(defaults.enable_triage)
+        self.assertTrue(defaults.enable_auto_crop)
+
+    def test_auto_crop_is_promoted_by_default_with_manual_rollback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            promoted = build_runtime(root / "promoted", enable_triage=False)
+            rolled_back = build_runtime(
+                root / "rolled-back",
+                enable_triage=False,
+                enable_auto_crop=False,
+            )
+
+            self.assertIsInstance(promoted.auto_cropper, GlmA3AutoCropper)
+            self.assertIsNone(rolled_back.auto_cropper)
 
     def test_launcher_can_disable_or_inject_the_triage_authority(self):
         with tempfile.TemporaryDirectory() as temp:

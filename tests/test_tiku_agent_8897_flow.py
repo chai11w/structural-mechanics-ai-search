@@ -30,13 +30,13 @@ class TikuAgent8897FlowTest(unittest.TestCase):
         self.assertEqual(SESSION_COOKIE, "tiku_agent_8897_session")
         self.assertTrue(defaults.enable_triage)
 
-    def test_8897_enables_glm_auto_crop_without_changing_8896_default(self):
+    def test_8896_promotion_keeps_8897_runtime_isolated(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             runtime_8896 = build_8896_runtime(root / "8896", enable_triage=False)
             runtime_8897 = build_runtime(root / "8897", enable_triage=False)
 
-            self.assertIsNone(runtime_8896.auto_cropper)
+            self.assertIsInstance(runtime_8896.auto_cropper, GlmA3AutoCropper)
             self.assertIsInstance(runtime_8897.auto_cropper, GlmA3AutoCropper)
             self.assertNotEqual(
                 runtime_8896.store.database_path,

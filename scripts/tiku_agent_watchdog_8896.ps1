@@ -1,7 +1,8 @@
 param(
     [int]$Port = 8896,
     [string]$RuntimeDir,
-    [string]$PythonExe = "python"
+    [string]$PythonExe = "python",
+    [switch]$DisableAutoCrop
 )
 
 $ErrorActionPreference = "Stop"
@@ -65,6 +66,9 @@ function Start-Agent {
         "--port", "$Port",
         "--runtime-dir", "$RuntimeDir"
     )
+    if ($DisableAutoCrop) {
+        $arguments += "--disable-auto-crop"
+    }
     $process = Start-Process $PythonExe `
         -ArgumentList $arguments `
         -WorkingDirectory $ProjectDir `

@@ -1,4 +1,4 @@
-"""Run the isolated A3 manual-crop MVP on port 8896."""
+"""Run the promoted A3-V1 flow on port 8896."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from scripts.run_tiku_agent_demo import build_runtime as build_a2_runtime
+from tiku_agent.a3_auto_crop import GlmA3AutoCropper
 from tiku_agent.a3_models import QwenA3CropVerifier, QwenA3PageObserver
 from tiku_agent.a3_runtime import A3MvpRuntime, SQLiteA3SessionStore
 from tiku_agent.external_load_screen import QwenExternalLoadScreen
@@ -46,6 +47,8 @@ def build_runtime(
     runtime_dir: str | Path = DEFAULT_RUNTIME_DIR,
     *,
     model_timeout_seconds: float = 120.0,
+    grounding_timeout_seconds: float = 180.0,
+    enable_auto_crop: bool = True,
     enable_triage: bool = True,
     triage_timeout_seconds: float = 120.0,
     reply_timeout_seconds: float = 60.0,
@@ -72,13 +75,18 @@ def build_runtime(
             QwenImageTriage(timeout_seconds=triage_timeout_seconds),
             QwenTriageReplyClient(timeout_seconds=reply_timeout_seconds),
         )
+    resolved_auto_cropper = auto_cropper
+    if resolved_auto_cropper is None and enable_auto_crop:
+        resolved_auto_cropper = GlmA3AutoCropper(
+            timeout_seconds=grounding_timeout_seconds,
+        )
     return A3MvpRuntime(
         store=SQLiteA3SessionStore(root / "a3_sessions.sqlite3"),
         artifacts=SessionArtifacts(root / "a3_sessions"),
         a2_runtime=a2_runtime,
         page_observer=page_observer or QwenA3PageObserver(timeout_seconds=model_timeout_seconds),
         crop_verifier=crop_verifier or QwenA3CropVerifier(timeout_seconds=model_timeout_seconds),
-        auto_cropper=auto_cropper,
+        auto_cropper=resolved_auto_cropper,
         unit_analyzer=unit_analyzer,
         external_load_screen=QwenExternalLoadScreen(),
         image_triage_authority=authority,
@@ -91,6 +99,8 @@ def build_app(
     *,
     runtime: A3MvpRuntime | None = None,
     model_timeout_seconds: float = 120.0,
+    grounding_timeout_seconds: float = 180.0,
+    enable_auto_crop: bool = True,
     enable_triage: bool = True,
     triage_timeout_seconds: float = 120.0,
     reply_timeout_seconds: float = 60.0,
@@ -101,6 +111,8 @@ def build_app(
         or build_runtime(
             root,
             model_timeout_seconds=model_timeout_seconds,
+            grounding_timeout_seconds=grounding_timeout_seconds,
+            enable_auto_crop=enable_auto_crop,
             enable_triage=enable_triage,
             triage_timeout_seconds=triage_timeout_seconds,
             reply_timeout_seconds=reply_timeout_seconds,
@@ -112,11 +124,12 @@ def build_app(
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the isolated A1/A2/A3 flow with manual A3 crop")
+    parser = argparse.ArgumentParser(description="Run the isolated A1/A2/A3 flow with A3-V1 auto crop")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--runtime-dir", type=Path, default=DEFAULT_RUNTIME_DIR)
     parser.add_argument("--model-timeout-seconds", type=float, default=120.0)
+    parser.add_argument("--grounding-timeout-seconds", type=float, default=180.0)
     parser.add_argument("--triage-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--reply-timeout-seconds", type=float, default=60.0)
     parser.add_argument(
@@ -125,7 +138,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Temporarily run the A3-only path for local diagnostics",
     )
-    parser.set_defaults(enable_triage=True)
+    parser.add_argument(
+        "--disable-auto-crop",
+        dest="enable_auto_crop",
+        action="store_false",
+        help="Roll back A3 to the V0 manual-crop flow",
+    )
+    parser.set_defaults(enable_triage=True, enable_auto_crop=True)
     return parser
 
 
@@ -135,6 +154,8 @@ def main() -> int:
         build_app(
             args.runtime_dir,
             model_timeout_seconds=args.model_timeout_seconds,
+            grounding_timeout_seconds=args.grounding_timeout_seconds,
+            enable_auto_crop=args.enable_auto_crop,
             enable_triage=args.enable_triage,
             triage_timeout_seconds=args.triage_timeout_seconds,
             reply_timeout_seconds=args.reply_timeout_seconds,
