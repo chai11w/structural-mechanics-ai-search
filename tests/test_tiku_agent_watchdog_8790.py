@@ -3,16 +3,18 @@ from pathlib import Path
 
 
 class TikuAgentWatchdog8790Test(unittest.TestCase):
-    def test_external_load_screen_defaults_on_with_explicit_rollback(self):
+    def test_watchdog_runs_a3_v1_with_control_db_and_manual_crop_rollback(self):
         script = (
             Path(__file__).resolve().parents[1]
             / "scripts"
             / "tiku_agent_watchdog_8790.ps1"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("[switch]$DisableExternalLoadScreen", script)
-        self.assertIn('"--disable-external-load-screen"', script)
-        self.assertNotIn('"--enable-external-load-screen"', script)
+        self.assertIn('"scripts\\run_tiku_agent_8790.py"', script)
+        self.assertIn('".tmp_tiku_admin_8795\\control.sqlite3"', script)
+        self.assertIn("[switch]$DisableAutoCrop", script)
+        self.assertIn('"--disable-auto-crop"', script)
+        self.assertNotIn('"scripts\\run_tiku_agent_demo.py"', script)
 
 
 if __name__ == "__main__":

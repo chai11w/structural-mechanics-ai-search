@@ -9,6 +9,7 @@ param(
     [string]$InviteConfig,
     [string]$ControlDb,
     [switch]$DisableExternalLoadScreen,
+    [switch]$DisableAutoCrop,
     [string]$PythonExe = "python"
 )
 
@@ -19,6 +20,9 @@ if (-not $RuntimeDir) {
     $RuntimeDir = Join-Path $ProjectDir ".tmp_tiku_agent_v2_prod_8790"
 } elseif (-not [System.IO.Path]::IsPathRooted($RuntimeDir)) {
     $RuntimeDir = Join-Path $ProjectDir $RuntimeDir
+}
+if (-not $ControlDb -and -not $InviteConfig) {
+    $ControlDb = Join-Path $ProjectDir ".tmp_tiku_admin_8795\control.sqlite3"
 }
 if ($InviteConfig -and -not [System.IO.Path]::IsPathRooted($InviteConfig)) {
     $InviteConfig = Join-Path $ProjectDir $InviteConfig
@@ -87,28 +91,19 @@ function Stop-PortProcess {
 
 function Start-Bot {
     $arguments = @(
-        "scripts\run_tiku_agent_demo.py",
+        "scripts\run_tiku_agent_8790.py",
         "--host", "127.0.0.1",
         "--port", "$Port",
         "--runtime-dir", "$RuntimeDir"
-        "--max-concurrent-tasks", "$MaxConcurrentTasks"
-        "--max-queued-tasks", "$MaxQueuedTasks"
-        "--queue-wait-seconds", "$QueueWaitSeconds"
     )
-    if ($DailyBudgetCny -gt 0) {
-        $arguments += @("--daily-budget-cny", "$DailyBudgetCny")
-    }
-    if ($PerInviteDailyBudgetCny -gt 0) {
-        $arguments += @("--per-invite-daily-budget-cny", "$PerInviteDailyBudgetCny")
-    }
     if ($InviteConfig) {
         $arguments += @("--invite-config", "$InviteConfig")
     }
     if ($ControlDb) {
         $arguments += @("--control-db", "$ControlDb")
     }
-    if ($DisableExternalLoadScreen) {
-        $arguments += "--disable-external-load-screen"
+    if ($DisableAutoCrop) {
+        $arguments += "--disable-auto-crop"
     }
     $process = Start-Process $PythonExe `
         -ArgumentList $arguments `
