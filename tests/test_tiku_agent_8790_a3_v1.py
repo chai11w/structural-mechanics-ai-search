@@ -50,6 +50,9 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
             self.assertFalse(
                 build_runtime.call_args.kwargs["enable_a3_intent_model_fallback"]
             )
+            self.assertFalse(
+                build_runtime.call_args.kwargs["enable_author_contact_fallback"]
+            )
 
 
 if __name__ == "__main__":

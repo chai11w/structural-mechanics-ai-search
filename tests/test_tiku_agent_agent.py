@@ -153,12 +153,13 @@ class TikuSearchAgentTest(unittest.TestCase):
             use_llm_intent=False,
         )
 
-    def make_v2_agent(self, fake_tools, *, llm_client=None):
+    def make_v2_agent(self, fake_tools, *, llm_client=None, enable_author_contact_fallback=False):
         return TikuSearchAgent(
             tools=fake_tools.toolbox(),
             config=AgentToolConfig(top_k=3, rerank_top=3),
             use_llm_intent=llm_client is not None,
             llm_client=llm_client,
+            enable_author_contact_fallback=enable_author_contact_fallback,
         )
 
     def test_v2_conversation_shell_preserves_search_state_and_calls_no_tools(self):
@@ -982,6 +983,22 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(exhausted.intent, "clarification")
         self.assertIn("没有更多候选", exhausted.text)
         self.assertEqual(len(fake.search_chapters), calls_before)
+
+    def test_8896_author_fallback_keeps_continue_as_text_only(self):
+        fake = FakeTools(chapter="4力法")
+        agent = self.make_v2_agent(fake, enable_author_contact_fallback=True)
+        agent.handle_image("q.jpg")
+
+        rejected = agent.handle_text("没有我想要的")
+
+        self.assertEqual(
+            rejected.text,
+            "收到，这批候选都先排除。你可以回复“继续搜”看下一批，或联系作者手搓。",
+        )
+        self.assertEqual(
+            rejected.author_contact,
+            {"label": "联系作者", "channel": "微信", "value": "jglxfd6666"},
+        )
 
     def test_answer_mismatch_can_return_to_the_existing_candidates(self):
         fake = FakeTools(chapter="4力法")

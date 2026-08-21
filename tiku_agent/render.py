@@ -92,7 +92,15 @@ def render_candidates(state: AgentState, *, reranked: bool = False, note: str = 
     return append_notice(text, note)
 
 
-def render_candidates_rejected(state: AgentState) -> str:
+def render_candidates_rejected(
+    state: AgentState,
+    *,
+    author_contact_fallback: bool = False,
+) -> str:
+    if author_contact_fallback:
+        if state.continuation_available:
+            return "收到，这批候选都先排除。你可以回复“继续搜”看下一批，或联系作者手搓。"
+        return "目前没有更多相似候选题，你可以联系作者手搓。"
     if state.continuation_available:
         return "收到，这批候选都先排除。你可以回复“继续搜”看下一批，或告诉我换哪个章节。"
     return "收到，这批候选都不匹配。当前范围已经没有更多候选，可以换章节或发一张更清楚的题图。"
@@ -110,7 +118,13 @@ def render_answer_mismatch(state: AgentState) -> str:
     return "收到，这个答案先标记为不匹配。你可以返回候选改选；当前范围没有更多候选。"
 
 
-def render_no_more_candidates(state: AgentState) -> str:
+def render_no_more_candidates(
+    state: AgentState,
+    *,
+    author_contact_fallback: bool = False,
+) -> str:
+    if author_contact_fallback:
+        return "目前没有更多相似候选题，你可以联系作者手搓。"
     chapter = state.current_chapter or "当前范围"
     return f"{chapter}里已经没有更多未看过的候选了。可以换章节或发一张更清楚的题图。"
 
@@ -173,7 +187,13 @@ def render_failure_explanation(state: AgentState) -> str:
     return f"刚才没查成功，是因为：{detail}。你重新发一下题图，我们再试一次。"
 
 
-def render_no_match(state: AgentState) -> str:
+def render_no_match(
+    state: AgentState,
+    *,
+    author_contact_fallback: bool = False,
+) -> str:
+    if author_contact_fallback:
+        return "没有找到相似候选题，你可以联系作者手搓。"
     chapter = state.current_chapter or "这一章"
     return f"我在{chapter}里没找到很像的题。换个章节试试？"
 

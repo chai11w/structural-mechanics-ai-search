@@ -96,6 +96,7 @@ class AgentResponse:
     reply_source: str = ""
     fallback_reason: str = ""
     protocol: dict[str, Any] = field(default_factory=dict)
+    author_contact: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -126,6 +127,7 @@ class TikuSearchAgent:
         enable_safe_answer_v0: bool = False,
         safe_answer_generator_v0: SafeAnswerGeneratorV0 | None = None,
         enable_chapter_scope_fallback: bool = False,
+        enable_author_contact_fallback: bool = False,
         image_search_cancelled: Callable[[], bool] | None = None,
         commit_image_candidates: Callable[[], bool] | None = None,
     ) -> None:
@@ -138,6 +140,7 @@ class TikuSearchAgent:
         self.enable_safe_answer_v0 = enable_safe_answer_v0
         self.safe_answer_generator_v0 = safe_answer_generator_v0
         self.enable_chapter_scope_fallback = bool(enable_chapter_scope_fallback)
+        self.enable_author_contact_fallback = bool(enable_author_contact_fallback)
         self.image_search_cancelled = image_search_cancelled
         self.commit_image_candidates = commit_image_candidates
         self._incoming_search_id = ""
@@ -483,7 +486,14 @@ class TikuSearchAgent:
             return self._start_image_search(self.state.current_image_path)
         if intent.intent == "reject_candidates":
             self.state.reject_current_candidates()
-            return self._response(render.render_candidates_rejected(self.state), intent)
+            return self._response(
+                render.render_candidates_rejected(
+                    self.state,
+                    author_contact_fallback=self.enable_author_contact_fallback,
+                ),
+                intent,
+                include_author_contact=self.enable_author_contact_fallback,
+            )
         if intent.intent == "continue_search":
             self.state.reject_current_candidates()
             return self._run_search(intent=intent, classified=self._selected_question(), continuing=True)
@@ -741,8 +751,22 @@ class TikuSearchAgent:
         self.state.record_search_batch(candidates, has_more=bool(coarse.data.get("has_more")))
         if not candidates:
             self.state.set_candidates([])
-            text = render.render_no_more_candidates(self.state) if continuing else render.render_no_match(self.state)
-            return self._response(text, intent or IntentResult("search_image"))
+            text = (
+                render.render_no_more_candidates(
+                    self.state,
+                    author_contact_fallback=self.enable_author_contact_fallback,
+                )
+                if continuing
+                else render.render_no_match(
+                    self.state,
+                    author_contact_fallback=self.enable_author_contact_fallback,
+                )
+            )
+            return self._response(
+                text,
+                intent or IntentResult("search_image"),
+                include_author_contact=self.enable_author_contact_fallback,
+            )
 
         reranked = self.tools.rerank_candidates(
             self._rerank_query_image_path(),
@@ -758,8 +782,13 @@ class TikuSearchAgent:
         if reranked.outcome is ToolOutcome.NO_MATCH:
             self.state.set_candidates([])
             return self._response(
-                reranked.error or "未找到可靠相似题。",
+                (
+                    "没有找到相似候选题，你可以联系作者手搓。"
+                    if self.enable_author_contact_fallback
+                    else reranked.error or "未找到可靠相似题。"
+                ),
                 intent or IntentResult("search_image"),
+                include_author_contact=self.enable_author_contact_fallback,
             )
         visible = list(reranked.data.get("visible_candidates") or candidates)
         self.state.set_candidates(visible)
@@ -1035,6 +1064,7 @@ class TikuSearchAgent:
         *,
         images: list[str] | None = None,
         protocol: dict[str, Any] | None = None,
+        include_author_contact: bool = False,
     ) -> AgentResponse:
         derived_protocol = protocol
         if derived_protocol is None and self.state.phase in {
@@ -1051,6 +1081,11 @@ class TikuSearchAgent:
             state=self.state.to_dict(),
             intent=intent.intent,
             protocol=dict(derived_protocol),
+            author_contact=(
+                {"label": "联系作者", "channel": "微信", "value": "jglxfd6666"}
+                if include_author_contact
+                else {}
+            ),
         )
 
     def _protocol_from_tool_result(self, result: ToolResult) -> dict[str, Any]:

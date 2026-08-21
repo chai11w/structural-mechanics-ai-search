@@ -1253,6 +1253,7 @@ def _agent_payload(
         "uploaded_image": uploaded_image_url,
         "submitted_crop": submitted_crop_url,
         "intent": response.intent,
+        "author_contact": dict(response.author_contact),
         "session": snapshot,
         "failure": failure,
         **protocol.to_dict(),

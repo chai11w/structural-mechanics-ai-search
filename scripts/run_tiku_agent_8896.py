@@ -63,6 +63,7 @@ def build_runtime(
     enable_a3_intent_v1: bool = True,
     enable_a3_intent_model_fallback: bool = True,
     a3_intent_model_client=None,
+    enable_author_contact_fallback: bool = True,
 ) -> A3MvpRuntime:
     """Build the full A1/A2/A3 route with A3 and its child A2 under one root."""
 
@@ -74,6 +75,7 @@ def build_runtime(
         enable_dimension_filter=True,
         enable_external_load_screen=False,
         enable_chapter_scope_fallback=True,
+        enable_author_contact_fallback=enable_author_contact_fallback,
         rerank_policy=A2_RERANK_POLICY,
         cost_ledger=shared_cost_ledger,
         control_store=control_store,

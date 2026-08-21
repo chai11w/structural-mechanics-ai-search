@@ -56,6 +56,7 @@ def build_app(
             control_store=control_store,
             enable_a3_intent_v1=True,
             enable_a3_intent_model_fallback=False,
+            enable_author_contact_fallback=False,
         ),
         incoming_dir=root / "incoming",
         session_cookie=SESSION_COOKIE,

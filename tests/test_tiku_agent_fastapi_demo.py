@@ -290,7 +290,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260820-a3-v1-v2"', 'src="/assets/demo.js?v=20260821-a3-progress-style-v1"',
+            'href="/assets/demo.css?v=20260821-author-contact-v1"', 'src="/assets/demo.js?v=20260821-author-contact-v1"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -493,6 +493,7 @@ class FastApiDemoTest(unittest.TestCase):
         text_response = client.post("/api/message", json={"text": "就这个"})
         self.assertEqual(text_response.status_code, 200)
         self.assertEqual(text_response.json()["text"], "我明白了。")
+        self.assertEqual(text_response.json()["author_contact"], {})
         self.assertIsNone(text_response.json()["failure"])
         self.assertIn(SESSION_COOKIE, text_response.cookies)
         follow_up = client.post("/api/message", json={"text": "再说一次"})

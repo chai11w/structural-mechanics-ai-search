@@ -144,6 +144,15 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn("sessionContext.a3?.phase === 'ERROR'", self.script)
         self.assertIn("}, timeoutMs, '请求等待时间过长，请稍后重试。'", self.script)
 
+    def test_author_contact_is_the_only_fallback_button(self):
+        page = (ROOT / "tiku_agent" / "demo_web" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("function createAuthorContactAction", self.script)
+        self.assertIn("button.textContent = contact.label", self.script)
+        self.assertIn('id="author-contact-backdrop"', page)
+        self.assertIn("作者${contact.channel}：", self.script)
+        self.assertNotIn("button.textContent = '继续搜'", self.script)
+
 
 if __name__ == "__main__":
     unittest.main()

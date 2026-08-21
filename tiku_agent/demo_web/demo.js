@@ -28,6 +28,11 @@ const feedbackDetail = $('#feedback-detail');
 const feedbackError = $('#feedback-error');
 const feedbackCancel = $('#feedback-cancel');
 const feedbackSubmit = $('#feedback-submit');
+const authorContactBackdrop = $('#author-contact-backdrop');
+const authorContactClose = $('#author-contact-close');
+const authorContactChannel = $('#author-contact-channel');
+const authorContactValue = $('#author-contact-value');
+const authorContactCopy = $('#author-contact-copy');
 const a3CropWorkspace = $('#a3-crop-workspace');
 const a3CropBack = $('#a3-crop-back');
 const a3CropLabel = $('#a3-crop-label');
@@ -248,6 +253,7 @@ function remember(item) {
     feedback: item.feedback || null,
     recoveryActions: normalizeRecoveryActions(item.recoveryActions),
     retryAction: normalizeRetryAction(item.retryAction),
+    authorContact: normalizeAuthorContact(item.authorContact),
     a3: normalizeA3Snapshot(item.a3),
     ...protocolFields(item),
   });
@@ -552,6 +558,67 @@ function createRecoveryActions(actions, item = {}) {
   return host;
 }
 
+function normalizeAuthorContact(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const label = String(raw.label || '').trim();
+  const channel = String(raw.channel || '').trim();
+  const value = String(raw.value || '').trim();
+  if (!label || !channel || !value) return null;
+  return { label, channel, value };
+}
+
+function closeAuthorContact() {
+  if (authorContactBackdrop.hidden) return;
+  authorContactBackdrop.hidden = true;
+  authorContactCopy.textContent = '复制微信号';
+  delete document.body.dataset.modal;
+  focusBeforeModal?.focus();
+}
+
+function openAuthorContact(raw) {
+  const contact = normalizeAuthorContact(raw);
+  if (!contact) return;
+  focusBeforeModal = document.activeElement;
+  authorContactChannel.textContent = `作者${contact.channel}：`;
+  authorContactValue.textContent = contact.value;
+  authorContactCopy.dataset.value = contact.value;
+  authorContactCopy.textContent = `复制${contact.channel}号`;
+  authorContactBackdrop.hidden = false;
+  document.body.dataset.modal = 'author-contact';
+  authorContactCopy.focus();
+}
+
+function createAuthorContactAction(raw) {
+  const contact = normalizeAuthorContact(raw);
+  if (!contact) return null;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'message-author-contact';
+  button.textContent = contact.label;
+  button.addEventListener('click', () => openAuthorContact(contact));
+  return button;
+}
+
+async function copyAuthorContact() {
+  const value = String(authorContactCopy.dataset.value || '').trim();
+  if (!value) return;
+  try {
+    await navigator.clipboard.writeText(value);
+    authorContactCopy.textContent = '已复制';
+  } catch (_error) {
+    const input = document.createElement('textarea');
+    input.value = value;
+    input.setAttribute('readonly', '');
+    input.style.position = 'fixed';
+    input.style.opacity = '0';
+    document.body.append(input);
+    input.select();
+    const copied = document.execCommand('copy');
+    input.remove();
+    authorContactCopy.textContent = copied ? '已复制' : '复制失败，请手动复制';
+  }
+}
+
 function createA3UnitActions(rawA3) {
   const a3 = normalizeA3Snapshot(rawA3);
   if (!a3 || !a3.units.length) return null;
@@ -814,6 +881,8 @@ function addMessage(item, persist = true) {
   if (a3Actions) content.append(a3Actions);
   const recoveryActions = createRecoveryActions(item.recoveryActions, item);
   if (recoveryActions) content.append(recoveryActions);
+  const authorContactAction = createAuthorContactAction(item.authorContact);
+  if (authorContactAction) content.append(authorContactAction);
   if (feedbackEligible) content.append(createMessageActions(item, article));
   article.append(content);
   chat.append(article);
@@ -1265,6 +1334,7 @@ function responseItem(data) {
       ? 'error'
       : protocol.status === 'PARTIAL' ? 'partial' : '',
     recoveryActions: recoveryAction ? [recoveryAction] : [],
+    authorContact: normalizeAuthorContact(data?.author_contact),
     messageId: createMessageId(),
     createdAt: Date.now(),
     a3: normalizeA3Snapshot(data.session?.a3),
@@ -2246,12 +2316,16 @@ feedbackClose.addEventListener('click', closeFeedback);
 feedbackBackdrop.addEventListener('click', (event) => { if (event.target === feedbackBackdrop) closeFeedback(); });
 feedbackCancel.addEventListener('click', cancelFeedback);
 feedbackSubmit.addEventListener('click', submitFeedback);
+authorContactClose.addEventListener('click', closeAuthorContact);
+authorContactBackdrop.addEventListener('click', (event) => { if (event.target === authorContactBackdrop) closeAuthorContact(); });
+authorContactCopy.addEventListener('click', copyAuthorContact);
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   if (!a3ExampleBackdrop.hidden) closeA3Example();
   else if (!a3SheetBackdrop.hidden) closeA3Sheet();
   else if (!a3CropWorkspace.hidden) requestCloseA3Crop({ dismiss: true });
   else if (!feedbackBackdrop.hidden) closeFeedback();
+  else if (!authorContactBackdrop.hidden) closeAuthorContact();
   else if (!lightbox.hidden) closeLightbox();
   else closeDrawer();
 });

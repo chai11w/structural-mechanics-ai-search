@@ -112,6 +112,21 @@ class TikuAgent8896FlowTest(unittest.TestCase):
             self.assertFalse(agent_8790.enable_chapter_scope_fallback)
             self.assertIsInstance(runtime_8896.external_load_screen, QwenExternalLoadScreen)
 
+    def test_only_8896_enables_author_contact_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runtime_8896 = build_runtime(root / "8896", enable_triage=False)
+            runtime_8790 = build_a2_runtime(
+                root / "8790",
+                enable_external_load_screen=False,
+            )
+
+            agent_8896 = runtime_8896.a2_runtime.agent_factory(AgentState())
+            agent_8790 = runtime_8790.agent_factory(AgentState())
+
+            self.assertTrue(agent_8896.enable_author_contact_fallback)
+            self.assertFalse(agent_8790.enable_author_contact_fallback)
+
     def test_8896_passes_qwen_policy_with_tool_parameter_names(self):
         with tempfile.TemporaryDirectory() as temp, patch(
             "scripts.run_tiku_agent_demo.rerank_candidates_tool"

@@ -53,6 +53,7 @@ def build_runtime(
     external_load_timeout_seconds: float = 15.0,
     external_load_screen: Callable[[str | Path], str] | None = None,
     enable_chapter_scope_fallback: bool = False,
+    enable_author_contact_fallback: bool = False,
     rerank_policy: dict[str, object] | None = None,
     cost_ledger: SQLiteModelCostLedger | None = None,
 ) -> AgentSessionRuntime:
@@ -77,7 +78,13 @@ def build_runtime(
 
         scoped_tools = AgentToolbox(rerank_candidates=rerank_with_policy)
 
-    if enable_safe_answer_v0 or enable_dimension_filter or enable_chapter_scope_fallback or scoped_tools:
+    if (
+        enable_safe_answer_v0
+        or enable_dimension_filter
+        or enable_chapter_scope_fallback
+        or enable_author_contact_fallback
+        or scoped_tools
+    ):
         def build_agent(state: AgentState) -> TikuSearchAgent:
             return TikuSearchAgent(
                 state=state,
@@ -90,6 +97,7 @@ def build_runtime(
                 enable_safe_answer_v0=enable_safe_answer_v0,
                 safe_answer_generator_v0=generator,
                 enable_chapter_scope_fallback=enable_chapter_scope_fallback,
+                enable_author_contact_fallback=enable_author_contact_fallback,
             )
 
         agent_factory = build_agent

@@ -553,7 +553,7 @@ def _is_global_search_decline(text: str) -> bool:
 
 def _has_reject_candidates_evidence(text: str) -> bool:
     compact = re.sub(r"[\s，。！？!?、,.]+", "", text)
-    if compact in {"没有", "都不是", "都不对", "没一个对", "一个都不是", "没有想要的"}:
+    if compact in {"没有", "都不是", "都不对", "没一个对", "一个都不是", "没有想要的", "没有我想要的"}:
         return True
     return bool(re.search(r"(?:这些|这几个|这一批|候选|都|一个也?).{0,6}(?:不对|不是|不匹配|不合适|没想要)", compact))
 
