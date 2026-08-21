@@ -457,6 +457,34 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(continued.text, "好，继续处理当前题。你可以继续选择候选。")
         self.assertNotIn("章节", continued.text)
 
+    def test_intent_v1_generic_image_scope_clarifies_crop_vs_original_page(self):
+        self.runtime.intent_engine = A3IntentEngineV1()
+        session_id = "a3-intent-image-scope"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+        state = self.runtime.store.load(session_id)
+        state.phase = A3_PHASE_A2_ACTIVE
+        self.runtime.store.save(state)
+        self.a2.sessions[session_id] = {
+            "session_valid": True,
+            "phase": "WAIT_CANDIDATE_CHOICE",
+            "candidate_count": 3,
+        }
+
+        clarified = self.runtime.handle_text(session_id, "结束这张图吧")
+        continued = self.runtime.handle_text(session_id, "继续")
+
+        self.assertEqual(clarified.intent, "a3_cancel_scope_clarification")
+        self.assertIn("当前裁剪后的单题图", clarified.text)
+        self.assertIn("只停止当前这道题（裁剪后的单题图）", clarified.text)
+        self.assertIn("结束最初上传的整张多题图", clarified.text)
+        self.assertIn("继续当前题", clarified.text)
+        self.assertEqual(continued.intent, "a3_continue_current")
+        self.assertEqual(continued.text, "好，继续处理当前题。你可以继续选择候选。")
+        snapshot = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(snapshot["phase"], A3_PHASE_A2_ACTIVE)
+        self.assertEqual(snapshot["selected_unit"]["unit_id"], "g1-u2")
+
     def test_intent_v1_explicit_page_finish_and_session_reset_have_distinct_scope(self):
         self.runtime.intent_engine = A3IntentEngineV1()
         session_id = "a3-intent-finish-page"

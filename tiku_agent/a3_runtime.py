@@ -666,16 +666,21 @@ class A3MvpRuntime:
                 }
                 self.store.save(state)
                 labels = {
-                    "cancel_current_unit": "只取消当前题",
-                    "finish_page": "结束这张图的全部题目",
-                    "continue_current": "继续当前操作",
+                    "cancel_current_unit": "只停止当前这道题（裁剪后的单题图）",
+                    "finish_page": "结束最初上传的整张多题图",
+                    "continue_current": "继续当前题",
                 }
                 choices = "\n".join(
                     f"{index}. {labels[value]}"
                     for index, value in enumerate(options, start=1)
                 )
+                question = (
+                    "你说的“这张图”是当前裁剪后的单题图，还是最初上传的整张多题图？"
+                    if state.selected_unit_id
+                    else "你想结束最初上传的整张多题图，还是继续当前操作？"
+                )
                 return _response(
-                    "你想取消哪个范围？我暂时没有改变当前进度。\n" + choices,
+                    question + "我暂时没有改变当前进度。\n" + choices,
                     state,
                     intent="a3_cancel_scope_clarification",
                     code="CLARIFICATION_REQUIRED",
@@ -703,7 +708,7 @@ class A3MvpRuntime:
                 selected = state.unit(state.selected_unit_id) or {}
                 message = (
                     f"当前正在处理「{selected.get('display_label', '这道题')}」。"
-                    "你可以继续裁剪；如需停止，请明确说“取消当前题”或“结束这张图”。"
+                    "你可以继续裁剪；如需停止，请明确说“取消当前题”或“结束整张原图”。"
                 )
                 intent = "a3_crop_required"
             elif state.page_finished:
@@ -741,7 +746,7 @@ class A3MvpRuntime:
             state.crop_review_feedback = ""
             self.store.save(state)
             return _response(
-                "好，已结束这张图的搜题流程。当前对话记录仍然保留。",
+                "好，已结束最初上传的整张多题图搜题流程。当前对话记录仍然保留。",
                 state,
                 intent="a3_page_finished",
             )
@@ -755,7 +760,7 @@ class A3MvpRuntime:
             state.crop_review_feedback = ""
             self.store.save(state)
             return _response(
-                f"好，只取消了「{display_label}」。这张图的其他题目和当前对话都已保留。",
+                f"好，只停止了「{display_label}」。原始大图里的其他题目和当前对话都已保留。",
                 state,
                 intent="a3_current_unit_cancelled",
             )

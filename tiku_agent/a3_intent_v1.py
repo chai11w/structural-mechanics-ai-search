@@ -228,9 +228,14 @@ def authorize_a3_action_v1(
     }:
         return A3ActionAuthorizationV1(True, "safe_response")
     if decision.action == "continue_current":
+        if context.pending_cancel_scopes:
+            return A3ActionAuthorizationV1(True, "continue_pending")
+        allowed = not context.page_finished and context.phase in {
+            "WAIT_UNIT_SELECTION", "CROP_REQUIRED", "A2_ACTIVE"
+        }
         return A3ActionAuthorizationV1(
-            bool(context.pending_cancel_scopes),
-            "continue_pending" if context.pending_cancel_scopes else "no_pending_clarification",
+            allowed,
+            "continue_current" if allowed else "continue_unavailable",
         )
     if decision.action == "reset_session":
         return A3ActionAuthorizationV1(True, "reset_session")
@@ -338,6 +343,8 @@ def _rule_decision(text: str, context: A3IntentContextV1) -> A3ActionDecisionV1 
 
     if _is_explicit_reset(text):
         return _simple("reset_session", "用户明确要求清空会话或开始新对话")
+    if _is_ambiguous_image_scope(text, context):
+        return _clarification("ambiguous_cancel_scope", source="rule")
     if _is_explicit_finish_page(text):
         return _simple("finish_page", "用户明确要求结束当前整张题图")
     if _is_explicit_cancel_current(text):
@@ -401,7 +408,10 @@ def _validate_model_evidence(
             return _clarification("ambiguous_reference", source="validator")
     if decision.action == "cancel_current_unit" and not _is_explicit_cancel_current(text):
         return _clarification("ambiguous_cancel_scope", source="validator")
-    if decision.action == "finish_page" and not _is_explicit_finish_page(text):
+    if decision.action == "finish_page" and (
+        not _is_explicit_finish_page(text)
+        or _is_ambiguous_image_scope(text, context)
+    ):
         return _clarification("ambiguous_cancel_scope", source="validator")
     if decision.action == "reset_session" and not _is_explicit_reset(text):
         return _clarification("ambiguous_cancel_scope", source="validator")
@@ -498,8 +508,29 @@ def _is_explicit_finish_page(text: str) -> bool:
     compact = _compact(text)
     return bool(
         re.fullmatch(
-            r"(?:结束|取消|停止|放弃)(?:当前|这|这一)?(?:张图|页|整页|整个图片|整张图片)(?:的)?(?:全部|所有)?(?:题目|搜题|检索)?(?:了)?|"
-            r"(?:当前|这|这一)?(?:张图|页|整页|整个图片|整张图片)(?:的)?(?:全部|所有)?(?:题目)?(?:不搜|不查|不要|算了|结束|取消|停止)(?:了)?",
+            r"(?:结束|取消|停止|放弃)(?:最初上传的)?(?:当前|这|这一)?(?:张图|页|整页|原图|整张图|整张多题图|整个图片|整张图片|整张原图)(?:的)?(?:全部|所有)?(?:题目|搜题|检索)?(?:了)?(?:吧|呢|啊|呀)?|"
+            r"(?:最初上传的)?(?:当前|这|这一)?(?:张图|页|整页|原图|整张图|整张多题图|整个图片|整张图片|整张原图)(?:的)?(?:全部|所有)?(?:题目)?(?:不搜|不查|不要|算了|结束|取消|停止)(?:了)?(?:吧|呢|啊|呀)?",
+            compact,
+        )
+    )
+
+
+def _is_ambiguous_image_scope(text: str, context: A3IntentContextV1) -> bool:
+    if context.phase not in {"CROP_REQUIRED", "A2_ACTIVE"} or context.selected_unit is None:
+        return False
+    compact = _compact(text)
+    if any(
+        token in compact
+        for token in (
+            "整页", "原图", "整张图", "整张多题图", "整张图片", "整个图片",
+            "最初上传", "全部题目", "所有题目",
+        )
+    ):
+        return False
+    return bool(
+        re.fullmatch(
+            r"(?:结束|取消|停止|放弃)(?:当前|这|这一)?(?:张图|图片)(?:了)?(?:吧|呢|啊|呀)?|"
+            r"(?:当前|这|这一)?(?:张图|图片)(?:不搜|不查|不要|算了|结束|取消|停止)(?:了)?(?:吧|呢|啊|呀)?",
             compact,
         )
     )

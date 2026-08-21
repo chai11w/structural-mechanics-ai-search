@@ -55,7 +55,7 @@ class A3IntentV1Tests(unittest.TestCase):
         context = _context(phase="CROP_REQUIRED", selected=2)
 
         self.assertEqual(engine.decide("取消当前题", context).action, "cancel_current_unit")
-        self.assertEqual(engine.decide("结束这张图", context).action, "finish_page")
+        self.assertEqual(engine.decide("结束整张原图", context).action, "finish_page")
         self.assertEqual(engine.decide("开始新对话", context).action, "reset_session")
 
         for text in ("这道题", "这张图"):
@@ -101,6 +101,30 @@ class A3IntentV1Tests(unittest.TestCase):
         self.assertEqual(bare.clarification_reason, "ambiguous_number_namespace")
         self.assertEqual(explicit.action, "select_unit")
         self.assertEqual(explicit.question_index, 2)
+
+    def test_selected_unit_makes_generic_image_scope_ambiguous(self):
+        engine = A3IntentEngineV1()
+        active = _context(phase="A2_ACTIVE", selected=2, candidate_count=3)
+
+        ambiguous = engine.decide("结束这张图吧", active)
+        explicit_page = engine.decide("结束整张原图", active)
+        explicit_label = engine.decide("结束最初上传的整张多题图", active)
+        page_without_selected_unit = engine.decide("结束这张图吧", _context())
+
+        self.assertEqual(ambiguous.action, "clarification")
+        self.assertEqual(ambiguous.clarification_reason, "ambiguous_cancel_scope")
+        self.assertEqual(explicit_page.action, "finish_page")
+        self.assertEqual(explicit_label.action, "finish_page")
+        self.assertEqual(page_without_selected_unit.action, "finish_page")
+
+    def test_continue_is_valid_without_pending_clarification(self):
+        engine = A3IntentEngineV1()
+
+        active = engine.decide("继续", _context(phase="A2_ACTIVE", selected=2))
+        selecting = engine.decide("继续", _context())
+
+        self.assertEqual(active.action, "continue_current")
+        self.assertEqual(selecting.action, "continue_current")
 
     def test_negative_named_unit_never_becomes_selection(self):
         decision = A3IntentEngineV1().decide("四-1 不搜了", _context())

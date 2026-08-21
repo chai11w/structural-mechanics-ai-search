@@ -61,6 +61,17 @@ class TikuAgent8896FlowTest(unittest.TestCase):
             self.assertIsNotNone(enabled.intent_engine)
             self.assertIsNone(disabled.intent_engine)
 
+    def test_a3_intent_can_run_rules_without_model_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = build_runtime(
+                Path(temp),
+                enable_triage=False,
+                enable_a3_intent_model_fallback=False,
+            )
+
+            self.assertIsNotNone(runtime.intent_engine)
+            self.assertIsNone(runtime.intent_engine.model_client)
+
     def test_a3_and_child_a2_share_the_production_cost_ledger(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

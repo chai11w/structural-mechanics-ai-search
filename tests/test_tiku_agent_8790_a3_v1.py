@@ -46,7 +46,10 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
 
             self.assertIsNotNone(app)
             self.assertTrue(build_runtime.call_args.kwargs["auto_prepare_all_units"])
-            self.assertFalse(build_runtime.call_args.kwargs["enable_a3_intent_v1"])
+            self.assertTrue(build_runtime.call_args.kwargs["enable_a3_intent_v1"])
+            self.assertFalse(
+                build_runtime.call_args.kwargs["enable_a3_intent_model_fallback"]
+            )
 
 
 if __name__ == "__main__":

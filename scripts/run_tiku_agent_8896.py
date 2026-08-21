@@ -61,6 +61,7 @@ def build_runtime(
     unit_analyzer=None,
     control_store=None,
     enable_a3_intent_v1: bool = True,
+    enable_a3_intent_model_fallback: bool = True,
     a3_intent_model_client=None,
 ) -> A3MvpRuntime:
     """Build the full A1/A2/A3 route with A3 and its child A2 under one root."""
@@ -89,7 +90,7 @@ def build_runtime(
             timeout_seconds=grounding_timeout_seconds,
         )
     intent_client = a3_intent_model_client
-    if intent_client is None:
+    if enable_a3_intent_v1 and enable_a3_intent_model_fallback and intent_client is None:
         intent_client = lambda prompt: call_qwen_a3_intent_v1(  # noqa: E731 - bounded adapter.
             prompt,
             timeout=max(1, int(reply_timeout_seconds)),
@@ -125,6 +126,7 @@ def build_app(
     triage_timeout_seconds: float = 120.0,
     reply_timeout_seconds: float = 60.0,
     enable_a3_intent_v1: bool = True,
+    enable_a3_intent_model_fallback: bool = True,
 ):
     root = Path(runtime_dir).resolve()
     return create_app(
@@ -138,6 +140,7 @@ def build_app(
             triage_timeout_seconds=triage_timeout_seconds,
             reply_timeout_seconds=reply_timeout_seconds,
             enable_a3_intent_v1=enable_a3_intent_v1,
+            enable_a3_intent_model_fallback=enable_a3_intent_model_fallback,
         ),
         incoming_dir=root / "incoming",
         session_cookie=SESSION_COOKIE,
