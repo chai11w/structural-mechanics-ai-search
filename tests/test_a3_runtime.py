@@ -422,7 +422,6 @@ class A3RuntimeTests(unittest.TestCase):
             [
                 "cancel_current_unit",
                 "finish_page",
-                "reset_session",
                 "continue_current",
             ],
         )
@@ -435,6 +434,28 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(snapshot["selected_unit"]["unit_id"], "")
         self.assertEqual(snapshot["completed_unit_ids"], [])
         self.assertEqual(snapshot["searched_unit_ids"], [])
+
+    def test_intent_v1_a2_continue_only_mentions_candidate_selection(self):
+        self.runtime.intent_engine = A3IntentEngineV1()
+        session_id = "a3-intent-a2-continue"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+        state = self.runtime.store.load(session_id)
+        state.phase = A3_PHASE_A2_ACTIVE
+        self.runtime.store.save(state)
+        self.a2.sessions[session_id] = {
+            "session_valid": True,
+            "phase": "WAIT_CANDIDATE_CHOICE",
+            "candidate_count": 2,
+        }
+
+        clarified = self.runtime.handle_text(session_id, "取消")
+        continued = self.runtime.handle_text(session_id, "3")
+
+        self.assertNotIn("开始新对话", clarified.text)
+        self.assertEqual(continued.intent, "a3_continue_current")
+        self.assertEqual(continued.text, "好，继续处理当前题。你可以继续选择候选。")
+        self.assertNotIn("章节", continued.text)
 
     def test_intent_v1_explicit_page_finish_and_session_reset_have_distinct_scope(self):
         self.runtime.intent_engine = A3IntentEngineV1()

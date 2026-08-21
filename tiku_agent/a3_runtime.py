@@ -668,7 +668,6 @@ class A3MvpRuntime:
                 labels = {
                     "cancel_current_unit": "只取消当前题",
                     "finish_page": "结束这张图的全部题目",
-                    "reset_session": "开始新对话并清空当前会话",
                     "continue_current": "继续当前操作",
                 }
                 choices = "\n".join(
@@ -766,7 +765,7 @@ class A3MvpRuntime:
                 selected = state.unit(state.selected_unit_id) or {}
                 message = f"好，继续处理「{selected.get('display_label', '当前题')}」，请完成裁剪后提交。"
             elif state.phase == A3_PHASE_A2_ACTIVE:
-                message = "好，继续处理当前题。你可以选择候选或补充章节。"
+                message = "好，继续处理当前题。你可以继续选择候选。"
             elif state.phase == A3_PHASE_WAIT_SELECTION:
                 message = "好，继续当前图片，请选择一道题。"
             else:
@@ -822,7 +821,7 @@ class A3MvpRuntime:
             self.store.save(state)
             return _response(
                 "我可以按原图稳定题号选择题目、裁剪结构图并进入题库检索。"
-                "取消时请说明是当前题、整张图还是新对话。",
+                "取消时请说明是当前题还是整张图。",
                 state,
                 intent="capability_help",
             )
@@ -841,7 +840,7 @@ class A3MvpRuntime:
             options.append("cancel_current_unit")
         if not state.page_finished:
             options.append("finish_page")
-        options.extend(("reset_session", "continue_current"))
+        options.append("continue_current")
         return options
 
     def select_unit(

@@ -69,7 +69,6 @@ class A3IntentV1Tests(unittest.TestCase):
             pending=(
                 "cancel_current_unit",
                 "finish_page",
-                "reset_session",
                 "continue_current",
             ),
         )
@@ -77,7 +76,7 @@ class A3IntentV1Tests(unittest.TestCase):
 
         self.assertEqual(engine.decide("1", context).action, "cancel_current_unit")
         self.assertEqual(engine.decide("2", context).action, "finish_page")
-        self.assertEqual(engine.decide("4", context).action, "continue_current")
+        self.assertEqual(engine.decide("3", context).action, "continue_current")
 
     def test_stable_original_index_does_not_renumber_remaining_units(self):
         engine = A3IntentEngineV1()
