@@ -1,6 +1,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts.run_tiku_agent_8790 import (
     DEFAULT_PORT,
@@ -34,6 +35,17 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
             )
 
             self.assertIsNotNone(app)
+
+    def test_production_keeps_prevalidation_selection_enabled(self):
+        with tempfile.TemporaryDirectory() as temp, patch(
+            "scripts.run_tiku_agent_8790.build_a3_runtime"
+        ) as build_runtime:
+            build_runtime.return_value = object()
+
+            app = build_app(Path(temp) / "runtime", enable_triage=False)
+
+            self.assertIsNotNone(app)
+            self.assertFalse(build_runtime.call_args.kwargs["auto_prepare_all_units"])
 
 
 if __name__ == "__main__":

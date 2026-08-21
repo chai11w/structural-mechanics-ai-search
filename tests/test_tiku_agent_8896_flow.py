@@ -38,6 +38,13 @@ class TikuAgent8896FlowTest(unittest.TestCase):
             )
 
             self.assertIsInstance(promoted.auto_cropper, GlmA3AutoCropper)
+            self.assertTrue(promoted.auto_prepare_all_units)
+            self.assertTrue(
+                promoted.session_snapshot("empty")["a3"]["auto_prepare_all_enabled"]
+            )
+            self.assertFalse(
+                rolled_back.session_snapshot("empty")["a3"]["auto_prepare_all_enabled"]
+            )
             self.assertIsNone(rolled_back.auto_cropper)
 
     def test_launcher_can_disable_or_inject_the_triage_authority(self):

@@ -22,13 +22,22 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn("选择图片中的题目", page)
         self.assertIn("选择其他题目后会重新裁剪并搜索", page)
 
-    def test_auto_crop_sheet_supports_multi_select_and_overlay_above_sheet(self):
+    def test_auto_crop_sheet_auto_opens_after_8896_prepares_all_units(self):
         page = (ROOT / "tiku_agent" / "demo_web" / "index.html").read_text(encoding="utf-8")
 
         self.assertIn('id="a3-prepare"', page)
         self.assertIn('id="a3-sheet-overlay"', page)
         self.assertIn("requestStream('/api/a3/prepare/stream'", self.script)
         self.assertIn("a3PrepareSelection", self.script)
+        self.assertIn("a3SheetSubtitle.hidden = a3.auto_prepare_all_units", self.script)
+        self.assertIn("response.intent === 'a3_units_prepared'", self.script)
+        self.assertIn("openA3Sheet();", self.script)
+        self.assertIn("A3_AUTO_PREPARE_IDLE_TIMEOUT_MS = 210000", self.script)
+        self.assertIn("renewTimeoutOnProgress: autoPrepareAll", self.script)
+        self.assertIn("renewTimeoutOnProgress: autoPrepareRetry", self.script)
+        self.assertGreaterEqual(self.script.count("maybeOpenAutoPreparedA3Sheet(response)"), 3)
+        self.assertIn("await sessionBootstrap", self.script)
+        self.assertIn("sessionBootstrap = repairUploadedImageHistory()", self.script)
         self.assertIn(".lightbox { position: fixed; z-index: 120", self.style)
         self.assertIn(".a3-sheet-backdrop, .a3-example-backdrop { position: fixed; z-index: 80", self.style)
 

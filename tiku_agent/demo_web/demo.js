@@ -58,6 +58,7 @@ const a3ExampleCanvas = $('#a3-example-canvas');
 const TEXT_TIMEOUT_MS = 60000;
 const IMAGE_TIMEOUT_MS = 90000;
 const A3_TIMEOUT_MS = 180000;
+const A3_AUTO_PREPARE_IDLE_TIMEOUT_MS = 210000;
 const A3_TEXT_RETRY_TIMEOUT_MS = 100000;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 const IMAGE_TARGET_BYTES = 1024 * 1024;
@@ -116,6 +117,7 @@ let historyStorageWarningShown = false;
 const activeFailureNotices = new Set();
 let pendingSessionExpiredNotice = false;
 let pendingHistoryStorageNotice = '';
+let sessionBootstrap = null;
 let sessionContext = {
   session_valid: false, phase: 'IDLE', has_active_image: false,
   task_revision: 0, candidate_generation: '', candidate_count: 0, search_id: '',
@@ -295,6 +297,8 @@ function normalizeA3Snapshot(value) {
   return {
     enabled: true,
     auto_crop_enabled: Boolean(value.auto_crop_enabled),
+    auto_prepare_all_enabled: Boolean(value.auto_prepare_all_enabled),
+    auto_prepare_all_units: Boolean(value.auto_prepare_all_units),
     phase: String(value.phase || ''),
     units: Array.isArray(value.units) ? value.units.map((unit) => ({
       unit_id: String(unit.unit_id || ''),
@@ -1167,13 +1171,26 @@ async function request(url, options, timeoutMs, timeoutMessage, track = true, ne
   }
 }
 
-async function requestStream(url, options, timeoutMs, timeoutMessage, onProgress, networkMessage = '') {
+async function requestStream(
+  url,
+  options,
+  timeoutMs,
+  timeoutMessage,
+  onProgress,
+  networkMessage = '',
+  { renewTimeoutOnProgress = false } = {},
+) {
   const controller = new AbortController();
   const requestId = createRequestId();
   const headers = new Headers(options?.headers || {});
   headers.set('x-request-id', requestId);
   activeController = controller;
-  const timer = setTimeout(() => controller.abort('timeout'), timeoutMs);
+  let timer;
+  const renewTimeout = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => controller.abort('timeout'), timeoutMs);
+  };
+  renewTimeout();
   try {
     const response = await fetch(url, { ...options, headers, signal: controller.signal });
     if (!response.ok) {
@@ -1194,7 +1211,10 @@ async function requestStream(url, options, timeoutMs, timeoutMessage, onProgress
       for (const line of lines) {
         if (!line.trim()) continue;
         const event = JSON.parse(line);
-        if (event.type === 'progress') onProgress?.(event);
+        if (event.type === 'progress') {
+          if (renewTimeoutOnProgress) renewTimeout();
+          onProgress?.(event);
+        }
         if (event.type === 'result') result = event.data;
         if (event.type === 'error') throw streamedError(event);
       }
@@ -1253,6 +1273,12 @@ function setResponseStatus(data) {
     setStatus('error', '处理失败，可重新尝试');
   } else {
     setStatus('ready', '准备就绪');
+  }
+}
+
+function maybeOpenAutoPreparedA3Sheet(response) {
+  if (response.intent === 'a3_units_prepared' && response.a3?.auto_prepare_all_units) {
+    openA3Sheet();
   }
 }
 
@@ -1642,6 +1668,7 @@ function renderA3SheetUnits(a3 = a3Current()) {
     renderA3AutoSheetUnits(a3);
     return;
   }
+  a3SheetSubtitle.hidden = false;
   a3SheetSubtitle.textContent = '选择其他题目后会重新裁剪并搜索';
   a3SheetOverlay.hidden = !a3.auto_crop_overlay_available;
   if (a3.auto_crop_overlay_available) {
@@ -1679,7 +1706,10 @@ function renderA3AutoSheetUnits(a3) {
   Array.from(a3PrepareSelection).forEach((unitId) => {
     if (!currentIds.has(unitId)) a3PrepareSelection.delete(unitId);
   });
-  a3SheetSubtitle.textContent = '可多选；只校验你准备查询的裁图';
+  a3SheetSubtitle.hidden = a3.auto_prepare_all_units;
+  a3SheetSubtitle.textContent = a3.auto_prepare_all_units
+    ? ''
+    : '可多选；只校验你准备查询的裁图';
   a3SheetOverlay.hidden = !a3.auto_crop_overlay_available;
   if (a3.auto_crop_overlay_available) {
     a3SheetOverlayImage.src = `/api/a3/overlay?revision=${encodeURIComponent(a3.task_revision)}`;
@@ -1863,9 +1893,11 @@ async function sendTextValue(value, displayValue = value, actionContext = null) 
   let pending = null;
   setBusy(true);
   setStatus('working', '正在处理…');
-  const timeoutMs = sessionContext.a3?.enabled && sessionContext.a3?.phase === 'ERROR'
-    ? A3_TEXT_RETRY_TIMEOUT_MS
-    : TEXT_TIMEOUT_MS;
+  const isA3ErrorRetry = sessionContext.a3?.enabled && sessionContext.a3?.phase === 'ERROR';
+  const autoPrepareRetry = isA3ErrorRetry && sessionContext.a3?.auto_prepare_all_enabled;
+  const timeoutMs = autoPrepareRetry
+    ? A3_AUTO_PREPARE_IDLE_TIMEOUT_MS
+    : isA3ErrorRetry ? A3_TEXT_RETRY_TIMEOUT_MS : TEXT_TIMEOUT_MS;
   try {
     const data = await requestStream('/api/message/stream', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -1875,11 +1907,13 @@ async function sendTextValue(value, displayValue = value, actionContext = null) 
       if (!pending) pending = addMessage({ message: event.message, variant: 'pending' }, false);
       else updatePendingMessage(pending, event.message);
       setStatus('working', event.message);
-    });
+    }, '', { renewTimeoutOnProgress: autoPrepareRetry });
     if (operation !== operationVersion) return;
     pending?.remove();
-    addMessage(responseItem(data));
+    const response = responseItem(data);
+    addMessage(response);
     setResponseStatus(data);
+    maybeOpenAutoPreparedA3Sheet(response);
   } catch (error) {
     if (operation !== operationVersion) return;
     pending?.remove();
@@ -1962,13 +1996,19 @@ async function submitPreparedImage(prepared, uploadRow) {
     const formData = new FormData();
     formData.append('file', prepared.blob, prepared.filename);
     debugUploadMetadata('form-data:file', prepared.blob, prepared.filename);
+    const autoPrepareAll = Boolean(sessionContext.a3?.auto_prepare_all_enabled);
     const data = await requestStream('/api/image/stream', {
       method: 'POST', body: formData,
-    }, sessionContext.a3?.enabled ? A3_TIMEOUT_MS : IMAGE_TIMEOUT_MS, '网络上传或题图识别超时，请直接重新上传。', (event) => {
+    }, autoPrepareAll
+      ? A3_AUTO_PREPARE_IDLE_TIMEOUT_MS
+      : sessionContext.a3?.enabled ? A3_TIMEOUT_MS : IMAGE_TIMEOUT_MS,
+    '网络上传或题图识别超时，请直接重新上传。', (event) => {
       if (operation !== operationVersion) return;
       updatePendingMessage(pending, event.message);
       setStatus('working', event.message);
-    }, '网络上传失败，请检查网络后重试。');
+    }, '网络上传失败，请检查网络后重试。', {
+      renewTimeoutOnProgress: autoPrepareAll,
+    });
     if (operation !== operationVersion) return;
     if (!isPersistentImage(data.uploaded_image)) throw new UserVisibleError('服务端处理失败，未返回已上传的题图，请直接重新上传。');
     pending.remove();
@@ -1984,6 +2024,7 @@ async function submitPreparedImage(prepared, uploadRow) {
     clearPendingUpload({ releasePreview: false });
     addMessage(response);
     setResponseStatus(data);
+    maybeOpenAutoPreparedA3Sheet(response);
   } catch (error) {
     if (operation !== operationVersion) return;
     pending.remove();
@@ -2008,6 +2049,8 @@ async function retryUpload(row, prepared) {
 }
 
 async function uploadImage(selected) {
+  if (isBusy) return;
+  await sessionBootstrap;
   if (isBusy) return;
   const validationError = validateImage(selected);
   fileInput.value = '';
@@ -2256,7 +2299,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) expi
 
 syncVisualViewport();
 restoreHistory();
-repairUploadedImageHistory();
+sessionBootstrap = repairUploadedImageHistory();
 resizeComposer();
 updateComposer();
 checkHealth();

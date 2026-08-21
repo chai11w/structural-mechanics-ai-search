@@ -38,6 +38,8 @@ class TikuAgent8897FlowTest(unittest.TestCase):
 
             self.assertIsInstance(runtime_8896.auto_cropper, GlmA3AutoCropper)
             self.assertIsInstance(runtime_8897.auto_cropper, GlmA3AutoCropper)
+            self.assertTrue(runtime_8896.auto_prepare_all_units)
+            self.assertFalse(runtime_8897.auto_prepare_all_units)
             self.assertNotEqual(
                 runtime_8896.store.database_path,
                 runtime_8897.store.database_path,

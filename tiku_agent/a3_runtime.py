@@ -332,6 +332,7 @@ class A3MvpRuntime:
         crop_verifier: A3CropVerifier,
         auto_cropper: A3AutoCropper | None = None,
         auto_crop_max_workers: int = 10,
+        auto_prepare_all_units: bool = False,
         unit_analyzer: A3UnitAnalyzer | None = None,
         external_load_screen: Callable[[str | Path], str] | None = None,
         image_triage_authority: object | None = None,
@@ -344,6 +345,7 @@ class A3MvpRuntime:
         self.crop_verifier = crop_verifier
         self.auto_cropper = auto_cropper
         self.auto_crop_max_workers = max(1, min(10, int(auto_crop_max_workers)))
+        self.auto_prepare_all_units = bool(auto_prepare_all_units)
         # Kept as an injection point for older callers; A3 no longer owns
         # final load/chapter extraction after crop verification.
         self.unit_analyzer = unit_analyzer
@@ -952,6 +954,9 @@ class A3MvpRuntime:
 
     def session_snapshot(self, session_id: str) -> dict[str, object]:
         clean = _clean_session_id(session_id)
+        auto_prepare_all_enabled = bool(
+            self.auto_prepare_all_units and self.auto_cropper is not None
+        )
         state = self.store.load(clean)
         if state is None:
             return {
@@ -964,14 +969,24 @@ class A3MvpRuntime:
                 "chapter": "",
                 "search_id": "",
                 "image_route": "",
-                "a3": {"enabled": True, "phase": A3_PHASE_IDLE, "units": []},
+                "a3": {
+                    "enabled": True,
+                    "auto_prepare_all_enabled": auto_prepare_all_enabled,
+                    "phase": A3_PHASE_IDLE,
+                    "units": [],
+                },
             }
         if state.entry_route == "A2":
             snapshot = dict(self.a2_runtime.session_snapshot(clean))
             snapshot["session_valid"] = True
             snapshot["has_active_image"] = bool(state.source_page_path)
             snapshot["image_route"] = "A2"
-            snapshot["a3"] = {"enabled": False, "phase": A3_PHASE_IDLE, "units": []}
+            snapshot["a3"] = {
+                "enabled": False,
+                "auto_prepare_all_enabled": auto_prepare_all_enabled,
+                "phase": A3_PHASE_IDLE,
+                "units": [],
+            }
             return snapshot
         if state.entry_route != "A3":
             return {
@@ -984,7 +999,12 @@ class A3MvpRuntime:
                 "chapter": "",
                 "search_id": state.current_search_id,
                 "image_route": state.entry_route,
-                "a3": {"enabled": False, "phase": A3_PHASE_IDLE, "units": []},
+                "a3": {
+                    "enabled": False,
+                    "auto_prepare_all_enabled": auto_prepare_all_enabled,
+                    "phase": A3_PHASE_IDLE,
+                    "units": [],
+                },
             }
         child = self.a2_runtime.session_snapshot(clean)
         if state.phase != A3_PHASE_A2_ACTIVE:
@@ -1267,6 +1287,18 @@ class A3MvpRuntime:
                         progress=progress,
                         request_id=request_id,
                     )
+                if self.auto_prepare_all_units:
+                    unit_ids = [str(unit["unit_id"]) for unit in searchable]
+                    ready, manual = self._prepare_units_locked(
+                        state,
+                        unit_ids,
+                        progress=progress,
+                    )
+                    text = f"已准备 {len(unit_ids)} 道题：{ready} 道可以直接检索"
+                    if manual:
+                        text += f"，{manual} 道需要人工裁剪"
+                    text += "。请选择一道继续。"
+                    return _response(text, state, intent="a3_units_prepared")
                 state.phase = A3_PHASE_WAIT_SELECTION
                 self.store.save(state)
                 text = (
@@ -1641,6 +1673,14 @@ class A3MvpRuntime:
     def _a3_snapshot(self, state: A3SessionState) -> dict[str, Any]:
         completed = set(state.completed_unit_ids)
         searched = set(state.searched_unit_ids)
+        requested = set(state.requested_unit_ids)
+        remaining = state.remaining_units
+        auto_prepare_all_active = (
+            self.auto_prepare_all_units
+            and state.auto_crop_enabled
+            and bool(requested)
+            and all(str(item["unit_id"]) in requested for item in remaining)
+        )
         units = []
         for item in state.units:
             if item.get("searchability") != "searchable_candidate":
@@ -1665,6 +1705,10 @@ class A3MvpRuntime:
         return {
             "enabled": True,
             "auto_crop_enabled": state.auto_crop_enabled,
+            "auto_prepare_all_enabled": bool(
+                self.auto_prepare_all_units and state.auto_crop_enabled
+            ),
+            "auto_prepare_all_units": auto_prepare_all_active,
             "phase": state.phase,
             "units": units,
             "selected_unit": {
@@ -1674,7 +1718,7 @@ class A3MvpRuntime:
             },
             "completed_unit_ids": list(state.completed_unit_ids),
             "searched_unit_ids": list(state.searched_unit_ids),
-            "remaining_count": len(state.remaining_units),
+            "remaining_count": len(remaining),
             "requested_unit_ids": list(state.requested_unit_ids),
             "auto_crop_page_status": str(state.auto_crop_page.get("page_status") or ""),
             "auto_crop_overlay_available": bool(state.auto_crop_overlay_path),

@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 
 from fastapi.testclient import TestClient
@@ -516,6 +517,80 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(self.verifier.calls, ["g1-u1"])
         self.assertEqual(len(load_calls), 1)
         self.assertEqual(len(self.a2.prechecked_calls), 1)
+
+    def test_auto_prepare_all_validates_every_unit_before_showing_selection(self):
+        load_calls = []
+        barrier = threading.Barrier(2)
+
+        class ConcurrentVerifier(FakeVerifier):
+            def verify(self, page, crop, selected, understanding):
+                barrier.wait(timeout=2)
+                return super().verify(page, crop, selected, understanding)
+
+        verifier = ConcurrentVerifier()
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "auto-prepare-all.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "auto-prepare-all-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=verifier,
+            auto_cropper=FakeAutoCropper(second_status="auto_ready"),
+            auto_prepare_all_units=True,
+            external_load_screen=lambda path: load_calls.append(Path(path)) or "yes",
+        )
+
+        response = runtime.handle_image("auto-prepare-all", self.source)
+
+        self.assertEqual(response.intent, "a3_units_prepared")
+        snapshot = runtime.session_snapshot("auto-prepare-all")["a3"]
+        self.assertTrue(snapshot["auto_prepare_all_enabled"])
+        self.assertTrue(snapshot["auto_prepare_all_units"])
+        self.assertEqual(snapshot["phase"], A3_PHASE_WAIT_SELECTION)
+        self.assertEqual(snapshot["requested_unit_ids"], ["g1-u1", "g1-u2"])
+        self.assertTrue(all(unit["requested"] for unit in snapshot["units"]))
+        self.assertTrue(
+            all(unit["validation_status"] == "auto_ready" for unit in snapshot["units"])
+        )
+        self.assertCountEqual(verifier.calls, ["g1-u1", "g1-u2"])
+        self.assertEqual(len(load_calls), 2)
+        self.assertEqual(self.a2.prechecked_calls, [])
+
+    def test_auto_prepare_all_keeps_manual_fallback_for_unready_crop(self):
+        load_calls = []
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "auto-prepare-partial.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "auto-prepare-partial-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            auto_cropper=FakeAutoCropper(),
+            auto_prepare_all_units=True,
+            external_load_screen=lambda path: load_calls.append(Path(path)) or "yes",
+        )
+
+        response = runtime.handle_image("auto-prepare-partial", self.source)
+
+        self.assertEqual(response.intent, "a3_units_prepared")
+        snapshot = runtime.session_snapshot("auto-prepare-partial")["a3"]
+        self.assertEqual(snapshot["requested_unit_ids"], ["g1-u1", "g1-u2"])
+        self.assertTrue(all(unit["requested"] for unit in snapshot["units"]))
+        self.assertEqual(
+            [unit["validation_status"] for unit in snapshot["units"]],
+            ["auto_ready", "manual_required"],
+        )
+        self.assertEqual(self.verifier.calls, ["g1-u1"])
+        self.assertEqual(len(load_calls), 1)
+
+        selected = runtime.select_unit(
+            "auto-prepare-partial",
+            "g1-u2",
+            task_revision=1,
+        )
+
+        self.assertEqual(selected.intent, "a3_unit_selected")
+        selected_snapshot = runtime.session_snapshot("auto-prepare-partial")["a3"]
+        self.assertEqual(selected_snapshot["phase"], A3_PHASE_CROP_REQUIRED)
+        self.assertTrue(selected_snapshot["crop_draft"]["available"])
 
     def test_prepare_only_validates_requested_auto_crops_then_directly_enters_a2(self):
         load_calls = []
@@ -1084,6 +1159,43 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(select_data["intent"], "search_image")
         self.assertEqual(select_data["session"]["a3"]["phase"], A3_PHASE_A2_ACTIVE)
         self.assertTrue(select_data["submitted_crop"].startswith("/api/media/"))
+
+    def test_fastapi_upload_stream_auto_prepares_all_before_selection(self):
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "auto-upload-api.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "auto-upload-api-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            auto_cropper=FakeAutoCropper(second_status="auto_ready"),
+            auto_prepare_all_units=True,
+            external_load_screen=lambda _path: "yes",
+        )
+        client = TestClient(
+            create_app(runtime=runtime, incoming_dir=self.root / "auto-upload-api-incoming")
+        )
+
+        uploaded = client.post(
+            "/api/image/stream",
+            files={"file": ("page.jpg", self.source.read_bytes(), "image/jpeg")},
+        )
+
+        upload_events = [json.loads(line) for line in uploaded.text.splitlines() if line]
+        self.assertEqual(upload_events[-1]["type"], "result")
+        upload_data = upload_events[-1]["data"]
+        self.assertEqual(upload_data["intent"], "a3_units_prepared")
+        a3 = upload_data["session"]["a3"]
+        self.assertTrue(a3["auto_prepare_all_units"])
+        self.assertEqual(a3["phase"], A3_PHASE_WAIT_SELECTION)
+        self.assertEqual(a3["requested_unit_ids"], ["g1-u1", "g1-u2"])
+        self.assertTrue(all(unit["validation_status"] == "auto_ready" for unit in a3["units"]))
+
+        selected = client.post(
+            "/api/a3/select/stream",
+            json={"unit_id": "g1-u1", "task_revision": 1},
+        )
+        select_events = [json.loads(line) for line in selected.text.splitlines() if line]
+        self.assertEqual(select_events[-1]["data"]["intent"], "search_image")
 
     def test_uploading_next_page_keeps_previous_upload_available(self):
         client = TestClient(create_app(runtime=self.runtime, incoming_dir=self.root / "incoming"))
