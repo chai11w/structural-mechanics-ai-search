@@ -594,7 +594,7 @@ function createAuthorContactAction(raw) {
   if (!contact) return null;
   const button = document.createElement('button');
   button.type = 'button';
-  button.className = 'message-author-contact';
+  button.className = 'a3-unit-choice message-author-contact';
   button.textContent = contact.label;
   button.addEventListener('click', () => openAuthorContact(contact));
   return button;
@@ -884,11 +884,17 @@ function addMessage(item, persist = true) {
     content.append(grid);
   }
   const a3Actions = createA3UnitActions(item.a3);
-  if (a3Actions) content.append(a3Actions);
   const recoveryActions = createRecoveryActions(item.recoveryActions, item);
-  if (recoveryActions) content.append(recoveryActions);
   const authorContactAction = createAuthorContactAction(item.authorContact);
-  if (authorContactAction) content.append(authorContactAction);
+  if (a3Actions && authorContactAction) a3Actions.append(authorContactAction);
+  if (a3Actions) content.append(a3Actions);
+  if (recoveryActions) content.append(recoveryActions);
+  if (authorContactAction && !a3Actions) {
+    const contactActions = document.createElement('div');
+    contactActions.className = 'message-recovery-actions';
+    contactActions.append(authorContactAction);
+    content.append(contactActions);
+  }
   if (feedbackEligible) content.append(createMessageActions(item, article));
   article.append(content);
   chat.append(article);

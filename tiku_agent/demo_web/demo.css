@@ -69,8 +69,6 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .message-recovery-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .message-recovery { min-height: 34px; padding: 0 13px; border: 1px solid #b9b9b2; border-radius: 9px; color: #33332f; background: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
 .message-recovery:hover { background: #f6f6f2; }
-.message-author-contact { min-height: 38px; margin-top: 10px; padding: 0 15px; border: 1px solid #30302d; border-radius: 9px; color: #fff; background: #30302d; font-size: 13px; font-weight: 650; cursor: pointer; }
-.message-author-contact:hover { background: #41413d; }
 .message.error .message-recovery { border-color: #b91c1c; color: #991b1b; }
 .message.error .message-recovery:hover { background: #fff7f7; }
 .retry-upload { align-self: flex-start; min-height: 34px; margin-top: 10px; padding: 0 13px; border: 1px solid #b91c1c; border-radius: 9px; color: #991b1b; background: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }

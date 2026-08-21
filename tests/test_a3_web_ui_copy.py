@@ -158,6 +158,14 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn("includes('联系作者手搓')", self.script)
         self.assertIn("authorContact: inferredAuthorContact", self.script)
 
+    def test_author_contact_matches_adjacent_a3_action_style_and_row(self):
+        page = (ROOT / "tiku_agent" / "demo_web" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("button.className = 'a3-unit-choice message-author-contact'", self.script)
+        self.assertIn("a3Actions.append(authorContactAction)", self.script)
+        self.assertIn("把题图发给作者，人工帮你做，5r起。", page)
+        self.assertNotIn(".message-author-contact {", self.style)
+
 
 if __name__ == "__main__":
     unittest.main()
