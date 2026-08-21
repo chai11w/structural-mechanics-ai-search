@@ -1417,7 +1417,7 @@ async function selectA3Unit(unitId) {
       body: JSON.stringify({ unit_id: unitId, task_revision: Number(a3Current()?.task_revision || 0) }),
     }, A3_TIMEOUT_MS, '选题或搜题等待超时，请重新选择。', (event) => {
       if (operation !== operationVersion) return;
-      pending.querySelector('.message-content')?.replaceChildren(document.createTextNode(event.message));
+      updatePendingMessage(pending, event.message);
       setStatus('working', event.message);
     });
     if (operation !== operationVersion) return;

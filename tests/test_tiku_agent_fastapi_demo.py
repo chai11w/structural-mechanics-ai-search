@@ -290,7 +290,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260820-a3-v1-v2"', 'src="/assets/demo.js?v=20260821-a3-intent-v1"',
+            'href="/assets/demo.css?v=20260820-a3-v1-v2"', 'src="/assets/demo.js?v=20260821-a3-progress-style-v1"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -322,6 +322,7 @@ class FastApiDemoTest(unittest.TestCase):
             "message: '正在识别题目'", "setStatus('working', '正在识别题目…')",
             "requestStream('/api/message/stream'", "requestStream('/api/image/stream'",
             "function updatePendingMessage", "setStatus('working', event.message)",
+            "updatePendingMessage(pending, event.message);",
             "function refocusComposerOnDesktop()", "window.matchMedia('(hover: hover) and (pointer: fine)')",
             "textInput.focus({ preventScroll: true })",
             "function syncVisualViewport()", "window.visualViewport?.addEventListener('resize', syncVisualViewport",
@@ -348,6 +349,10 @@ class FastApiDemoTest(unittest.TestCase):
             "search_id: context.item.searchId || sessionContext.search_id || ''",
         ):
             self.assertIn(expected, _SCRIPT)
+        self.assertNotIn(
+            "pending.querySelector('.message-content')?.replaceChildren(document.createTextNode(event.message));",
+            _SCRIPT,
+        )
         self.assertLess(
             _SCRIPT.index("if (status === 503"),
             _SCRIPT.index("if (status >= 500)"),
