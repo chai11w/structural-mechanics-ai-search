@@ -520,6 +520,7 @@ class A3RuntimeTests(unittest.TestCase):
 
     def test_auto_prepare_all_validates_every_unit_before_showing_selection(self):
         load_calls = []
+        progress_events = []
         barrier = threading.Barrier(2)
 
         class ConcurrentVerifier(FakeVerifier):
@@ -539,7 +540,11 @@ class A3RuntimeTests(unittest.TestCase):
             external_load_screen=lambda path: load_calls.append(Path(path)) or "yes",
         )
 
-        response = runtime.handle_image("auto-prepare-all", self.source)
+        response = runtime.handle_image(
+            "auto-prepare-all",
+            self.source,
+            progress=lambda stage, message: progress_events.append((stage, message)),
+        )
 
         self.assertEqual(response.intent, "a3_units_prepared")
         snapshot = runtime.session_snapshot("auto-prepare-all")["a3"]
@@ -554,6 +559,19 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertCountEqual(verifier.calls, ["g1-u1", "g1-u2"])
         self.assertEqual(len(load_calls), 2)
         self.assertEqual(self.a2.prechecked_calls, [])
+        validation_progress = [
+            message
+            for stage, message in progress_events
+            if stage == "a3_auto_validating"
+        ]
+        self.assertEqual(
+            validation_progress,
+            [
+                "正在并发校验 2 张自动裁图…",
+                "已完成 1/2 张自动裁图校验…",
+                "已完成 2/2 张自动裁图校验…",
+            ],
+        )
 
     def test_auto_prepare_all_keeps_manual_fallback_for_unready_crop(self):
         load_calls = []

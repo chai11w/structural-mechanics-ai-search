@@ -36,7 +36,7 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
 
             self.assertIsNotNone(app)
 
-    def test_production_keeps_prevalidation_selection_enabled(self):
+    def test_production_auto_validates_all_units_before_selection(self):
         with tempfile.TemporaryDirectory() as temp, patch(
             "scripts.run_tiku_agent_8790.build_a3_runtime"
         ) as build_runtime:
@@ -45,7 +45,7 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
             app = build_app(Path(temp) / "runtime", enable_triage=False)
 
             self.assertIsNotNone(app)
-            self.assertFalse(build_runtime.call_args.kwargs["auto_prepare_all_units"])
+            self.assertTrue(build_runtime.call_args.kwargs["auto_prepare_all_units"])
 
 
 if __name__ == "__main__":

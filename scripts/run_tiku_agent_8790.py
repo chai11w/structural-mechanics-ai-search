@@ -49,7 +49,7 @@ def build_app(
             model_timeout_seconds=model_timeout_seconds,
             grounding_timeout_seconds=grounding_timeout_seconds,
             enable_auto_crop=enable_auto_crop,
-            auto_prepare_all_units=False,
+            auto_prepare_all_units=True,
             enable_triage=enable_triage,
             triage_timeout_seconds=triage_timeout_seconds,
             reply_timeout_seconds=reply_timeout_seconds,

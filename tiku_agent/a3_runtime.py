@@ -689,7 +689,7 @@ class A3MvpRuntime:
                     executor.submit(self._validate_auto_crop, state, unit_id): unit_id
                     for unit_id in candidates
                 }
-                for future in as_completed(futures):
+                for completed, future in enumerate(as_completed(futures), start=1):
                     unit_id = futures[future]
                     try:
                         results[unit_id] = future.result()
@@ -700,6 +700,11 @@ class A3MvpRuntime:
                             "verification_checks": {},
                             "error_type": type(exc).__name__,
                         }
+                    if progress is not None:
+                        progress(
+                            "a3_auto_validating",
+                            f"已完成 {completed}/{len(candidates)} 张自动裁图校验…",
+                        )
 
         for unit_id in requested:
             record = state.auto_crops.setdefault(unit_id, {})
