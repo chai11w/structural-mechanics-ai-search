@@ -56,6 +56,7 @@ def build_runtime(
     enable_author_contact_fallback: bool = False,
     rerank_policy: dict[str, object] | None = None,
     cost_ledger: SQLiteModelCostLedger | None = None,
+    preserve_artifacts_on_cancel: bool = False,
 ) -> AgentSessionRuntime:
     """Build the 8790 runtime with bounded safe answers enabled by default."""
     root = Path(runtime_dir).resolve()
@@ -122,6 +123,7 @@ def build_runtime(
             else None
         ),
         external_load_timeout_seconds=external_load_timeout_seconds,
+        preserve_artifacts_on_cancel=preserve_artifacts_on_cancel,
     )
 
 

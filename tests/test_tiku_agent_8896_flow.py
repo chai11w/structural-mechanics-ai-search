@@ -78,6 +78,7 @@ class TikuAgent8896FlowTest(unittest.TestCase):
             runtime = build_runtime(root, enable_triage=False)
 
             self.assertIs(runtime.cost_ledger, runtime.a2_runtime.cost_ledger)
+            self.assertTrue(runtime.a2_runtime.preserve_artifacts_on_cancel)
             self.assertEqual(
                 runtime.cost_ledger.path.resolve(),
                 (root / "model_costs.sqlite3").resolve(),

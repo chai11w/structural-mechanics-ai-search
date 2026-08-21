@@ -65,6 +65,7 @@ def build_runtime(
     a3_intent_model_client=None,
     enable_author_contact_fallback: bool = True,
     enable_three_scope_cancel_clarification: bool = True,
+    preserve_a2_artifacts_on_cancel: bool = True,
 ) -> A3MvpRuntime:
     """Build the full A1/A2/A3 route with A3 and its child A2 under one root."""
 
@@ -80,6 +81,7 @@ def build_runtime(
         rerank_policy=A2_RERANK_POLICY,
         cost_ledger=shared_cost_ledger,
         control_store=control_store,
+        preserve_artifacts_on_cancel=preserve_a2_artifacts_on_cancel,
     )
     authority = image_triage_authority
     if authority is None and enable_triage:

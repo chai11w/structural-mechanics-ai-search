@@ -164,6 +164,36 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.assertFalse(self.artifacts.session_dir(session_id).exists())
         self.assertEqual(self.logger.entries[-1].outcome, "cancelled")
 
+    def test_parent_managed_cancel_preserves_history_media_until_full_clear(self):
+        session_id = "parent-managed-cancel-session"
+        self.addCleanup(lambda: self.artifacts.clear_session(session_id))
+        runtime = AgentSessionRuntime(
+            self.store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            agent_factory=lambda state: TikuSearchAgent(
+                state=state,
+                tools=FakeTools().toolbox(),
+                use_llm_intent=False,
+            ),
+            preserve_artifacts_on_cancel=True,
+        )
+        runtime.handle_image(session_id, self.source_image)
+        media = runtime.persist_media(session_id, self.source_image)
+
+        response = runtime.handle_text(session_id, "取消")
+
+        self.assertEqual(response.intent, "cancel")
+        self.assertIsNone(self.store.load(session_id))
+        self.assertTrue(self.artifacts.session_dir(session_id).exists())
+        self.assertIsNone(runtime.resolve_media(session_id, media.name))
+        self.assertEqual(
+            runtime.resolve_media(session_id, media.name, allow_preserved=True),
+            media.resolve(),
+        )
+        runtime.clear(session_id)
+        self.assertFalse(self.artifacts.session_dir(session_id).exists())
+
     def test_state_only_clear_keeps_history_media_until_full_clear(self):
         session_id = "history-media-session"
         self.addCleanup(lambda: self.artifacts.clear_session(session_id))

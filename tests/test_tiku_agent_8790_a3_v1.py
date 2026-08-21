@@ -56,6 +56,9 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
             self.assertTrue(
                 build_runtime.call_args.kwargs["enable_three_scope_cancel_clarification"]
             )
+            self.assertTrue(
+                build_runtime.call_args.kwargs["preserve_a2_artifacts_on_cancel"]
+            )
 
 
 if __name__ == "__main__":

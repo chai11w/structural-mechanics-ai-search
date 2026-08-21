@@ -186,6 +186,7 @@ class AgentSessionRuntime:
         external_load_screen: ExternalLoadScreen | None = None,
         external_load_timeout_seconds: float = 15.0,
         image_triage_authority: object | None = None,
+        preserve_artifacts_on_cancel: bool = False,
     ) -> None:
         self.store = store
         self.artifacts = artifacts or SessionArtifacts()
@@ -211,6 +212,7 @@ class AgentSessionRuntime:
             0.01, float(external_load_timeout_seconds)
         )
         self.image_triage_authority = image_triage_authority
+        self.preserve_artifacts_on_cancel = bool(preserve_artifacts_on_cancel)
         self._image_executor = (
             ThreadPoolExecutor(max_workers=8, thread_name_prefix="tiku-image-race")
             if external_load_screen is not None
@@ -897,7 +899,9 @@ class AgentSessionRuntime:
             )
             if response.intent == "cancel":
                 self.store.clear(clean_session_id)
-                self.artifacts.clear_session(clean_session_id)
+                # Nested A3 flows own the conversation-level artifact lifetime.
+                if not self.preserve_artifacts_on_cancel:
+                    self.artifacts.clear_session(clean_session_id)
             else:
                 self.store.save(agent.state)
             return response
