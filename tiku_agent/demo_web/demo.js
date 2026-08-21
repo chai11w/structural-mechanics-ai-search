@@ -68,6 +68,7 @@ const A3_TEXT_RETRY_TIMEOUT_MS = 100000;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 const IMAGE_TARGET_BYTES = 1024 * 1024;
 const IMAGE_MAX_DIMENSION = 2560;
+const AUTHOR_CONTACT_FALLBACK = Object.freeze({ label: '联系作者', channel: '微信', value: 'jglxfd6666' });
 const IMAGE_FALLBACK_DIMENSION = 2048;
 const IMAGE_QUALITY_STEPS = [0.88, 0.82, 0.76, 0.70];
 const HISTORY_TTL_MS = 2 * 60 * 60 * 1000;
@@ -830,6 +831,11 @@ function createMediaCard(url, index, item) {
 
 function addMessage(item, persist = true) {
   item = { ...item, createdAt: Number(item.createdAt || Date.now()) };
+  const inferredAuthorContact = normalizeAuthorContact(item.authorContact)
+    || (!item.me && String(item.message || '').includes('联系作者手搓')
+      ? AUTHOR_CONTACT_FALLBACK
+      : null);
+  if (inferredAuthorContact) item = { ...item, authorContact: inferredAuthorContact };
   const feedbackEligible = !item.me && item.variant !== 'pending';
   if (feedbackEligible) {
     item = {

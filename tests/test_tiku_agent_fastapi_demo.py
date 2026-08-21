@@ -290,7 +290,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260821-author-contact-v1"', 'src="/assets/demo.js?v=20260821-author-contact-v1"',
+            'href="/assets/demo.css?v=20260821-author-contact-v2"', 'src="/assets/demo.js?v=20260821-author-contact-v2"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',

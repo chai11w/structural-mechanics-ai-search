@@ -153,6 +153,11 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn("作者${contact.channel}：", self.script)
         self.assertNotIn("button.textContent = '继续搜'", self.script)
 
+    def test_old_contact_fallback_reply_recovers_its_button_after_refresh(self):
+        self.assertIn("const AUTHOR_CONTACT_FALLBACK", self.script)
+        self.assertIn("includes('联系作者手搓')", self.script)
+        self.assertIn("authorContact: inferredAuthorContact", self.script)
+
 
 if __name__ == "__main__":
     unittest.main()
