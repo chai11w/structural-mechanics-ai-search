@@ -64,6 +64,7 @@ def build_runtime(
     enable_a3_intent_model_fallback: bool = True,
     a3_intent_model_client=None,
     enable_author_contact_fallback: bool = True,
+    enable_three_scope_cancel_clarification: bool = True,
 ) -> A3MvpRuntime:
     """Build the full A1/A2/A3 route with A3 and its child A2 under one root."""
 
@@ -114,6 +115,7 @@ def build_runtime(
             if enable_a3_intent_v1
             else None
         ),
+        enable_three_scope_cancel_clarification=enable_three_scope_cancel_clarification,
     )
 
 

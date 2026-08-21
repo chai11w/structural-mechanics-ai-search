@@ -435,6 +435,26 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(snapshot["completed_unit_ids"], [])
         self.assertEqual(snapshot["searched_unit_ids"], [])
 
+    def test_8896_cancel_scope_uses_three_choices_without_progress_disclaimer(self):
+        self.runtime.intent_engine = A3IntentEngineV1()
+        self.runtime.enable_three_scope_cancel_clarification = True
+        session_id = "a3-intent-three-cancel-scopes"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+
+        clarified = self.runtime.handle_text(session_id, "取消")
+
+        self.assertEqual(
+            clarified.text,
+            "你想结束最初上传的整张多题图，还是结束当前题？\n"
+            "1. 结束最初上传的整张多题图\n"
+            "2. 结束当前题\n"
+            "3. 继续当前题",
+        )
+        self.assertNotIn("我暂时没有改变当前进度", clarified.text)
+        cancelled = self.runtime.handle_text(session_id, "2")
+        self.assertEqual(cancelled.intent, "a3_current_unit_cancelled")
+
     def test_intent_v1_a2_continue_only_mentions_candidate_selection(self):
         self.runtime.intent_engine = A3IntentEngineV1()
         session_id = "a3-intent-a2-continue"

@@ -356,6 +356,7 @@ class A3MvpRuntime:
         image_triage_authority: object | None = None,
         cost_ledger: SQLiteModelCostLedger | None = None,
         intent_engine: A3IntentEngineV1 | None = None,
+        enable_three_scope_cancel_clarification: bool = False,
     ) -> None:
         self.store = store
         self.artifacts = artifacts
@@ -372,6 +373,9 @@ class A3MvpRuntime:
         self.image_triage_authority = image_triage_authority
         self.cost_ledger = cost_ledger
         self.intent_engine = intent_engine
+        self.enable_three_scope_cancel_clarification = bool(
+            enable_three_scope_cancel_clarification
+        )
         self._locks = tuple(threading.RLock() for _ in range(64))
 
     def handle_image(
@@ -659,14 +663,22 @@ class A3MvpRuntime:
         if action == "clarification":
             reason = str(decision.clarification_reason or "ambiguous_action")
             if reason == "ambiguous_cancel_scope":
-                options = self._cancel_scope_options(state)
+                options = (
+                    ["finish_page", "cancel_current_unit", "continue_current"]
+                    if self.enable_three_scope_cancel_clarification
+                    else self._cancel_scope_options(state)
+                )
                 state.pending_intent_clarification = {
                     "kind": "cancel_scope",
                     "options": options,
                 }
                 self.store.save(state)
                 labels = {
-                    "cancel_current_unit": "只停止当前这道题（裁剪后的单题图）",
+                    "cancel_current_unit": (
+                        "结束当前题"
+                        if self.enable_three_scope_cancel_clarification
+                        else "只停止当前这道题（裁剪后的单题图）"
+                    ),
                     "finish_page": "结束最初上传的整张多题图",
                     "continue_current": "继续当前题",
                 }
@@ -674,13 +686,20 @@ class A3MvpRuntime:
                     f"{index}. {labels[value]}"
                     for index, value in enumerate(options, start=1)
                 )
-                question = (
-                    "你说的“这张图”是当前裁剪后的单题图，还是最初上传的整张多题图？"
-                    if state.selected_unit_id
-                    else "你想结束最初上传的整张多题图，还是继续当前操作？"
-                )
+                if self.enable_three_scope_cancel_clarification:
+                    question = "你想结束最初上传的整张多题图，还是结束当前题？"
+                else:
+                    question = (
+                        "你说的“这张图”是当前裁剪后的单题图，还是最初上传的整张多题图？"
+                        if state.selected_unit_id
+                        else "你想结束最初上传的整张多题图，还是继续当前操作？"
+                    )
                 return _response(
-                    question + "我暂时没有改变当前进度。\n" + choices,
+                    (
+                        question + "\n" + choices
+                        if self.enable_three_scope_cancel_clarification
+                        else question + "我暂时没有改变当前进度。\n" + choices
+                    ),
                     state,
                     intent="a3_cancel_scope_clarification",
                     code="CLARIFICATION_REQUIRED",

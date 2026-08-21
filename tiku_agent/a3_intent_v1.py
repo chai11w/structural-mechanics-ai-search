@@ -246,7 +246,10 @@ def authorize_a3_action_v1(
         )
     if decision.action == "cancel_current_unit":
         selected = context.selected_unit
-        allowed = selected is not None and context.phase in {"CROP_REQUIRED", "A2_ACTIVE"}
+        allowed = context.phase in {"CROP_REQUIRED", "A2_ACTIVE"} and (
+            selected is not None
+            or "cancel_current_unit" in context.pending_cancel_scopes
+        )
         return A3ActionAuthorizationV1(
             allowed,
             "cancel_current_unit" if allowed else "current_unit_unavailable",

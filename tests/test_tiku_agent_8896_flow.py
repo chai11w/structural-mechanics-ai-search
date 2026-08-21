@@ -127,6 +127,12 @@ class TikuAgent8896FlowTest(unittest.TestCase):
             self.assertTrue(agent_8896.enable_author_contact_fallback)
             self.assertFalse(agent_8790.enable_author_contact_fallback)
 
+    def test_8896_enables_three_scope_cancel_clarification(self):
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = build_runtime(Path(temp), enable_triage=False)
+
+            self.assertTrue(runtime.enable_three_scope_cancel_clarification)
+
     def test_8896_passes_qwen_policy_with_tool_parameter_names(self):
         with tempfile.TemporaryDirectory() as temp, patch(
             "scripts.run_tiku_agent_demo.rerank_candidates_tool"
