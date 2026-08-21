@@ -414,6 +414,8 @@ def create_app(
                 layer=rated_protocol.layer.value,
                 code=rated_protocol.code,
                 chapter=str(snapshot.get("chapter") or ""),
+                image_route=str(snapshot.get("image_route") or ""),
+                workflow_search_id=str(snapshot.get("workflow_search_id") or search_id),
                 conversation=conversation,
                 media_resolver=lambda url: _resolve_feedback_media(
                     runtime, session_id, url
@@ -802,12 +804,18 @@ def create_app(
             session_id = _session_id(request, cookie_name=session_cookie)
 
             def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
+                kwargs: dict[str, object] = {
+                    "task_revision": task_revision,
+                    "progress": progress,
+                    "request_id": _request_id(request),
+                }
+                identity_key = _identity_key(request)
+                if identity_key:
+                    kwargs["identity_key"] = identity_key
                 response = runtime.prepare_units(  # type: ignore[attr-defined]
                     session_id,
                     unit_ids,
-                    task_revision=task_revision,
-                    progress=progress,
-                    request_id=_request_id(request),
+                    **kwargs,
                 )
                 return _agent_payload(response, runtime, session_id)
 

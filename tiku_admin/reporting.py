@@ -6,10 +6,60 @@ from datetime import UTC, date, datetime, time, timedelta
 import json
 from pathlib import Path
 import sqlite3
+from typing import Iterable, Sequence
 from zoneinfo import ZoneInfo
 
 from tiku_admin.control_store import SQLiteControlStore, micros_to_cny
 from tiku_agent.feedback_store import MessageFeedback, SQLiteFeedbackStore
+from tiku_shared.model_costs import estimate_cost
+
+
+_STAGE_META = {
+    "image_triage": ("图片分流", "判断图片进入 A1、A2 或 A3", "workflow"),
+    "a3_page_understanding": ("整页理解", "识别题目、文字与结构图的对应关系", "workflow"),
+    "a3_page_understanding_retry": ("整页理解重试", "重新识别整页题目关系", "workflow"),
+    "a3_auto_crop_grounding": ("整页自动框选", "一次定位所有可检索题目的结构图", "workflow"),
+    "a3_auto_crop_compare": ("自动裁图完整性校验", "逐题核对裁图是否完整且对应正确", "workflow"),
+    "a3_auto_external_load_screen": ("裁图外荷载门禁", "逐题确认裁图包含明确外荷载", "workflow"),
+    "a3_crop_compare": ("人工裁图校验", "核对人工裁剪范围与所选题目", "question"),
+    "a3_external_load_screen": ("外荷载门禁", "确认题图包含明确外荷载", "question"),
+    "a3_verified_image": ("A2 题库检索", "识别荷载、章节并检索与复筛候选题", "question"),
+    "image": ("A2 题库检索", "识别荷载、章节并检索与复筛候选题", "question"),
+    "text": ("结果交互", "处理选题、追问或答案说明", "question"),
+}
+
+_CALL_LABELS = {
+    "qwen_image_triage": "Qwen 图片分流",
+    "qwen_image_triage_reply": "Qwen 分流说明",
+    "qwen_a3_page_understanding": "Qwen 整页理解",
+    "glm_a3_page_auto_crop": "GLM 整页框选",
+    "qwen_a3_crop_compare": "Qwen 裁图完整性校验",
+    "external_load_screen": "外荷载门禁",
+    "qwen_image_classification": "Qwen 荷载与章节识别",
+    "qwen_image_scope": "Qwen 图片范围识别",
+    "qwen_layout_analysis": "Qwen 页面布局分析",
+    "qwen_structure_type": "Qwen 结构类型识别",
+    "qwen_structure_dimension": "Qwen 尺寸识别",
+    "qwen_shape_rerank": "Qwen 候选复筛",
+    "qwen_length_tie_break": "Qwen 长度细判",
+    "zhipu_shape_rerank": "GLM 候选复筛",
+    "qwen_safe_answer": "Qwen 答案说明",
+    "qwen_intent_decision": "Qwen 追问意图判断",
+}
+
+_STAGE_ORDER = {
+    "image_triage": 10,
+    "a3_page_understanding": 20,
+    "a3_page_understanding_retry": 20,
+    "a3_auto_crop_grounding": 30,
+    "a3_auto_crop_compare": 40,
+    "a3_auto_external_load_screen": 50,
+    "a3_crop_compare": 60,
+    "a3_external_load_screen": 65,
+    "a3_verified_image": 70,
+    "image": 70,
+    "text": 80,
+}
 
 
 class AdminReporter:
@@ -17,11 +67,21 @@ class AdminReporter:
         self,
         *,
         control_store: SQLiteControlStore,
-        cost_database: str | Path,
+        cost_database: str | Path | None = None,
+        cost_databases: Sequence[str | Path] | None = None,
         feedback_store: SQLiteFeedbackStore,
     ) -> None:
         self.control_store = control_store
-        self.cost_database = Path(cost_database).resolve()
+        paths = [*list(cost_databases or [])]
+        if cost_database is not None:
+            paths.insert(0, cost_database)
+        resolved: list[Path] = []
+        for value in paths:
+            path = Path(value).resolve()
+            if path not in resolved:
+                resolved.append(path)
+        self.cost_databases = tuple(resolved)
+        self.cost_database = resolved[0] if resolved else Path("model_costs.sqlite3").resolve()
         self.feedback_store = feedback_store
 
     def overview(self) -> dict[str, object]:
@@ -132,18 +192,22 @@ class AdminReporter:
         }
 
     def invitation_delete_blockers(self, invite_id: str) -> dict[str, int]:
-        cost_runs = -1
-        if self.cost_database.is_file():
+        cost_runs = 0
+        readable = False
+        for path in self.cost_databases:
+            if not path.is_file():
+                continue
             try:
-                with sqlite3.connect(self.cost_database) as connection:
-                    cost_runs = int(connection.execute(
+                with sqlite3.connect(path) as connection:
+                    cost_runs += int(connection.execute(
                         "SELECT COUNT(*) FROM model_cost_runs WHERE identity_key = ?",
                         (str(invite_id),),
                     ).fetchone()[0])
+                    readable = True
             except sqlite3.Error:
-                cost_runs = -1
+                continue
         return {
-            "cost_runs": cost_runs,
+            "cost_runs": cost_runs if readable else -1,
             "feedback": self.feedback_store.count_for_identity(invite_id),
         }
 
@@ -152,7 +216,7 @@ class AdminReporter:
         if item is None:
             return None
         invitation = self.control_store.get_invitation(item.identity_key)
-        detail = self._feedback_summaries([item])[0]
+        detail = self._feedback_summaries([item], include_flow=True)[0]
         detail.update({
             "conversation": [
                 {
@@ -172,9 +236,18 @@ class AdminReporter:
         return detail
 
     def _feedback_summaries(
-        self, items: list[MessageFeedback]
+        self,
+        items: list[MessageFeedback],
+        *,
+        include_flow: bool = False,
     ) -> list[dict[str, object]]:
-        costs = self._search_costs([item.search_key for item in items])
+        search_keys = sorted({
+            key
+            for item in items
+            for key in (item.search_key, item.workflow_search_id)
+            if key
+        })
+        runs = self._load_runs(search_keys=search_keys)
         invitations = {
             item.invite_id: item
             for item in self.control_store.list_invitations(include_archived=True)
@@ -183,9 +256,15 @@ class AdminReporter:
         for item in items:
             summary = _feedback_summary(item)
             invitation = invitations.get(item.identity_key)
+            item_keys = {item.search_key, item.workflow_search_id} - {""}
+            item_runs = [run for run in runs if str(run["search_key"]) in item_keys]
             summary.update({
                 "invite_label": invitation.label if invitation else item.identity_key,
-                "cost": costs.get(item.search_key, _empty_search_cost()),
+                "cost": _cost_summary(
+                    item_runs,
+                    image_route=item.image_route,
+                    include_flow=include_flow,
+                ),
             })
             result.append(summary)
         return result
@@ -193,94 +272,304 @@ class AdminReporter:
     def _usage(
         self, started_at: str, finished_at: str
     ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
-        empty = {"search_count": 0, "estimated_cost_micros": 0}
-        if not self.cost_database.is_file():
-            return empty, {}
-        try:
-            with sqlite3.connect(self.cost_database) as connection:
-                connection.row_factory = sqlite3.Row
-                total = connection.execute(
-                    """
-                    SELECT COUNT(DISTINCT NULLIF(search_key, '')) AS search_count,
-                           COALESCE(SUM(estimated_cost_micros), 0) AS estimated_cost_micros
-                    FROM model_cost_runs
-                    WHERE started_at >= ? AND started_at < ?
-                    """,
-                    (started_at, finished_at),
-                ).fetchone()
-                rows = connection.execute(
-                    """
-                    SELECT identity_key,
-                           COUNT(DISTINCT NULLIF(search_key, '')) AS search_count,
-                           COALESCE(SUM(estimated_cost_micros), 0) AS estimated_cost_micros,
-                           MAX(finished_at) AS last_activity_at
-                    FROM model_cost_runs
-                    WHERE started_at >= ? AND started_at < ? AND identity_key != ''
-                    GROUP BY identity_key
-                    """,
-                    (started_at, finished_at),
-                ).fetchall()
-        except sqlite3.Error:
-            return empty, {}
+        runs = self._load_runs(started_at=started_at, finished_at=finished_at)
+        if not runs:
+            return {"search_count": 0, "estimated_cost_micros": 0}, {}
+        per_identity: dict[str, dict[str, object]] = {}
+        for run in runs:
+            identity_key = str(run["identity_key"])
+            if not identity_key:
+                continue
+            usage = per_identity.setdefault(identity_key, {
+                "search_keys": set(),
+                "estimated_cost_micros": 0,
+                "last_activity_at": "",
+            })
+            search_key = str(run["search_key"])
+            if search_key and str(run["task_kind"]) in {"image", "a3_verified_image"}:
+                usage["search_keys"].add(search_key)  # type: ignore[union-attr]
+            usage["estimated_cost_micros"] = int(usage["estimated_cost_micros"]) + int(
+                run["effective_cost_micros"]
+            )
+            usage["last_activity_at"] = max(
+                str(usage["last_activity_at"]), str(run["finished_at"])
+            )
+        normalized = {
+            key: {
+                "search_count": len(value.pop("search_keys")),
+                **value,
+            }
+            for key, value in per_identity.items()
+        }
         return (
             {
-                "search_count": int(total["search_count"] or 0),
-                "estimated_cost_micros": int(total["estimated_cost_micros"] or 0),
+                "search_count": len({
+                    str(run["search_key"])
+                    for run in runs
+                    if run["search_key"]
+                    and str(run["task_kind"]) in {"image", "a3_verified_image"}
+                }),
+                "estimated_cost_micros": sum(int(run["effective_cost_micros"]) for run in runs),
             },
-            {
-                str(row["identity_key"]): {
-                    "search_count": int(row["search_count"] or 0),
-                    "estimated_cost_micros": int(row["estimated_cost_micros"] or 0),
-                    "last_activity_at": str(row["last_activity_at"] or ""),
-                }
-                for row in rows
-            },
+            normalized,
         )
 
-    def _search_cost(self, search_key: str) -> dict[str, object]:
-        clean = str(search_key or "").strip()
-        return self._search_costs([clean]).get(clean, _empty_search_cost())
+    def _load_runs(
+        self,
+        *,
+        started_at: str = "",
+        finished_at: str = "",
+        search_keys: Sequence[str] | None = None,
+    ) -> list[dict[str, object]]:
+        keys = sorted({str(value).strip() for value in (search_keys or []) if str(value).strip()})
+        result: list[dict[str, object]] = []
+        seen_run_ids: set[str] = set()
+        for path in self.cost_databases:
+            if not path.is_file():
+                continue
+            clauses: list[str] = []
+            parameters: list[object] = []
+            if started_at:
+                clauses.append("started_at >= ?")
+                parameters.append(started_at)
+            if finished_at:
+                clauses.append("started_at < ?")
+                parameters.append(finished_at)
+            if keys:
+                clauses.append(f"search_key IN ({','.join('?' for _ in keys)})")
+                parameters.extend(keys)
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            try:
+                with sqlite3.connect(path) as connection:
+                    connection.row_factory = sqlite3.Row
+                    rows = connection.execute(
+                        "SELECT run_id, session_key, identity_key, search_key, task_kind, "
+                        "started_at, finished_at, outcome, call_count, total_tokens, "
+                        f"estimated_cost_micros, warning_codes_json FROM model_cost_runs {where}",
+                        parameters,
+                    ).fetchall()
+                    calls_by_run = _read_calls(connection, [str(row["run_id"]) for row in rows])
+            except sqlite3.Error:
+                continue
+            for row in rows:
+                run_id = str(row["run_id"])
+                if run_id in seen_run_ids:
+                    continue
+                seen_run_ids.add(run_id)
+                calls = calls_by_run.get(run_id, [])
+                stored_cost = int(row["estimated_cost_micros"] or 0)
+                effective_cost = (
+                    sum(int(call["effective_cost_micros"]) for call in calls)
+                    if calls
+                    else stored_cost
+                )
+                result.append({
+                    **dict(row),
+                    "calls": calls,
+                    "effective_cost_micros": effective_cost,
+                    "historical_reprice_applied": any(
+                        bool(call["historical_reprice_applied"]) for call in calls
+                    ),
+                    "warning_codes": _json_list(row["warning_codes_json"]),
+                })
+        return sorted(result, key=lambda run: (str(run["started_at"]), str(run["run_id"])))
 
-    def _search_costs(self, search_keys: list[str]) -> dict[str, dict[str, object]]:
-        keys = sorted({str(value).strip() for value in search_keys if str(value).strip()})
-        if not keys or not self.cost_database.is_file():
-            return {}
-        placeholders = ",".join("?" for _key in keys)
-        try:
-            with sqlite3.connect(self.cost_database) as connection:
-                connection.row_factory = sqlite3.Row
-                rows = connection.execute(
-                    f"""
-                    SELECT search_key, estimated_cost_micros, call_count, started_at,
-                           finished_at, warning_codes_json
-                    FROM model_cost_runs WHERE search_key IN ({placeholders})
-                    """,
-                    keys,
-                ).fetchall()
-        except sqlite3.Error:
-            return {}
-        grouped: dict[str, list[sqlite3.Row]] = {}
-        for row in rows:
-            grouped.setdefault(str(row["search_key"]), []).append(row)
-        return {key: _cost_summary(group) for key, group in grouped.items()}
 
-
-def _cost_summary(rows: list[sqlite3.Row]) -> dict[str, object]:
-    cost = sum(int(row["estimated_cost_micros"] or 0) for row in rows)
-    warnings: list[str] = []
+def _read_calls(
+    connection: sqlite3.Connection,
+    run_ids: Sequence[str],
+) -> dict[str, list[dict[str, object]]]:
+    if not run_ids:
+        return {}
+    try:
+        rows = connection.execute(
+            "SELECT call_id, run_id, sequence, provider, model, call_type, status, "
+            "started_at, finished_at, latency_ms, input_tokens, image_tokens, "
+            "cached_tokens, output_tokens, total_tokens, attempt_count, error_kind, "
+            "price_version, pricing_status, estimated_cost_micros FROM model_cost_calls "
+            f"WHERE run_id IN ({','.join('?' for _ in run_ids)}) "
+            "ORDER BY started_at, sequence",
+            list(run_ids),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    grouped: dict[str, list[dict[str, object]]] = {}
     for row in rows:
-        try:
-            warnings.extend(json.loads(str(row["warning_codes_json"] or "[]")))
-        except json.JSONDecodeError:
-            continue
-    return {
+        call = dict(row)
+        current = int(call["estimated_cost_micros"] or 0)
+        repriced = estimate_cost(
+            str(call["provider"]),
+            str(call["model"]),
+            {
+                "input_tokens": int(call["input_tokens"] or 0),
+                "cached_tokens": int(call["cached_tokens"] or 0),
+                "output_tokens": int(call["output_tokens"] or 0),
+            },
+        )
+        can_reprice = (
+            str(call["pricing_status"]) != "priced"
+            and str(repriced["pricing_status"]) == "priced"
+        )
+        call["effective_cost_micros"] = (
+            int(repriced["estimated_cost_micros"]) if can_reprice else current
+        )
+        call["effective_price_version"] = (
+            str(repriced["price_version"]) if can_reprice else str(call["price_version"])
+        )
+        call["effective_pricing_status"] = "repriced" if can_reprice else str(call["pricing_status"])
+        call["historical_reprice_applied"] = can_reprice
+        grouped.setdefault(str(call["run_id"]), []).append(call)
+    return grouped
+
+
+def _cost_summary(
+    runs: list[dict[str, object]],
+    *,
+    image_route: str = "",
+    include_flow: bool = False,
+) -> dict[str, object]:
+    if not runs:
+        return _empty_search_cost(include_flow=include_flow, image_route=image_route)
+    cost = sum(int(run["effective_cost_micros"]) for run in runs)
+    warnings = sorted({
+        warning
+        for run in runs
+        for warning in list(run.get("warning_codes") or [])
+    })
+    repriced = any(bool(run["historical_reprice_applied"]) for run in runs)
+    if repriced:
+        warnings = sorted({*warnings, "HISTORICAL_PRICE_RECALCULATED"})
+    result: dict[str, object] = {
         "estimated_cost_micros": cost,
         "estimated_cost_cny": micros_to_cny(cost),
-        "model_call_count": sum(int(row["call_count"] or 0) for row in rows),
-        "started_at": min(str(row["started_at"] or "") for row in rows),
-        "finished_at": max(str(row["finished_at"] or "") for row in rows),
-        "warning_codes": sorted(set(warnings)),
+        "model_call_count": sum(int(run["call_count"] or 0) for run in runs),
+        "started_at": min(str(run["started_at"] or "") for run in runs),
+        "finished_at": max(str(run["finished_at"] or "") for run in runs),
+        "warning_codes": warnings,
+        "historical_reprice_applied": repriced,
     }
+    if include_flow:
+        route = _infer_route(runs, image_route)
+        calls = [call for run in runs for call in list(run.get("calls") or [])]
+        result.update({
+            "route": route,
+            "route_label": _route_label(route),
+            "flow": _flow_summary(runs),
+            "models": _model_summary(calls),
+        })
+    return result
+
+
+def _flow_summary(runs: list[dict[str, object]]) -> list[dict[str, object]]:
+    grouped: dict[str, list[dict[str, object]]] = {}
+    order: list[str] = []
+    for run in runs:
+        task_kind = str(run["task_kind"] or "unknown")
+        if task_kind not in grouped:
+            grouped[task_kind] = []
+            order.append(task_kind)
+        grouped[task_kind].append(run)
+    order.sort(key=lambda key: (
+        _STAGE_ORDER.get(key, 75),
+        min(str(run["started_at"]) for run in grouped[key]),
+    ))
+    stages = []
+    for index, task_kind in enumerate(order, start=1):
+        stage_runs = grouped[task_kind]
+        title, description, scope = _STAGE_META.get(
+            task_kind,
+            (task_kind.replace("_", " "), "记录该阶段的模型调用与费用", "question"),
+        )
+        calls = sorted(
+            [call for run in stage_runs for call in list(run.get("calls") or [])],
+            key=lambda call: (str(call["started_at"]), int(call["sequence"] or 0)),
+        )
+        stage_cost = sum(int(run["effective_cost_micros"]) for run in stage_runs)
+        stages.append({
+            "index": index,
+            "key": task_kind,
+            "title": title,
+            "description": description,
+            "scope": scope,
+            "run_count": len(stage_runs),
+            "model_call_count": sum(int(run["call_count"] or 0) for run in stage_runs),
+            "estimated_cost_micros": stage_cost,
+            "estimated_cost_cny": micros_to_cny(stage_cost),
+            "started_at": min(str(run["started_at"] or "") for run in stage_runs),
+            "finished_at": max(str(run["finished_at"] or "") for run in stage_runs),
+            "status": "error" if any(str(run["outcome"]) == "error" for run in stage_runs) else "success",
+            "calls": [_public_call(call) for call in calls],
+        })
+    return stages
+
+
+def _public_call(call: dict[str, object]) -> dict[str, object]:
+    call_type = str(call["call_type"])
+    cost = int(call["effective_cost_micros"] or 0)
+    return {
+        "label": _CALL_LABELS.get(call_type, call_type.replace("_", " ")),
+        "call_type": call_type,
+        "provider": str(call["provider"]),
+        "model": str(call["model"]),
+        "status": str(call["status"]),
+        "latency_ms": int(call["latency_ms"] or 0),
+        "input_tokens": int(call["input_tokens"] or 0),
+        "cached_tokens": int(call["cached_tokens"] or 0),
+        "output_tokens": int(call["output_tokens"] or 0),
+        "total_tokens": int(call["total_tokens"] or 0),
+        "attempt_count": int(call["attempt_count"] or 0),
+        "estimated_cost_micros": cost,
+        "estimated_cost_cny": micros_to_cny(cost),
+        "price_version": str(call["effective_price_version"]),
+        "pricing_status": str(call["effective_pricing_status"]),
+        "error_kind": str(call["error_kind"]),
+    }
+
+
+def _model_summary(calls: Iterable[dict[str, object]]) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, str], dict[str, object]] = {}
+    for call in calls:
+        key = (str(call["provider"]), str(call["model"]))
+        item = grouped.setdefault(key, {
+            "provider": key[0],
+            "model": key[1],
+            "call_count": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "estimated_cost_micros": 0,
+        })
+        item["call_count"] = int(item["call_count"]) + int(call["attempt_count"] or 0)
+        for name in ("input_tokens", "output_tokens", "total_tokens", "estimated_cost_micros"):
+            source = "effective_cost_micros" if name == "estimated_cost_micros" else name
+            item[name] = int(item[name]) + int(call[source] or 0)
+    result = []
+    for item in grouped.values():
+        item["estimated_cost_cny"] = micros_to_cny(int(item["estimated_cost_micros"]))
+        result.append(item)
+    return sorted(result, key=lambda item: (-int(item["estimated_cost_micros"]), str(item["model"])))
+
+
+def _infer_route(runs: list[dict[str, object]], explicit: str) -> str:
+    clean = str(explicit or "").strip().upper()
+    if clean in {"A1", "A2", "A3"}:
+        return clean
+    task_kinds = {str(run["task_kind"]) for run in runs}
+    if any(kind.startswith("a3_page") or kind.startswith("a3_auto") for kind in task_kinds):
+        return "A3"
+    if "image" in task_kinds or "a3_verified_image" in task_kinds:
+        return "A2"
+    if "image_triage" in task_kinds:
+        return "A1"
+    return ""
+
+
+def _route_label(route: str) -> str:
+    return {
+        "A1": "A1 · 停止检索",
+        "A2": "A2 · 单题直接检索",
+        "A3": "A3 · 整页拆题后检索",
+    }.get(route, "未识别路线")
 
 
 def _feedback_summary(item: MessageFeedback) -> dict[str, object]:
@@ -299,6 +588,8 @@ def _feedback_summary(item: MessageFeedback) -> dict[str, object]:
         "candidate_count": item.candidate_count,
         "search_duration_ms": item.search_duration_ms,
         "chapter": item.chapter,
+        "image_route": item.image_route,
+        "workflow_search_id": item.workflow_search_id,
         "review_status": item.review_status,
         "archived_at": item.archived_at,
         "created_at": item.created_at,
@@ -309,6 +600,14 @@ def _feedback_summary(item: MessageFeedback) -> dict[str, object]:
             f"/api/admin/feedback/{item.feedback_id}/media/{images[0]}" if images else ""
         ),
     }
+
+
+def _json_list(value: object) -> list[str]:
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except json.JSONDecodeError:
+        return []
+    return [str(item) for item in parsed] if isinstance(parsed, list) else []
 
 
 def _today_window(timezone_name: str) -> tuple[str, str]:
@@ -334,12 +633,26 @@ def _is_expired(expires_at: str) -> bool:
     return bool(expires_at and datetime.fromisoformat(expires_at) <= datetime.now(UTC))
 
 
-def _empty_search_cost() -> dict[str, object]:
-    return {
+def _empty_search_cost(
+    *,
+    include_flow: bool = False,
+    image_route: str = "",
+) -> dict[str, object]:
+    result: dict[str, object] = {
         "estimated_cost_micros": 0,
         "estimated_cost_cny": "0.00",
         "model_call_count": 0,
         "started_at": "",
         "finished_at": "",
         "warning_codes": [],
+        "historical_reprice_applied": False,
     }
+    if include_flow:
+        route = str(image_route or "").strip().upper()
+        result.update({
+            "route": route if route in {"A1", "A2", "A3"} else "",
+            "route_label": _route_label(route),
+            "flow": [],
+            "models": [],
+        })
+    return result

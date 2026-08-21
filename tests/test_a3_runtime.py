@@ -375,6 +375,33 @@ class A3RuntimeTests(unittest.TestCase):
             unit_analyzer=self.analyzer,
         )
 
+    def test_a3_cost_runs_keep_identity_and_workflow_search_id(self):
+        class CapturingLedger:
+            def __init__(self):
+                self.collectors = []
+
+            def write_run(self, collector, *, finished_at, outcome):
+                del finished_at, outcome
+                self.collectors.append(collector)
+
+        ledger = CapturingLedger()
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "identity-a3.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "identity-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            cost_ledger=ledger,
+        )
+
+        runtime.handle_image("identity-flow", self.source, identity_key="invite-001")
+        snapshot = runtime.session_snapshot("identity-flow")
+
+        self.assertEqual(len(ledger.collectors), 1)
+        self.assertEqual(ledger.collectors[0].identity_key, "invite-001")
+        self.assertEqual(ledger.collectors[0].search_key, snapshot["workflow_search_id"])
+        self.assertEqual(snapshot["search_id"], snapshot["workflow_search_id"])
+
     def test_restored_unlabelled_units_receive_unique_page_ordinals(self):
         state = A3SessionState.from_dict({
             "session_id": "legacy-unlabelled",
@@ -664,7 +691,7 @@ class A3RuntimeTests(unittest.TestCase):
         snapshot = runtime.session_snapshot("manual-fallback")["a3"]
         self.assertEqual(snapshot["phase"], A3_PHASE_CROP_REQUIRED)
         self.assertTrue(snapshot["crop_draft"]["available"])
-        self.assertEqual(snapshot["crop_draft"]["bounds"]["x"], 0.52)
+        self.assertEqual(snapshot["crop_draft"]["bounds"]["x"], 0.5)
         self.assertEqual(self.verifier.calls, [])
 
     def test_grounding_error_degrades_every_unit_to_manual_without_page_error(self):
@@ -711,7 +738,7 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(selected.intent, "a3_unit_selected")
         selected_snapshot = runtime.session_snapshot("all-manual")["a3"]
         self.assertEqual(selected_snapshot["phase"], A3_PHASE_CROP_REQUIRED)
-        self.assertEqual(selected_snapshot["crop_draft"]["bounds"]["x"], 0.08)
+        self.assertEqual(selected_snapshot["crop_draft"]["bounds"]["x"], 0.06)
 
     def test_full_flow_a1_stops_without_a2_or_a3_processing(self):
         authority = FakeFlowAuthority("A1")

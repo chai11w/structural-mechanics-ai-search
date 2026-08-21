@@ -43,7 +43,10 @@ def build_app(
     )
     reporter = AdminReporter(
         control_store=control_store,
-        cost_database=source_root / "model_costs.sqlite3",
+        cost_databases=(
+            source_root / "model_costs.sqlite3",
+            source_root / "a2" / "model_costs.sqlite3",
+        ),
         feedback_store=feedback_store,
     )
     return create_admin_app(

@@ -54,6 +54,7 @@ def build_runtime(
     external_load_screen: Callable[[str | Path], str] | None = None,
     enable_chapter_scope_fallback: bool = False,
     rerank_policy: dict[str, object] | None = None,
+    cost_ledger: SQLiteModelCostLedger | None = None,
 ) -> AgentSessionRuntime:
     """Build the 8790 runtime with bounded safe answers enabled by default."""
     root = Path(runtime_dir).resolve()
@@ -96,7 +97,7 @@ def build_runtime(
         SQLiteSessionStore(root / "session.db"),
         artifacts=artifacts,
         task_logger=JsonlTaskLogger(root / "task_logs.jsonl"),
-        cost_ledger=SQLiteModelCostLedger(root / "model_costs.sqlite3"),
+        cost_ledger=cost_ledger or SQLiteModelCostLedger(root / "model_costs.sqlite3"),
         agent_factory=agent_factory,
         max_concurrent_tasks=max_concurrent_tasks,
         max_queued_tasks=max_queued_tasks,

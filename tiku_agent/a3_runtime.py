@@ -96,6 +96,7 @@ class A3SessionState:
     crop_review_feedback: str = ""
     task_revision: int = 0
     current_search_id: str = ""
+    workflow_search_id: str = ""
     last_error: str = ""
     last_error_detail: str = ""
 
@@ -126,6 +127,8 @@ class A3SessionState:
         values = dict(payload)
         if not values.get("entry_route") and values.get("source_page_path"):
             values["entry_route"] = "A3"
+        if not values.get("workflow_search_id") and values.get("current_search_id"):
+            values["workflow_search_id"] = values["current_search_id"]
         state = cls(**values)
         _refresh_unlabelled_display_labels(state.units)
         for unit in state.units:
@@ -366,10 +369,12 @@ class A3MvpRuntime:
         clean = _clean_session_id(session_id)
         lock = self._lock(clean)
         with lock:
+            self._ensure_budget(identity_key)
             previous = self.store.load(clean)
             next_revision = int(previous.task_revision if previous is not None else 0) + 1
             self._clear_locked(clean, preserve_artifacts=True)
             persisted = self.artifacts.persist_image(clean, image_path)
+            workflow_search_id = new_search_id()
             state = A3SessionState(
                 session_id=clean,
                 entry_route="A3" if self.image_triage_authority is None else "",
@@ -377,7 +382,8 @@ class A3MvpRuntime:
                 source_page_path=str(persisted),
                 auto_crop_enabled=self.auto_cropper is not None,
                 task_revision=next_revision,
-                current_search_id=new_search_id(),
+                current_search_id=workflow_search_id,
+                workflow_search_id=workflow_search_id,
             )
             self.store.save(state)
             return self._route_persisted_image(
@@ -399,6 +405,7 @@ class A3MvpRuntime:
     ) -> AgentResponse:
         clean = _clean_session_id(session_id)
         with self._lock(clean):
+            self._ensure_budget(identity_key)
             state = self.store.load(clean)
             if state is None:
                 return AgentResponse(
@@ -608,6 +615,7 @@ class A3MvpRuntime:
         unit_ids: Sequence[str],
         *,
         task_revision: int | None = None,
+        identity_key: str = "",
         progress: ProgressReporter | None = None,
         request_id: str = "",
     ) -> AgentResponse:
@@ -621,6 +629,7 @@ class A3MvpRuntime:
                 protocol=RequestProtocol.from_code("CLARIFICATION_REQUIRED").to_dict(),
             )
         with self._lock(clean):
+            self._ensure_budget(identity_key)
             state = self.store.load(clean)
             if state is None or not state.auto_crop_enabled:
                 return AgentResponse(
@@ -649,6 +658,7 @@ class A3MvpRuntime:
             ready, manual = self._prepare_units_locked(
                 state,
                 requested,
+                identity_key=identity_key,
                 progress=progress,
             )
             text = f"已准备 {len(requested)} 道题：{ready} 道可以直接检索"
@@ -662,6 +672,7 @@ class A3MvpRuntime:
         state: A3SessionState,
         requested: Sequence[str],
         *,
+        identity_key: str,
         progress: ProgressReporter | None,
     ) -> tuple[int, int]:
         state.requested_unit_ids = list(requested)
@@ -686,7 +697,12 @@ class A3MvpRuntime:
             workers = min(self.auto_crop_max_workers, len(candidates))
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {
-                    executor.submit(self._validate_auto_crop, state, unit_id): unit_id
+                    executor.submit(
+                        self._validate_auto_crop,
+                        state,
+                        unit_id,
+                        identity_key=identity_key,
+                    ): unit_id
                     for unit_id in candidates
                 }
                 for completed, future in enumerate(as_completed(futures), start=1):
@@ -733,6 +749,8 @@ class A3MvpRuntime:
         self,
         state: A3SessionState,
         unit_id: str,
+        *,
+        identity_key: str,
     ) -> dict[str, Any]:
         selected = state.unit(unit_id)
         record = state.auto_crops.get(unit_id) or {}
@@ -754,6 +772,7 @@ class A3MvpRuntime:
                     selected,
                     state.page_understanding,
                 ),
+                identity_key=identity_key,
             )
         except Exception as exc:  # noqa: BLE001 - automatic crop degrades to manual.
             return {
@@ -783,6 +802,7 @@ class A3MvpRuntime:
                     state,
                     "a3_auto_external_load_screen",
                     lambda: self.external_load_screen(crop_path),
+                    identity_key=identity_key,
                 )
             ).strip().lower()
         except Exception as exc:  # noqa: BLE001 - independent gate is fail-closed.
@@ -812,6 +832,7 @@ class A3MvpRuntime:
     ) -> AgentResponse:
         clean = _clean_session_id(session_id)
         with self._lock(clean):
+            self._ensure_budget(identity_key)
             state = self.store.load(clean)
             if state is None or state.phase != A3_PHASE_CROP_REQUIRED:
                 return AgentResponse(
@@ -854,6 +875,7 @@ class A3MvpRuntime:
                         selected,
                         state.page_understanding,
                     ),
+                    identity_key=identity_key,
                 )
             except Exception as exc:  # noqa: BLE001 - preserve the crop draft for retry.
                 state.phase = A3_PHASE_CROP_REQUIRED
@@ -887,6 +909,7 @@ class A3MvpRuntime:
                             state,
                             "a3_external_load_screen",
                             lambda: self.external_load_screen(crop_path),
+                            identity_key=identity_key,
                         )
                     ).strip().lower()
                 except Exception as exc:  # noqa: BLE001 - do not pass an unverified crop to A2.
@@ -973,6 +996,7 @@ class A3MvpRuntime:
                 "candidate_count": 0,
                 "chapter": "",
                 "search_id": "",
+                "workflow_search_id": "",
                 "image_route": "",
                 "a3": {
                     "enabled": True,
@@ -986,6 +1010,9 @@ class A3MvpRuntime:
             snapshot["session_valid"] = True
             snapshot["has_active_image"] = bool(state.source_page_path)
             snapshot["image_route"] = "A2"
+            snapshot["workflow_search_id"] = (
+                state.workflow_search_id or state.current_search_id
+            )
             snapshot["a3"] = {
                 "enabled": False,
                 "auto_prepare_all_enabled": auto_prepare_all_enabled,
@@ -1003,6 +1030,7 @@ class A3MvpRuntime:
                 "candidate_count": 0,
                 "chapter": "",
                 "search_id": state.current_search_id,
+                "workflow_search_id": state.workflow_search_id or state.current_search_id,
                 "image_route": state.entry_route,
                 "a3": {
                     "enabled": False,
@@ -1027,6 +1055,7 @@ class A3MvpRuntime:
         snapshot["session_valid"] = True
         snapshot["has_active_image"] = bool(state.source_page_path)
         snapshot["image_route"] = "A3"
+        snapshot["workflow_search_id"] = state.workflow_search_id or state.current_search_id
         snapshot["a3"] = self._a3_snapshot(state)
         return snapshot
 
@@ -1078,6 +1107,7 @@ class A3MvpRuntime:
                     state,
                     "image_triage",
                     lambda: self.image_triage_authority.decide_for_full_flow(persisted),
+                    identity_key=identity_key,
                 )
             except Exception as exc:  # noqa: BLE001 - normalize the model boundary.
                 state.entry_route = ""
@@ -1113,6 +1143,7 @@ class A3MvpRuntime:
                                 state,
                                 "a3_external_load_screen",
                                 lambda: self.external_load_screen(persisted),
+                                identity_key=identity_key,
                             )
                         ).strip().lower()
                     except Exception as exc:  # noqa: BLE001 - do not search without the gate.
@@ -1185,6 +1216,7 @@ class A3MvpRuntime:
                     persisted,
                     task_kind="a3_page_understanding",
                 ),
+                identity_key=identity_key,
             )
         except Exception as exc:  # noqa: BLE001 - keep the upload available for retry.
             state.phase = A3_PHASE_ERROR
@@ -1227,6 +1259,7 @@ class A3MvpRuntime:
                     Path(state.source_page_path),
                     task_kind="a3_page_understanding_retry",
                 ),
+                identity_key=identity_key,
             )
         except A3ModelError as exc:
             state.last_error = type(exc).__name__
@@ -1280,11 +1313,21 @@ class A3MvpRuntime:
             return _response(text, state, intent="a3_page_ready")
 
         if self.auto_cropper is not None:
-            self._ground_auto_crops(state, persisted, progress=progress)
+            self._ground_auto_crops(
+                state,
+                persisted,
+                identity_key=identity_key,
+                progress=progress,
+            )
             if state.auto_crop_enabled:
                 if len(searchable) == 1:
                     unit_id = str(searchable[0]["unit_id"])
-                    self._prepare_units_locked(state, [unit_id], progress=progress)
+                    self._prepare_units_locked(
+                        state,
+                        [unit_id],
+                        identity_key=identity_key,
+                        progress=progress,
+                    )
                     return self._select_locked(
                         state,
                         unit_id,
@@ -1297,6 +1340,7 @@ class A3MvpRuntime:
                     ready, manual = self._prepare_units_locked(
                         state,
                         unit_ids,
+                        identity_key=identity_key,
                         progress=progress,
                     )
                     text = f"已准备 {len(unit_ids)} 道题：{ready} 道可以直接检索"
@@ -1337,6 +1381,7 @@ class A3MvpRuntime:
         state: A3SessionState,
         persisted: Path,
         *,
+        identity_key: str,
         progress: ProgressReporter | None,
     ) -> None:
         if self.auto_cropper is None:
@@ -1354,6 +1399,7 @@ class A3MvpRuntime:
                     state.searchable_units,
                     state.page_understanding,
                 ),
+                identity_key=identity_key,
             )
         except Exception as exc:  # noqa: BLE001 - automatic crop always degrades to manual.
             state.auto_crop_enabled = False
@@ -1747,10 +1793,13 @@ class A3MvpRuntime:
         state: A3SessionState,
         task_kind: str,
         function: Callable[[], Any],
+        *,
+        identity_key: str = "",
     ) -> Any:
         collector = ModelCostCollector(
             run_id=new_request_id(),
             session_key=session_key(state.session_id),
+            identity_key=str(identity_key).strip(),
             search_key=state.current_search_id,
             task_kind=task_kind,
         )
@@ -1770,6 +1819,11 @@ class A3MvpRuntime:
                     )
                 except Exception:  # noqa: BLE001 - observability must not break A3.
                     pass
+
+    def _ensure_budget(self, identity_key: str) -> None:
+        ensure_budget = getattr(self.a2_runtime, "ensure_budget_available", None)
+        if callable(ensure_budget):
+            ensure_budget(identity_key)
 
     def _record_page_error(
         self,

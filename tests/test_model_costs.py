@@ -64,6 +64,58 @@ class ModelCostTest(unittest.TestCase):
         self.assertEqual(zhipu["estimated_cost_micros"], 900)
         self.assertEqual(qwen["pricing_status"], "priced")
 
+    def test_current_qwen_cache_and_glm_5v_turbo_prices(self):
+        cached_qwen = estimate_cost("dashscope", "qwen3.7-plus", {
+            "input_tokens": 1000, "cached_tokens": 500, "output_tokens": 100,
+        })
+        glm_5v = estimate_cost("zhipu", "glm-5v-turbo", {
+            "input_tokens": 1000, "cached_tokens": 0, "output_tokens": 100,
+        })
+
+        self.assertEqual(cached_qwen["estimated_cost_micros"], 2000)
+        self.assertEqual(glm_5v["estimated_cost_micros"], 7200)
+        self.assertEqual(glm_5v["pricing_status"], "priced")
+
+    def test_budget_sum_read_only_reprices_historical_glm_5v_calls(self):
+        directory = self.make_directory()
+        database = directory / "costs.sqlite3"
+        collector = ModelCostCollector(
+            run_id="historical-glm-5v",
+            identity_key="invite-001",
+            search_key="workflow-1",
+            task_kind="a3_auto_crop_grounding",
+            started_at="2026-08-21T00:00:00+00:00",
+        )
+        collector.record(
+            provider="zhipu",
+            model="glm-5v-turbo",
+            call_type="glm_a3_page_auto_crop",
+            status="success",
+            started_at="2026-08-21T00:00:00+00:00",
+            finished_at="2026-08-21T00:00:01+00:00",
+            latency_ms=1000,
+            usage={"input_tokens": 1000, "output_tokens": 100},
+        )
+        ledger = SQLiteModelCostLedger(database)
+        ledger.write_run(
+            collector,
+            finished_at="2026-08-21T00:00:01+00:00",
+            outcome="success",
+        )
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "UPDATE model_cost_calls SET pricing_status = 'missing_price', "
+                "price_version = '', estimated_cost_micros = 0"
+            )
+            connection.execute(
+                "UPDATE model_cost_runs SET estimated_cost_micros = 0"
+            )
+
+        self.assertEqual(
+            ledger.estimated_cost_micros_since("2026-08-21T00:00:00+00:00"),
+            7200,
+        )
+
     def test_concurrent_calls_keep_the_parent_cost_scope(self):
         collector = ModelCostCollector(run_id="run")
 

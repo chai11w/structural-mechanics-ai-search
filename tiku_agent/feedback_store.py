@@ -13,7 +13,7 @@ from typing import Callable, Sequence
 from uuid import uuid4
 
 
-FEEDBACK_SCHEMA_VERSION = 4
+FEEDBACK_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,8 @@ class MessageFeedback:
     layer: str
     code: str
     chapter: str
+    image_route: str
+    workflow_search_id: str
     conversation: tuple[dict[str, object], ...]
     review_status: str
     admin_note: str
@@ -76,6 +78,8 @@ class SQLiteFeedbackStore:
         layer: str = "tool",
         code: str = "REQUEST_SUCCEEDED",
         chapter: str = "",
+        image_route: str = "",
+        workflow_search_id: str = "",
         conversation: list[dict[str, object]] | None = None,
         media_resolver: Callable[[str], Path | None] | None = None,
         retention_days: int = 30,
@@ -125,10 +129,11 @@ class SQLiteFeedbackStore:
                         feedback_id, feedback_number, message_id, identity_key, session_key, rating,
                         tags_json, detail, task_revision, phase, candidate_count,
                         search_duration_ms, search_key, request_id, search_id,
-                        status, layer, code, chapter, conversation_json,
+                        status, layer, code, chapter, image_route, workflow_search_id,
+                        conversation_json,
                         review_status, admin_note, archived_at,
                         case_expires_at, case_purged_at, created_at, updated_at, schema_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(identity_key, session_key, message_id) DO UPDATE SET
                         rating = excluded.rating,
                         tags_json = excluded.tags_json,
@@ -144,6 +149,8 @@ class SQLiteFeedbackStore:
                         layer = excluded.layer,
                         code = excluded.code,
                         chapter = excluded.chapter,
+                        image_route = excluded.image_route,
+                        workflow_search_id = excluded.workflow_search_id,
                         conversation_json = excluded.conversation_json,
                         case_expires_at = excluded.case_expires_at,
                         case_purged_at = excluded.case_purged_at,
@@ -170,6 +177,12 @@ class SQLiteFeedbackStore:
                         str(layer or "tool").strip().lower(),
                         str(code or "REQUEST_SUCCEEDED").strip().upper(),
                         str(chapter).strip()[:80],
+                        (
+                            str(image_route).strip().upper()
+                            if str(image_route).strip().upper() in {"A1", "A2", "A3"}
+                            else ""
+                        ),
+                        str(workflow_search_id or search_id or search_key).strip(),
                         conversation_json,
                         review_status,
                         admin_note,
@@ -201,6 +214,12 @@ class SQLiteFeedbackStore:
             layer=str(layer or "tool").strip().lower(),
             code=str(code or "REQUEST_SUCCEEDED").strip().upper(),
             chapter=str(chapter).strip()[:80],
+            image_route=(
+                str(image_route).strip().upper()
+                if str(image_route).strip().upper() in {"A1", "A2", "A3"}
+                else ""
+            ),
+            workflow_search_id=str(workflow_search_id or search_id or search_key).strip(),
             conversation=tuple(json.loads(conversation_json)),
             review_status=review_status,
             admin_note=admin_note,
@@ -552,6 +571,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             layer TEXT NOT NULL DEFAULT 'tool',
             code TEXT NOT NULL DEFAULT 'REQUEST_SUCCEEDED',
             chapter TEXT NOT NULL DEFAULT '',
+            image_route TEXT NOT NULL DEFAULT '',
+            workflow_search_id TEXT NOT NULL DEFAULT '',
             conversation_json TEXT NOT NULL DEFAULT '[]',
             review_status TEXT NOT NULL DEFAULT 'pending',
             admin_note TEXT NOT NULL DEFAULT '',
@@ -578,6 +599,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         "layer": "TEXT NOT NULL DEFAULT 'tool'",
         "code": "TEXT NOT NULL DEFAULT 'REQUEST_SUCCEEDED'",
         "chapter": "TEXT NOT NULL DEFAULT ''",
+        "image_route": "TEXT NOT NULL DEFAULT ''",
+        "workflow_search_id": "TEXT NOT NULL DEFAULT ''",
         "conversation_json": "TEXT NOT NULL DEFAULT '[]'",
         "review_status": "TEXT NOT NULL DEFAULT 'pending'",
         "admin_note": "TEXT NOT NULL DEFAULT ''",
@@ -639,6 +662,8 @@ def _feedback_from_row(row: sqlite3.Row) -> MessageFeedback:
         layer=str(row["layer"]),
         code=str(row["code"]),
         chapter=str(row["chapter"]),
+        image_route=str(row["image_route"]),
+        workflow_search_id=str(row["workflow_search_id"] or row["search_id"] or row["search_key"]),
         conversation=tuple(json.loads(str(row["conversation_json"]))),
         review_status=str(row["review_status"]),
         admin_note=str(row["admin_note"]),

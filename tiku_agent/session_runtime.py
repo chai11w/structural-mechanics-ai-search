@@ -1029,6 +1029,11 @@ class AgentSessionRuntime:
                 code="INVITE_DAILY_QUOTA_EXCEEDED",
             )
 
+    def ensure_budget_available(self, identity_key: str = "") -> None:
+        """Expose the same dynamic budget check to a parent A3 workflow."""
+
+        self._check_daily_budget(identity_key)
+
     def _write_task_log(
         self,
         *,

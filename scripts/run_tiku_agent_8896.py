@@ -58,10 +58,12 @@ def build_runtime(
     crop_verifier=None,
     auto_cropper=None,
     unit_analyzer=None,
+    control_store=None,
 ) -> A3MvpRuntime:
     """Build the full A1/A2/A3 route with A3 and its child A2 under one root."""
 
     root = Path(runtime_dir).resolve()
+    shared_cost_ledger = SQLiteModelCostLedger(root / "model_costs.sqlite3")
     a2_runtime = build_a2_runtime(
         root / "a2",
         enable_safe_answer_v0=True,
@@ -69,6 +71,8 @@ def build_runtime(
         enable_external_load_screen=False,
         enable_chapter_scope_fallback=True,
         rerank_policy=A2_RERANK_POLICY,
+        cost_ledger=shared_cost_ledger,
+        control_store=control_store,
     )
     authority = image_triage_authority
     if authority is None and enable_triage:
@@ -92,7 +96,7 @@ def build_runtime(
         unit_analyzer=unit_analyzer,
         external_load_screen=QwenExternalLoadScreen(),
         image_triage_authority=authority,
-        cost_ledger=SQLiteModelCostLedger(root / "model_costs.sqlite3"),
+        cost_ledger=shared_cost_ledger,
     )
 
 

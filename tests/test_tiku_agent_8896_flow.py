@@ -47,6 +47,17 @@ class TikuAgent8896FlowTest(unittest.TestCase):
             )
             self.assertIsNone(rolled_back.auto_cropper)
 
+    def test_a3_and_child_a2_share_the_production_cost_ledger(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runtime = build_runtime(root, enable_triage=False)
+
+            self.assertIs(runtime.cost_ledger, runtime.a2_runtime.cost_ledger)
+            self.assertEqual(
+                runtime.cost_ledger.path.resolve(),
+                (root / "model_costs.sqlite3").resolve(),
+            )
+
     def test_launcher_can_disable_or_inject_the_triage_authority(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

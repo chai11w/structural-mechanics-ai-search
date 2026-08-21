@@ -353,18 +353,54 @@ class SQLiteModelCostLedger:
                     _create_schema(connection)
                     identity_clause = " AND identity_key = ?" if identity_key is not None else ""
                     parameters = (str(started_at), str(identity_key)) if identity_key is not None else (str(started_at),)
-                    row = connection.execute(
+                    rows = connection.execute(
                         f"""
-                        SELECT COALESCE(SUM(estimated_cost_micros), 0)
+                        SELECT run_id, estimated_cost_micros
                         FROM model_cost_runs
                         WHERE started_at >= ?
                         {identity_clause}
                         """,
                         parameters,
-                    ).fetchone()
+                    ).fetchall()
+                    if not rows:
+                        return 0
+                    run_ids = [str(row[0]) for row in rows]
+                    calls = connection.execute(
+                        "SELECT run_id, provider, model, input_tokens, cached_tokens, "
+                        "output_tokens, pricing_status, estimated_cost_micros "
+                        f"FROM model_cost_calls WHERE run_id IN ({','.join('?' for _ in run_ids)})",
+                        run_ids,
+                    ).fetchall()
                 except sqlite3.OperationalError:
                     return 0
-        return max(0, int(row[0] if row else 0))
+        calls_by_run: dict[str, list[sqlite3.Row | tuple[Any, ...]]] = {}
+        for call in calls:
+            calls_by_run.setdefault(str(call[0]), []).append(call)
+        total = 0
+        for run_id, stored_cost in rows:
+            run_calls = calls_by_run.get(str(run_id), [])
+            if not run_calls:
+                total += int(stored_cost or 0)
+                continue
+            for call in run_calls:
+                if str(call[6]) == "priced":
+                    total += int(call[7] or 0)
+                    continue
+                repriced = estimate_cost(
+                    str(call[1]),
+                    str(call[2]),
+                    {
+                        "input_tokens": int(call[3] or 0),
+                        "cached_tokens": int(call[4] or 0),
+                        "output_tokens": int(call[5] or 0),
+                    },
+                )
+                total += (
+                    int(repriced["estimated_cost_micros"])
+                    if repriced["pricing_status"] == "priced"
+                    else int(call[7] or 0)
+                )
+        return max(0, total)
 
 
 def _warning_codes(records: list[ModelCallRecord]) -> list[str]:

@@ -24,6 +24,7 @@ from tiku_admin.invite_vault import InvitationCodeVault, mask_invitation_code
 from tiku_admin.reporting import AdminReporter
 from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.invite_access import InviteAccess, build_invitation_config
+from tiku_shared.model_costs import ModelCostCollector, SQLiteModelCostLedger
 
 
 class TikuAdminTest(unittest.TestCase):
@@ -352,6 +353,100 @@ class TikuAdminTest(unittest.TestCase):
         store.set_archived(saved.feedback_number, archived=True)
         self.assertTrue(store.delete_archived(saved.feedback_number))
         self.assertIsNone(store.get_feedback(saved.feedback_number))
+
+    def test_feedback_detail_combines_a3_workflow_and_a2_question_costs(self):
+        self.control.initialize_admin("a-secure-admin-password")
+        invitation, _code = self.control.create_invitation(label="流程用户")
+        feedback = SQLiteFeedbackStore(self.root / "feedback.sqlite3")
+        workflow_db = self.root / "model_costs.sqlite3"
+        question_db = self.root / "a2" / "model_costs.sqlite3"
+        started_at = datetime.now(UTC).isoformat()
+
+        workflow = ModelCostCollector(
+            run_id="workflow-run",
+            identity_key=invitation.invite_id,
+            search_key="workflow-search",
+            task_kind="a3_auto_crop_grounding",
+            started_at=started_at,
+        )
+        workflow.record(
+            provider="zhipu",
+            model="glm-5v-turbo",
+            call_type="glm_a3_page_auto_crop",
+            status="success",
+            started_at=started_at,
+            finished_at=started_at,
+            latency_ms=500,
+            usage={"input_tokens": 1000, "output_tokens": 100},
+        )
+        SQLiteModelCostLedger(workflow_db).write_run(
+            workflow, finished_at=started_at, outcome="success"
+        )
+        with sqlite3.connect(workflow_db) as connection:
+            connection.execute(
+                "UPDATE model_cost_calls SET pricing_status = 'missing_price', "
+                "price_version = '', estimated_cost_micros = 0"
+            )
+            connection.execute(
+                "UPDATE model_cost_runs SET estimated_cost_micros = 0, "
+                "warning_codes_json = '[\"PRICE_MISSING_OR_OUTSIDE_TIER\"]'"
+            )
+
+        question = ModelCostCollector(
+            run_id="question-run",
+            identity_key=invitation.invite_id,
+            search_key="question-search",
+            task_kind="image",
+            started_at=started_at,
+        )
+        question.record(
+            provider="dashscope",
+            model="qwen3.7-plus",
+            call_type="qwen_shape_rerank",
+            status="success",
+            started_at=started_at,
+            finished_at=started_at,
+            latency_ms=700,
+            usage={"input_tokens": 1000, "output_tokens": 100},
+        )
+        SQLiteModelCostLedger(question_db).write_run(
+            question, finished_at=started_at, outcome="success"
+        )
+        saved = feedback.upsert(
+            message_id="message_trace_01",
+            identity_key=invitation.invite_id,
+            session_key="session-key",
+            rating="negative",
+            tags=("ranking_issue",),
+            detail="需要查看完整流程",
+            task_revision=1,
+            phase="WAIT_CANDIDATE_CHOICE",
+            candidate_count=3,
+            search_key="question-search",
+            search_id="question-search",
+            workflow_search_id="workflow-search",
+            image_route="A3",
+        )
+        reporter = AdminReporter(
+            control_store=self.control,
+            cost_databases=(workflow_db, question_db),
+            feedback_store=feedback,
+        )
+
+        detail = reporter.feedback_detail(saved.feedback_id)
+
+        self.assertEqual(detail["cost"]["estimated_cost_micros"], 10_000)
+        self.assertEqual(detail["cost"]["route"], "A3")
+        self.assertTrue(detail["cost"]["historical_reprice_applied"])
+        self.assertEqual(
+            [step["key"] for step in detail["cost"]["flow"]],
+            ["a3_auto_crop_grounding", "image"],
+        )
+        self.assertEqual(
+            {item["model"] for item in detail["cost"]["models"]},
+            {"glm-5v-turbo", "qwen3.7-plus"},
+        )
+        self.assertEqual(reporter.overview()["today_searches"], 1)
 
     def test_admin_http_flow_covers_setup_invites_overview_feedback_and_settings(self):
         feedback = SQLiteFeedbackStore(self.root / "feedback.sqlite3")
