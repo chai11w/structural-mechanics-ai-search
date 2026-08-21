@@ -16,6 +16,12 @@ from typing import Any, Callable, Mapping, Sequence
 
 from PIL import Image, ImageDraw, ImageOps
 
+from tiku_agent.a3_intent_v1 import (
+    A3ActionDecisionV1,
+    A3IntentContextV1,
+    A3IntentEngineV1,
+    A3IntentUnitV1,
+)
 from tiku_agent.a3_auto_crop import (
     A3AutoCropper,
     expand_normalized_bbox,
@@ -97,6 +103,9 @@ class A3SessionState:
     task_revision: int = 0
     current_search_id: str = ""
     workflow_search_id: str = ""
+    page_finished: bool = False
+    pending_intent_clarification: dict[str, Any] = field(default_factory=dict)
+    last_a3_intent: dict[str, Any] = field(default_factory=dict)
     last_error: str = ""
     last_error_detail: str = ""
 
@@ -118,6 +127,9 @@ class A3SessionState:
             raise ValueError("requested A3 unit is unavailable")
         if any(value not in unit_ids for value in self.auto_crops):
             raise ValueError("automatic crop is bound to an unavailable unit")
+        page_indexes = [int(item.get("page_index") or 0) for item in self.units]
+        if any(value < 1 for value in page_indexes) or len(page_indexes) != len(set(page_indexes)):
+            raise ValueError("A3 page indexes must be positive and unique")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -130,6 +142,7 @@ class A3SessionState:
         if not values.get("workflow_search_id") and values.get("current_search_id"):
             values["workflow_search_id"] = values["current_search_id"]
         state = cls(**values)
+        _ensure_stable_page_indexes(state.units)
         _refresh_unlabelled_display_labels(state.units)
         for unit in state.units:
             unit["a2_context_text"] = _question_context_text(unit)
@@ -152,6 +165,8 @@ class A3SessionState:
 
     @property
     def remaining_units(self) -> list[dict[str, Any]]:
+        if self.page_finished:
+            return []
         closed = set(self.completed_unit_ids) | set(self.searched_unit_ids)
         return [item for item in self.searchable_units if item["unit_id"] not in closed]
 
@@ -340,6 +355,7 @@ class A3MvpRuntime:
         external_load_screen: Callable[[str | Path], str] | None = None,
         image_triage_authority: object | None = None,
         cost_ledger: SQLiteModelCostLedger | None = None,
+        intent_engine: A3IntentEngineV1 | None = None,
     ) -> None:
         self.store = store
         self.artifacts = artifacts
@@ -355,6 +371,7 @@ class A3MvpRuntime:
         self.external_load_screen = external_load_screen
         self.image_triage_authority = image_triage_authority
         self.cost_ledger = cost_ledger
+        self.intent_engine = intent_engine
         self._locks = tuple(threading.RLock() for _ in range(64))
 
     def handle_image(
@@ -429,6 +446,23 @@ class A3MvpRuntime:
                     intent="image_triage_stop",
                     code="UPLOAD_REQUIRED",
                 )
+            if self.intent_engine is not None:
+                context = self._a3_intent_context(state)
+                decision = self._call_model(
+                    state,
+                    "a3_intent",
+                    lambda: self.intent_engine.decide(clean_text, context),
+                    identity_key=identity_key,
+                )
+                handled = self._dispatch_a3_intent(
+                    state,
+                    decision,
+                    identity_key=identity_key,
+                    progress=progress,
+                    request_id=request_id,
+                )
+                if handled is not None:
+                    return handled
             if state.phase == A3_PHASE_ERROR and clean_text in {"重试", "再试一次", "重新识别"}:
                 if not state.entry_route and self.image_triage_authority is not None:
                     return self._route_persisted_image(
@@ -574,6 +608,241 @@ class A3MvpRuntime:
                 state,
                 intent="a3_complete",
             )
+
+    def _a3_intent_context(self, state: A3SessionState) -> A3IntentContextV1:
+        child: Mapping[str, Any] = {}
+        if state.phase == A3_PHASE_A2_ACTIVE:
+            child = self.a2_runtime.session_snapshot(state.session_id)
+        completed = set(state.completed_unit_ids)
+        searched = set(state.searched_unit_ids)
+        units = tuple(
+            A3IntentUnitV1(
+                unit_id=str(unit["unit_id"]),
+                question_index=int(unit["page_index"]),
+                display_label=str(unit.get("display_label") or ""),
+                completed=str(unit["unit_id"]) in completed,
+                searched=str(unit["unit_id"]) in searched,
+                selected=str(unit["unit_id"]) == state.selected_unit_id,
+            )
+            for unit in state.searchable_units
+        )
+        pending = state.pending_intent_clarification
+        pending_scopes = tuple(
+            str(value)
+            for value in pending.get("options") or ()
+            if str(value)
+        ) if pending.get("kind") == "cancel_scope" else ()
+        return A3IntentContextV1(
+            phase=state.phase,
+            units=units,
+            child_phase=str(child.get("phase") or ""),
+            candidate_count=int(child.get("candidate_count") or 0),
+            page_finished=state.page_finished,
+            pending_cancel_scopes=pending_scopes,
+        )
+
+    def _dispatch_a3_intent(
+        self,
+        state: A3SessionState,
+        decision: A3ActionDecisionV1,
+        *,
+        identity_key: str,
+        progress: ProgressReporter | None,
+        request_id: str,
+    ) -> AgentResponse | None:
+        state.last_a3_intent = decision.to_dict()
+        action = decision.action
+        if action == "defer_to_a2":
+            state.pending_intent_clarification = {}
+            self.store.save(state)
+            return None
+        if action == "clarification":
+            reason = str(decision.clarification_reason or "ambiguous_action")
+            if reason == "ambiguous_cancel_scope":
+                options = self._cancel_scope_options(state)
+                state.pending_intent_clarification = {
+                    "kind": "cancel_scope",
+                    "options": options,
+                }
+                self.store.save(state)
+                labels = {
+                    "cancel_current_unit": "只取消当前题",
+                    "finish_page": "结束这张图的全部题目",
+                    "reset_session": "开始新对话并清空当前会话",
+                    "continue_current": "继续当前操作",
+                }
+                choices = "\n".join(
+                    f"{index}. {labels[value]}"
+                    for index, value in enumerate(options, start=1)
+                )
+                return _response(
+                    "你想取消哪个范围？我暂时没有改变当前进度。\n" + choices,
+                    state,
+                    intent="a3_cancel_scope_clarification",
+                    code="CLARIFICATION_REQUIRED",
+                )
+            state.pending_intent_clarification = {}
+            self.store.save(state)
+            if reason == "ambiguous_number_namespace":
+                return _response(
+                    "这个数字可能是候选排名，也可能是原图题号。"
+                    "请说“候选 2”或“图片第 2 题”。",
+                    state,
+                    intent="a3_namespace_clarification",
+                    code="CLARIFICATION_REQUIRED",
+                )
+            if reason == "unit_completed":
+                message = "你指定的原图题目已经处理完成，没有改选其他题目。"
+                intent = "a3_unit_unavailable"
+            elif reason == "unit_unavailable":
+                message = "你指定的原图题目当前不能再次选择，没有改选其他题目。"
+                intent = "a3_unit_unavailable"
+            elif reason == "out_of_range":
+                message = "原图中没有这个稳定题号，请从题目列表中选择。"
+                intent = "a3_unit_clarification"
+            elif state.phase == A3_PHASE_CROP_REQUIRED:
+                selected = state.unit(state.selected_unit_id) or {}
+                message = (
+                    f"当前正在处理「{selected.get('display_label', '这道题')}」。"
+                    "你可以继续裁剪；如需停止，请明确说“取消当前题”或“结束这张图”。"
+                )
+                intent = "a3_crop_required"
+            elif state.page_finished:
+                message = "这张图的流程已经结束。你可以上传新题图，或明确说“开始新对话”。"
+                intent = "a3_complete"
+            else:
+                message = "我还不能确定你想执行什么。请明确说题号，或说明要取消的范围。"
+                intent = "a3_unit_clarification"
+            return _response(
+                message,
+                state,
+                intent=intent,
+                code="CLARIFICATION_REQUIRED",
+            )
+
+        state.pending_intent_clarification = {}
+        if action == "reset_session":
+            search_id = state.current_search_id
+            self._clear_locked(state.session_id)
+            return AgentResponse(
+                text="好，已清空当前会话。请发送一张新题图。",
+                intent="a3_session_reset",
+                protocol=RequestProtocol.from_code(
+                    "REQUEST_SUCCEEDED",
+                    request_id=request_id or new_request_id(),
+                    search_id=search_id,
+                ).to_dict(),
+            )
+        if action == "finish_page":
+            self.a2_runtime.clear(state.session_id, preserve_artifacts=True)
+            state.selected_unit_id = ""
+            state.page_finished = True
+            state.phase = A3_PHASE_COMPLETE
+            state.crop_review_required = False
+            state.crop_review_feedback = ""
+            self.store.save(state)
+            return _response(
+                "好，已结束这张图的搜题流程。当前对话记录仍然保留。",
+                state,
+                intent="a3_page_finished",
+            )
+        if action == "cancel_current_unit":
+            selected = state.unit(state.selected_unit_id) or {}
+            display_label = str(selected.get("display_label") or "当前题")
+            self.a2_runtime.clear(state.session_id, preserve_artifacts=True)
+            state.selected_unit_id = ""
+            state.phase = A3_PHASE_WAIT_SELECTION if state.remaining_units else A3_PHASE_COMPLETE
+            state.crop_review_required = False
+            state.crop_review_feedback = ""
+            self.store.save(state)
+            return _response(
+                f"好，只取消了「{display_label}」。这张图的其他题目和当前对话都已保留。",
+                state,
+                intent="a3_current_unit_cancelled",
+            )
+        if action == "continue_current":
+            self.store.save(state)
+            if state.phase == A3_PHASE_CROP_REQUIRED:
+                selected = state.unit(state.selected_unit_id) or {}
+                message = f"好，继续处理「{selected.get('display_label', '当前题')}」，请完成裁剪后提交。"
+            elif state.phase == A3_PHASE_A2_ACTIVE:
+                message = "好，继续处理当前题。你可以选择候选或补充章节。"
+            elif state.phase == A3_PHASE_WAIT_SELECTION:
+                message = "好，继续当前图片，请选择一道题。"
+            else:
+                message = "好，继续当前操作。"
+            return _response(message, state, intent="a3_continue_current")
+        if action == "retry_current_stage":
+            self.store.save(state)
+            if not state.entry_route and self.image_triage_authority is not None:
+                return self._route_persisted_image(
+                    state,
+                    Path(state.source_page_path),
+                    identity_key=identity_key,
+                    progress=progress,
+                    request_id=request_id,
+                )
+            return self._retry_page_understanding(
+                state,
+                identity_key=identity_key,
+                progress=progress,
+                request_id=request_id,
+            )
+        if action == "select_unit":
+            self.store.save(state)
+            unit = next(
+                (
+                    item
+                    for item in state.searchable_units
+                    if int(item.get("page_index") or 0) == int(decision.question_index or 0)
+                ),
+                None,
+            )
+            if unit is None:
+                return _response(
+                    "原图中没有这个稳定题号，请从题目列表中选择。",
+                    state,
+                    intent="a3_unit_clarification",
+                    code="CLARIFICATION_REQUIRED",
+                )
+            return self._select_locked(
+                state,
+                str(unit["unit_id"]),
+                identity_key=identity_key,
+                progress=progress,
+                request_id=request_id,
+            )
+        if action == "greeting":
+            self.store.save(state)
+            return _response("你好，我正在处理这张多题图片。你可以说题号继续。", state, intent="greeting")
+        if action == "small_talk":
+            self.store.save(state)
+            return _response("不客气。当前图片进度已经保留。", state, intent="small_talk")
+        if action == "capability_help":
+            self.store.save(state)
+            return _response(
+                "我可以按原图稳定题号选择题目、裁剪结构图并进入题库检索。"
+                "取消时请说明是当前题、整张图还是新对话。",
+                state,
+                intent="capability_help",
+            )
+        self.store.save(state)
+        return _response(
+            "我还不能确定你想执行什么，请再说明一下。",
+            state,
+            intent="a3_unit_clarification",
+            code="CLARIFICATION_REQUIRED",
+        )
+
+    @staticmethod
+    def _cancel_scope_options(state: A3SessionState) -> list[str]:
+        options: list[str] = []
+        if state.selected_unit_id and state.phase in {A3_PHASE_CROP_REQUIRED, A3_PHASE_A2_ACTIVE}:
+            options.append("cancel_current_unit")
+        if not state.page_finished:
+            options.append("finish_page")
+        options.extend(("reset_session", "continue_current"))
+        return options
 
     def select_unit(
         self,
@@ -1484,6 +1753,27 @@ class A3MvpRuntime:
         request_id: str = "",
     ) -> AgentResponse:
         unit = state.unit(unit_id)
+        if state.page_finished:
+            return _response(
+                "这张图的流程已经结束，请上传新题图。",
+                state,
+                intent="stale_action",
+                code="STALE_ACTION",
+            )
+        if unit_id in state.completed_unit_ids:
+            return _response(
+                "这道原图题目已经处理完成，没有改选其他题目。",
+                state,
+                intent="stale_action",
+                code="STALE_ACTION",
+            )
+        if unit_id in state.searched_unit_ids:
+            return _response(
+                "这道原图题目已经停止或搜索过，没有改选其他题目。",
+                state,
+                intent="stale_action",
+                code="STALE_ACTION",
+            )
         if (
             state.phase not in {
                 A3_PHASE_WAIT_SELECTION,
@@ -1493,8 +1783,6 @@ class A3MvpRuntime:
             or
             unit is None
             or unit.get("searchability") != "searchable_candidate"
-            or unit_id in state.completed_unit_ids
-            or unit_id in state.searched_unit_ids
         ):
             return _response(
                 "这道题当前不能选择，请从剩余题目中选一道。",
@@ -1508,6 +1796,7 @@ class A3MvpRuntime:
                 state,
                 intent="a3_unit_already_selected",
             )
+        state.pending_intent_clarification = {}
         switching_from_a2 = state.phase == A3_PHASE_A2_ACTIVE
         if switching_from_a2:
             self.a2_runtime.clear(state.session_id, preserve_artifacts=True)
@@ -1699,7 +1988,7 @@ class A3MvpRuntime:
         draw = ImageDraw.Draw(image)
         width, height = image.size
         line_width = max(2, round(min(width, height) * 0.004))
-        for index, unit in enumerate(state.searchable_units, 1):
+        for unit in state.searchable_units:
             record = state.auto_crops.get(str(unit.get("unit_id") or "")) or {}
             bounds = record.get("bounds") or {}
             if not bounds:
@@ -1711,7 +2000,7 @@ class A3MvpRuntime:
             ready = record.get("grounding_status") == "auto_ready"
             color = "#159447" if ready else "#c17a00"
             draw.rectangle((x1, y1, x2, y2), outline=color, width=line_width)
-            label = f"C{index} {unit.get('display_label') or ''}".strip()
+            label = f"Q{int(unit.get('page_index') or 0)} {unit.get('display_label') or ''}".strip()
             label_y = max(0, y1 - max(16, line_width * 5))
             draw.rectangle(
                 (x1, label_y, min(width, x1 + max(54, len(label) * 9)), y1),
@@ -1739,6 +2028,7 @@ class A3MvpRuntime:
             auto = state.auto_crops.get(str(item["unit_id"])) or {}
             units.append({
                 "unit_id": item["unit_id"],
+                "page_index": int(item.get("page_index") or 0),
                 "display_label": item["display_label"],
                 "title_text": item.get("title_text") or "",
                 "completed": item["unit_id"] in completed,
@@ -1761,6 +2051,10 @@ class A3MvpRuntime:
             ),
             "auto_prepare_all_units": auto_prepare_all_active,
             "phase": state.phase,
+            "intent_v1_enabled": self.intent_engine is not None,
+            "page_finished": state.page_finished,
+            "pending_intent_clarification": dict(state.pending_intent_clarification),
+            "last_intent": dict(state.last_a3_intent),
             "units": units,
             "selected_unit": {
                 "unit_id": selected.get("unit_id", ""),
@@ -1931,8 +2225,16 @@ def _flatten_units(page: Mapping[str, Any]) -> list[dict[str, Any]]:
                 item["parent_title_text"] = parent_title_text
                 item["a2_context_text"] = _question_context_text(item)
                 units.append(item)
+    _ensure_stable_page_indexes(units)
     _refresh_unlabelled_display_labels(units)
     return units
+
+
+def _ensure_stable_page_indexes(units: list[dict[str, Any]]) -> None:
+    """Bind each semantic page unit to its original, persistent page position."""
+
+    for page_index, unit in enumerate(units, start=1):
+        unit["page_index"] = page_index
 
 
 def _refresh_unlabelled_display_labels(units: list[dict[str, Any]]) -> None:
@@ -1940,7 +2242,7 @@ def _refresh_unlabelled_display_labels(units: list[dict[str, Any]]) -> None:
         parent = str(unit.get("parent_question_label") or "").strip()
         child = str(unit.get("question_label") or "").strip()
         if not parent and not child:
-            unit["display_label"] = f"未标号题{ordinal}"
+            unit["display_label"] = f"未标号题{int(unit.get('page_index') or ordinal)}"
 
 
 def _question_context_text(unit: Mapping[str, Any]) -> str:

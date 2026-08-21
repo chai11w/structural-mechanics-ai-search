@@ -13,6 +13,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from scripts.run_tiku_agent_demo import build_runtime as build_a2_runtime
+from tiku_agent.a3_intent_v1 import A3IntentEngineV1, call_qwen_a3_intent_v1
 from tiku_agent.a3_auto_crop import GlmA3AutoCropper
 from tiku_agent.a3_models import QwenA3CropVerifier, QwenA3PageObserver
 from tiku_agent.a3_runtime import A3MvpRuntime, SQLiteA3SessionStore
@@ -59,6 +60,8 @@ def build_runtime(
     auto_cropper=None,
     unit_analyzer=None,
     control_store=None,
+    enable_a3_intent_v1: bool = True,
+    a3_intent_model_client=None,
 ) -> A3MvpRuntime:
     """Build the full A1/A2/A3 route with A3 and its child A2 under one root."""
 
@@ -85,6 +88,12 @@ def build_runtime(
         resolved_auto_cropper = GlmA3AutoCropper(
             timeout_seconds=grounding_timeout_seconds,
         )
+    intent_client = a3_intent_model_client
+    if intent_client is None:
+        intent_client = lambda prompt: call_qwen_a3_intent_v1(  # noqa: E731 - bounded adapter.
+            prompt,
+            timeout=max(1, int(reply_timeout_seconds)),
+        )
     return A3MvpRuntime(
         store=SQLiteA3SessionStore(root / "a3_sessions.sqlite3"),
         artifacts=SessionArtifacts(root / "a3_sessions"),
@@ -97,6 +106,11 @@ def build_runtime(
         external_load_screen=QwenExternalLoadScreen(),
         image_triage_authority=authority,
         cost_ledger=shared_cost_ledger,
+        intent_engine=(
+            A3IntentEngineV1(intent_client)
+            if enable_a3_intent_v1
+            else None
+        ),
     )
 
 
@@ -110,6 +124,7 @@ def build_app(
     enable_triage: bool = True,
     triage_timeout_seconds: float = 120.0,
     reply_timeout_seconds: float = 60.0,
+    enable_a3_intent_v1: bool = True,
 ):
     root = Path(runtime_dir).resolve()
     return create_app(
@@ -122,6 +137,7 @@ def build_app(
             enable_triage=enable_triage,
             triage_timeout_seconds=triage_timeout_seconds,
             reply_timeout_seconds=reply_timeout_seconds,
+            enable_a3_intent_v1=enable_a3_intent_v1,
         ),
         incoming_dir=root / "incoming",
         session_cookie=SESSION_COOKIE,
@@ -150,7 +166,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Roll back A3 to the V0 manual-crop flow",
     )
-    parser.set_defaults(enable_triage=True, enable_auto_crop=True)
+    parser.add_argument(
+        "--disable-a3-intent-v1",
+        dest="enable_a3_intent_v1",
+        action="store_false",
+        help="Temporarily use the legacy A3 text rules",
+    )
+    parser.set_defaults(
+        enable_triage=True,
+        enable_auto_crop=True,
+        enable_a3_intent_v1=True,
+    )
     return parser
 
 
@@ -165,6 +191,7 @@ def main() -> int:
             enable_triage=args.enable_triage,
             triage_timeout_seconds=args.triage_timeout_seconds,
             reply_timeout_seconds=args.reply_timeout_seconds,
+            enable_a3_intent_v1=args.enable_a3_intent_v1,
         ),
         host=args.host,
         port=args.port,

@@ -23,6 +23,7 @@ _STAGE_META = {
     "a3_auto_external_load_screen": ("裁图外荷载门禁", "逐题确认裁图包含明确外荷载", "workflow"),
     "a3_crop_compare": ("人工裁图校验", "核对人工裁剪范围与所选题目", "question"),
     "a3_external_load_screen": ("外荷载门禁", "确认题图包含明确外荷载", "question"),
+    "a3_intent": ("A3 意图理解", "理解整页选题、取消范围与会话控制意图", "question"),
     "a3_verified_image": ("A2 题库检索", "识别荷载、章节并检索与复筛候选题", "question"),
     "image": ("A2 题库检索", "识别荷载、章节并检索与复筛候选题", "question"),
     "text": ("结果交互", "处理选题、追问或答案说明", "question"),
@@ -45,6 +46,7 @@ _CALL_LABELS = {
     "zhipu_shape_rerank": "GLM 候选复筛",
     "qwen_safe_answer": "Qwen 答案说明",
     "qwen_intent_decision": "Qwen 追问意图判断",
+    "qwen_a3_intent_decision": "Qwen A3 意图判断",
 }
 
 _STAGE_ORDER = {
@@ -56,6 +58,7 @@ _STAGE_ORDER = {
     "a3_auto_external_load_screen": 50,
     "a3_crop_compare": 60,
     "a3_external_load_screen": 65,
+    "a3_intent": 68,
     "a3_verified_image": 70,
     "image": 70,
     "text": 80,

@@ -54,6 +54,7 @@ def build_app(
             triage_timeout_seconds=triage_timeout_seconds,
             reply_timeout_seconds=reply_timeout_seconds,
             control_store=control_store,
+            enable_a3_intent_v1=False,
         ),
         incoming_dir=root / "incoming",
         session_cookie=SESSION_COOKIE,

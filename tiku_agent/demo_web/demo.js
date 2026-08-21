@@ -300,8 +300,14 @@ function normalizeA3Snapshot(value) {
     auto_prepare_all_enabled: Boolean(value.auto_prepare_all_enabled),
     auto_prepare_all_units: Boolean(value.auto_prepare_all_units),
     phase: String(value.phase || ''),
+    intent_v1_enabled: Boolean(value.intent_v1_enabled),
+    page_finished: Boolean(value.page_finished),
+    pending_intent_clarification: value.pending_intent_clarification && typeof value.pending_intent_clarification === 'object'
+      ? value.pending_intent_clarification : {},
+    last_intent: value.last_intent && typeof value.last_intent === 'object' ? value.last_intent : {},
     units: Array.isArray(value.units) ? value.units.map((unit) => ({
       unit_id: String(unit.unit_id || ''),
+      page_index: Number(unit.page_index || 0),
       display_label: String(unit.display_label || ''),
       title_text: String(unit.title_text || ''),
       completed: Boolean(unit.completed),
@@ -1680,7 +1686,7 @@ function renderA3SheetUnits(a3 = a3Current()) {
     button.type = 'button';
     button.className = 'a3-sheet-unit';
     const isCurrent = unit.unit_id === a3.selected_unit?.unit_id;
-    button.disabled = unit.completed || unit.searched || isCurrent;
+    button.disabled = a3.page_finished || unit.completed || unit.searched || isCurrent;
     button.setAttribute('aria-current', String(isCurrent));
     const text = document.createElement('span');
     const title = document.createElement('strong');
@@ -1714,12 +1720,13 @@ function renderA3AutoSheetUnits(a3) {
   if (a3.auto_crop_overlay_available) {
     a3SheetOverlayImage.src = `/api/a3/overlay?revision=${encodeURIComponent(a3.task_revision)}`;
   }
-  a3SheetFooter.hidden = !a3.units.some((unit) => !unit.completed && !unit.searched && !unit.requested);
+  a3SheetFooter.hidden = a3.page_finished
+    || !a3.units.some((unit) => !unit.completed && !unit.searched && !unit.requested);
   a3.units.forEach((unit) => {
     const prepared = unit.requested;
     const host = document.createElement(prepared ? 'button' : 'label');
     if (prepared) host.type = 'button';
-    const closed = unit.completed || unit.searched;
+    const closed = a3.page_finished || unit.completed || unit.searched;
     host.className = `a3-auto-unit${closed ? ' is-closed' : ''}${prepared ? ' is-prepared' : ''}`;
     const visual = document.createElement('span');
     visual.className = 'a3-auto-unit-visual';
@@ -1910,6 +1917,19 @@ async function sendTextValue(value, displayValue = value, actionContext = null) 
     }, '', { renewTimeoutOnProgress: autoPrepareRetry });
     if (operation !== operationVersion) return;
     pending?.remove();
+    if (data.intent === 'a3_session_reset') {
+      clearHistory();
+      if (!a3CropWorkspace.hidden) finishCloseA3Crop({ dismiss: false });
+      a3CropHistoryActive = false;
+      sessionContext = {
+        session_valid: false, phase: 'IDLE', has_active_image: false,
+        task_revision: 0, candidate_generation: '', candidate_count: 0, search_id: '',
+      };
+      chat.replaceChildren();
+      empty.hidden = false;
+      setStatus('ready', '已开始新对话');
+      return;
+    }
     const response = responseItem(data);
     addMessage(response);
     setResponseStatus(data);

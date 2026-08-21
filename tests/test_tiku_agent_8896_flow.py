@@ -26,6 +26,7 @@ class TikuAgent8896FlowTest(unittest.TestCase):
         self.assertEqual(SESSION_COOKIE, "tiku_agent_8896_session")
         self.assertTrue(defaults.enable_triage)
         self.assertTrue(defaults.enable_auto_crop)
+        self.assertTrue(defaults.enable_a3_intent_v1)
 
     def test_auto_crop_is_promoted_by_default_with_manual_rollback(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -46,6 +47,19 @@ class TikuAgent8896FlowTest(unittest.TestCase):
                 rolled_back.session_snapshot("empty")["a3"]["auto_prepare_all_enabled"]
             )
             self.assertIsNone(rolled_back.auto_cropper)
+
+    def test_a3_intent_v1_is_enabled_only_when_requested(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            enabled = build_runtime(root / "enabled", enable_triage=False)
+            disabled = build_runtime(
+                root / "disabled",
+                enable_triage=False,
+                enable_a3_intent_v1=False,
+            )
+
+            self.assertIsNotNone(enabled.intent_engine)
+            self.assertIsNone(disabled.intent_engine)
 
     def test_a3_and_child_a2_share_the_production_cost_ledger(self):
         with tempfile.TemporaryDirectory() as temp:

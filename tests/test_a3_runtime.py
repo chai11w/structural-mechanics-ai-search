@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from tiku_agent.a3_auto_crop import A3AutoCropPage, A3AutoCropTarget
+from tiku_agent.a3_intent_v1 import A3IntentEngineV1
 from tiku_agent.a3_models import (
     A3ModelError,
     A3UnitAnalysis,
@@ -19,6 +20,7 @@ from tiku_agent.a3_runtime import (
     A3MvpRuntime,
     A3SessionState,
     A3_PHASE_A2_ACTIVE,
+    A3_PHASE_COMPLETE,
     A3_PHASE_CROP_REQUIRED,
     A3_PHASE_WAIT_SELECTION,
     SQLiteA3SessionStore,
@@ -401,6 +403,85 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(ledger.collectors[0].identity_key, "invite-001")
         self.assertEqual(ledger.collectors[0].search_key, snapshot["workflow_search_id"])
         self.assertEqual(snapshot["search_id"], snapshot["workflow_search_id"])
+
+    def test_intent_v1_cancel_scope_clarifies_before_mutating_state(self):
+        self.runtime.intent_engine = A3IntentEngineV1()
+        session_id = "a3-intent-cancel-scope"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+
+        clarified = self.runtime.handle_text(session_id, "取消")
+
+        self.assertEqual(clarified.intent, "a3_cancel_scope_clarification")
+        self.assertIn("暂时没有改变当前进度", clarified.text)
+        snapshot = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(snapshot["phase"], A3_PHASE_CROP_REQUIRED)
+        self.assertEqual(snapshot["selected_unit"]["unit_id"], "g1-u2")
+        self.assertEqual(
+            snapshot["pending_intent_clarification"]["options"],
+            [
+                "cancel_current_unit",
+                "finish_page",
+                "reset_session",
+                "continue_current",
+            ],
+        )
+
+        cancelled = self.runtime.handle_text(session_id, "1")
+
+        self.assertEqual(cancelled.intent, "a3_current_unit_cancelled")
+        snapshot = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(snapshot["phase"], A3_PHASE_WAIT_SELECTION)
+        self.assertEqual(snapshot["selected_unit"]["unit_id"], "")
+        self.assertEqual(snapshot["completed_unit_ids"], [])
+        self.assertEqual(snapshot["searched_unit_ids"], [])
+
+    def test_intent_v1_explicit_page_finish_and_session_reset_have_distinct_scope(self):
+        self.runtime.intent_engine = A3IntentEngineV1()
+        session_id = "a3-intent-finish-page"
+        self.runtime.handle_image(session_id, self.source)
+
+        finished = self.runtime.handle_text(session_id, "结束这张图")
+
+        self.assertEqual(finished.intent, "a3_page_finished")
+        snapshot = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertTrue(snapshot["page_finished"])
+        self.assertEqual(snapshot["phase"], A3_PHASE_COMPLETE)
+        self.assertEqual(snapshot["remaining_count"], 0)
+        stale = self.runtime.select_unit(session_id, "g1-u1")
+        self.assertEqual(stale.intent, "stale_action")
+
+        reset = self.runtime.handle_text(session_id, "开始新对话")
+
+        self.assertEqual(reset.intent, "a3_session_reset")
+        self.assertFalse(self.runtime.session_snapshot(session_id)["session_valid"])
+
+    def test_intent_v1_uses_original_page_index_after_an_earlier_unit_completed(self):
+        self.runtime.intent_engine = A3IntentEngineV1()
+        session_id = "a3-stable-page-index"
+        self.runtime.handle_image(session_id, self.source)
+        state = self.runtime.store.load(session_id)
+        state.completed_unit_ids = ["g1-u1"]
+        state.phase = A3_PHASE_WAIT_SELECTION
+        self.runtime.store.save(state)
+
+        completed = self.runtime.handle_text(session_id, "第1题")
+
+        self.assertEqual(completed.intent, "a3_unit_unavailable")
+        snapshot = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(snapshot["selected_unit"]["unit_id"], "")
+        self.assertEqual(
+            [(item["unit_id"], item["page_index"]) for item in snapshot["units"]],
+            [("g1-u1", 1), ("g1-u2", 2)],
+        )
+
+        selected = self.runtime.handle_text(session_id, "第2题")
+
+        self.assertEqual(selected.intent, "a3_unit_selected")
+        self.assertEqual(
+            self.runtime.session_snapshot(session_id)["a3"]["selected_unit"]["unit_id"],
+            "g1-u2",
+        )
 
     def test_restored_unlabelled_units_receive_unique_page_ordinals(self):
         state = A3SessionState.from_dict({

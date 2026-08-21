@@ -412,6 +412,26 @@ class TikuAdminTest(unittest.TestCase):
         SQLiteModelCostLedger(question_db).write_run(
             question, finished_at=started_at, outcome="success"
         )
+        intent = ModelCostCollector(
+            run_id="intent-run",
+            identity_key=invitation.invite_id,
+            search_key="question-search",
+            task_kind="a3_intent",
+            started_at=started_at,
+        )
+        intent.record(
+            provider="dashscope",
+            model="qwen3.7-plus",
+            call_type="qwen_a3_intent_decision",
+            status="success",
+            started_at=started_at,
+            finished_at=started_at,
+            latency_ms=120,
+            usage={"input_tokens": 0, "output_tokens": 0},
+        )
+        SQLiteModelCostLedger(question_db).write_run(
+            intent, finished_at=started_at, outcome="success"
+        )
         saved = feedback.upsert(
             message_id="message_trace_01",
             identity_key=invitation.invite_id,
@@ -440,8 +460,11 @@ class TikuAdminTest(unittest.TestCase):
         self.assertTrue(detail["cost"]["historical_reprice_applied"])
         self.assertEqual(
             [step["key"] for step in detail["cost"]["flow"]],
-            ["a3_auto_crop_grounding", "image"],
+            ["a3_auto_crop_grounding", "a3_intent", "image"],
         )
+        intent_step = detail["cost"]["flow"][1]
+        self.assertEqual(intent_step["title"], "A3 意图理解")
+        self.assertEqual(intent_step["calls"][0]["label"], "Qwen A3 意图判断")
         self.assertEqual(
             {item["model"] for item in detail["cost"]["models"]},
             {"glm-5v-turbo", "qwen3.7-plus"},
