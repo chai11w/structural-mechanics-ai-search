@@ -365,6 +365,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .toolbar { align-items: stretch; flex-wrap: wrap; }
   .toolbar .field, .toolbar .field.search-field { width: calc(50% - 5px); }
   .toolbar .field.search-field { width: 100%; }
+  .feedback-filters > .button { align-self: flex-end; height: 40px; min-height: 40px; }
   .toolbar-spacer { display: none; }
   .toggle-row { width: 100%; }
   .feedback-archive-toggle { margin-left: 0; }

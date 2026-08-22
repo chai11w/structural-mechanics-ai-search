@@ -140,6 +140,10 @@ class TikuAdminTest(unittest.TestCase):
         self.assertIn(".date-filter-input { position: absolute;", styles)
         self.assertIn(".feedback-filter-select { font-size: 13px; }", styles)
         self.assertIn(".feedback-filter-select.is-placeholder { color: #8b8b84; }", styles)
+        self.assertIn(
+            ".feedback-filters > .button { align-self: flex-end; height: 40px; min-height: 40px; }",
+            styles,
+        )
         self.assertIn(".feedback-table { min-width: 1320px; table-layout: fixed; }", styles)
         self.assertIn(".feedback-table td { height: 70px; padding-block: 12px; }", styles)
         self.assertIn(".message-overlay { margin: 13px 0 0;", styles)
