@@ -56,7 +56,7 @@ class FinalOutputRequestV1:
     facts: Mapping[str, JsonValue]      # 仅允许本 message_key 声明的字段
     allowed_actions: tuple[UserAction, ...]
     notice_keys: tuple[str, ...] = ()   # 只允许登记过的 PARTIAL/降级提示
-    bounded_text: str = ""              # 仅给明确登记的受约束模型特例
+    contact: PublicContactV1 | None = None  # 仅 contact_author 授权时存在
 
 
 @dataclass(frozen=True)
@@ -80,6 +80,8 @@ class PublicMessageV1:
     request_id: str
     search_id: str
     sequence: int | None                 # 仅 progress 使用
+    stage: str | None                    # 仅 progress 使用，由 key 派生
+    contact: PublicContactV1 | None      # 仅已授权的公开联系信息
 ```
 
 `UserOutputRequestV1` 可作为上述 final/progress 两种请求的联合类型。这样 progress 不需要伪造一个尚未发生的最终 status/action，同时所有公开消息仍携带同一 request/search ID。
@@ -140,12 +142,14 @@ progress.search.chapter
 | --- | --- | --- | --- |
 | `chapter_name` | 1–40 字符的公开章节/题型显示名 | 章节目录解析结果 | 章节提示、章节无匹配 |
 | `supported_chapters` | 最多 7 个已登记显示名 | `chapter_catalog` | 不支持范围提示 |
+| `a1_reason` | 已登记的 A1 原因枚举 | 图片分流权威结果 | 选择固定 A1 重新上传文案 |
 | `question_count` | 非负整数，设置合理上限 | A2/A3 状态 | 多题识别 |
 | `candidate_count` | 非负整数 | 当前 candidate generation | 候选提示 |
 | `remaining_count` | 非负整数 | A3 当前 revision | 当前题完成后的剩余题 |
 | `ready_count` | 非负整数且不大于请求数 | A3 自动裁剪结果 | 批量准备结果 |
 | `manual_count` | 非负整数且不大于请求数 | A3 自动裁剪结果 | 人工裁剪提示 |
 | `question_label` | 1–40 字符公开标签；非法时退回 `图片第 N 题` | A3 稳定 page index + 已验证 label | 选题、裁剪、答案 |
+| `page_index` | 1–10000 的正整数；只作为稳定题号和 label 兜底 | A3 稳定 page index | 生成 `图片第 N 题` |
 | `source_chapters` | 最多 7 个已登记显示名 | 全局检索结果 | 全局候选来源 |
 | `continuation_available` | 布尔值 | 状态机 | 是否可以“继续搜” |
 | `global_search_offered` | 布尔值 | 状态机 | 是否可以建议全局搜索 |
@@ -259,6 +263,9 @@ CatalogEntry(
     required_facts={"candidate_count"},
     optional_facts={"question_label"},
     mentioned_actions={"select_candidate"},
+    permitted_actions={"select_candidate", "continue_search", "retry_search"},
+    allowed_phases={"WAIT_CANDIDATE_CHOICE"},
+    terminal_without_action=False,
     renderer=render_candidates_ready,
     max_chars=160,
 )
@@ -268,10 +275,10 @@ CatalogEntry(
 
 1. 找到 `message_key`，校验 protocol、facts、phase 和 actions；
 2. 使用目录中的审核固定文本或确定性模板；
-3. 对明确登记的 `bounded_text` 特例执行专用校验；
-4. 任一步失败，记录内部 `output_contract_violation`；
-5. 根据已验证的 status 和允许动作进入安全兜底；
-6. 若 protocol 本身也矛盾，使用 `system.service.unavailable`，不尝试猜业务事实。
+3. 任一步失败，记录内部 `output_contract_violation`；
+4. 只有 exact entry 的 protocol、phase、facts 和动作全部验证过，兜底才能沿用该 entry 的动作；
+5. 前置失败只能保留 protocol 自带的主动作；无法证明时使用 `system.service.unavailable`；
+6. protocol 本身矛盾时不尝试猜业务事实。
 
 禁止的优先级：
 
@@ -312,19 +319,17 @@ notice.media_partial
 
 兜底文本同样是目录项，不在异常处理器中临时拼写。
 
-### 6.4 受约束模型文本唯一特例
+### 6.4 A1 使用原因枚举，不接收模型句子
 
-生产全流程当前可能为 A1 图片预检生成说明。V1 不新增模型调用，允许暂时保留该既有能力，但必须满足：
+阶段 3 的对抗审查证明：“长度限制 + 敏感词黑名单 + 必含重新上传”仍可被同义表达绕过，无法证明一句模型文案没有夹带伪执行结果。因此 V1 收紧为：
 
-- `message_key` 明确登记为 `triage.a1.bounded_explanation`；
-- 模型只能看到业务 handoff，不得看到异常、配置或诊断；
-- 长度、字符、内部 route/schema/debug 词、等待承诺均被拒绝；
-- 必须包含状态机允许的重新上传动作；
-- 不得改变 A1 路由事实；
-- 验证失败使用固定 `triage.a1.fallback`；
-- `reply_source/fallback_reason` 只进日志，不进入用户 payload。
+- `FinalOutputRequestV1` 不提供任意文本字段；
+- A1 上游只提交已登记的 `a1_reason` 枚举；
+- `triage.a1.reasoned` 根据枚举选择审核过的固定模板；
+- 原因未知时由上游选择固定 `triage.a1.fallback`；
+- `reply_source/fallback_reason/raw_model_output` 只进内部日志，不进入用户 payload。
 
-safe-answer 的受约束模型回复继续使用自己的事实校验，但最终也应以登记 key 进入公共输出契约。
+safe-answer 的模型回复仍由其自身事实校验管理；进入公共输出层时同样必须先映射为登记 key 和白名单 facts，不能把模型原句塞进 final 请求。
 
 ## 7. 首批策略矩阵
 
@@ -427,6 +432,7 @@ progress.page.auto_crop_ready
 - 上游只能发 key + facts，不能发公开 message；
 - stage 值从 key 派生或在目录注册，不能任意输入；
 - 所有事件携带同一 request/search ID 和单调 sequence；
+- 搜索尚未建立时 `search_id` 可以为空，但 `request_id` 必须有效；
 - progress 不承诺最终成功，不说“已找到”或“已通过”，除非对应事实已经提交；
 - 普通接口可以不展示 progress，但流式展示的文字必须由同一目录生成。
 
@@ -526,7 +532,7 @@ Traceback (most recent call last): ...
 - HTTPException.detail；
 - AgentProtocolError message；
 - progress 来源；
-- A1 bounded model reply；
+- A1 原因枚举与固定模板；
 - A3 intent reason 和 snapshot；
 - 浏览器收到的未知 detail/event message。
 
@@ -581,7 +587,7 @@ required facts
 - 同意 `message_key + facts + allowed_actions`，而不是字符串清洗方案；
 - 同意 progress 和公共 session payload 也属于输出安全边界；
 - 同意媒体交付失败不能继续宣称完整成功；
-- 同意现有 A1 模型说明只作为受约束特例保留，不新增模型调用；
+- 同意 A1 只提交已登记原因枚举并使用固定模板，不把模型原句带入输出层，也不新增模型调用；
 - 首批 message key、facts 和动作命名可在实现中做机械微调，但不得改变上述职责与安全不变量。
 
 阶段 3 应先实现纯函数目录、契约验证和对抗测试，不立即把 A2/A3 所有分支一次性迁移。
