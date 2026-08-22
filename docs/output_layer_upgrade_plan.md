@@ -4,11 +4,8 @@
 
 - 阶段 1“现状审计与基线分类”已完成，见 [`output_layer_phase1_audit.md`](output_layer_phase1_audit.md)。
 - 阶段 2“输出契约与策略设计”已完成，见 [`output_layer_phase2_contract.md`](output_layer_phase2_contract.md)。
-- 阶段 3“纯输出核心与对抗测试”已完成，见 [`output_layer_phase3_implementation.md`](output_layer_phase3_implementation.md)。
-- 阶段 3 没有接管生产回复，也没有新增模型调用；当前线上行为不变。
-- 下一步是阶段 4：先收紧共享协议反序列化并接入 A2，再接入 A3；最终状态和文案只在媒体实际持久化后定稿。
-
-六阶段路线保持不变：审计 → 契约 → 纯核心 → A2/A3 接入 → Web/Stream/公共状态收口 → 全链路验收与旧出口清理。
+- 本轮没有修改生产逻辑，也没有新增模型调用。
+- 下一步是先审查阶段 1 的 A/B/C 文案分类和阶段 2 的契约决定；通过后再进入阶段 3 的纯输出核心与对抗测试。
 
 ## 一句话结论
 
