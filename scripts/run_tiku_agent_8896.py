@@ -66,8 +66,6 @@ def build_runtime(
     enable_author_contact_fallback: bool = True,
     enable_three_scope_cancel_clarification: bool = True,
     preserve_a2_artifacts_on_cancel: bool = True,
-    enable_safe_answer_model_v0: bool = False,
-    safe_answer_model_client=None,
 ) -> A3MvpRuntime:
     """Build the full A1/A2/A3 route with A3 and its child A2 under one root."""
 
@@ -76,8 +74,6 @@ def build_runtime(
     a2_runtime = build_a2_runtime(
         root / "a2",
         enable_safe_answer_v0=True,
-        enable_safe_answer_model_v0=enable_safe_answer_model_v0,
-        safe_answer_model_client=safe_answer_model_client,
         enable_dimension_filter=True,
         enable_external_load_screen=False,
         enable_chapter_scope_fallback=True,

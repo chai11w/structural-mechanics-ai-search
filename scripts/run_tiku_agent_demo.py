@@ -41,7 +41,6 @@ def build_runtime(
     runtime_dir: str | Path = DEFAULT_V2_RUNTIME_DIR,
     *,
     enable_safe_answer_v0: bool = True,
-    enable_safe_answer_model_v0: bool = True,
     enable_dimension_filter: bool = False,
     safe_answer_model_client: Callable[[SafeAnswerModelRequestV0], str] | None = None,
     max_concurrent_tasks: int = 0,
@@ -63,7 +62,7 @@ def build_runtime(
     root = Path(runtime_dir).resolve()
     artifacts = SessionArtifacts(root / "sessions")
     generator = None
-    if enable_safe_answer_v0 and enable_safe_answer_model_v0:
+    if enable_safe_answer_v0:
         generator = SafeAnswerGeneratorV0(
             safe_answer_model_client or QwenSafeAnswerClientV0()
         )

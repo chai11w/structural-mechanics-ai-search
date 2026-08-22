@@ -50,8 +50,8 @@
 - 新增 `tests/test_tiku_agent_web_output_contract.py`，锁定规范流式读取、HTTP/detail 不直通、最终文案/动作来源、会话最小快照和本地图片校验 code。
 - `node --check tiku_agent/demo_web/demo.js` 已通过。
 - `git diff --check` 已通过。
-- 输出层阶段 4-6 专项 `184` 项测试通过。
-- 全仓 `870` 项测试通过。
+- 输出层阶段 4-6 专项 `180` 项测试通过。
+- 全仓 `864` 项测试通过。
 
 ## 未做事项
 
