@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from tiku_agent import render
 from tiku_agent.action_decision_v2 import (
@@ -55,6 +55,7 @@ from tiku_agent.tools import (
     prepare_question_units_tool,
 )
 from tiku_shared.request_protocol import (
+    PROTOCOL_REASONS,
     RequestAction,
     RequestProtocol,
     RequestStatus,
@@ -66,6 +67,9 @@ from tiku_shared.chapter_catalog import (
     resolve_image_scope,
 )
 
+if TYPE_CHECKING:
+    from tiku_agent.user_output_integration import OutputDraftV1
+
 
 _CLARIFICATION_PROTOCOL_CODES = {
     "missing_image": "UPLOAD_REQUIRED",
@@ -75,6 +79,18 @@ _CLARIFICATION_PROTOCOL_CODES = {
     "candidate_list_unavailable": "CANDIDATE_LIST_UNAVAILABLE",
     "out_of_range": "SELECTION_OUT_OF_RANGE",
     "no_more_candidates": "NO_MORE_CANDIDATES",
+}
+
+# Only these legacy/internal ToolResult codes may cross into the public request
+# protocol, and each is normalized to one reviewed public meaning.  Arbitrary
+# syntactically-valid tool codes must never become trusted user output metadata.
+_PUBLIC_TOOL_CODE_NORMALIZATION = {
+    "GLOBAL_RERANK_INCOMPLETE": "GLOBAL_SEARCH_FAILED",
+    "GLOBAL_SEARCH_IMAGE_REQUIRED": "EXTERNAL_LOAD_NOT_FOUND",
+    "GLOBAL_SEARCH_UNSUPPORTED_ROUTE": "BANK_ROUTE_FAILED",
+    "LOAD_ROUTE_NEEDS_REVIEW": "CLARIFICATION_REQUIRED",
+    "MULTI_DETAIL_INVALID": "MULTI_DETAIL_FAILED",
+    "UNKNOWN_CHAPTER": "CHAPTER_REQUIRED",
 }
 
 _CHAPTER_SCOPE_LLM_SUPPLEMENT = """
@@ -97,6 +113,12 @@ class AgentResponse:
     fallback_reason: str = ""
     protocol: dict[str, Any] = field(default_factory=dict)
     author_contact: dict[str, str] = field(default_factory=dict)
+    # Stage-4 production output is rendered only after the request protocol is
+    # bound and media persistence has finished.  ``text`` stays temporarily as
+    # a rollback/debug seam; public delivery must prefer this structured draft.
+    output: "OutputDraftV1 | None" = None
+    output_variant: str = ""
+    output_context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -275,6 +297,7 @@ class TikuSearchAgent:
                     state=self.state.to_dict(),
                     intent="safe_answer",
                     reply_source="grounded_fact",
+                    output_variant="supported_chapters",
                 )
             safe_decision = evaluate_safe_answer_policy(text)
             if safe_decision.eligible:
@@ -288,6 +311,7 @@ class TikuSearchAgent:
                         state=self.state.to_dict(),
                         intent="safe_answer",
                         reply_source="fixed_fallback",
+                        output_variant=safe_decision.category,
                     )
                 if safe_decision.category == "general":
                     context = build_runtime_context_v2(self.state)
@@ -328,6 +352,7 @@ class TikuSearchAgent:
                     intent="safe_answer",
                     reply_source=generated.source,
                     fallback_reason=generated.fallback_reason,
+                    output_variant=category,
                 )
         return AgentResponse(
             text=render_safe_answer_v0(category, context, validation_facts),
@@ -337,6 +362,7 @@ class TikuSearchAgent:
             fallback_reason=(
                 "generator_error" if self.safe_answer_generator_v0 is not None else ""
             ),
+            output_variant=category,
         )
 
     def _safe_answer_inputs(
@@ -766,6 +792,14 @@ class TikuSearchAgent:
                 text,
                 intent or IntentResult("search_image"),
                 include_author_contact=self.enable_author_contact_fallback,
+                protocol=(
+                    RequestProtocol.from_code(
+                        "NO_MORE_CANDIDATES",
+                        search_id=self.state.current_search_id,
+                    ).to_dict()
+                    if continuing
+                    else None
+                ),
             )
 
         reranked = self.tools.rerank_candidates(
@@ -789,6 +823,14 @@ class TikuSearchAgent:
                 ),
                 intent or IntentResult("search_image"),
                 include_author_contact=self.enable_author_contact_fallback,
+                protocol=(
+                    RequestProtocol.from_code(
+                        "NO_MORE_CANDIDATES",
+                        search_id=self.state.current_search_id,
+                    ).to_dict()
+                    if continuing
+                    else None
+                ),
             )
         visible = list(reranked.data.get("visible_candidates") or candidates)
         self.state.set_candidates(visible)
@@ -999,18 +1041,7 @@ class TikuSearchAgent:
         self.state.fail(error)
         protocol = None
         if result is not None:
-            protocol = RequestProtocol(
-                status=RequestStatus.ERROR,
-                layer=result.layer,
-                code=result.code or "TOOL_FAILED",
-                retryable=result.retryable,
-                action=(
-                    result.action
-                    if result.action is not RequestAction.NONE
-                    else RequestAction.RETRY_SEARCH
-                ),
-                search_id=self.state.current_search_id,
-            ).to_dict()
+            protocol = self._protocol_from_tool_result(result)
         return self._response(
             render.render_error(error),
             IntentResult("unsupported", ok=False, error=error),
@@ -1029,6 +1060,11 @@ class TikuSearchAgent:
         if result.outcome is ToolOutcome.ERROR:
             return self._fail(result.error or "工具执行失败，请稍后重试。", result)
         if result.outcome is ToolOutcome.NEEDS_INPUT and not allow_needs_input:
+            if result.code == "UNKNOWN_CHAPTER":
+                self.state.current_chapter = ""
+                self.state.phase = "WAIT_CHAPTER"
+                if self.state.active_image_path:
+                    self.state.offer_global_search()
             message = result.error or "需要补充信息后才能继续。"
             return self._response(
                 message,
@@ -1089,15 +1125,35 @@ class TikuSearchAgent:
         )
 
     def _protocol_from_tool_result(self, result: ToolResult) -> dict[str, Any]:
-        action = result.action
-        if action is RequestAction.NONE and result.outcome is RequestStatus.ERROR:
-            action = RequestAction.RETRY_SEARCH
-        return RequestProtocol(
-            status=result.outcome,
-            layer=result.layer,
-            code=result.code or "TOOL_FAILED",
-            retryable=result.retryable,
-            action=action,
+        source_code = str(result.code or "TOOL_FAILED").strip().upper()
+        public_code = _PUBLIC_TOOL_CODE_NORMALIZATION.get(source_code, source_code)
+        reason = PROTOCOL_REASONS.get(public_code)
+        if reason is None:
+            public_code = "SERVICE_UNAVAILABLE"
+            reason = PROTOCOL_REASONS[public_code]
+
+        # Known codes are allowed to choose their public action from the shared
+        # registry, but a contradictory outcome/retryability is a contract
+        # failure and must collapse to a service error instead of being trusted.
+        normalized_outcome = (
+            RequestStatus.ERROR
+            if source_code == "GLOBAL_RERANK_INCOMPLETE"
+            else result.outcome
+        )
+        if (
+            normalized_outcome is not reason.status
+            or (
+                source_code not in _PUBLIC_TOOL_CODE_NORMALIZATION
+                and result.layer is not reason.layer
+            )
+            or (
+                source_code not in _PUBLIC_TOOL_CODE_NORMALIZATION
+                and result.retryable is not reason.retryable
+            )
+        ):
+            public_code = "SERVICE_UNAVAILABLE"
+        return RequestProtocol.from_code(
+            public_code,
             search_id=self.state.current_search_id,
         ).to_dict()
 

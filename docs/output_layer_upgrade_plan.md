@@ -5,10 +5,14 @@
 - 阶段 1“现状审计与基线分类”已完成，见 [`output_layer_phase1_audit.md`](output_layer_phase1_audit.md)。
 - 阶段 2“输出契约与策略设计”已完成，见 [`output_layer_phase2_contract.md`](output_layer_phase2_contract.md)。
 - 阶段 3“纯输出核心与对抗测试”已完成，见 [`output_layer_phase3_implementation.md`](output_layer_phase3_implementation.md)。
-- 阶段 3 没有接管生产回复，也没有新增模型调用；当前线上行为不变。
-- 下一步是阶段 4：先收紧共享协议反序列化并接入 A2，再接入 A3；最终状态和文案只在媒体实际持久化后定稿。
+- 阶段 3 本身没有接管生产回复，也没有新增模型调用。
+- 阶段 4“A2/A3 生产接入”已完成，见 [`output_layer_phase4_integration.md`](output_layer_phase4_integration.md)。
+- 阶段 5“Web/Stream/公共状态收口”已完成，见 [`output_layer_phase5_web_boundary.md`](output_layer_phase5_web_boundary.md)。
+- 阶段 6“全链路验收与旧出口清理”已完成，见 [`output_layer_phase6_exit_validation.md`](output_layer_phase6_exit_validation.md)。
 
-六阶段路线保持不变：审计 → 契约 → 纯核心 → A2/A3 接入 → Web/Stream/公共状态收口 → 全链路验收与旧出口清理。
+六阶段已全部完成：审计 → 契约 → 纯核心 → A2/A3 接入 → Web/Stream/公共状态收口 → 全链路验收与旧出口清理。
+
+这里的“阶段 3”是输出层纯核心阶段，不是 A3 整页题目流程；阶段 4 才把该核心接入 A2 和 A3。
 
 ## 一句话结论
 
@@ -155,6 +159,12 @@ invalid_observation_schema
 
 第一阶段不需要新增模型调用。等这一层稳定后，如果确实需要把复杂过程解释得更自然，再把“输出模型润色”作为可选能力接在它里面，并始终允许回退到固定文案。
 
-## 给下一对话的任务说明
+## 当前完成结论
 
-请先围绕本方案审查当前题库 Agent 的用户输出：已有固定输出哪些应保持不动，异常输出是否存在泄露内部信息或缺少下一步提示的缺口。先报告问题和最小改动建议；不要直接把所有回复改成模型生成，也不要实现输入总控大脑。确认范围后，再只补统一、安全的输出兜底能力。
+- A2、A3、普通 HTTP、NDJSON Stream 和浏览器已经统一使用结构化公共消息。
+- 常见结果、关键数值、错误和确认提示走固定模板；未覆盖或契约异常走固定安全兜底。
+- 旧 `response.text`、HTTP `detail` 和 Stream 裸 `message` 不再作为公开回复来源。
+- 公共 session 使用白名单；确需展示的题目标题和上下文经过限长、控制字符和敏感内容过滤。
+- 本轮没有新增模型润色，也没有实现输入总控大脑。偏门表达的模型润色仍是后续可选阶段，且必须保留固定模板回退。
+- 输出层专项 `180` 项、全仓 `864` 项测试通过；JavaScript 语法和 `git diff --check` 通过。
+- 本轮只完成仓库实现与验收，没有重启或部署现有 8790、8788、8795 服务。

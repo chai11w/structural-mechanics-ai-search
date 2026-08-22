@@ -22,6 +22,7 @@ from tiku_agent.session_store import SessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_log import JsonlTaskLogger, TaskLogEntry, TaskLogger
 from tiku_agent.tools import AgentToolConfig
+from tiku_agent.user_output_integration import build_a2_output_draft
 from tiku_shared.model_costs import (
     ModelCostCollector,
     SQLiteModelCostLedger,
@@ -437,6 +438,11 @@ class AgentSessionRuntime:
                 intent="image_triage_stop",
                 reply_source=decision.reply_source,
                 fallback_reason=decision.fallback_reason,
+                output_variant=(
+                    "no_external_load"
+                    if decision.reply_source == "fixed_policy"
+                    else "fallback"
+                ),
                 protocol=protocol,
             )
 
@@ -663,6 +669,7 @@ class AgentSessionRuntime:
             text=NO_EXTERNAL_LOAD_MESSAGE,
             state=state.to_dict(),
             intent="external_load_screen",
+            output_variant="no_external_load",
             protocol=RequestProtocol.from_code(
                 "EXTERNAL_LOAD_NOT_FOUND", search_id=search_id
             ).to_dict(),
@@ -1097,13 +1104,37 @@ class AgentSessionRuntime:
         request_id: str,
         search_id: str,
     ) -> None:
-        response.protocol = _request_protocol(
+        protocol = _request_protocol(
             state,
             response,
             "",
             request_id=request_id,
             search_id=search_id,
-        ).to_dict()
+        )
+        response.protocol = protocol.to_dict()
+        if response.output is None:
+            output_state = state.to_dict()
+            output_state.update(response.output_context)
+            try:
+                response.output = build_a2_output_draft(
+                    response.intent,
+                    output_state,
+                    protocol,
+                    author_contact_available=bool(response.author_contact),
+                    variant=response.output_variant or response.reply_source,
+                )
+            except Exception:  # noqa: BLE001 - output boundary must fail closed.
+                safe_protocol = RequestProtocol.from_code(
+                    "SERVICE_UNAVAILABLE",
+                    request_id=request_id,
+                    search_id=search_id,
+                )
+                response.protocol = safe_protocol.to_dict()
+                response.output = build_a2_output_draft(
+                    "",
+                    {"phase": "ERROR"},
+                    safe_protocol,
+                )
 
     @staticmethod
     def _clean_session_id(session_id: str) -> str:
@@ -1142,10 +1173,23 @@ def _request_protocol(
             search_id or payload.get("search_id") or state.current_search_id
         )
         return RequestProtocol.from_dict(payload)
-    if error_kind or state.phase == "ERROR":
+    if error_kind:
         code = "AGENT_FAILED"
+    elif response is not None and response.intent in {
+        "safe_answer",
+        "greeting",
+        "small_talk",
+        "capability_help",
+    }:
+        # Conversation replies describe this request, not the unfinished search
+        # phase that remains stored underneath it.
+        code = "REQUEST_SUCCEEDED"
+    elif response is not None and response.intent in {"clarification", "unsupported"}:
+        code = "CLARIFICATION_REQUIRED"
     elif response is not None and response.intent == "external_load_screen":
         code = "EXTERNAL_LOAD_NOT_FOUND"
+    elif state.phase == "ERROR":
+        code = "AGENT_FAILED"
     elif state.phase == "NO_MATCH":
         code = "NO_MATCH"
     elif state.phase == "WAIT_CHAPTER":
