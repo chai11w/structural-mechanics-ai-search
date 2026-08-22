@@ -59,6 +59,9 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
             self.assertTrue(
                 build_runtime.call_args.kwargs["preserve_a2_artifacts_on_cancel"]
             )
+            self.assertFalse(
+                build_runtime.call_args.kwargs["enable_safe_answer_model_v0"]
+            )
 
 
 if __name__ == "__main__":

@@ -6,6 +6,8 @@
 
 本阶段没有新增模型调用，也没有重启或部署现有服务。
 
+8790/8896 的固定闲聊仍使用现有规则分类，但生产构建不再创建结果必然被固定模板替换的旧 Qwen 文字生成器；输入意图、章节、A3 和检索模型保持不变。
+
 ## 已清理的旧出口
 
 - `_agent_payload` 不再读取 `AgentResponse.text` 作为公开回复；`output=None` 直接 fail closed，并尽量保留合法的 request/search ID。
@@ -26,8 +28,9 @@
 ## 验证
 
 ```text
-阶段 4-6 专项：180 tests OK
-全仓回归：864 tests OK
+阶段 4-6 专项：184 tests OK
+8790/8896 扩大接入专项：199 tests OK
+全仓回归：870 tests OK
 JavaScript：node --check 通过
 差异检查：git diff --check 通过
 ```

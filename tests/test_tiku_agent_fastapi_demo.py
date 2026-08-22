@@ -132,6 +132,58 @@ class SelectiveMediaRuntime(FakeRuntime):
 
 
 class FastApiDemoTest(unittest.TestCase):
+    def test_set_chapter_search_result_keeps_candidate_media(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"set_chapter_candidate_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (8, 8), "white").save(image_path)
+
+        class SetChapterCandidateRuntime(FakeRuntime):
+            def handle_text(
+                self,
+                session_id: str,
+                text: str,
+                *,
+                identity_key="",
+                progress=None,
+                request_id="",
+            ) -> AgentResponse:
+                del text, identity_key, progress
+                self.snapshot.update({
+                    "session_valid": True,
+                    "phase": "WAIT_CANDIDATE_CHOICE",
+                    "candidate_generation": "set-chapter-generation",
+                    "candidate_count": 1,
+                })
+                protocol = RequestProtocol.from_code(
+                    "REQUEST_SUCCEEDED",
+                    request_id=request_id or "req_set_chapter_candidate",
+                )
+                state = {
+                    "phase": "WAIT_CANDIDATE_CHOICE",
+                    "current_chapter": "4力法",
+                    "candidate_count": 1,
+                    "candidates": [{"chapter": "4力法"}],
+                }
+                return AgentResponse(
+                    text="LEGACY_SET_CHAPTER_TEXT",
+                    images=[str(self.image_path)],
+                    intent="set_chapter",
+                    protocol=protocol.to_dict(),
+                    output=build_a2_output_draft("set_chapter", state, protocol),
+                )
+
+        response = TestClient(
+            create_app(runtime=SetChapterCandidateRuntime(image_path))
+        ).post("/api/message", json={"text": "按力法搜"})
+        payload = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["message_key"], "search.candidates.ready")
+        self.assertEqual(payload["text"], "找到了 1 道较相似的候选题，请选择候选编号。")
+        self.assertEqual(payload["images"], [f"/api/media/{image_path.name}"])
+        self.assertNotIn("LEGACY_SET_CHAPTER_TEXT", response.text)
+
     def test_unstructured_agent_response_fails_closed_and_keeps_request_ids(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
         test_dir = runtime_dir / f"unstructured_output_{uuid4().hex}"

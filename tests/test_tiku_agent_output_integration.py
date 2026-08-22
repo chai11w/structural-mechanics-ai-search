@@ -73,6 +73,76 @@ class OutputIntegrationTests(unittest.TestCase):
         self.assertIn("位移法", public.text)
         self.assertNotIn("力法。", public.text)
 
+    def test_a2_set_chapter_with_candidates_prefers_the_search_result(self):
+        protocol = _protocol("REQUEST_SUCCEEDED")
+        draft = build_a2_output_draft(
+            "set_chapter",
+            {
+                "phase": "WAIT_CANDIDATE_CHOICE",
+                "current_chapter": "4力法",
+                "candidate_count": 2,
+                "candidates": [{"chapter": "4力法"}, {"chapter": "4力法"}],
+            },
+            protocol,
+        )
+        public = finalize_output_draft(draft, protocol, 2, 2)
+
+        self.assertEqual(draft.message_key, "search.candidates.ready")
+        self.assertEqual(draft.media_policy, "candidate_set")
+        self.assertEqual(public.message_key, "search.candidates.ready")
+        self.assertIn("2 道", public.text)
+
+    def test_a2_next_image_chapter_does_not_replay_retained_candidates(self):
+        protocol = _protocol("REQUEST_SUCCEEDED")
+        draft = build_a2_output_draft(
+            "set_chapter",
+            {
+                "phase": "WAIT_CANDIDATE_CHOICE",
+                "current_chapter": "4力法",
+                "pending_chapter": "5位移法",
+                "candidate_count": 2,
+                "candidates": [{"chapter": "4力法"}, {"chapter": "4力法"}],
+            },
+            protocol,
+        )
+        public = finalize_output_draft(draft, protocol, 0, 0)
+
+        self.assertEqual(draft.message_key, "search.chapter.saved")
+        self.assertEqual(draft.media_policy, "none")
+        self.assertIn("位移法", public.text)
+
+        no_match_draft = build_a2_output_draft(
+            "set_chapter",
+            {
+                "phase": "NO_MATCH",
+                "current_chapter": "4力法",
+                "pending_chapter": "5位移法",
+            },
+            protocol,
+        )
+        no_match_public = finalize_output_draft(no_match_draft, protocol, 0, 0)
+
+        self.assertEqual(no_match_draft.message_key, "search.chapter.saved")
+        self.assertIn("位移法", no_match_public.text)
+
+    def test_a2_set_chapter_with_new_question_units_prefers_the_question_list(self):
+        protocol = _protocol("QUESTION_UNITS_PREPARED")
+        draft = build_a2_output_draft(
+            "set_chapter",
+            {
+                "phase": "WAIT_QUESTION_CHOICE",
+                "current_chapter": "4力法",
+                "question_count": 2,
+                "questions": [{"label": "1"}, {"label": "2"}],
+            },
+            protocol,
+        )
+        public = finalize_output_draft(draft, protocol, 0, 0)
+
+        self.assertEqual(draft.message_key, "search.questions.ready")
+        self.assertEqual(public.message_key, "search.questions.ready")
+        self.assertIn("2 道题", public.text)
+
     def test_unknown_chapter_without_public_name_uses_actionable_chapter_prompt(self):
         marker = "SECRET_UNKNOWN_CHAPTER"
         protocol = _protocol("UNKNOWN_CHAPTER")

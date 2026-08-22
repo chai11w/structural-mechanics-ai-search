@@ -682,11 +682,28 @@ def build_a2_output_draft(
     if system is not None:
         return system
 
-    # A newly selected chapter starts the next search.  It must win over a
-    # retained ANSWERED phase from the preceding search, which has no media to
-    # deliver for this request.
+    # A chapter-only turn must win over a retained ANSWERED phase from the
+    # preceding search.  Once this turn has produced a search outcome, however,
+    # the outcome owns the reply and its media contract.
     saved_chapter = _saved_chapter_from_state(state)
-    if intent_key == "set_chapter" and saved_chapter:
+    has_pending_chapter = bool(_public_chapter(state.get("pending_chapter")))
+    question_count = _count(state, "question_count", "questions")
+    candidate_count = _count(state, "candidate_count", "candidates")
+    has_current_search_outcome = not has_pending_chapter and (
+        (phase == "WAIT_QUESTION_CHOICE" and question_count > 0)
+        or (phase == "WAIT_CANDIDATE_CHOICE" and candidate_count > 0)
+        or phase == "NO_MATCH"
+        or protocol.status in {RequestStatus.NO_MATCH, RequestStatus.ERROR}
+        or protocol.code in {"QUESTION_UNITS_PREPARED", "MULTI_CROPS_UNAVAILABLE"}
+        or protocol.code in _CANDIDATE_CODES
+        or protocol.code in _RETRYABLE_SEARCH_CODES
+        or protocol.code in {"ANSWER_FILES_FOUND", "MEDIA_PERSIST_FAILED"}
+    )
+    if (
+        intent_key == "set_chapter"
+        and saved_chapter
+        and not has_current_search_outcome
+    ):
         saved_phase = (
             phase if phase in _CHAPTER_SAVED_PHASES else "READY_TO_ROUTE"
         )
@@ -845,7 +862,6 @@ def build_a2_output_draft(
     ):
         return _answer_draft(state)
 
-    candidate_count = _count(state, "candidate_count", "candidates")
     if phase == "WAIT_CANDIDATE_CHOICE" and (
         candidate_count > 0
         or protocol.code in _CANDIDATE_CODES
@@ -860,14 +876,13 @@ def build_a2_output_draft(
         "QUESTION_UNITS_PREPARED",
         "MULTI_CROPS_UNAVAILABLE",
     }:
-        count = _count(state, "question_count", "questions")
         actions = [UserAction.SELECT_QUESTION]
         if protocol.retryable:
             actions.append(UserAction.RETRY_SEARCH)
         return _draft(
             "search.questions.ready",
             "WAIT_QUESTION_CHOICE",
-            facts={"question_count": count},
+            facts={"question_count": question_count},
             actions=actions,
             notices=_notice_keys(protocol),
         )

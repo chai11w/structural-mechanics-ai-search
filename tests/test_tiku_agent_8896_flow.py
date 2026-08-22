@@ -84,6 +84,63 @@ class TikuAgent8896FlowTest(unittest.TestCase):
                 (root / "model_costs.sqlite3").resolve(),
             )
 
+    def test_fixed_safe_answers_do_not_call_the_legacy_output_model(self):
+        requests = []
+
+        def model_client(request):
+            requests.append(request)
+            return "我是力答，专注结构力学题库搜索，通过题图检索相似候选题。"
+
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = build_runtime(
+                Path(temp),
+                enable_triage=False,
+                enable_auto_crop=False,
+                enable_a3_intent_model_fallback=False,
+                safe_answer_model_client=model_client,
+            )
+            agent = runtime.a2_runtime.agent_factory(AgentState())
+
+            self.assertTrue(agent.enable_safe_answer_v0)
+            self.assertIsNone(agent.safe_answer_generator_v0)
+            for text, expected_variant in (
+                ("你好", "greeting"),
+                ("谢谢", "courtesy"),
+                ("你是谁", "identity"),
+                ("你能做什么", "capability"),
+            ):
+                with self.subTest(text=text):
+                    response = agent.handle_text(text)
+                    self.assertEqual(response.intent, "safe_answer")
+                    self.assertEqual(response.reply_source, "fixed_fallback")
+                    self.assertEqual(response.output_variant, expected_variant)
+            self.assertEqual(requests, [])
+
+    def test_legacy_safe_answer_model_can_be_explicitly_reenabled(self):
+        requests = []
+
+        def model_client(request):
+            requests.append(request)
+            return "我是力答，专注结构力学题库搜索，通过题图检索相似候选题。"
+
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = build_runtime(
+                Path(temp),
+                enable_triage=False,
+                enable_auto_crop=False,
+                enable_a3_intent_model_fallback=False,
+                enable_safe_answer_model_v0=True,
+                safe_answer_model_client=model_client,
+            )
+            agent = runtime.a2_runtime.agent_factory(AgentState())
+
+            response = agent.handle_text("你是谁")
+
+            self.assertIsNotNone(agent.safe_answer_generator_v0)
+            self.assertEqual(response.intent, "safe_answer")
+            self.assertEqual(response.reply_source, "model")
+            self.assertEqual(len(requests), 1)
+
     def test_launcher_can_disable_or_inject_the_triage_authority(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
