@@ -64,54 +64,34 @@ def final_request(
     contact=None,
 ):
     if phase is None:
-        if message_key in {
-            "conversation.current",
-            "conversation.action_rejected",
-        }:
-            phase = "WAIT_CANDIDATE_CHOICE"
-        elif message_key.startswith("conversation."):
+        if message_key.startswith("conversation."):
             phase = "IDLE"
         elif message_key.startswith("triage."):
             phase = "PROCESSING"
-        elif message_key == "search.cancelled":
-            phase = "CANCELLED"
-        elif message_key == "search.chapter.saved":
-            phase = "READY_TO_ROUTE"
         elif message_key in {"search.chapter.required", "search.chapter.unsupported"}:
             phase = "WAIT_CHAPTER"
-        elif message_key == "search.clarification.required":
-            phase = "WAIT_CANDIDATE_CHOICE"
         elif message_key == "search.questions.ready":
             phase = "WAIT_QUESTION_CHOICE"
         elif message_key in {
             "search.candidates.ready",
             "search.global.candidates.ready",
             "search.candidates.rejected",
-            "search.candidates.unavailable",
-            "search.candidates.recalled",
-            "search.candidates.rejected_more",
             "search.answer.missing",
         }:
             phase = "WAIT_CANDIDATE_CHOICE"
         elif message_key.startswith("search.no_match"):
             phase = "NO_MATCH"
-        elif message_key in {
-            "search.answer.ready",
-            "search.answer.mismatch",
-            "search.answer.resent",
-        }:
+        elif message_key == "search.answer.ready":
             phase = "ANSWERED"
-        elif message_key in {"search.failed.retryable", "search.failed.nonretryable"}:
+        elif message_key == "search.failed.retryable":
             phase = "ERROR"
         elif message_key in {
             "page.selection.required",
             "page.units.prepared",
             "page.cancel.scope_required.page",
             "page.unit.cancelled_remaining",
-            "page.unit.stopped_remaining",
             "page.unit.answer.delivered_remaining",
             "page.stale.selection",
-            "page.current.guidance",
         }:
             phase = "WAIT_UNIT_SELECTION"
         elif message_key.startswith("page.crop"):
@@ -123,16 +103,8 @@ def final_request(
             "page.stale.candidate",
         }:
             phase = "A2_ACTIVE"
-        elif message_key in {
-            "page.no_units",
-            "page.unit.stopped_complete",
-            "page.unit.answer.delivered_complete",
-            "page.completed",
-            "page.ended",
-        }:
+        elif message_key in {"page.unit.answer.delivered_complete", "page.completed"}:
             phase = "COMPLETE"
-        elif message_key == "page.session.reset":
-            phase = "IDLE"
         elif message_key == "page.failed.retryable":
             phase = "ERROR"
         else:
@@ -675,10 +647,16 @@ class FinalOutputContractTest(UserOutputAssertions):
                     )
                 )
             with self.subTest(scope="protocol", version=version):
-                # RequestProtocol rejects malformed schema versions at its
-                # construction boundary, before a renderer can receive one.
-                with self.assertRaises(ValueError):
-                    replace(base_protocol, schema_version=version)
+                poisoned_protocol = replace(base_protocol, schema_version=version)
+                self.assert_service_fallback(
+                    render_final_output(
+                        final_request(
+                            "conversation.greeting",
+                            poisoned_protocol,
+                            actions=(UserAction.UPLOAD_IMAGE,),
+                        )
+                    )
+                )
             with self.subTest(scope="public", version=version):
                 with self.assertRaises(ValueError):
                     replace(
@@ -963,359 +941,6 @@ class ResultEvidenceContractTest(UserOutputAssertions):
         self.assertIn("手动裁剪", output.text)
 
 
-class ExpandedSemanticCatalogTest(UserOutputAssertions):
-    def success_protocol(self):
-        return RequestProtocol.from_code(
-            "REQUEST_SUCCEEDED", request_id=REQUEST_ID, search_id=SEARCH_ID
-        )
-
-    def test_common_conversation_families_use_fixed_registered_copy(self):
-        success_cases = {
-            "conversation.courtesy": "不客气",
-            "conversation.farewell": "需要时",
-            "conversation.identity": "我是力答",
-            "conversation.capability": "结构力学题图",
-            "conversation.supported_chapters": "静定结构受力",
-            "conversation.workflow": "候选确认",
-            "conversation.general": "题库检索",
-        }
-        for key, expected in success_cases.items():
-            with self.subTest(key=key):
-                output = render_final_output(final_request(key, self.success_protocol()))
-                self.assertEqual(output.message_key, key)
-                self.assertIn(expected, output.text)
-
-        current = render_final_output(
-            final_request(
-                "conversation.current",
-                RequestProtocol.from_code(
-                    "CLARIFICATION_REQUIRED",
-                    request_id=REQUEST_ID,
-                    search_id=SEARCH_ID,
-                ),
-                actions=(UserAction.SELECT_CANDIDATE,),
-            )
-        )
-        self.assertEqual(current.message_key, "conversation.current")
-
-        out_of_scope = render_final_output(
-            final_request(
-                "conversation.out_of_scope",
-                RequestProtocol.from_code(
-                    "REQUEST_OUT_OF_SCOPE",
-                    request_id=REQUEST_ID,
-                    search_id=SEARCH_ID,
-                ),
-                actions=(UserAction.UPLOAD_IMAGE,),
-            )
-        )
-        self.assertEqual(out_of_scope.message_key, "conversation.out_of_scope")
-
-        rejected = render_final_output(
-            final_request(
-                "conversation.action_rejected",
-                RequestProtocol.from_code(
-                    "ACTION_NOT_ALLOWED",
-                    request_id=REQUEST_ID,
-                    search_id=SEARCH_ID,
-                ),
-                actions=(UserAction.CONTINUE_CURRENT,),
-            )
-        )
-        self.assertEqual(rejected.message_key, "conversation.action_rejected")
-
-    def test_a2_common_semantic_families_render_from_bounded_facts(self):
-        cases = (
-            final_request(
-                "search.cancelled",
-                self.success_protocol(),
-                actions=(UserAction.UPLOAD_IMAGE,),
-            ),
-            final_request(
-                "search.chapter.saved",
-                self.success_protocol(),
-                facts={"chapter_name": "力法"},
-            ),
-            final_request(
-                "search.clarification.required",
-                RequestProtocol.from_code(
-                    "CLARIFICATION_REQUIRED",
-                    request_id=REQUEST_ID,
-                    search_id=SEARCH_ID,
-                ),
-                actions=(UserAction.SELECT_CANDIDATE,),
-            ),
-            final_request(
-                "search.candidates.unavailable",
-                RequestProtocol.from_code(
-                    "CANDIDATE_LIST_UNAVAILABLE",
-                    request_id=REQUEST_ID,
-                    search_id=SEARCH_ID,
-                ),
-                actions=(UserAction.RETRY_UPLOAD,),
-            ),
-            final_request(
-                "search.candidates.recalled",
-                self.success_protocol(),
-                facts={"candidate_count": 2},
-                actions=(UserAction.SELECT_CANDIDATE,),
-            ),
-            final_request(
-                "search.candidates.rejected_more",
-                self.success_protocol(),
-                facts={"continuation_available": True},
-                actions=(UserAction.CONTINUE_SEARCH,),
-            ),
-            final_request(
-                "search.answer.mismatch",
-                self.success_protocol(),
-                actions=(UserAction.SHOW_CANDIDATES,),
-            ),
-            final_request(
-                "search.answer.resent",
-                self.success_protocol(),
-                facts={"delivered_image_count": 2},
-            ),
-            final_request(
-                "search.failed.nonretryable",
-                RequestProtocol.from_code(
-                    "BANK_ROUTE_FAILED",
-                    request_id=REQUEST_ID,
-                    search_id=SEARCH_ID,
-                ),
-                actions=(UserAction.UPLOAD_IMAGE,),
-            ),
-        )
-        for request in cases:
-            with self.subTest(key=request.message_key):
-                output = render_final_output(request)
-                self.assertEqual(output.message_key, request.message_key)
-
-        nonretryable = render_final_output(cases[-1])
-        self.assertFalse(nonretryable.protocol.retryable)
-        self.assertNotIn(UserAction.RETRY_SEARCH, nonretryable.allowed_actions)
-        self.assertNotIn("重试", nonretryable.text)
-
-    def test_a3_common_semantic_families_render_from_parent_state(self):
-        cases = (
-            final_request(
-                "page.no_units",
-                RequestProtocol.from_code(
-                    "PAGE_NO_SEARCHABLE_UNITS",
-                    request_id=REQUEST_ID,
-                    search_id=SEARCH_ID,
-                ),
-                facts={"question_count": 0},
-                actions=(UserAction.RETRY_UPLOAD,),
-            ),
-            final_request(
-                "page.ended",
-                self.success_protocol(),
-                actions=(UserAction.UPLOAD_IMAGE,),
-            ),
-            final_request(
-                "page.session.reset",
-                self.success_protocol(),
-                actions=(UserAction.UPLOAD_IMAGE,),
-            ),
-            final_request(
-                "page.current.guidance",
-                RequestProtocol.from_code(
-                    "CLARIFICATION_REQUIRED",
-                    request_id=REQUEST_ID,
-                    search_id=SEARCH_ID,
-                ),
-                actions=(UserAction.SELECT_QUESTION,),
-            ),
-            final_request(
-                "page.unit.stopped_remaining",
-                self.success_protocol(),
-                facts={"question_label": "四-2", "remaining_count": 2},
-                actions=(UserAction.SELECT_QUESTION,),
-            ),
-            final_request(
-                "page.unit.stopped_complete",
-                self.success_protocol(),
-                facts={"question_label": "四-2", "remaining_count": 0},
-                actions=(UserAction.UPLOAD_IMAGE,),
-            ),
-            final_request(
-                "page.crop.verification_failed",
-                RequestProtocol.from_code(
-                    "SERVICE_UNAVAILABLE",
-                    request_id=REQUEST_ID,
-                    search_id=SEARCH_ID,
-                ),
-                facts={"crop_draft_preserved": True},
-                actions=(UserAction.RETRY_REQUEST,),
-            ),
-        )
-        for request in cases:
-            with self.subTest(key=request.message_key):
-                output = render_final_output(request)
-                self.assertEqual(output.message_key, request.message_key)
-
-    def test_new_state_claims_fail_closed_when_their_evidence_is_false(self):
-        invalid = (
-            final_request(
-                "page.no_units",
-                RequestProtocol.from_code(
-                    "PAGE_NO_SEARCHABLE_UNITS",
-                    request_id=REQUEST_ID,
-                    search_id=SEARCH_ID,
-                ),
-                facts={"question_count": 1},
-                actions=(UserAction.RETRY_UPLOAD,),
-            ),
-            final_request(
-                "page.unit.stopped_complete",
-                self.success_protocol(),
-                facts={"question_label": "四-2", "remaining_count": 1},
-                actions=(UserAction.UPLOAD_IMAGE,),
-            ),
-            final_request(
-                "page.crop.verification_failed",
-                RequestProtocol.from_code(
-                    "SERVICE_UNAVAILABLE",
-                    request_id=REQUEST_ID,
-                    search_id=SEARCH_ID,
-                ),
-                facts={"crop_draft_preserved": False},
-                actions=(UserAction.RETRY_REQUEST,),
-            ),
-            final_request(
-                "search.candidates.rejected_more",
-                self.success_protocol(),
-                facts={"continuation_available": False},
-                actions=(UserAction.CONTINUE_SEARCH,),
-            ),
-        )
-        for request in invalid:
-            with self.subTest(key=request.message_key):
-                self.assert_service_fallback(render_final_output(request))
-
-    def test_stage4_compatibility_codes_keep_structured_semantics(self):
-        chapter = render_final_output(
-            final_request(
-                "search.chapter.required",
-                RequestProtocol.from_code(
-                    "CHAPTER_REQUIRED",
-                    request_id=REQUEST_ID,
-                    search_id=SEARCH_ID,
-                ),
-                facts={"global_search_offered": True},
-                actions=(UserAction.CHANGE_CHAPTER, UserAction.GLOBAL_SEARCH),
-            )
-        )
-        self.assertEqual(chapter.message_key, "search.chapter.required")
-
-        partial_questions = render_final_output(
-            final_request(
-                "search.questions.ready",
-                RequestProtocol.from_code(
-                    "MULTI_CROPS_UNAVAILABLE",
-                    request_id=REQUEST_ID,
-                    search_id=SEARCH_ID,
-                ),
-                facts={"question_count": 2},
-                actions=(UserAction.SELECT_QUESTION, UserAction.RETRY_SEARCH),
-                notices=("notice.multi_crop_partial",),
-            )
-        )
-        self.assertEqual(partial_questions.message_key, "search.questions.ready")
-        self.assertEqual(partial_questions.protocol.status, RequestStatus.PARTIAL)
-
-        for key, facts in (
-            ("search.candidates.ready", {"candidate_count": 2}),
-            (
-                "search.global.candidates.ready",
-                {"candidate_count": 2, "source_chapters": ("力法",)},
-            ),
-        ):
-            with self.subTest(key=key):
-                output = render_final_output(
-                    final_request(
-                        key,
-                        self.success_protocol(),
-                        facts=facts,
-                        actions=(UserAction.SELECT_CANDIDATE,),
-                    )
-                )
-                self.assertEqual(output.message_key, key)
-
-        page_global = render_final_output(
-            final_request(
-                "page.unit.candidates.ready",
-                RequestProtocol.from_code(
-                    "GLOBAL_CANDIDATES_FOUND",
-                    request_id=REQUEST_ID,
-                    search_id=SEARCH_ID,
-                ),
-                facts={
-                    "question_label": "四-2",
-                    "candidate_count": 2,
-                    "source_chapters": ("力法",),
-                },
-                actions=(UserAction.SELECT_CANDIDATE,),
-            )
-        )
-        self.assertEqual(page_global.message_key, "page.unit.candidates.ready")
-        self.assertIn("力法", page_global.text)
-
-        global_no_match = render_final_output(
-            final_request(
-                "search.no_match.global",
-                RequestProtocol.from_code(
-                    "NO_MATCH", request_id=REQUEST_ID, search_id=SEARCH_ID
-                ),
-                actions=(UserAction.CHANGE_CHAPTER,),
-            )
-        )
-        self.assertEqual(global_no_match.message_key, "search.no_match.global")
-
-    def test_global_search_action_still_requires_explicit_availability_fact(self):
-        output = render_final_output(
-            final_request(
-                "search.chapter.required",
-                RequestProtocol.from_code(
-                    "CHAPTER_REQUIRED",
-                    request_id=REQUEST_ID,
-                    search_id=SEARCH_ID,
-                ),
-                facts={"global_search_offered": False},
-                actions=(UserAction.CHANGE_CHAPTER, UserAction.GLOBAL_SEARCH),
-            )
-        )
-        self.assert_service_fallback(output)
-
-    def test_answer_resent_uses_actual_persisted_media_count(self):
-        protocol = RequestProtocol.from_code(
-            "MEDIA_PERSIST_FAILED", request_id=REQUEST_ID, search_id=SEARCH_ID
-        )
-        partial = render_final_output(
-            final_request(
-                "search.answer.resent",
-                protocol,
-                facts={"delivered_image_count": 1},
-                actions=(UserAction.RETRY_REQUEST,),
-                notices=("notice.media_partial",),
-            )
-        )
-        self.assertEqual(partial.message_key, "search.answer.resent")
-        self.assertIn("共 1 张", partial.text)
-
-        missing = render_final_output(
-            final_request(
-                "search.answer.resent",
-                protocol,
-                facts={"delivered_image_count": 0},
-                actions=(UserAction.RETRY_REQUEST,),
-                notices=("notice.media_partial",),
-            )
-        )
-        self.assert_service_fallback(missing)
-
-
 class DynamicLabelAndA1ReasonTest(UserOutputAssertions):
     def test_short_question_labels_are_preserved(self):
         protocol = RequestProtocol.from_code(
@@ -1482,59 +1107,33 @@ class DynamicLabelAndA1ReasonTest(UserOutputAssertions):
 class NoticeCatalogTest(UserOutputAssertions):
     FINAL_KEYS = {
         "conversation.greeting",
-        "conversation.courtesy",
-        "conversation.farewell",
-        "conversation.identity",
-        "conversation.capability",
-        "conversation.supported_chapters",
-        "conversation.workflow",
-        "conversation.general",
-        "conversation.current",
-        "conversation.out_of_scope",
-        "conversation.action_rejected",
         "search.upload.required",
-        "search.cancelled",
         "search.chapter.required",
-        "search.chapter.saved",
         "search.chapter.unsupported",
-        "search.clarification.required",
         "search.questions.ready",
         "search.candidates.ready",
         "search.global.candidates.ready",
-        "search.candidates.unavailable",
-        "search.candidates.recalled",
-        "search.candidates.rejected_more",
         "search.candidates.rejected",
         "search.no_match.chapter",
         "search.no_match.global",
         "search.answer.ready",
-        "search.answer.mismatch",
-        "search.answer.resent",
         "search.answer.missing",
         "search.failed.retryable",
-        "search.failed.nonretryable",
         "triage.a1.reasoned",
         "triage.a1.fallback",
         "triage.a1.no_external_load",
-        "page.no_units",
         "page.selection.required",
-        "page.current.guidance",
         "page.units.prepared",
         "page.crop.required",
         "page.crop.rejected",
-        "page.crop.verification_failed",
         "page.namespace.clarification",
         "page.cancel.scope_required.current",
         "page.cancel.scope_required.page",
         "page.unit.cancelled_remaining",
-        "page.unit.stopped_remaining",
-        "page.unit.stopped_complete",
         "page.unit.candidates.ready",
         "page.unit.answer.delivered_remaining",
         "page.unit.answer.delivered_complete",
         "page.completed",
-        "page.ended",
-        "page.session.reset",
         "page.stale.selection",
         "page.stale.candidate",
         "page.failed.retryable",

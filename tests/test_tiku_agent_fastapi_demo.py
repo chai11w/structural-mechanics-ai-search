@@ -16,8 +16,6 @@ from tiku_agent.fastapi_demo import MAX_FEEDBACK_BYTES, MAX_IMAGE_BYTES, SESSION
 from tiku_agent.feedback_store import SQLiteFeedbackStore, scope_feedback_conversation
 from tiku_agent.invite_access import InviteAccess, build_invitation_config
 from tiku_agent.session_runtime import AgentBudgetExceededError, AgentRuntimeBusyError
-from tiku_agent.user_output_integration import build_a2_output_draft, build_a3_output_draft
-from tiku_shared.request_protocol import RequestProtocol
 
 
 class FakeRuntime:
@@ -36,7 +34,7 @@ class FakeRuntime:
             "candidate_count": 0,
         }
 
-    def handle_text(self, session_id: str, text: str, *, identity_key="", progress=None, request_id="") -> AgentResponse:
+    def handle_text(self, session_id: str, text: str, *, identity_key="", progress=None) -> AgentResponse:
         self.last_identity = identity_key
         self.calls.append(("text", session_id, text))
         if progress is not None:
@@ -47,23 +45,9 @@ class FakeRuntime:
             "candidate_generation": "fake-generation",
             "candidate_count": 1,
         })
-        protocol = RequestProtocol.from_code(
-            "COARSE_CANDIDATES_FOUND",
-            request_id=request_id or "req_fake_text_stream",
-        )
-        return AgentResponse(
-            text="LEGACY_STREAM_TEXT",
-            images=[str(self.image_path)],
-            intent="select_candidate",
-            protocol=protocol.to_dict(),
-            output=build_a2_output_draft(
-                "search_image",
-                {"phase": "WAIT_CANDIDATE_CHOICE", "candidate_count": 1},
-                protocol,
-            ),
-        )
+        return AgentResponse(text="我明白了。", images=[str(self.image_path)], intent="select_candidate")
 
-    def handle_image(self, session_id: str, image_path: Path, *, identity_key="", progress=None, request_id="") -> AgentResponse:
+    def handle_image(self, session_id: str, image_path: Path, *, identity_key="", progress=None) -> AgentResponse:
         self.last_identity = identity_key
         self.calls.append(("image", session_id, image_path.is_file()))
         self.upload_session = session_id
@@ -77,20 +61,7 @@ class FakeRuntime:
         })
         if progress is not None:
             progress("searching", "正在按「4力法」搜索题目…")
-        protocol = RequestProtocol.from_code(
-            "CHAPTER_REQUIRED",
-            request_id=request_id or "req_fake_image_stream",
-        )
-        return AgentResponse(
-            text="LEGACY_STREAM_IMAGE_TEXT",
-            intent="search_image",
-            protocol=protocol.to_dict(),
-            output=build_a2_output_draft(
-                "search_image",
-                {"phase": "WAIT_CHAPTER"},
-                protocol,
-            ),
-        )
+        return AgentResponse(text="我正在帮你找。", intent="search_image")
 
     def clear(self, session_id: str) -> None:
         self.calls.append(("clear", session_id))
@@ -120,210 +91,7 @@ class FakeRuntime:
         return self.image_path if session_id == self.upload_session else None
 
 
-class SelectiveMediaRuntime(FakeRuntime):
-    def __init__(self, image_path: Path, *, failed_names: set[str]):
-        super().__init__(image_path)
-        self.failed_names = set(failed_names)
-
-    def persist_media(self, session_id: str, source: Path) -> Path | None:
-        if source.name in self.failed_names:
-            return None
-        return super().persist_media(session_id, source)
-
-
 class FastApiDemoTest(unittest.TestCase):
-    def test_unstructured_agent_response_fails_closed_and_keeps_request_ids(self):
-        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
-        test_dir = runtime_dir / f"unstructured_output_{uuid4().hex}"
-        test_dir.mkdir(parents=True)
-        self.addCleanup(lambda: shutil.rmtree(test_dir, ignore_errors=True))
-        image_path = test_dir / "private_candidate.jpg"
-        Image.new("RGB", (8, 8), "white").save(image_path)
-        runtime = FakeRuntime(image_path)
-        protocol = RequestProtocol.from_code(
-            "REQUEST_SUCCEEDED",
-            request_id="req_unstructured_output",
-            search_id="search_unstructured_output",
-        )
-
-        payload = _agent_payload(
-            AgentResponse(
-                text="Traceback PRIVATE_LEGACY_TEXT",
-                images=[str(image_path)],
-                intent="a3_session_reset",
-                protocol=protocol.to_dict(),
-                author_contact={"label": "private", "value": "secret"},
-            ),
-            runtime,
-            "session_unstructured_output",
-        )
-
-        self.assertEqual(payload["code"], "SERVICE_UNAVAILABLE")
-        self.assertEqual(payload["request_id"], "req_unstructured_output")
-        self.assertEqual(payload["search_id"], "search_unstructured_output")
-        self.assertEqual(payload["images"], [])
-        self.assertEqual(payload["intent"], "")
-        self.assertEqual(payload["author_contact"], {})
-        self.assertNotIn("PRIVATE", json.dumps(payload, ensure_ascii=False))
-
-    def test_structured_candidate_media_is_atomic_and_never_uses_legacy_text(self):
-        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
-        test_dir = runtime_dir / f"structured_candidates_{uuid4().hex}"
-        test_dir.mkdir(parents=True)
-        self.addCleanup(lambda: shutil.rmtree(test_dir, ignore_errors=True))
-        first = test_dir / "candidate_1.jpg"
-        second = test_dir / "candidate_2.jpg"
-        Image.new("RGB", (8, 8), "white").save(first)
-        Image.new("RGB", (8, 8), "white").save(second)
-        runtime = SelectiveMediaRuntime(first, failed_names={second.name})
-        protocol = RequestProtocol.from_code(
-            "COARSE_CANDIDATES_FOUND",
-            request_id="req_candidate_atomic",
-            search_id="search_candidate_atomic",
-        )
-        draft = build_a2_output_draft(
-            "search_image",
-            {"phase": "WAIT_CANDIDATE_CHOICE", "candidate_count": 2},
-            protocol,
-        )
-
-        payload = _agent_payload(
-            AgentResponse(
-                text="LEGACY_TEXT_MUST_NOT_ESCAPE",
-                images=[str(first), str(second)],
-                intent="search_image",
-                protocol=protocol.to_dict(),
-                output=draft,
-            ),
-            runtime,
-            "session_structured_candidates",
-        )
-
-        self.assertEqual(payload["code"], "MEDIA_NOT_FOUND")
-        self.assertEqual(payload["message_key"], "system.media.not_found")
-        self.assertEqual(payload["images"], [])
-        self.assertNotIn("LEGACY_TEXT_MUST_NOT_ESCAPE", payload["text"])
-        self.assertEqual(payload["failure"]["recovery_action"], "retry_request")
-
-    def test_structured_answer_keeps_internal_expected_count_when_path_list_is_short(self):
-        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
-        test_dir = runtime_dir / f"structured_answer_{uuid4().hex}"
-        test_dir.mkdir(parents=True)
-        self.addCleanup(lambda: shutil.rmtree(test_dir, ignore_errors=True))
-        first = test_dir / "answer_1.jpg"
-        second = test_dir / "answer_2.jpg"
-        Image.new("RGB", (8, 8), "white").save(first)
-        Image.new("RGB", (8, 8), "white").save(second)
-        runtime = SelectiveMediaRuntime(first, failed_names=set())
-        protocol = RequestProtocol.from_code(
-            "ANSWER_FILES_FOUND",
-            request_id="req_answer_partial",
-            search_id="search_answer_partial",
-        )
-        draft = build_a2_output_draft(
-            "select_candidate",
-            {
-                "phase": "ANSWERED",
-                "delivered_image_count": 2,
-                "selected_question": 1,
-            },
-            protocol,
-        )
-
-        payload = _agent_payload(
-            AgentResponse(
-                text="LEGACY_ANSWER_MUST_NOT_ESCAPE",
-                images=[str(first)],
-                intent="select_candidate",
-                protocol=protocol.to_dict(),
-                output=draft,
-            ),
-            runtime,
-            "session_structured_answer",
-        )
-
-        self.assertEqual(payload["code"], "MEDIA_PERSIST_FAILED")
-        self.assertEqual(payload["status"], "PARTIAL")
-        self.assertEqual(payload["images"], [f"/api/media/{first.name}"])
-        self.assertIn("共 1 张", payload["text"])
-        self.assertIn("部分结果图片未能交付", payload["text"])
-        self.assertNotIn("LEGACY_ANSWER_MUST_NOT_ESCAPE", payload["text"])
-        self.assertIsNone(payload["failure"])
-
-    def test_structured_answer_with_no_delivered_media_fails_closed(self):
-        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
-        test_dir = runtime_dir / f"structured_answer_none_{uuid4().hex}"
-        test_dir.mkdir(parents=True)
-        self.addCleanup(lambda: shutil.rmtree(test_dir, ignore_errors=True))
-        answer = test_dir / "answer.jpg"
-        Image.new("RGB", (8, 8), "white").save(answer)
-        runtime = SelectiveMediaRuntime(answer, failed_names={answer.name})
-        protocol = RequestProtocol.from_code(
-            "ANSWER_FILES_FOUND",
-            request_id="req_answer_missing",
-            search_id="search_answer_missing",
-        )
-        draft = build_a2_output_draft(
-            "select_candidate",
-            {"phase": "ANSWERED", "delivered_image_count": 1},
-            protocol,
-        )
-
-        payload = _agent_payload(
-            AgentResponse(
-                text="LEGACY_ANSWER_MUST_NOT_ESCAPE",
-                images=[str(answer)],
-                intent="select_candidate",
-                protocol=protocol.to_dict(),
-                output=draft,
-            ),
-            runtime,
-            "session_structured_answer_none",
-        )
-
-        self.assertEqual(payload["code"], "MEDIA_NOT_FOUND")
-        self.assertEqual(payload["images"], [])
-        self.assertNotIn("LEGACY_ANSWER_MUST_NOT_ESCAPE", payload["text"])
-
-    def test_malformed_structured_protocol_returns_safe_service_message(self):
-        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
-        test_dir = runtime_dir / f"structured_bad_protocol_{uuid4().hex}"
-        test_dir.mkdir(parents=True)
-        self.addCleanup(lambda: shutil.rmtree(test_dir, ignore_errors=True))
-        image_path = test_dir / "candidate.jpg"
-        Image.new("RGB", (8, 8), "white").save(image_path)
-        runtime = FakeRuntime(image_path)
-        protocol = RequestProtocol.from_code(
-            "COARSE_CANDIDATES_FOUND",
-            request_id="req_bad_protocol",
-            search_id="search_bad_protocol",
-        )
-        draft = build_a2_output_draft(
-            "search_image",
-            {"phase": "WAIT_CANDIDATE_CHOICE", "candidate_count": 1},
-            protocol,
-        )
-        malformed = protocol.to_dict()
-        malformed["unexpected"] = "field"
-
-        payload = _agent_payload(
-            AgentResponse(
-                text="RAW_PROTOCOL_ERROR_MUST_NOT_ESCAPE",
-                images=[str(image_path)],
-                intent="search_image",
-                protocol=malformed,
-                output=draft,
-            ),
-            runtime,
-            "session_structured_bad_protocol",
-        )
-
-        self.assertEqual(payload["code"], "SERVICE_UNAVAILABLE")
-        self.assertEqual(payload["message_key"], "system.service.unavailable")
-        self.assertEqual(payload["images"], [])
-        self.assertEqual(payload["intent"], "")
-        self.assertNotIn("RAW_PROTOCOL_ERROR_MUST_NOT_ESCAPE", payload["text"])
-
     def test_feedback_submission_captures_visible_conversation_and_session_media(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
         test_dir = runtime_dir / f"feedback_case_{uuid4().hex}"
@@ -411,26 +179,8 @@ class FastApiDemoTest(unittest.TestCase):
             "candidate_count": 99,
             "a3": {"task_revision": 2, "auto_crop_overlay_available": True},
         })
-        protocol = RequestProtocol.from_code(
-            "QUESTION_UNITS_PREPARED",
-            request_id="req_feedback_overlay",
-        )
         prepared = _agent_payload(
-            AgentResponse(
-                text="已准备 9 道题。",
-                intent="a3_units_prepared",
-                protocol=protocol.to_dict(),
-                output=build_a3_output_draft(
-                    "a3_units_prepared",
-                    {
-                        "phase": "WAIT_UNIT_SELECTION",
-                        "question_count": 9,
-                        "ready_count": 9,
-                        "manual_count": 0,
-                    },
-                    protocol,
-                ),
-            ),
+            AgentResponse(text="已准备 9 道题。", intent="a3_units_prepared"),
             runtime,
             session_id,
         )
@@ -675,7 +425,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260822-feedback-v1"', 'src="/assets/demo.js?v=20260822-output-layer-v1"',
+            'href="/assets/demo.css?v=20260822-feedback-v1"', 'src="/assets/demo.js?v=20260822-feedback-v1"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -696,9 +446,9 @@ class FastApiDemoTest(unittest.TestCase):
             "HISTORY_TTL_MS = 2 * 60 * 60 * 1000", "HISTORY_LIMIT = 50", "repairUploadedImageHistory()",
             "lastActivityAt: historyLastActivityAt", "saveHistory({ refreshActivity: true })",
             "function scheduleHistoryExpiry()", "function expireHistoryIfNeeded()",
-            "if (!snapshot.session_valid)", "window.addEventListener('focus', expireHistoryIfNeeded)",
+            "if (!data.session?.session_valid)", "window.addEventListener('focus', expireHistoryIfNeeded)",
             "document.addEventListener('visibilitychange'",
-            "data.message_key === 'page.session.reset' && data.status === 'SUCCESS'",
+            "data.intent === 'a3_session_reset'",
             "data.uploaded_image", "Number.isFinite(activityAt)", "无法连接服务",
             "IMAGE_TARGET_BYTES = 1024 * 1024", "IMAGE_MAX_DIMENSION = 2560", "IMAGE_FALLBACK_DIMENSION = 2048",
             "canvas.toBlob(resolve, 'image/jpeg', quality)", "formData.append('file', prepared.blob, prepared.filename)",
@@ -706,8 +456,8 @@ class FastApiDemoTest(unittest.TestCase):
             "const uploadRow = addLocalUploadPreview(sourcePreview)", "setUploadRowStatus(uploadRow, '我发了一张题图。')",
             "message: '正在识别题目'", "setStatus('working', '正在识别题目…')",
             "requestStream('/api/message/stream'", "requestStream('/api/image/stream'",
-            "function updatePendingMessage", "setStatus('working', event.text)",
-            "updatePendingMessage(pending, event.text);",
+            "function updatePendingMessage", "setStatus('working', event.message)",
+            "updatePendingMessage(pending, event.message);",
             "function refocusComposerOnDesktop()", "window.matchMedia('(hover: hover) and (pointer: fine)')",
             "textInput.focus({ preventScroll: true })",
             "function syncVisualViewport()", "window.visualViewport?.addEventListener('resize', syncVisualViewport",
@@ -719,7 +469,7 @@ class FastApiDemoTest(unittest.TestCase):
             "['found_answer', '找到了正确答案']", "['not_found', '没找到正确题']",
             "const feedbackEligible = !item.me && item.variant !== 'pending'",
             "function createRecoveryActions", "登录状态已失效，请重新登录。",
-            "这次请求没有处理成功，请检查后重试。",
+            "这次请求没有处理成功，请直接重试；如果仍然失败，请点踩并补充说明。",
             "if (now - activityAt >= HISTORY_TTL_MS)", "showSessionExpiredNotice();",
             "function flushStartupNotices", "pendingSessionExpiredNotice = true",
             "variant: 'error', recoveryActions:",
@@ -740,8 +490,10 @@ class FastApiDemoTest(unittest.TestCase):
             "pending.querySelector('.message-content')?.replaceChildren(document.createTextNode(event.message));",
             _SCRIPT,
         )
-        self.assertIn("const publicMessage = canonicalPublicMessage(data)", _SCRIPT)
-        self.assertIn("canonicalPublicMessage(event?.data, { progress: true })", _SCRIPT)
+        self.assertLess(
+            _SCRIPT.index("if (status === 503"),
+            _SCRIPT.index("if (status >= 500)"),
+        )
         self.assertNotIn("A temporary network failure should not discard", _SCRIPT)
         self.assertNotIn("new File(", _SCRIPT)
         self.assertNotIn("sendTextValue(String(index + 1)", _SCRIPT)
@@ -877,12 +629,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.post("/api/message", json=[]).status_code, 400)
         text_response = client.post("/api/message", json={"text": "就这个"})
         self.assertEqual(text_response.status_code, 200)
-        self.assertEqual(
-            text_response.json()["text"],
-            "找到了 1 道较相似的候选题，请选择候选编号。",
-        )
-        self.assertEqual(text_response.json()["message_key"], "search.candidates.ready")
-        self.assertEqual(text_response.json()["code"], "COARSE_CANDIDATES_FOUND")
+        self.assertEqual(text_response.json()["text"], "我明白了。")
         self.assertEqual(text_response.json()["author_contact"], {})
         self.assertIsNone(text_response.json()["failure"])
         self.assertIn(SESSION_COOKIE, text_response.cookies)
@@ -925,47 +672,25 @@ class FastApiDemoTest(unittest.TestCase):
                 super().__init__(image_path)
                 self.has_active_image = has_active_image
 
-            def handle_text(
-                self,
-                session_id: str,
-                text: str,
-                *,
-                identity_key="",
-                progress=None,
-                request_id="",
-            ) -> AgentResponse:
+            def handle_text(self, session_id: str, text: str, *, identity_key="", progress=None) -> AgentResponse:
                 del text, identity_key, progress
                 self.snapshot.update({
                     "session_valid": True,
                     "phase": "ERROR",
                     "has_active_image": self.has_active_image,
                 })
-                protocol = RequestProtocol.from_code(
-                    "AGENT_FAILED",
-                    request_id=request_id or "req_fake_business_error",
-                )
                 return AgentResponse(
                     text="这次没查成功。题图已保留，你可以直接回复“重试”。",
                     intent="unsupported",
-                    protocol=protocol.to_dict(),
-                    output=build_a2_output_draft(
-                        "unsupported",
-                        self.snapshot,
-                        protocol,
-                    ),
                 )
 
-        for has_active_image, expected_code, expected_action in (
-            (True, "AGENT_FAILED", "retry_search"),
-            (False, "SERVICE_UNAVAILABLE", "retry_request"),
-        ):
+        for has_active_image, expected_action in ((True, "retry_search"), (False, "new_chat")):
             with self.subTest(has_active_image=has_active_image):
                 response = TestClient(create_app(runtime=ErrorRuntime(
                     image_path, has_active_image=has_active_image,
                 ))).post("/api/message", json={"text": "重试"})
 
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.json()["code"], expected_code)
                 self.assertEqual(
                     response.json()["failure"],
                     {"kind": "business_error", "recovery_action": expected_action},
@@ -978,22 +703,11 @@ class FastApiDemoTest(unittest.TestCase):
         Image.new("RGB", (4, 4), "white").save(image_path)
         client = TestClient(create_app(runtime=FakeRuntime(image_path)))
 
-        request_id = "req_0123456789abcdef0123456789abcdef"
-        text_response = client.post(
-            "/api/message/stream",
-            json={"text": "按力法搜"},
-            headers={"x-request-id": request_id},
-        )
+        text_response = client.post("/api/message/stream", json={"text": "按力法搜"})
         text_events = [json.loads(line) for line in text_response.text.splitlines() if line]
         self.assertEqual([event["type"] for event in text_events], ["progress", "result"])
-        progress = text_events[0]["data"]
-        self.assertEqual(progress["kind"], "progress")
-        self.assertEqual(progress["message_key"], "progress.image.analysis")
-        self.assertEqual(progress["stage"], "image_analysis")
-        self.assertEqual(progress["sequence"], 1)
-        self.assertEqual(progress["request_id"], request_id)
-        self.assertNotIn("力法", progress["text"])
-        self.assertEqual(text_events[-1]["data"]["request_id"], request_id)
+        self.assertEqual(text_events[0]["stage"], "searching")
+        self.assertIn("力法", text_events[0]["message"])
 
         buffer = io.BytesIO()
         Image.new("RGB", (4, 4), "white").save(buffer, format="JPEG")
@@ -1003,228 +717,7 @@ class FastApiDemoTest(unittest.TestCase):
         )
         image_events = [json.loads(line) for line in image_response.text.splitlines() if line]
         self.assertEqual([event["type"] for event in image_events], ["progress", "result"])
-        self.assertEqual(image_events[0]["data"]["sequence"], 1)
-        self.assertEqual(image_events[0]["data"]["kind"], "progress")
         self.assertTrue(image_events[-1]["data"]["uploaded_image"].startswith("/api/upload/"))
-
-    def test_stream_progress_sequence_and_ids_are_monotonic_and_nonreflective(self):
-        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
-        image_path = runtime_dir / f"demo_progress_contract_{uuid4().hex}.jpg"
-        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
-        Image.new("RGB", (4, 4), "white").save(image_path)
-        request_id = "req_abcdef0123456789abcdef0123456789"
-        search_id = "search_abcdef0123456789abcdef01234567"
-
-        class MultiProgressRuntime(FakeRuntime):
-            def __init__(self, path):
-                super().__init__(path)
-                self.snapshot["search_id"] = search_id
-
-            def handle_text(
-                self,
-                session_id,
-                text,
-                *,
-                identity_key="",
-                progress=None,
-                request_id="",
-            ):
-                del session_id, text, identity_key
-                progress("searching", "Traceback PRIVATE_PROGRESS_ONE")
-                progress("unknown_internal_stage", "C:\\private\\PRIVATE_PROGRESS_TWO")
-                self.snapshot.update({
-                    "session_valid": True,
-                    "phase": "WAIT_CANDIDATE_CHOICE",
-                    "candidate_count": 1,
-                })
-                protocol = RequestProtocol.from_code(
-                    "COARSE_CANDIDATES_FOUND",
-                    request_id=request_id,
-                    search_id=search_id,
-                )
-                return AgentResponse(
-                    text="PRIVATE_FINAL_TEXT",
-                    images=[str(self.image_path)],
-                    intent="search_image",
-                    protocol=protocol.to_dict(),
-                    output=build_a2_output_draft(
-                        "search_image",
-                        {"phase": "WAIT_CANDIDATE_CHOICE", "candidate_count": 1},
-                        protocol,
-                    ),
-                )
-
-        response = TestClient(create_app(runtime=MultiProgressRuntime(image_path))).post(
-            "/api/message/stream",
-            json={"text": "搜索"},
-            headers={"x-request-id": request_id},
-        )
-        events = [json.loads(line) for line in response.text.splitlines() if line]
-        progress_events = [event["data"] for event in events if event["type"] == "progress"]
-        self.assertEqual([item["sequence"] for item in progress_events], [1, 2])
-        self.assertEqual({item["request_id"] for item in progress_events}, {request_id})
-        self.assertEqual({item["search_id"] for item in progress_events}, {search_id})
-        self.assertEqual(events[-1]["data"]["request_id"], request_id)
-        self.assertEqual(events[-1]["data"]["search_id"], search_id)
-        self.assertNotIn("PRIVATE_PROGRESS", response.text)
-        self.assertNotIn("PRIVATE_FINAL_TEXT", response.text)
-
-    def test_new_image_stream_establishes_search_id_after_empty_progress_id(self):
-        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
-        image_path = runtime_dir / f"demo_new_search_stream_{uuid4().hex}.jpg"
-        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
-        Image.new("RGB", (4, 4), "white").save(image_path)
-        request_id = "req_1234567890abcdef1234567890abcdef"
-        new_search_id = "search_1234567890abcdef1234567890abcd"
-
-        class NewSearchRuntime(FakeRuntime):
-            def __init__(self, path):
-                super().__init__(path)
-                self.snapshot["search_id"] = "search_previous_request_01"
-
-            def handle_image(
-                self,
-                session_id,
-                uploaded_path,
-                *,
-                identity_key="",
-                progress=None,
-                request_id="",
-            ):
-                del identity_key
-                self.calls.append(("image", session_id, uploaded_path.is_file()))
-                self.upload_session = session_id
-                progress("searching", "PRIVATE_NEW_SEARCH_PROGRESS")
-                self.snapshot.update({
-                    "session_valid": True,
-                    "phase": "WAIT_CHAPTER",
-                    "has_active_image": True,
-                    "search_id": new_search_id,
-                })
-                protocol = RequestProtocol.from_code(
-                    "CHAPTER_REQUIRED",
-                    request_id=request_id,
-                    search_id=new_search_id,
-                )
-                return AgentResponse(
-                    text="PRIVATE_NEW_SEARCH_FINAL",
-                    intent="search_image",
-                    protocol=protocol.to_dict(),
-                    output=build_a2_output_draft(
-                        "search_image",
-                        {"phase": "WAIT_CHAPTER"},
-                        protocol,
-                    ),
-                )
-
-        buffer = io.BytesIO()
-        Image.new("RGB", (4, 4), "white").save(buffer, format="JPEG")
-        response = TestClient(create_app(runtime=NewSearchRuntime(image_path))).post(
-            "/api/image/stream",
-            files={"file": ("question.jpg", buffer.getvalue(), "image/jpeg")},
-            headers={"x-request-id": request_id},
-        )
-
-        events = [json.loads(line) for line in response.text.splitlines() if line]
-        self.assertEqual([event["type"] for event in events], ["progress", "result"])
-        self.assertEqual(events[0]["data"]["search_id"], "")
-        self.assertEqual(events[-1]["data"]["search_id"], new_search_id)
-        self.assertEqual({event["data"]["request_id"] for event in events}, {request_id})
-        self.assertNotIn("PRIVATE_NEW_SEARCH", response.text)
-
-    def test_public_session_snapshot_removes_internal_a3_state(self):
-        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
-        image_path = runtime_dir / f"demo_public_session_{uuid4().hex}.jpg"
-        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
-        Image.new("RGB", (4, 4), "white").save(image_path)
-        runtime = FakeRuntime(image_path)
-        runtime.snapshot.update({
-            "session_valid": True,
-            "phase": "WAIT_UNIT_SELECTION",
-            "search_id": "search_public_session_01",
-            "private_path": "C:\\private\\LEAK_SESSION",
-            "a3": {
-                "enabled": True,
-                "phase": "WAIT_UNIT_SELECTION",
-                "task_revision": 7,
-                "auto_crop_enabled": True,
-                "auto_prepare_all_enabled": True,
-                "auto_prepare_all_units": False,
-                "page_finished": False,
-                "pending_intent_clarification": {"raw": "LEAK_PENDING"},
-                "last_intent": {"reasoning": "LEAK_INTENT"},
-                "completed_unit_ids": ["unit_2"],
-                "searched_unit_ids": [],
-                "requested_unit_ids": ["unit_1"],
-                "auto_crop_page_status": "LEAK_AUTO_STATUS",
-                "intent_v1_enabled": True,
-                "auto_crop_overlay_available": True,
-                "crop_review_required": True,
-                "crop_review_feedback": "Traceback LEAK_CROP_FEEDBACK",
-                "crop_draft": {
-                    "available": True,
-                    "bounds": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
-                    "path": "C:\\private\\LEAK_CROP_PATH",
-                },
-                "units": [{
-                    "unit_id": "unit_1",
-                    "page_index": 1,
-                    "display_label": "第1题",
-                    "title_text": "题目C:\\private\\LEAK_TITLE",
-                    "completed": False,
-                    "searched": False,
-                    "selected": True,
-                    "requested": True,
-                    "grounding_status": "auto_ready",
-                    "validation_status": "manual_required",
-                    "crop_available": True,
-                    "auto_bounds": {"x": 0.1},
-                    "reason_codes": ["LEAK_REASON"],
-                }],
-                "selected_unit": {
-                    "unit_id": "unit_1",
-                    "display_label": "第1题",
-                    "context_text": "题干/home/private/LEAK_CONTEXT",
-                },
-            },
-        })
-
-        payload = TestClient(create_app(runtime=runtime)).get("/api/session").json()
-        public = payload["session"]
-        encoded = json.dumps(public, ensure_ascii=False)
-        for forbidden in (
-            "pending_intent_clarification", "last_intent", "reason_codes",
-            "auto_bounds", "completed_unit_ids", "searched_unit_ids",
-            "requested_unit_ids", "auto_crop_page_status", "intent_v1_enabled",
-            "crop_review_feedback", "private_path", "LEAK_",
-        ):
-            self.assertNotIn(forbidden, encoded)
-        a3 = public["a3"]
-        self.assertEqual(a3["units"][0]["preparation_status"], "manual")
-        self.assertEqual(a3["units"][0]["title_text"], "")
-        self.assertEqual(a3["selected_unit"]["context_text"], "")
-        self.assertEqual(
-            a3["crop_draft"]["bounds"],
-            {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4},
-        )
-
-    def test_api_http_errors_use_canonical_nonreflective_output(self):
-        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
-        image_path = runtime_dir / f"demo_http_output_{uuid4().hex}.jpg"
-        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
-        Image.new("RGB", (4, 4), "white").save(image_path)
-        response = TestClient(create_app(runtime=FakeRuntime(image_path))).post(
-            "/api/message",
-            content=b"PRIVATE_INVALID_JSON",
-            headers={"content-type": "application/json"},
-        )
-        payload = response.json()
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(payload["schema_version"], 1)
-        self.assertEqual(payload["message_key"], "search.clarification.required")
-        self.assertEqual(payload["code"], "MESSAGE_INVALID")
-        self.assertNotIn("detail", payload)
-        self.assertNotIn("PRIVATE_INVALID_JSON", response.text)
 
     def test_old_candidate_button_is_rejected_without_running_agent(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
@@ -1255,12 +748,7 @@ class FastApiDemoTest(unittest.TestCase):
 
         events = [json.loads(line) for line in response.text.splitlines() if line]
         self.assertEqual([event["type"] for event in events], ["result"])
-        self.assertEqual(
-            events[0]["data"]["text"],
-            "刚才的候选状态已经失效，请重新上传题图。",
-        )
-        self.assertEqual(events[0]["data"]["message_key"], "page.stale.candidate")
-        self.assertEqual(events[0]["data"]["code"], "STALE_CANDIDATE")
+        self.assertIn("上一道题", events[0]["data"]["text"])
         self.assertEqual(events[0]["data"]["intent"], "stale_candidate")
         self.assertEqual(runtime.calls, [])
 
@@ -1271,7 +759,7 @@ class FastApiDemoTest(unittest.TestCase):
         Image.new("RGB", (4, 4), "white").save(image_path)
 
         class GuardedRuntime(FakeRuntime):
-            error = AgentRuntimeBusyError("Traceback PRIVATE_QUEUE_DETAIL")
+            error = AgentRuntimeBusyError("当前请求较多，请稍后再试。")
 
             def handle_text(self, session_id: str, text: str, *, progress=None) -> AgentResponse:
                 raise self.error
@@ -1282,21 +770,17 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(busy.status_code, 429)
         self.assertEqual(busy.headers["retry-after"], "15")
         self.assertEqual(busy.headers["cache-control"], "no-store")
-        self.assertEqual(busy.json()["message_key"], "system.queue.full")
-        self.assertNotIn("PRIVATE_QUEUE_DETAIL", busy.text)
 
         stream = client.post("/api/message/stream", json={"text": "你好"})
         events = [json.loads(line) for line in stream.text.splitlines() if line]
         self.assertEqual(events[0]["type"], "error")
-        event = events[0]["data"]
-        self.assertEqual(event["message_key"], "system.queue.full")
-        self.assertEqual(event["status"], "ERROR")
-        self.assertEqual(event["layer"], "queue")
-        self.assertEqual(event["code"], "QUEUE_FULL")
-        self.assertTrue(event["retryable"])
-        self.assertEqual(event["action"], "retry_request")
-        self.assertTrue(event["request_id"].startswith("req_"))
-        self.assertNotIn("PRIVATE_QUEUE_DETAIL", stream.text)
+        self.assertEqual(events[0]["message"], "当前请求较多，请稍后再试。")
+        self.assertEqual(events[0]["status"], "ERROR")
+        self.assertEqual(events[0]["layer"], "queue")
+        self.assertEqual(events[0]["code"], "QUEUE_FULL")
+        self.assertTrue(events[0]["retryable"])
+        self.assertEqual(events[0]["action"], "retry_request")
+        self.assertTrue(events[0]["request_id"].startswith("req_"))
 
         runtime.error = AgentBudgetExceededError("今日服务额度已用完，请明天再试。")
         budget = client.post("/api/message", json={"text": "你好"})

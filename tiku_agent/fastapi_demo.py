@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from io import BytesIO
 import inspect
@@ -31,19 +30,6 @@ from tiku_agent.session_runtime import (
     AgentSessionRuntime,
 )
 from tiku_agent.session_store import SQLiteSessionStore
-from tiku_agent.user_output import (
-    USER_OUTPUT_SCHEMA_VERSION,
-    ProgressOutputRequestV1,
-    PublicContactV1,
-    PublicMessageV1,
-    UserAction,
-    render_progress_output,
-)
-from tiku_agent.user_output_integration import (
-    build_a2_output_draft,
-    build_a3_output_draft,
-    finalize_output_draft,
-)
 from tiku_shared.model_costs import SQLiteModelCostLedger
 from tiku_shared.request_protocol import (
     RequestAction,
@@ -79,46 +65,6 @@ FEEDBACK_TAGS = {
     },
 }
 logger = logging.getLogger(__name__)
-_PUBLIC_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$")
-_PUBLIC_PROTOCOL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_-]{7,127}$")
-_PUBLIC_STATE_PHASE_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
-_PUBLIC_STATE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_PUBLIC_STATE_SENSITIVE_PATTERNS = (
-    re.compile(r"https?://", re.IGNORECASE),
-    re.compile(r"[A-Za-z]:[\\/]"),
-    re.compile(
-        r"/(?:app|etc|home|opt|private|root|srv|tmp|usr|var)(?:/|\b)",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\b(?:authorization|bearer|api[_ -]?key|access[_ -]?token|password|cookie)\b", re.IGNORECASE),
-    re.compile(r"\b(?:sk-[A-Za-z0-9_-]{6,}|gh[pousr]_[A-Za-z0-9]{6,}|AKIA[A-Z0-9]{8,})\b"),
-    re.compile(
-        r"(?:^|[^A-Za-z0-9])(?:token|secret|password|api[_-]?key)[_:= -][A-Za-z0-9_-]{4,}",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\btraceback\b", re.IGNORECASE),
-    re.compile(r"\b[A-Za-z_][A-Za-z0-9_.]{0,80}(?:Error|Exception)\s*:", re.IGNORECASE),
-    re.compile(
-        r"\b(?:invalid_observation_schema|schema_error|raw_model_output|reasoning|"
-        r"route[_ -]?code|reason[_ -]?code|confidence|debug|prompt)\b",
-        re.IGNORECASE,
-    ),
-)
-_PROGRESS_KEY_BY_STAGE = {
-    "queued": "progress.queue.waiting",
-    "dequeued": "progress.queue.started",
-    "triage": "progress.image.triage",
-    "searching": "progress.image.analysis",
-    "global_searching": "progress.search.global",
-    "a3_understanding": "progress.page.understanding",
-    "a3_reunderstanding": "progress.page.reunderstanding",
-    "a3_auto_grounding": "progress.page.auto_grounding",
-    # These callbacks do not yet carry a structured question label.  A fixed,
-    # generic registered message is safer than reflecting their raw text.
-    "a3_auto_validating": "progress.image.analysis",
-    "a3_verifying": "progress.image.analysis",
-    "a3_analyzing_unit": "progress.image.analysis",
-}
 _PAGE = (WEB_DIR / "index.html").read_text(encoding="utf-8")
 _STYLE = (WEB_DIR / "demo.css").read_text(encoding="utf-8")
 _SCRIPT = (WEB_DIR / "demo.js").read_text(encoding="utf-8")
@@ -185,7 +131,7 @@ def create_app(
     @app.exception_handler(HTTPException)
     async def public_http_error(request: Request, exc: HTTPException) -> Response:
         if not request.url.path.startswith("/api/"):
-            return HTMLResponse("页面不可用。", status_code=exc.status_code)
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
         session_id = str(request.cookies.get(session_cookie) or "").strip()
         search_id = ""
         if session_id:
@@ -201,6 +147,7 @@ def create_app(
                 error_kind="HTTPException",
             )
         return _protocol_json_response(
+            str(exc.detail),
             protocol,
             status_code=exc.status_code,
             headers=exc.headers,
@@ -213,6 +160,7 @@ def create_app(
             search_id=exc.search_id,
         )
         return _protocol_json_response(
+            str(exc),
             protocol,
             status_code=429,
             headers={"Retry-After": "15", "Cache-Control": "no-store"},
@@ -225,6 +173,7 @@ def create_app(
             search_id=exc.search_id,
         )
         return _protocol_json_response(
+            str(exc),
             protocol,
             status_code=503,
             headers={"Retry-After": "3600", "Cache-Control": "no-store"},
@@ -237,6 +186,7 @@ def create_app(
             search_id=exc.search_id,
         )
         return _protocol_json_response(
+            str(exc),
             protocol,
             status_code=500,
             headers={"Cache-Control": "no-store"},
@@ -264,6 +214,7 @@ def create_app(
                 error_kind="UnhandledException",
             )
         return _protocol_json_response(
+            "服务端处理失败，请稍后重试。",
             protocol,
             status_code=500,
             headers={"Cache-Control": "no-store"},
@@ -287,6 +238,7 @@ def create_app(
             if identity is None and not public_path:
                 if request.url.path.startswith("/api/"):
                     result = _protocol_json_response(
+                        "请先使用有效邀请码登录。",
                         RequestProtocol.from_code(
                             "LOGIN_REQUIRED", request_id=_request_id(request)
                         ),
@@ -494,7 +446,7 @@ def create_app(
                 ),
             )
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail="invalid feedback payload") from exc
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         protocol = RequestProtocol(
             status=RequestStatus.SUCCESS,
             layer=RequestLayer.FEEDBACK,
@@ -579,7 +531,7 @@ def create_app(
         snapshot = runtime.session_snapshot(session_id)
         result = JSONResponse({
             "uploaded_image": f"/api/upload/{path.name}" if path is not None else "",
-            "session": _public_session_snapshot(snapshot),
+            "session": snapshot,
         })
         _set_session_cookie(
             result,
@@ -674,22 +626,14 @@ def create_app(
         if session_id:
             search_id = str(runtime.session_snapshot(session_id).get("search_id") or "")
             runtime.clear(session_id)
-        protocol = RequestProtocol.from_code(
-            "SESSION_RESET",
+        protocol = RequestProtocol(
+            status=RequestStatus.SUCCESS,
+            layer=RequestLayer.SESSION,
+            code="SESSION_RESET",
             request_id=_request_id(request),
             search_id=search_id,
         )
-        message = finalize_output_draft(
-            build_a3_output_draft(
-                "a3_session_reset",
-                {"phase": "IDLE"},
-                protocol,
-            ),
-            protocol,
-            delivered_count=0,
-            expected_media_count=0,
-        )
-        result = JSONResponse({"ok": True, **message.to_dict()})
+        result = JSONResponse({"ok": True, **protocol.to_dict()})
         result.delete_cookie(session_cookie, secure=_is_secure_request(request), httponly=True, samesite="lax")
         return result
 
@@ -1011,32 +955,16 @@ def _request_id(request: Request) -> str:
 
 
 def _protocol_json_response(
+    detail: str,
     protocol: RequestProtocol,
     *,
     status_code: int,
     headers: dict[str, str] | None = None,
 ) -> JSONResponse:
-    message = _public_message_for_protocol(protocol)
     return JSONResponse(
-        message.to_dict(),
+        {"detail": detail, **protocol.to_dict()},
         status_code=status_code,
         headers=headers,
-    )
-
-
-def _public_message_for_protocol(protocol: RequestProtocol) -> PublicMessageV1:
-    """Render public transport/session errors without reflecting exception text."""
-
-    draft = build_a2_output_draft(
-        "",
-        {"phase": "IDLE"},
-        protocol,
-    )
-    return finalize_output_draft(
-        draft,
-        protocol,
-        delivered_count=0,
-        expected_media_count=0,
     )
 
 
@@ -1303,28 +1231,21 @@ def _agent_payload(
     uploaded_image: Path | None = None,
     submitted_crop: Path | None = None,
 ) -> dict[str, object]:
-    image_urls: list[str] = []
+    image_urls = []
     for image in response.images:
-        try:
-            path = Path(image)
-            if not path.is_file():
-                continue
-            persisted = runtime.persist_media(session_id, path)
-            if persisted is not None:
-                image_urls.append(f"/api/media/{persisted.name}")
-        except Exception:  # noqa: BLE001 - media evidence is finalized below.
-            logger.warning("agent response media persistence failed")
+        path = Path(image)
+        if not path.is_file():
+            continue
+        persisted = runtime.persist_media(session_id, path)
+        if persisted is not None:
+            image_urls.append(f"/api/media/{persisted.name}")
     uploaded_image_url = f"/api/upload/{uploaded_image.name}" if uploaded_image is not None else ""
     submitted_crop_url = ""
     if submitted_crop is not None and submitted_crop.is_file():
-        try:
-            persisted_crop = runtime.persist_media(session_id, submitted_crop)
-            if persisted_crop is not None:
-                submitted_crop_url = f"/api/media/{persisted_crop.name}"
-        except Exception:  # noqa: BLE001 - submitted crop is feedback-only media.
-            logger.warning("submitted crop media persistence failed")
+        persisted_crop = runtime.persist_media(session_id, submitted_crop)
+        if persisted_crop is not None:
+            submitted_crop_url = f"/api/media/{persisted_crop.name}"
     snapshot = runtime.session_snapshot(session_id)
-    public_snapshot = _public_session_snapshot(snapshot)
     feedback_images: list[dict[str, str]] = []
     if response.intent == "a3_units_prepared":
         try:
@@ -1340,364 +1261,53 @@ def _agent_payload(
                     })
         except Exception:  # noqa: BLE001 - feedback-only media must not fail the reply.
             feedback_images = []
-    fallback_request_id, fallback_search_id = _structured_output_ids(
-        response.protocol,
-        snapshot,
-    )
-    output = response.output
-    if output is None:
-        logger.warning("agent response missing structured output")
-        media_policy = ""
-        expected_media_count = 0
-        candidate_shape_mismatch = False
-        public_message = _structured_output_failure(
-            request_id=fallback_request_id,
-            search_id=fallback_search_id,
+    if response.protocol:
+        protocol = RequestProtocol.from_dict(response.protocol)
+    elif snapshot.get("phase") == "ERROR":
+        protocol = RequestProtocol(
+            status=RequestStatus.ERROR,
+            layer=RequestLayer.TOOL,
+            code="AGENT_FAILED",
+            retryable=True,
+            action=(
+                RequestAction.RETRY_SEARCH
+                if snapshot.get("has_active_image") is True
+                else RequestAction.NEW_CHAT
+            ),
+            request_id=new_request_id(),
+            search_id=str(snapshot.get("search_id") or ""),
+        )
+    elif snapshot.get("phase") == "NO_MATCH":
+        protocol = RequestProtocol.from_code(
+            "NO_MATCH",
+            request_id=new_request_id(),
+            search_id=str(snapshot.get("search_id") or ""),
         )
     else:
-        media_policy = getattr(output, "media_policy", "")
-        expected_media_count = _expected_media_count(
-            output,
-            response_image_count=len(response.images),
+        protocol = RequestProtocol.from_code(
+            "REQUEST_SUCCEEDED",
+            request_id=new_request_id(),
+            search_id=str(snapshot.get("search_id") or ""),
         )
-        candidate_shape_mismatch = (
-            media_policy == "candidate_set"
-            and len(response.images) != expected_media_count
-        )
-        delivered_media_count = 0 if candidate_shape_mismatch else len(image_urls)
-        try:
-            protocol = RequestProtocol.from_dict(response.protocol)
-            public_message = finalize_output_draft(
-                output,
-                protocol,
-                delivered_count=delivered_media_count,
-                expected_media_count=expected_media_count,
-                contact=_public_contact(response.author_contact),
-            )
-        except Exception:  # noqa: BLE001 - fail closed at the public boundary.
-            logger.warning("structured agent output failed validation")
-            public_message = _structured_output_failure(
-                request_id=fallback_request_id,
-                search_id=fallback_search_id,
-            )
-
-    final_protocol = public_message.protocol
-    if final_protocol is None:  # Defensive: final drafts must never render progress.
-        public_message = _structured_output_failure(
-            request_id=fallback_request_id,
-            search_id=fallback_search_id,
-        )
-        final_protocol = public_message.protocol
-    assert final_protocol is not None
-
-    # Candidate numbering is meaningful only when the whole ranked set was
-    # delivered. Contract failures must not leak otherwise-valid media.
-    candidate_message_keys = {
-        "search.candidates.ready",
-        "search.global.candidates.ready",
-        "search.candidates.recalled",
-        "page.unit.candidates.ready",
-    }
-    delivery_message_keys = {
-        "search.answer.ready",
-        "search.answer.resent",
-        "page.unit.answer.delivered_remaining",
-        "page.unit.answer.delivered_complete",
-    }
-    if (
-        media_policy == "candidate_set"
-        and (
-            candidate_shape_mismatch
-            or len(image_urls) != expected_media_count
-            or public_message.message_key not in candidate_message_keys
-        )
-    ) or (
-        media_policy == "delivery"
-        and public_message.message_key not in delivery_message_keys
-    ) or final_protocol.code in {"MEDIA_NOT_FOUND", "SERVICE_UNAVAILABLE"}:
-        image_urls = []
-    if final_protocol.code == "SERVICE_UNAVAILABLE":
-        feedback_images = []
-
-    failure = _failure_payload(final_protocol, snapshot)
-    payload = public_message.to_dict()
-    contact = public_message.contact
-    public_intent = (
-        ""
-        if final_protocol.code == "SERVICE_UNAVAILABLE"
-        else _public_state_id(response.intent)
-    )
-    payload.update({
+    failure = None
+    if protocol.status is RequestStatus.ERROR:
+        failure = {
+            "kind": "business_error",
+            "recovery_action": protocol.action.value or (
+                "retry_search" if snapshot.get("has_active_image") is True else "new_chat"
+            ),
+        }
+    return {
+        "text": response.text,
         "images": image_urls,
         "uploaded_image": uploaded_image_url,
         "submitted_crop": submitted_crop_url,
         "feedback_images": feedback_images,
-        "intent": public_intent,
-        "author_contact": (
-            {
-                "label": contact.label,
-                "channel": contact.channel,
-                "value": contact.value,
-            }
-            if contact is not None
-            else {}
-        ),
-        "session": public_snapshot,
+        "intent": response.intent,
+        "author_contact": dict(response.author_contact),
+        "session": snapshot,
         "failure": failure,
-    })
-    return payload
-
-
-def _public_session_snapshot(value: object) -> dict[str, object]:
-    """Expose only state required by the current browser workflow."""
-
-    snapshot = value if isinstance(value, Mapping) else {}
-    phase = str(snapshot.get("phase") or "IDLE").strip().upper()
-    if not _PUBLIC_STATE_PHASE_RE.fullmatch(phase):
-        phase = "IDLE"
-    task_revision = _public_nonnegative_int(snapshot.get("task_revision"))
-    candidate_count = _public_nonnegative_int(snapshot.get("candidate_count"))
-    result: dict[str, object] = {
-        "session_valid": snapshot.get("session_valid") is True,
-        "phase": phase,
-        "has_active_image": snapshot.get("has_active_image") is True,
-        "task_revision": task_revision,
-        "candidate_generation": _public_state_id(snapshot.get("candidate_generation")),
-        "candidate_count": candidate_count,
-        "search_id": _public_state_id(snapshot.get("search_id")),
-    }
-    a3 = _public_a3_snapshot(snapshot.get("a3"))
-    if a3 is not None:
-        result["a3"] = a3
-    return result
-
-
-def _public_a3_snapshot(value: object) -> dict[str, object] | None:
-    if not isinstance(value, Mapping) or value.get("enabled") is not True:
-        return None
-    phase = str(value.get("phase") or "IDLE").strip().upper()
-    if not _PUBLIC_STATE_PHASE_RE.fullmatch(phase):
-        phase = "IDLE"
-    units: list[dict[str, object]] = []
-    raw_units = value.get("units")
-    if isinstance(raw_units, (list, tuple)):
-        for raw_unit in raw_units[:100]:
-            if not isinstance(raw_unit, Mapping):
-                continue
-            unit_id = _public_state_id(raw_unit.get("unit_id"))
-            if not unit_id:
-                continue
-            page_index = _public_positive_int(raw_unit.get("page_index"))
-            display_label = _public_state_text(raw_unit.get("display_label"), 64)
-            if not display_label and page_index:
-                display_label = f"图片第 {page_index} 题"
-            validation_status = str(raw_unit.get("validation_status") or "")
-            grounding_status = str(raw_unit.get("grounding_status") or "")
-            crop_available = raw_unit.get("crop_available") is True
-            requested = raw_unit.get("requested") is True
-            if validation_status == "auto_ready":
-                preparation_status = "ready"
-            elif requested:
-                preparation_status = "manual"
-            elif grounding_status == "auto_ready":
-                preparation_status = "located"
-            elif crop_available:
-                preparation_status = "manual"
-            else:
-                preparation_status = "pending"
-            units.append({
-                "unit_id": unit_id,
-                "page_index": page_index,
-                "display_label": display_label,
-                "title_text": _public_state_text(raw_unit.get("title_text"), 160),
-                "completed": raw_unit.get("completed") is True,
-                "searched": raw_unit.get("searched") is True,
-                "selected": raw_unit.get("selected") is True,
-                "requested": requested,
-                "crop_available": crop_available,
-                "preparation_status": preparation_status,
-            })
-
-    selected_raw = value.get("selected_unit")
-    selected = selected_raw if isinstance(selected_raw, Mapping) else {}
-    selected_id = _public_state_id(selected.get("unit_id"))
-    selected_label = _public_state_text(selected.get("display_label"), 64)
-    selected_unit = next(
-        (item for item in units if item["unit_id"] == selected_id),
-        None,
-    )
-    if not selected_label and selected_unit is not None:
-        selected_label = str(selected_unit["display_label"])
-
-    crop_draft_raw = value.get("crop_draft")
-    crop_draft = crop_draft_raw if isinstance(crop_draft_raw, Mapping) else {}
-    bounds = _public_crop_bounds(crop_draft.get("bounds"))
-    return {
-        "enabled": True,
-        "auto_crop_enabled": value.get("auto_crop_enabled") is True,
-        "auto_prepare_all_enabled": value.get("auto_prepare_all_enabled") is True,
-        "auto_prepare_all_units": value.get("auto_prepare_all_units") is True,
-        "phase": phase,
-        "page_finished": value.get("page_finished") is True,
-        "units": units,
-        "selected_unit": {
-            "unit_id": selected_id,
-            "display_label": selected_label,
-            "context_text": _public_state_text(selected.get("context_text"), 480),
-        },
-        "auto_crop_overlay_available": value.get("auto_crop_overlay_available") is True,
-        "crop_review_required": value.get("crop_review_required") is True,
-        "crop_draft": {
-            "bounds": bounds,
-            "available": crop_draft.get("available") is True,
-        },
-        "task_revision": _public_nonnegative_int(value.get("task_revision")),
-    }
-
-
-def _public_crop_bounds(value: object) -> dict[str, float]:
-    if not isinstance(value, Mapping):
-        return {}
-    bounds: dict[str, float] = {}
-    for name in ("x", "y", "width", "height"):
-        raw = value.get(name)
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-            return {}
-        bounds[name] = round(float(raw), 6)
-    if (
-        any(not 0 <= item <= 1 for item in bounds.values())
-        or bounds["width"] < 0.02
-        or bounds["height"] < 0.02
-        or bounds["x"] + bounds["width"] > 1.000001
-        or bounds["y"] + bounds["height"] > 1.000001
-    ):
-        return {}
-    return bounds
-
-
-def _public_state_text(value: object, max_chars: int) -> str:
-    if not isinstance(value, str):
-        return ""
-    clean = value.replace("\r\n", "\n").replace("\r", "\n")
-    clean = _PUBLIC_STATE_CONTROL_RE.sub("", clean).strip()
-    if not clean or any(pattern.search(clean) for pattern in _PUBLIC_STATE_SENSITIVE_PATTERNS):
-        return ""
-    return clean[:max_chars]
-
-
-def _public_state_id(value: object) -> str:
-    clean = value.strip() if isinstance(value, str) else ""
-    return clean if _PUBLIC_ID_RE.fullmatch(clean) else ""
-
-
-def _public_nonnegative_int(value: object) -> int:
-    return value if type(value) is int and 0 <= value <= 1_000_000 else 0
-
-
-def _public_positive_int(value: object) -> int:
-    return value if type(value) is int and 0 < value <= 10_000 else 0
-
-
-def _public_contact(value: object) -> PublicContactV1 | None:
-    """Accept only the one bounded legacy contact shape reviewed for public use."""
-
-    if not isinstance(value, dict) or set(value) != {"label", "channel", "value"}:
-        return None
-    label = value.get("label")
-    channel = value.get("channel")
-    contact_value = value.get("value")
-    if (
-        type(label) is not str
-        or type(channel) is not str
-        or type(contact_value) is not str
-    ):
-        return None
-    clean_label = label.strip()
-    clean_channel = channel.strip()
-    clean_value = contact_value.strip()
-    if clean_label != "联系作者" or clean_channel not in {"微信", "邮箱"}:
-        return None
-    if not re.fullmatch(r"[A-Za-z0-9_.@+-]{1,64}", clean_value):
-        return None
-    return PublicContactV1(clean_label, clean_channel, clean_value)
-
-
-def _expected_media_count(output: object, *, response_image_count: int) -> int:
-    """Keep internal media expectations when response paths are incomplete."""
-
-    media_policy = getattr(output, "media_policy", "")
-    facts = getattr(output, "facts", None)
-    fact_count = 0
-    if isinstance(facts, Mapping):
-        key = (
-            "candidate_count"
-            if media_policy == "candidate_set"
-            else "delivered_image_count"
-        )
-        value = facts.get(key)
-        if type(value) is int and value >= 0:
-            fact_count = value
-    if media_policy == "candidate_set":
-        return fact_count
-    if media_policy == "delivery":
-        return max(response_image_count, fact_count)
-    return response_image_count
-
-
-def _structured_output_ids(
-    protocol_payload: object,
-    snapshot: Mapping[str, object],
-) -> tuple[str, str]:
-    """Preserve correlation IDs when an otherwise-valid response loses its draft."""
-
-    if isinstance(protocol_payload, Mapping):
-        try:
-            protocol = RequestProtocol.from_dict(protocol_payload)
-        except (TypeError, ValueError):
-            protocol = None
-        if protocol is not None:
-            return protocol.request_id or new_request_id(), protocol.search_id
-    raw_search_id = snapshot.get("search_id")
-    search_id = raw_search_id.strip() if isinstance(raw_search_id, str) else ""
-    if search_id and not _PUBLIC_PROTOCOL_ID_RE.fullmatch(search_id):
-        search_id = ""
-    return new_request_id(), search_id
-
-
-def _structured_output_failure(
-    *, request_id: str = "", search_id: str = ""
-) -> PublicMessageV1:
-    """Render a deterministic response without consulting legacy response text."""
-
-    protocol = RequestProtocol.from_code(
-        "SERVICE_UNAVAILABLE",
-        request_id=request_id or new_request_id(),
-        search_id=search_id,
-    )
-    draft = build_a2_output_draft(
-        "",
-        {"phase": "ERROR"},
-        protocol,
-    )
-    return finalize_output_draft(
-        draft,
-        protocol,
-        delivered_count=0,
-        expected_media_count=0,
-    )
-
-
-def _failure_payload(
-    protocol: RequestProtocol,
-    snapshot: dict[str, object],
-) -> dict[str, str] | None:
-    if protocol.status is not RequestStatus.ERROR:
-        return None
-    return {
-        "kind": "business_error",
-        "recovery_action": protocol.action.value or (
-            "retry_search" if snapshot.get("has_active_image") is True else "new_chat"
-        ),
+        **protocol.to_dict(),
     }
 
 
@@ -1713,21 +1323,14 @@ def _validate_action_context(
         return None
     if not isinstance(raw_context, dict) or raw_context.get("type") != "select_candidate":
         snapshot = runtime.session_snapshot(session_id)
-        protocol = RequestProtocol.from_code(
-            "STALE_ACTION",
-            request_id=request_id or new_request_id(),
-            search_id=str(snapshot.get("search_id") or ""),
-        )
         return AgentResponse(
             text="这个操作已经失效，请使用当前页面中的操作。",
-            state=dict(snapshot),
             intent="stale_action",
-            protocol=protocol.to_dict(),
-            output=build_a3_output_draft(
-                "stale_action",
-                _a3_output_snapshot(snapshot),
-                protocol,
-            ),
+            protocol=RequestProtocol.from_code(
+                "STALE_ACTION",
+                request_id=request_id,
+                search_id=str(snapshot.get("search_id") or ""),
+            ).to_dict(),
         )
     snapshot = runtime.session_snapshot(session_id)
     try:
@@ -1753,27 +1356,15 @@ def _validate_action_context(
         if has_image
         else "这是已失效的候选，当前会话没有可选择的候选题，请重新上传题图。"
     )
-    protocol = RequestProtocol.from_code(
-        "STALE_CANDIDATE",
-        request_id=request_id or new_request_id(),
-        search_id=str(snapshot.get("search_id") or ""),
-    )
     return AgentResponse(
         text=message,
-        state=dict(snapshot),
         intent="stale_candidate",
-        protocol=protocol.to_dict(),
-        output=build_a3_output_draft(
-            "stale_candidate",
-            _a3_output_snapshot(snapshot),
-            protocol,
-        ),
+        protocol=RequestProtocol.from_code(
+            "STALE_CANDIDATE",
+            request_id=request_id,
+            search_id=str(snapshot.get("search_id") or ""),
+        ).to_dict(),
     )
-
-
-def _a3_output_snapshot(snapshot: Mapping[str, object]) -> Mapping[str, object]:
-    nested = snapshot.get("a3")
-    return nested if isinstance(nested, Mapping) else snapshot
 
 
 async def _stream_agent_events(
@@ -1784,64 +1375,39 @@ async def _stream_agent_events(
 ):
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
-    stream_request_id = (
-        request_id.strip()
-        if isinstance(request_id, str) and _PUBLIC_PROTOCOL_ID_RE.fullmatch(request_id.strip())
-        else new_request_id()
-    )
-    stream_search_id = (
-        search_id.strip()
-        if isinstance(search_id, str)
-        and (not search_id.strip() or _PUBLIC_PROTOCOL_ID_RE.fullmatch(search_id.strip()))
-        else ""
-    )
-    progress_sequence = 0
-
-    def publish_progress(stage: str) -> None:
-        nonlocal progress_sequence
-        progress_sequence += 1
-        key = _PROGRESS_KEY_BY_STAGE.get(stage.strip().lower(), "progress.image.analysis")
-        output = render_progress_output(
-            ProgressOutputRequestV1(
-                schema_version=USER_OUTPUT_SCHEMA_VERSION,
-                progress_key=key,
-                request_id=stream_request_id,
-                search_id=stream_search_id,
-                sequence=progress_sequence,
-                facts={},
-            )
-        )
-        queue.put_nowait(output.to_stream_event())
 
     def progress(stage: str, message: str) -> None:
-        del message
-        loop.call_soon_threadsafe(publish_progress, str(stage or ""))
+        loop.call_soon_threadsafe(
+            queue.put_nowait,
+            {"type": "progress", "stage": stage, "message": message},
+        )
 
     async def run() -> None:
         try:
             payload = await asyncio.to_thread(execute, progress)
-            await asyncio.sleep(0)
-            await queue.put(
-                _canonical_final_stream_event(
-                    payload,
-                    request_id=stream_request_id,
-                    search_id=stream_search_id,
-                )
-            )
+            await queue.put({"type": "result", "data": payload})
         except (AgentRuntimeBusyError, AgentBudgetExceededError) as exc:
             protocol = exc.bind(
-                request_id=stream_request_id,
-                search_id=stream_search_id,
+                request_id=exc.request_id or request_id or new_request_id(),
+                search_id=exc.search_id or search_id,
             )
-            await queue.put(_public_message_for_protocol(protocol).to_stream_event())
+            await queue.put({
+                "type": "error",
+                "message": str(exc),
+                **protocol.to_dict(),
+            })
         except Exception:  # noqa: BLE001 - keep internal failures out of the public stream.
             logger.exception("streamed Agent request failed")
             protocol = RequestProtocol.from_code(
                 "SERVICE_UNAVAILABLE",
-                request_id=stream_request_id,
-                search_id=stream_search_id,
+                request_id=request_id or new_request_id(),
+                search_id=search_id,
             )
-            await queue.put(_public_message_for_protocol(protocol).to_stream_event())
+            await queue.put({
+                "type": "error",
+                "message": "服务端处理失败，请稍后重试。",
+                **protocol.to_dict(),
+            })
         finally:
             await queue.put(None)
 
@@ -1852,71 +1418,6 @@ async def _stream_agent_events(
             break
         yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
     await task
-
-
-def _canonical_final_stream_event(
-    payload: object,
-    *,
-    request_id: str,
-    search_id: str,
-) -> dict[str, object]:
-    """Validate the rendered final payload before placing it on the stream."""
-
-    try:
-        if not isinstance(payload, dict):
-            raise ValueError("payload type")
-        if payload.get("schema_version") != USER_OUTPUT_SCHEMA_VERSION:
-            raise ValueError("schema")
-        kind = payload.get("kind")
-        if kind not in {"result", "transport_error", "client_error"}:
-            raise ValueError("kind")
-        message_key = payload.get("message_key")
-        if not isinstance(message_key, str) or not re.fullmatch(
-            r"[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)+", message_key
-        ):
-            raise ValueError("message key")
-        text = payload.get("text")
-        if (
-            not isinstance(text, str)
-            or not text
-            or _public_state_text(text, 320) != text
-        ):
-            raise ValueError("text")
-        actions = payload.get("allowed_actions")
-        if (
-            not isinstance(actions, list)
-            or len(actions) != len(set(actions))
-            or any(not isinstance(item, str) or item not in {action.value for action in UserAction} for item in actions)
-        ):
-            raise ValueError("actions")
-        protocol = RequestProtocol.from_dict({
-            "schema_version": payload["schema_version"],
-            "status": payload["status"],
-            "layer": payload["layer"],
-            "code": payload["code"],
-            "retryable": payload["retryable"],
-            "action": payload["action"],
-            "request_id": payload["request_id"],
-            "search_id": payload["search_id"],
-        })
-        if protocol.request_id != request_id:
-            raise ValueError("request id")
-        if search_id and protocol.search_id != search_id:
-            raise ValueError("search id")
-        event_type = (
-            "error"
-            if kind in {"transport_error", "client_error"}
-            or protocol.status is RequestStatus.ERROR
-            else "result"
-        )
-        return {"type": event_type, "data": payload}
-    except (KeyError, TypeError, ValueError):
-        protocol = RequestProtocol.from_code(
-            "SERVICE_UNAVAILABLE",
-            request_id=request_id,
-            search_id=search_id,
-        )
-        return _public_message_for_protocol(protocol).to_stream_event()
 
 
 async def _periodic_session_cleanup(cleaner: Callable[[], None], interval_seconds: float) -> None:

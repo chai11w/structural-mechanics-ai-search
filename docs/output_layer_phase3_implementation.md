@@ -24,7 +24,7 @@ message_key + 精确 protocol + 白名单 facts + allowed_actions + notice_keys
   - final 与 progress 两种请求契约；
   - `UserAction` 完整动作枚举；
   - 公开消息和公开联系信息的最小序列化；
-  - 43 个首批 final message key（阶段 4 接入时扩展了常见 A2/A3/会话语义族）；
+  - 43 个首批 final message key；
   - 12 个 progress key；
   - 5 个固定 notice key；
   - 已注册边界 code 与动态 Tool code 的精确协议形状表；

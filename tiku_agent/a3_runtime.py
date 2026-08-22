@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
-from functools import wraps
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -40,10 +38,6 @@ from tiku_agent.agent import AgentResponse
 from tiku_agent.image_triage_authority import NO_EXTERNAL_LOAD_REPLY
 from tiku_agent.session_artifacts import SessionArtifacts, session_key
 from tiku_agent.session_runtime import AgentProtocolError, AgentSessionRuntime, ProgressReporter
-from tiku_agent.user_output_integration import (
-    build_a2_output_draft,
-    build_a3_output_draft,
-)
 from tiku_shared.model_costs import ModelCostCollector, SQLiteModelCostLedger, model_cost_scope
 from tiku_shared.request_protocol import RequestProtocol, new_request_id, new_search_id
 
@@ -58,34 +52,6 @@ A3_PHASE_VERIFYING = "VERIFYING_CROP"
 A3_PHASE_A2_ACTIVE = "A2_ACTIVE"
 A3_PHASE_COMPLETE = "COMPLETE"
 A3_PHASE_ERROR = "ERROR"
-
-_ACTIVE_A3_REQUEST_ID: ContextVar[str] = ContextVar(
-    "active_a3_request_id",
-    default="",
-)
-
-
-def _active_a3_request_id(request_id: str = "") -> str:
-    return (
-        _ACTIVE_A3_REQUEST_ID.get()
-        or str(request_id or "").strip()
-        or new_request_id()
-    )
-
-
-def _bind_a3_request_id(function):
-    """Keep every nested A3 response on the public entry request chain."""
-
-    @wraps(function)
-    def wrapped(*args, **kwargs):
-        request_id = str(kwargs.get("request_id") or "").strip() or new_request_id()
-        token = _ACTIVE_A3_REQUEST_ID.set(request_id)
-        try:
-            return function(*args, **kwargs)
-        finally:
-            _ACTIVE_A3_REQUEST_ID.reset(token)
-
-    return wrapped
 
 _A3_PHASES = {
     A3_PHASE_IDLE,
@@ -412,7 +378,6 @@ class A3MvpRuntime:
         )
         self._locks = tuple(threading.RLock() for _ in range(64))
 
-    @_bind_a3_request_id
     def handle_image(
         self,
         session_id: str,
@@ -450,7 +415,6 @@ class A3MvpRuntime:
                 request_id=request_id,
             )
 
-    @_bind_a3_request_id
     def handle_text(
         self,
         session_id: str,
@@ -465,16 +429,10 @@ class A3MvpRuntime:
             self._ensure_budget(identity_key)
             state = self.store.load(clean)
             if state is None:
-                return _attach_a3_output(
-                    AgentResponse(
-                        text="先发一张题图给我吧。",
-                        intent="clarification",
-                        protocol=RequestProtocol.from_code(
-                            "UPLOAD_REQUIRED",
-                            request_id=_active_a3_request_id(request_id),
-                        ).to_dict(),
-                    ),
-                    {"phase": A3_PHASE_IDLE},
+                return AgentResponse(
+                    text="先发一张题图给我吧。",
+                    intent="clarification",
+                    protocol=RequestProtocol.from_code("UPLOAD_REQUIRED").to_dict(),
                 )
             clean_text = str(text or "").strip()
             if state.entry_route == "A2":
@@ -490,7 +448,7 @@ class A3MvpRuntime:
                     "这张图没有进入题库检索，请重新上传新的题图。",
                     state,
                     intent="image_triage_stop",
-                    code="TRIAGE_A1_STOPPED",
+                    code="UPLOAD_REQUIRED",
                 )
             if self.intent_engine is not None:
                 context = self._a3_intent_context(state)
@@ -560,7 +518,6 @@ class A3MvpRuntime:
                     "IDLE",
                     "CANCELLED",
                 }:
-                    previous_unit = state.unit(state.selected_unit_id) or {}
                     state.selected_unit_id = ""
                     state.phase = (
                         A3_PHASE_WAIT_SELECTION
@@ -580,11 +537,6 @@ class A3MvpRuntime:
                                 identity_key=identity_key,
                                 progress=progress,
                                 request_id=request_id,
-                                previous_unit_context=(
-                                    _public_unit_evidence(previous_unit)
-                                    if previous_unit
-                                    else None
-                                ),
                             )
                         message = (
                             "上一道已经停止了。你这句话里像是选了不止一道题，请再选一个。"
@@ -794,19 +746,15 @@ class A3MvpRuntime:
         state.pending_intent_clarification = {}
         if action == "reset_session":
             search_id = state.current_search_id
-            public_state = _a3_output_state(state)
             self._clear_locked(state.session_id)
-            return _attach_a3_output(
-                AgentResponse(
-                    text="好，已清空当前会话。请发送一张新题图。",
-                    intent="a3_session_reset",
-                    protocol=RequestProtocol.from_code(
-                        "REQUEST_SUCCEEDED",
-                        request_id=_active_a3_request_id(request_id),
-                        search_id=search_id,
-                    ).to_dict(),
-                ),
-                public_state,
+            return AgentResponse(
+                text="好，已清空当前会话。请发送一张新题图。",
+                intent="a3_session_reset",
+                protocol=RequestProtocol.from_code(
+                    "REQUEST_SUCCEEDED",
+                    request_id=request_id or new_request_id(),
+                    search_id=search_id,
+                ).to_dict(),
             )
         if action == "finish_page":
             self.a2_runtime.clear(state.session_id, preserve_artifacts=True)
@@ -834,7 +782,6 @@ class A3MvpRuntime:
                 f"好，只停止了「{display_label}」。原始大图里的其他题目和当前对话都已保留。",
                 state,
                 intent="a3_current_unit_cancelled",
-                output_context={"stopped_unit": _public_unit_evidence(selected)},
             )
         if action == "continue_current":
             self.store.save(state)
@@ -920,7 +867,6 @@ class A3MvpRuntime:
         options.append("continue_current")
         return options
 
-    @_bind_a3_request_id
     def select_unit(
         self,
         session_id: str,
@@ -935,16 +881,10 @@ class A3MvpRuntime:
         with self._lock(clean):
             state = self.store.load(clean)
             if state is None:
-                return _attach_a3_output(
-                    AgentResponse(
-                        text="当前题目列表已失效，请重新上传题图。",
-                        intent="stale_action",
-                        protocol=RequestProtocol.from_code(
-                            "STALE_ACTION",
-                            request_id=_active_a3_request_id(request_id),
-                        ).to_dict(),
-                    ),
-                    {"phase": A3_PHASE_WAIT_SELECTION},
+                return AgentResponse(
+                    text="当前题目列表已失效，请重新上传题图。",
+                    intent="stale_action",
+                    protocol=RequestProtocol.from_code("STALE_ACTION").to_dict(),
                 )
             if task_revision is not None and int(task_revision) != state.task_revision:
                 return _response(
@@ -961,7 +901,6 @@ class A3MvpRuntime:
                 request_id=request_id,
             )
 
-    @_bind_a3_request_id
     def prepare_units(
         self,
         session_id: str,
@@ -972,39 +911,23 @@ class A3MvpRuntime:
         progress: ProgressReporter | None = None,
         request_id: str = "",
     ) -> AgentResponse:
+        del request_id
         clean = _clean_session_id(session_id)
         requested = list(dict.fromkeys(str(value or "").strip() for value in unit_ids))
         if not requested or any(not value for value in requested):
-            return _attach_a3_output(
-                AgentResponse(
-                    text="请至少选择一道要查询的题目。",
-                    intent="a3_prepare_required",
-                    protocol=RequestProtocol.from_code(
-                        "CLARIFICATION_REQUIRED",
-                        request_id=_active_a3_request_id(request_id),
-                    ).to_dict(),
-                ),
-                {"phase": A3_PHASE_WAIT_SELECTION},
+            return AgentResponse(
+                text="请至少选择一道要查询的题目。",
+                intent="a3_prepare_required",
+                protocol=RequestProtocol.from_code("CLARIFICATION_REQUIRED").to_dict(),
             )
         with self._lock(clean):
             self._ensure_budget(identity_key)
             state = self.store.load(clean)
             if state is None or not state.auto_crop_enabled:
-                public_state = (
-                    _a3_output_state(state)
-                    if state is not None
-                    else {"phase": A3_PHASE_WAIT_SELECTION}
-                )
-                return _attach_a3_output(
-                    AgentResponse(
-                        text="当前自动裁剪任务已失效，请重新上传题图。",
-                        intent="stale_action",
-                        protocol=RequestProtocol.from_code(
-                            "STALE_ACTION",
-                            request_id=_active_a3_request_id(request_id),
-                        ).to_dict(),
-                    ),
-                    public_state,
+                return AgentResponse(
+                    text="当前自动裁剪任务已失效，请重新上传题图。",
+                    intent="stale_action",
+                    protocol=RequestProtocol.from_code("STALE_ACTION").to_dict(),
                 )
             if task_revision is not None and int(task_revision) != state.task_revision:
                 return _response(
@@ -1034,16 +957,7 @@ class A3MvpRuntime:
             if manual:
                 text += f"，{manual} 道需要人工裁剪"
             text += "。请选择一道继续。"
-            return _response(
-                text,
-                state,
-                intent="a3_units_prepared",
-                output_context={
-                    "question_count": len(requested),
-                    "ready_count": ready,
-                    "manual_count": manual,
-                },
-            )
+            return _response(text, state, intent="a3_units_prepared")
 
     def _prepare_units_locked(
         self,
@@ -1197,7 +1111,6 @@ class A3MvpRuntime:
             "error_type": "" if load_status == "yes" else "external_load_not_confirmed",
         }
 
-    @_bind_a3_request_id
     def handle_crop(
         self,
         session_id: str,
@@ -1214,21 +1127,10 @@ class A3MvpRuntime:
             self._ensure_budget(identity_key)
             state = self.store.load(clean)
             if state is None or state.phase != A3_PHASE_CROP_REQUIRED:
-                public_state = (
-                    _a3_output_state(state)
-                    if state is not None
-                    else {"phase": A3_PHASE_WAIT_SELECTION}
-                )
-                return _attach_a3_output(
-                    AgentResponse(
-                        text="这次裁剪已失效，请从当前题目列表重新选择。",
-                        intent="stale_action",
-                        protocol=RequestProtocol.from_code(
-                            "STALE_ACTION",
-                            request_id=_active_a3_request_id(request_id),
-                        ).to_dict(),
-                    ),
-                    public_state,
+                return AgentResponse(
+                    text="这次裁剪已失效，请从当前题目列表重新选择。",
+                    intent="stale_action",
+                    protocol=RequestProtocol.from_code("STALE_ACTION").to_dict(),
                 )
             if (
                 (task_revision is not None and int(task_revision) != state.task_revision)
@@ -1290,7 +1192,6 @@ class A3MvpRuntime:
                     state,
                     intent="a3_crop_review_required",
                     code="CLARIFICATION_REQUIRED",
-                    variant=_crop_review_reason(verdict),
                 )
 
             if self.external_load_screen is not None:
@@ -1314,7 +1215,6 @@ class A3MvpRuntime:
                         state,
                         intent="a3_crop_review_required",
                         code="CLARIFICATION_REQUIRED",
-                        variant="unconfirmed",
                     )
                 if load_verdict != "yes":
                     state.phase = A3_PHASE_CROP_REQUIRED
@@ -1329,7 +1229,6 @@ class A3MvpRuntime:
                         state,
                         intent="a3_crop_review_required",
                         code="CLARIFICATION_REQUIRED",
-                        variant="no_external_load",
                     )
 
             if progress is not None:
@@ -1526,25 +1425,16 @@ class A3MvpRuntime:
             if state.entry_route == "A1":
                 state.phase = A3_PHASE_COMPLETE
                 self.store.save(state)
-                return _attach_a3_output(
-                    AgentResponse(
-                        text=decision.reply or "这张图片目前不适合进入结构力学题库检索，请重新上传完整清晰的题目图。",
-                        state={"phase": state.phase, "current_route": "A1"},
-                        intent="image_triage_stop",
-                        reply_source=decision.reply_source,
-                        fallback_reason=decision.fallback_reason,
-                        output_variant=(
-                            "no_external_load"
-                            if decision.reply_source == "fixed_policy"
-                            else "fallback"
-                        ),
-                        protocol=RequestProtocol.from_code(
-                            "TRIAGE_A1_STOPPED",
-                            request_id=_active_a3_request_id(request_id),
-                            search_id=state.current_search_id,
-                        ).to_dict(),
-                    ),
-                    _a3_output_state(state),
+                return AgentResponse(
+                    text=decision.reply or "这张图片目前不适合进入结构力学题库检索，请重新上传完整清晰的题目图。",
+                    state={"phase": state.phase, "current_route": "A1"},
+                    intent="image_triage_stop",
+                    reply_source=decision.reply_source,
+                    fallback_reason=decision.fallback_reason,
+                    protocol=RequestProtocol.from_code(
+                        "TRIAGE_A1_STOPPED",
+                        search_id=state.current_search_id,
+                    ).to_dict(),
                 )
             if state.entry_route == "A2":
                 if self.external_load_screen is not None:
@@ -1571,19 +1461,14 @@ class A3MvpRuntime:
                         state.phase = A3_PHASE_COMPLETE
                         state.last_error = "external_load_not_confirmed"
                         self.store.save(state)
-                        return _attach_a3_output(
-                            AgentResponse(
-                                text=NO_EXTERNAL_LOAD_REPLY,
-                                state={"phase": state.phase, "current_route": "A1"},
-                                intent="image_triage_stop",
-                                output_variant="no_external_load",
-                                protocol=RequestProtocol.from_code(
-                                    "TRIAGE_A1_STOPPED",
-                                    request_id=_active_a3_request_id(request_id),
-                                    search_id=state.current_search_id,
-                                ).to_dict(),
-                            ),
-                            _a3_output_state(state),
+                        return AgentResponse(
+                            text=NO_EXTERNAL_LOAD_REPLY,
+                            state={"phase": state.phase, "current_route": "A1"},
+                            intent="image_triage_stop",
+                            protocol=RequestProtocol.from_code(
+                                "TRIAGE_A1_STOPPED",
+                                search_id=state.current_search_id,
+                            ).to_dict(),
                         )
                 state.phase = A3_PHASE_A2_ACTIVE
                 self.store.save(state)
@@ -1898,7 +1783,6 @@ class A3MvpRuntime:
         identity_key: str = "",
         progress: ProgressReporter | None = None,
         request_id: str = "",
-        previous_unit_context: Mapping[str, Any] | None = None,
     ) -> AgentResponse:
         unit = state.unit(unit_id)
         if state.page_finished:
@@ -1949,7 +1833,6 @@ class A3MvpRuntime:
         if switching_from_a2:
             self.a2_runtime.clear(state.session_id, preserve_artifacts=True)
             previous_unit_id = state.selected_unit_id
-            previous_unit = state.unit(previous_unit_id) or {}
             if (
                 previous_unit_id
                 and previous_unit_id not in state.completed_unit_ids
@@ -1981,11 +1864,6 @@ class A3MvpRuntime:
                     progress=progress,
                     request_id=request_id,
                 )
-                if switching_from_a2 and previous_unit:
-                    response.output_context = {
-                        "previous_selected_unit": _public_unit_evidence(previous_unit),
-                        **response.output_context,
-                    }
                 return self._after_a2_response(state, response)
 
         state.phase = A3_PHASE_CROP_REQUIRED
@@ -2001,11 +1879,6 @@ class A3MvpRuntime:
                 "source": "auto_suggestion",
             }
         self.store.save(state)
-        previous_evidence = (
-            _public_unit_evidence(previous_unit)
-            if switching_from_a2 and previous_unit
-            else dict(previous_unit_context or {})
-        )
         return _response(
             (
                 f"好，已停止当前题，改查「{unit['display_label']}」。"
@@ -2019,17 +1892,11 @@ class A3MvpRuntime:
             ),
             state,
             intent="a3_unit_selected",
-            output_context=(
-                {"previous_selected_unit": previous_evidence}
-                if previous_evidence
-                else None
-            ),
         )
 
     def _return_to_unit_selection_locked(self, state: A3SessionState) -> AgentResponse:
         self.a2_runtime.clear(state.session_id, preserve_artifacts=True)
         previous_unit_id = state.selected_unit_id
-        previous_unit = state.unit(previous_unit_id) or {}
         if (
             previous_unit_id
             and previous_unit_id not in state.completed_unit_ids
@@ -2051,7 +1918,6 @@ class A3MvpRuntime:
             ),
             state,
             intent="a3_reselect" if remaining else "a3_complete",
-            output_context={"stopped_unit": _public_unit_evidence(previous_unit)},
         )
 
     def _after_a2_response(
@@ -2060,77 +1926,52 @@ class A3MvpRuntime:
         response: AgentResponse,
     ) -> AgentResponse:
         child_phase = str(response.state.get("phase") or "")
-        inherited_output_context = dict(response.output_context)
-        child_protocol = RequestProtocol.from_dict(response.protocol)
-        protocol = RequestProtocol.from_code(
-            child_protocol.code,
-            request_id=_active_a3_request_id(child_protocol.request_id),
-            search_id=state.current_search_id or child_protocol.search_id,
-        )
-        response.protocol = protocol.to_dict()
-        child_draft = response.output
-        if child_draft is None:
-            child_state: dict[str, Any] = {}
-            snapshot = self.a2_runtime.session_snapshot(state.session_id)
-            if isinstance(snapshot, Mapping):
-                child_state.update(snapshot)
-            child_state.update(response.state)
-            child_draft = build_a2_output_draft(
-                response.intent,
-                child_state,
-                protocol,
-                author_contact_available=bool(response.author_contact),
-                variant=response.output_variant or response.reply_source,
-            )
-        selected = state.unit(state.selected_unit_id) or {}
-        selected_evidence = _public_unit_evidence(selected)
         if response.intent == "cancel" or child_phase == "CANCELLED":
             state.selected_unit_id = ""
             remaining = state.remaining_units
             state.phase = A3_PHASE_WAIT_SELECTION if remaining else A3_PHASE_COMPLETE
             response.state["phase"] = state.phase
-            response.output_context = {
-                **inherited_output_context,
-                "stopped_unit": selected_evidence,
-            }
-            response.output = build_a3_output_draft(
-                "a3_current_unit_cancelled",
-                _a3_output_state(state, response.output_context),
-                protocol,
+            response.text = (
+                f"好，已停止这道题。这张图里还有 {len(remaining)} 道可以选择。"
+                if remaining
+                else "好，已停止这道题。这张图里没有其他待处理题目。"
             )
             self.store.save(state)
             return response
         if child_phase != "ANSWERED":
             state.phase = A3_PHASE_A2_ACTIVE
-            response.state["phase"] = state.phase
-            response.output = build_a3_output_draft(
-                response.intent,
-                _a3_output_state(state, inherited_output_context),
-                protocol,
-                child_draft=child_draft,
-                variant=response.output_variant or response.reply_source,
-            )
+            selected = state.unit(state.selected_unit_id) or {}
+            display_label = str(selected.get("display_label") or "").strip()
+            candidate_count = int(response.state.get("candidate_count") or 0)
+            if child_phase == "WAIT_CANDIDATE_CHOICE" and display_label and candidate_count:
+                notice = ""
+                marker = "\n\n提示："
+                if marker in response.text:
+                    _base, _separator, suffix = response.text.partition(marker)
+                    notice = marker + suffix
+                response.text = (
+                    f"我从题库里找到了与「{display_label}」最相似的一道题。你看看是不是这道。"
+                    if candidate_count == 1
+                    else f"我从题库里找到了与「{display_label}」相似的 {candidate_count} 道题，已按相似度排序。"
+                ) + notice
             self.store.save(state)
             return response
+        selected = state.unit(state.selected_unit_id) or {}
+        display_label = str(selected.get("display_label") or "").strip()
+        if display_label and response.intent in {"select_candidate", "resend_answer"}:
+            response.text = f"「{display_label}」的题库答案找到了，已经发给你。"
         if state.selected_unit_id and state.selected_unit_id not in state.completed_unit_ids:
             state.completed_unit_ids.append(state.selected_unit_id)
         remaining = state.remaining_units
         if remaining:
             state.phase = A3_PHASE_WAIT_SELECTION
+            response.text = (
+                response.text.rstrip()
+                + f"这道题处理好了，这张图里还有 {len(remaining)} 道可以继续查。"
+            )
         else:
             state.phase = A3_PHASE_COMPLETE
-        response.state["phase"] = state.phase
-        response.output_context = {
-            **inherited_output_context,
-            "selected_unit": selected_evidence,
-        }
-        response.output = build_a3_output_draft(
-            response.intent,
-            _a3_output_state(state, response.output_context),
-            protocol,
-            child_draft=child_draft,
-            variant=response.output_variant or response.reply_source,
-        )
+            response.text = response.text.rstrip() + "这张图里的可处理题目已经全部完成。"
         self.store.save(state)
         return response
 
@@ -2589,149 +2430,18 @@ def _response(
     *,
     intent: str,
     code: str = "REQUEST_SUCCEEDED",
-    variant: str = "",
-    output_context: Mapping[str, Any] | None = None,
 ) -> AgentResponse:
-    code = _a3_public_code(intent, state, code)
     protocol = RequestProtocol.from_code(
         code,
-        request_id=_active_a3_request_id(),
+        request_id=new_request_id(),
         search_id=state.current_search_id,
     )
-    public_state = _a3_output_state(state, output_context)
-    try:
-        output = build_a3_output_draft(
-            intent,
-            public_state,
-            protocol,
-            variant=variant,
-        )
-    except Exception:  # noqa: BLE001 - public output must fail closed.
-        protocol = RequestProtocol.from_code(
-            "SERVICE_UNAVAILABLE",
-            request_id=protocol.request_id,
-            search_id=protocol.search_id,
-        )
-        output = build_a3_output_draft(
-            "a3_page_error",
-            {"phase": A3_PHASE_ERROR},
-            protocol,
-        )
     return AgentResponse(
         text=text,
         state={"phase": state.phase},
         intent=intent,
         protocol=protocol.to_dict(),
-        output=output,
-        output_variant=variant,
-        output_context=dict(output_context or {}),
     )
-
-
-def _a3_output_state(
-    state: A3SessionState,
-    extra: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Project mutable A3 state into the small, path-free output evidence shape."""
-
-    completed = set(state.completed_unit_ids)
-    searched = set(state.searched_unit_ids)
-    requested = set(state.requested_unit_ids)
-    units: list[dict[str, Any]] = []
-    for item in state.searchable_units:
-        unit_id = str(item.get("unit_id") or "")
-        auto = state.auto_crops.get(unit_id) or {}
-        units.append({
-            "unit_id": unit_id,
-            "page_index": int(item.get("page_index") or 0),
-            "display_label": str(item.get("display_label") or ""),
-            "searchability": "searchable_candidate",
-            "completed": unit_id in completed,
-            "searched": unit_id in searched,
-            "selected": unit_id == state.selected_unit_id,
-            "requested": unit_id in requested,
-            "validation_status": str(auto.get("validation_status") or ""),
-            "crop_available": auto.get("validation_status") == "auto_ready",
-        })
-    selected = _public_unit_evidence(state.unit(state.selected_unit_id) or {})
-    selected_crop = state.crop_drafts.get(state.selected_unit_id) or {}
-    payload: dict[str, Any] = {
-        "phase": state.phase,
-        "units": units,
-        "selected_unit": selected,
-        "remaining_count": len(state.remaining_units),
-        "question_count": len(units),
-        "completed_unit_ids": tuple(state.completed_unit_ids),
-        "searched_unit_ids": tuple(state.searched_unit_ids),
-        "page_finished": state.page_finished,
-        "crop_review_required": state.crop_review_required,
-        "crop_draft": {"available": bool(selected_crop.get("path"))},
-    }
-    if extra:
-        payload.update(dict(extra))
-    return payload
-
-
-def _attach_a3_output(
-    response: AgentResponse,
-    public_state: Mapping[str, Any],
-) -> AgentResponse:
-    """Attach a reviewed draft to direct A3 responses that bypass ``_response``."""
-
-    protocol = RequestProtocol.from_dict(response.protocol)
-    output_state = dict(public_state)
-    output_state.update(response.output_context)
-    try:
-        response.output = build_a3_output_draft(
-            response.intent,
-            output_state,
-            protocol,
-            variant=response.output_variant or response.reply_source,
-        )
-    except Exception:  # noqa: BLE001 - public output must fail closed.
-        safe_protocol = RequestProtocol.from_code(
-            "SERVICE_UNAVAILABLE",
-            request_id=protocol.request_id,
-            search_id=protocol.search_id,
-        )
-        response.protocol = safe_protocol.to_dict()
-        response.output = build_a3_output_draft(
-            "a3_page_error",
-            {"phase": A3_PHASE_ERROR},
-            safe_protocol,
-        )
-    return response
-
-
-def _a3_public_code(intent: str, state: A3SessionState, code: str) -> str:
-    """Normalize A3 control-flow replies before they reach the output layer."""
-
-    if code != "REQUEST_SUCCEEDED":
-        return code
-    if intent == "a3_page_ready" and state.phase == A3_PHASE_COMPLETE:
-        return (
-            "PAGE_NO_SEARCHABLE_UNITS"
-            if not state.searchable_units
-            else "REQUEST_SUCCEEDED"
-        )
-    if intent == "a3_units_prepared":
-        return "QUESTION_UNITS_PREPARED"
-    if intent in {
-        "a3_auto_crops_ready",
-        "a3_continue_current",
-        "a3_crop_required",
-        "a3_namespace_clarification",
-        "a3_prepare_required",
-        "a3_unit_already_selected",
-        "a3_unit_clarification",
-        "a3_unit_selected",
-        "a3_unit_unavailable",
-    } or (
-        intent == "a3_page_ready"
-        and state.phase in {A3_PHASE_WAIT_SELECTION, A3_PHASE_CROP_REQUIRED}
-    ):
-        return "CLARIFICATION_REQUIRED"
-    return code
 
 
 def _crop_review_feedback(result: CropCompareResult, display_label: str) -> str:
@@ -2750,35 +2460,6 @@ def _crop_review_feedback(result: CropCompareResult, display_label: str) -> str:
     elif not any(value is False for value in checks.values()):
         reason = "无法确认裁剪图完整"
     return f"裁剪结果未通过，{reason}，请重新选择区域裁剪。"
-
-
-def _crop_review_reason(result: CropCompareResult) -> str:
-    """Map verifier checks to the output catalog's reviewed reason enum."""
-
-    checks = result.checks
-    if checks.get("selected_diagram_match") is False:
-        return "wrong_question"
-    if checks.get("single_target_diagram") is False:
-        return "multiple_diagrams"
-    if checks.get("external_loads_complete") is False:
-        return "loads_incomplete"
-    if checks.get("structure_complete") is False or checks.get("supports_complete") is False:
-        return "structure_incomplete"
-    if checks.get("image_clear") is False:
-        return "image_unclear"
-    return "unconfirmed"
-
-
-def _public_unit_evidence(unit: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep only the stable unit identity needed by output composition."""
-
-    if not unit:
-        return {}
-    return {
-        "unit_id": str(unit.get("unit_id") or ""),
-        "display_label": str(unit.get("display_label") or ""),
-        "page_index": int(unit.get("page_index") or 0),
-    }
 
 
 def _clean_session_id(session_id: str) -> str:

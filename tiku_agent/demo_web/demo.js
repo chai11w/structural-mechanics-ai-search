@@ -68,6 +68,7 @@ const A3_TEXT_RETRY_TIMEOUT_MS = 100000;
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 const IMAGE_TARGET_BYTES = 1024 * 1024;
 const IMAGE_MAX_DIMENSION = 2560;
+const AUTHOR_CONTACT_FALLBACK = Object.freeze({ label: '联系作者', channel: '微信', value: 'jglxfd6666' });
 const IMAGE_FALLBACK_DIMENSION = 2048;
 const IMAGE_QUALITY_STEPS = [0.88, 0.82, 0.76, 0.70];
 const HISTORY_TTL_MS = 2 * 60 * 60 * 1000;
@@ -77,12 +78,6 @@ const LEGACY_HISTORY_KEY = 'tiku-agent-current-chat-v1';
 const LEGACY_EXPIRED_MEDIA_MESSAGE = '题图或结果图片已失效，请重新上传题图；如果问题反复出现，可以点踩告诉我们。';
 const A3_INLINE_ONLY_INTENTS = new Set([
   'a3_unit_selected', 'a3_unit_already_selected', 'a3_crop_review_required',
-]);
-const A3_SELECT_INLINE_MESSAGE_KEYS = new Set(['page.crop.required', 'page.current.guidance']);
-const A3_CROP_INLINE_MESSAGE_KEYS = new Set(['page.crop.rejected']);
-const ANSWER_MESSAGE_KEYS = new Set([
-  'search.answer.ready', 'search.answer.resent',
-  'page.unit.answer.delivered_remaining', 'page.unit.answer.delivered_complete',
 ]);
 const a3PrepareSelection = new Set();
 const ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp']);
@@ -102,48 +97,6 @@ const RECOVERY_ACTION_LABELS = {
   relogin: '重新登录', reupload: '重新上传题图', new_chat: '开始新对话',
   retry_connection: '重新连接', retry_request: '重试上一条', retry_search: '重试搜索',
 };
-const PUBLIC_MESSAGE_ACTIONS = new Set([
-  'upload_image', 'retry_upload', 'retry_request', 'retry_search', 'retry_current_stage',
-  'select_question', 'prepare_units', 'crop_question', 'select_candidate',
-  'show_candidates', 'continue_search', 'change_chapter', 'global_search',
-  'cancel_current_question', 'finish_page', 'new_chat', 'relogin', 'retry_feedback',
-  'contact_author', 'reject_candidates', 'report_answer_mismatch', 'resend_answer',
-  'continue_current',
-]);
-const PUBLIC_MESSAGE_KINDS = new Set(['result', 'transport_error', 'client_error', 'progress']);
-const PUBLIC_PROTOCOL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9:_-]{7,127}$/;
-const CLIENT_ERROR_CATALOG = Object.freeze({
-  NETWORK_UNAVAILABLE: {
-    text: '暂时无法连接服务，请检查网络后重试。', actions: ['retry_connection'],
-  },
-  REQUEST_TIMEOUT: {
-    text: '请求等待时间过长，请稍后重试。', actions: ['retry_request'],
-  },
-  RESPONSE_INVALID: {
-    text: '服务返回格式异常，请稍后重试。', actions: ['retry_request'],
-  },
-  HTTP_BAD_REQUEST: {
-    text: '这次请求没有处理成功，请检查后重试。', actions: ['retry_request'],
-  },
-  HTTP_UNAUTHORIZED: {
-    text: '登录状态已失效，请重新登录。', actions: ['relogin', 'new_chat'], retryable: false,
-  },
-  HTTP_FORBIDDEN: {
-    text: '当前请求无权处理，请重新登录或联系管理员。', actions: ['relogin'], retryable: false,
-  },
-  HTTP_RATE_LIMITED: {
-    text: '当前请求较多，请稍后再试。', actions: ['retry_request'],
-  },
-  HTTP_UPLOAD_TOO_LARGE: {
-    text: '图片太大，请上传不超过 15MB 的图片。', actions: ['reupload'], retryable: false,
-  },
-  HTTP_UPLOAD_UNSUPPORTED_FORMAT: {
-    text: '图片格式不支持，请上传 PNG、JPG、WEBP、GIF 或 BMP 图片。', actions: ['reupload'], retryable: false,
-  },
-  HTTP_SERVICE_UNAVAILABLE: {
-    text: '服务端处理失败，请稍后重试。', actions: ['retry_request'],
-  },
-});
 
 class UserVisibleError extends Error {
   constructor(message, recoveryActions = [], { retryable = true, protocol = {} } = {}) {
@@ -182,7 +135,6 @@ let a3CropHistoryActive = false;
 let a3PendingDismiss = true;
 let a3DismissedKey = '';
 let a3KnownRevision = 0;
-let a3PublicCropFeedback = '';
 const a3LocalDrafts = new Map();
 const objectUrls = new Set();
 
@@ -239,61 +191,19 @@ function protocolFields(source = {}) {
   };
 }
 
-function recoveryActionsFromAllowedActions(actions) {
-  const mapping = {
-    upload_image: 'reupload', retry_upload: 'reupload', retry_request: 'retry_request',
-    retry_search: 'retry_search', new_chat: 'new_chat', relogin: 'relogin',
-  };
-  return normalizeRecoveryActions((Array.isArray(actions) ? actions : [])
-    .map((action) => mapping[action] || ''));
+function protocolRecoveryAction(action) {
+  const value = String(action || '');
+  if (value === 'retry_upload') return 'reupload';
+  return Object.hasOwn(RECOVERY_ACTION_LABELS, value) ? value : '';
 }
 
-function clientProtocolError(code, requestId, fallback = 'RESPONSE_INVALID') {
-  const entry = CLIENT_ERROR_CATALOG[code] || CLIENT_ERROR_CATALOG[fallback];
-  return new UserVisibleError(entry.text, entry.actions, {
+function clientProtocolError(message, code, requestId, recoveryActions = ['retry_request']) {
+  return new UserVisibleError(message, recoveryActions, {
     protocol: {
-      status: 'ERROR', layer: 'network', code,
-      retryable: entry.retryable !== false,
-      action: entry.actions.includes('relogin') ? 'relogin' : 'retry_request',
+      status: 'ERROR', layer: 'network', code, retryable: true,
+      action: recoveryActions.includes('retry_connection') ? 'retry_connection' : 'retry_request',
       request_id: requestId, search_id: sessionContext.search_id || '',
     },
-  });
-}
-
-function isCanonicalPublicMessage(value, { progress = false } = {}) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  if (value.schema_version !== 1 || !PUBLIC_MESSAGE_KINDS.has(value.kind)) return false;
-  if (progress !== (value.kind === 'progress')) return false;
-  if (typeof value.message_key !== 'string' || !/^[a-z][a-z0-9]*(?:[._][a-z0-9]+)*$/.test(value.message_key)) return false;
-  if (typeof value.text !== 'string' || !value.text || value.text.length > 2000) return false;
-  if (!Array.isArray(value.allowed_actions) || new Set(value.allowed_actions).size !== value.allowed_actions.length) return false;
-  if (value.allowed_actions.some((action) => !PUBLIC_MESSAGE_ACTIONS.has(action))) return false;
-  if (typeof value.request_id !== 'string' || !PUBLIC_PROTOCOL_ID_RE.test(value.request_id)) return false;
-  if (typeof value.search_id !== 'string' || (value.search_id && !PUBLIC_PROTOCOL_ID_RE.test(value.search_id))) return false;
-  if (progress) {
-    return Number.isInteger(value.sequence) && value.sequence > 0
-      && typeof value.stage === 'string' && value.stage.length > 0
-      && !value.contact;
-  }
-  const contact = normalizeAuthorContact(value.contact);
-  if (value.allowed_actions.includes('contact_author') !== Boolean(contact)) return false;
-  return typeof value.status === 'string'
-    && typeof value.layer === 'string'
-    && typeof value.code === 'string'
-    && typeof value.retryable === 'boolean'
-    && typeof value.action === 'string';
-}
-
-function canonicalPublicMessage(value, options) {
-  return isCanonicalPublicMessage(value, options) ? value : null;
-}
-
-function publicMessageError(value, requestId) {
-  const message = canonicalPublicMessage(value);
-  if (!message || message.kind === 'progress') return clientProtocolError('RESPONSE_INVALID', requestId);
-  return new UserVisibleError(message.text, recoveryActionsFromAllowedActions(message.allowed_actions), {
-    retryable: message.retryable,
-    protocol: message,
   });
 }
 
@@ -342,7 +252,6 @@ function remember(item) {
     images: (item.images || []).filter(isPersistentImage),
     imageAlt: String(item.imageAlt || '题库图片'),
     intent: String(item.intent || ''),
-    messageKey: String(item.messageKey || ''),
     variant: String(item.variant || ''),
     taskRevision: Number(item.taskRevision || 0),
     candidateCount: Number(item.candidateCount || 0),
@@ -352,8 +261,6 @@ function remember(item) {
     createdAt: Number(item.createdAt || 0),
     feedback: item.feedback || null,
     feedbackImages: normalizeFeedbackImages(item.feedbackImages),
-    allowedActions: Array.isArray(item.allowedActions)
-      ? item.allowedActions.filter((action) => PUBLIC_MESSAGE_ACTIONS.has(action)) : [],
     recoveryActions: normalizeRecoveryActions(item.recoveryActions),
     retryAction: normalizeRetryAction(item.retryAction),
     authorContact: normalizeAuthorContact(item.authorContact),
@@ -370,7 +277,7 @@ function scrollToLatest() {
 
 function mediaKind(item) {
   if (item.me) return 'upload';
-  if (ANSWER_MESSAGE_KEYS.has(item.messageKey)) return 'answer';
+  if (item.intent === 'select_candidate' || item.intent === 'resend_answer') return 'answer';
   return item.images?.length ? 'candidate' : '';
 }
 
@@ -409,7 +316,11 @@ function normalizeA3Snapshot(value) {
     auto_prepare_all_enabled: Boolean(value.auto_prepare_all_enabled),
     auto_prepare_all_units: Boolean(value.auto_prepare_all_units),
     phase: String(value.phase || ''),
+    intent_v1_enabled: Boolean(value.intent_v1_enabled),
     page_finished: Boolean(value.page_finished),
+    pending_intent_clarification: value.pending_intent_clarification && typeof value.pending_intent_clarification === 'object'
+      ? value.pending_intent_clarification : {},
+    last_intent: value.last_intent && typeof value.last_intent === 'object' ? value.last_intent : {},
     units: Array.isArray(value.units) ? value.units.map((unit) => ({
       unit_id: String(unit.unit_id || ''),
       page_index: Number(unit.page_index || 0),
@@ -419,40 +330,27 @@ function normalizeA3Snapshot(value) {
       searched: Boolean(unit.searched),
       selected: Boolean(unit.selected),
       requested: Boolean(unit.requested),
+      grounding_status: String(unit.grounding_status || ''),
+      validation_status: String(unit.validation_status || ''),
       crop_available: Boolean(unit.crop_available),
-      preparation_status: ['ready', 'manual', 'located', 'pending'].includes(unit.preparation_status)
-        ? unit.preparation_status : 'pending',
+      auto_bounds: validA3Bounds(unit.auto_bounds),
+      reason_codes: Array.isArray(unit.reason_codes) ? unit.reason_codes.map(String) : [],
     })) : [],
     selected_unit: value.selected_unit && typeof value.selected_unit === 'object' ? {
       unit_id: String(value.selected_unit.unit_id || ''),
       display_label: String(value.selected_unit.display_label || ''),
       context_text: String(value.selected_unit.context_text || ''),
     } : { unit_id: '', display_label: '', context_text: '' },
+    completed_unit_ids: Array.isArray(value.completed_unit_ids) ? value.completed_unit_ids.map(String) : [],
+    searched_unit_ids: Array.isArray(value.searched_unit_ids) ? value.searched_unit_ids.map(String) : [],
+    remaining_count: Number(value.remaining_count || 0),
+    requested_unit_ids: Array.isArray(value.requested_unit_ids) ? value.requested_unit_ids.map(String) : [],
+    auto_crop_page_status: String(value.auto_crop_page_status || ''),
     auto_crop_overlay_available: Boolean(value.auto_crop_overlay_available),
     crop_review_required: Boolean(value.crop_review_required),
-    crop_draft: value.crop_draft && typeof value.crop_draft === 'object' ? {
-      bounds: validA3Bounds(value.crop_draft.bounds),
-      available: Boolean(value.crop_draft.available),
-    } : {},
+    crop_review_feedback: String(value.crop_review_feedback || ''),
+    crop_draft: value.crop_draft && typeof value.crop_draft === 'object' ? value.crop_draft : {},
     task_revision: Number(value.task_revision || 0),
-  };
-}
-
-function normalizeSessionSnapshot(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const phase = String(value.phase || 'IDLE');
-  const safeRevision = Number(value.task_revision);
-  const safeCandidateCount = Number(value.candidate_count);
-  const cleanId = (item) => typeof item === 'string' && /^[A-Za-z0-9:_.-]{0,128}$/.test(item) ? item : '';
-  return {
-    session_valid: value.session_valid === true,
-    phase: /^[A-Z_]{2,64}$/.test(phase) ? phase : 'IDLE',
-    has_active_image: value.has_active_image === true,
-    task_revision: Number.isInteger(safeRevision) && safeRevision >= 0 ? safeRevision : 0,
-    candidate_generation: cleanId(value.candidate_generation),
-    candidate_count: Number.isInteger(safeCandidateCount) && safeCandidateCount >= 0 ? safeCandidateCount : 0,
-    search_id: cleanId(value.search_id),
-    a3: normalizeA3Snapshot(value.a3),
   };
 }
 
@@ -962,7 +860,6 @@ function createMediaCard(url, index, item) {
       candidate_generation: String(item.candidateGeneration || ''),
     };
     const isCurrent = sessionContext.session_valid
-      && item.allowedActions?.includes('select_candidate')
       && ['WAIT_CANDIDATE_CHOICE', 'ANSWERED'].includes(sessionContext.phase)
       && actionContext.task_revision === Number(sessionContext.task_revision || 0)
       && actionContext.candidate_generation
@@ -978,10 +875,11 @@ function createMediaCard(url, index, item) {
 
 function addMessage(item, persist = true) {
   item = { ...item, createdAt: Number(item.createdAt || Date.now()) };
-  const authorContact = !item.me && item.allowedActions?.includes('contact_author')
-    ? normalizeAuthorContact(item.authorContact)
-    : null;
-  item = { ...item, authorContact };
+  const inferredAuthorContact = normalizeAuthorContact(item.authorContact)
+    || (!item.me && String(item.message || '').includes('联系作者手搓')
+      ? AUTHOR_CONTACT_FALLBACK
+      : null);
+  if (inferredAuthorContact) item = { ...item, authorContact: inferredAuthorContact };
   const feedbackEligible = !item.me && item.variant !== 'pending';
   if (feedbackEligible) {
     item = {
@@ -1132,12 +1030,10 @@ function flushStartupNotices() {
 async function repairUploadedImageHistory() {
   try {
     const data = await request('/api/session', {}, 5000, '会话恢复超时。', false);
-    const snapshot = normalizeSessionSnapshot(data?.session);
-    if (!snapshot) throw clientProtocolError('RESPONSE_INVALID', createRequestId());
     updateSessionContext(data);
     resolveFailureNotice('connection');
     renderHistory();
-    if (!snapshot.session_valid) {
+    if (!data.session?.session_valid) {
       if (history.length) {
         clearHistory();
         renderHistory();
@@ -1182,7 +1078,6 @@ function clearHistory() {
   a3LocalDrafts.clear();
   a3DismissedKey = '';
   a3KnownRevision = 0;
-  a3PublicCropFeedback = '';
   localStorage.removeItem(HISTORY_KEY);
   localStorage.removeItem(LEGACY_HISTORY_KEY);
 }
@@ -1253,16 +1148,16 @@ function setBusy(value) {
 }
 
 function validateImage(file) {
-  if (!file) return { code: 'UPLOAD_REQUIRED', text: '没有读取到图片，请重新选择。' };
+  if (!file) return '没有读取到图片，请重新选择。';
   const name = String(file.name || '');
   const extension = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
   const normalizedType = String(file.type || '').toLowerCase();
   const ambiguousType = !normalizedType || normalizedType === 'application/octet-stream';
   if (!ALLOWED_TYPES.has(normalizedType) && (!ambiguousType || (extension && !ALLOWED_EXTENSIONS.has(extension)))) {
-    return { code: 'UPLOAD_UNSUPPORTED_FORMAT', text: '图片格式不支持，请上传 PNG、JPG、WEBP、GIF 或 BMP 图片。' };
+    return '图片格式不支持，请上传 PNG、JPG、WEBP、GIF 或 BMP 图片。';
   }
-  if (file.size > MAX_IMAGE_BYTES) return { code: 'UPLOAD_TOO_LARGE', text: '图片太大，请上传不超过 15MB 的图片。' };
-  return null;
+  if (file.size > MAX_IMAGE_BYTES) return '图片太大，请上传不超过 15MB 的图片。';
+  return '';
 }
 
 function debugUploadMetadata(stage, value, filename = '') {
@@ -1317,14 +1212,57 @@ async function normalizeImage(selected, sourceUrl) {
 }
 
 function safeHttpError(status, data, requestId = '') {
-  const publicMessage = canonicalPublicMessage(data);
-  if (publicMessage?.request_id === requestId) return publicMessageError(publicMessage, requestId);
-  const code = {
-    400: 'HTTP_BAD_REQUEST', 401: 'HTTP_UNAUTHORIZED', 403: 'HTTP_FORBIDDEN',
-    413: 'HTTP_UPLOAD_TOO_LARGE', 415: 'HTTP_UPLOAD_UNSUPPORTED_FORMAT',
-    429: 'HTTP_RATE_LIMITED',
-  }[status] || (status >= 500 ? 'HTTP_SERVICE_UNAVAILABLE' : 'HTTP_BAD_REQUEST');
-  return clientProtocolError(code, requestId, 'HTTP_SERVICE_UNAVAILABLE');
+  const rawDetail = typeof data?.detail === 'string' ? data.detail : '';
+  const detail = rawDetail.toLowerCase();
+  const protocol = { ...data, request_id: data?.request_id || requestId };
+  const action = protocolRecoveryAction(data?.action);
+  if (data?.status) {
+    const messages = {
+      UPLOAD_REQUIRED: '没有读取到图片，请重新选择。',
+      UPLOAD_TOO_LARGE: '图片太大，请上传不超过 15MB 的图片。',
+      UPLOAD_UNSUPPORTED_FORMAT: '图片格式不支持，请上传 PNG、JPG、WEBP、GIF 或 BMP 图片。',
+      UPLOAD_DECODE_FAILED: '服务端无法读取该图片，请重新选择清晰、完整的题图。',
+      MESSAGE_INVALID: '这条消息无法处理，请重新输入后提交。',
+      FEEDBACK_INVALID: '反馈内容无法提交，请修改后重试。',
+      FEEDBACK_TOO_LARGE: '反馈内容过长，请精简后重试。',
+    };
+    return new UserVisibleError(
+      messages[data.code] || rawDetail || '这次请求没有处理成功，请稍后重试。',
+      action ? [action] : [],
+      { retryable: Boolean(data.retryable), protocol },
+    );
+  }
+  if (status === 401) return new UserVisibleError('登录状态已失效，请重新登录。', ['relogin'], { retryable: false });
+  if (status === 403) return new UserVisibleError('当前请求无权处理，请重新登录或联系管理员。', ['relogin'], { retryable: false });
+  if (status === 429) return new UserVisibleError(rawDetail || '当前请求较多，请稍后再试。', ['retry_request']);
+  if (status === 503 && (detail.includes('额度') || detail.includes('邀请码'))) {
+    const actions = detail.includes('重新登录') ? ['relogin'] : [];
+    return new UserVisibleError(rawDetail || '今日服务额度已用完，请明天再试。', actions, { retryable: false });
+  }
+  if (status === 413 || detail.includes('too large')) return new UserVisibleError('图片太大，请上传不超过 15MB 的图片。');
+  if (status === 415 || detail.includes('unsupported image')) return new UserVisibleError('图片格式不支持，请上传 PNG、JPG、WEBP、GIF 或 BMP 图片。');
+  if (status === 400 && detail.includes('invalid image')) return new UserVisibleError('服务端无法读取该图片，请检查图片后重试。');
+  if (status >= 500) return new UserVisibleError('服务端处理失败，请稍后重试。', ['retry_request']);
+  if (status === 400) return new UserVisibleError(
+    '这次请求没有处理成功，请直接重试；如果仍然失败，请点踩并补充说明。',
+    ['retry_request'],
+  );
+  return new UserVisibleError(`请求失败（HTTP ${status}），请稍后重试。`, ['retry_request']);
+}
+
+function streamedError(event) {
+  const text = String(event?.message || event || '服务端处理失败，请稍后重试。');
+  if (event?.status) {
+    const action = protocolRecoveryAction(event.action);
+    return new UserVisibleError(
+      text,
+      action ? [action] : [],
+      { retryable: Boolean(event.retryable), protocol: event },
+    );
+  }
+  const retryable = !text.includes('重新登录') && !text.includes('额度') && !text.includes('邀请码');
+  const actions = text.includes('重新登录') ? ['relogin'] : retryable ? ['retry_request'] : [];
+  return new UserVisibleError(text, actions, { retryable });
 }
 
 async function request(url, options, timeoutMs, timeoutMessage, track = true, networkMessage = '') {
@@ -1344,20 +1282,20 @@ async function request(url, options, timeoutMs, timeoutMessage, track = true, ne
       await response.text();
     }
     if (!response.ok) throw safeHttpError(response.status, data, requestId);
-    if (!contentType.includes('application/json')) throw clientProtocolError('RESPONSE_INVALID', requestId);
-    const publicMessage = canonicalPublicMessage(data);
-    if (publicMessage && publicMessage.request_id !== requestId) {
-      throw clientProtocolError('RESPONSE_INVALID', requestId);
-    }
+    if (!contentType.includes('application/json')) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
     return data;
   } catch (error) {
     if (error.name === 'AbortError') {
       if (controller.signal.reason === 'new-chat') throw new UserVisibleError('当前识别已取消。');
-      throw clientProtocolError('REQUEST_TIMEOUT', requestId);
+      throw new UserVisibleError(timeoutMessage, ['retry_request'], {
+        protocol: { status: 'ERROR', layer: 'network', code: 'REQUEST_TIMEOUT', retryable: true, action: 'retry_request', request_id: requestId },
+      });
     }
     if (error instanceof UserVisibleError) throw error;
-    if (error instanceof TypeError) throw clientProtocolError('NETWORK_UNAVAILABLE', requestId);
-    throw clientProtocolError('RESPONSE_INVALID', requestId);
+    if (error instanceof TypeError) throw new UserVisibleError(networkMessage || '无法连接服务，请检查网络后重试。', ['retry_request'], {
+      protocol: { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: requestId },
+    });
+    throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
   } finally {
     clearTimeout(timer);
     if (activeController === controller) activeController = null;
@@ -1391,24 +1329,11 @@ async function requestStream(
       try { data = await response.json(); } catch (_error) { data = {}; }
       throw safeHttpError(response.status, data, requestId);
     }
-    if (!response.body) throw clientProtocolError('RESPONSE_INVALID', requestId);
+    if (!response.body) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
     let result = null;
-    let progressSequence = 0;
-    let streamSearchId = null;
-    const acceptsCorrelation = (message, progress) => {
-      if (message.request_id !== requestId) return false;
-      if (progress) {
-        if (result !== null || message.sequence !== progressSequence + 1) return false;
-        if (streamSearchId === null) streamSearchId = message.search_id;
-        else if (message.search_id !== streamSearchId) return false;
-        progressSequence = message.sequence;
-        return true;
-      }
-      return result === null && (!streamSearchId || message.search_id === streamSearchId);
-    };
     while (true) {
       const { value, done } = await reader.read();
       buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
@@ -1416,39 +1341,30 @@ async function requestStream(
       buffer = lines.pop() || '';
       for (const line of lines) {
         if (!line.trim()) continue;
-        let event;
-        try { event = JSON.parse(line); } catch (_error) { throw clientProtocolError('RESPONSE_INVALID', requestId); }
-        const progress = canonicalPublicMessage(event?.data, { progress: true });
-        if (event?.type === 'progress' && progress && acceptsCorrelation(progress, true)) {
+        const event = JSON.parse(line);
+        if (event.type === 'progress') {
           if (renewTimeoutOnProgress) renewTimeout();
-          onProgress?.(progress);
-          continue;
+          onProgress?.(event);
         }
-        const message = canonicalPublicMessage(event?.data);
-        if (event?.type === 'result' && message && message.kind === 'result'
-          && message.status !== 'ERROR' && acceptsCorrelation(message, false)) {
-          result = { ...event.data, text: message.text, allowed_actions: message.allowed_actions };
-          continue;
-        }
-        if (event?.type === 'error' && message
-          && (message.kind !== 'result' || message.status === 'ERROR')
-          && acceptsCorrelation(message, false)) {
-          throw publicMessageError(message, requestId);
-        }
-        throw clientProtocolError('RESPONSE_INVALID', requestId);
+        if (event.type === 'result') result = event.data;
+        if (event.type === 'error') throw streamedError(event);
       }
       if (done) break;
     }
-    if (!result) throw clientProtocolError('RESPONSE_INVALID', requestId);
+    if (!result) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
     return result;
   } catch (error) {
     if (error.name === 'AbortError') {
       if (controller.signal.reason === 'new-chat') throw new UserVisibleError('当前识别已取消。');
-      throw clientProtocolError('REQUEST_TIMEOUT', requestId);
+      throw new UserVisibleError(timeoutMessage, ['retry_request'], {
+        protocol: { status: 'ERROR', layer: 'network', code: 'REQUEST_TIMEOUT', retryable: true, action: 'retry_request', request_id: requestId },
+      });
     }
     if (error instanceof UserVisibleError) throw error;
-    if (error instanceof TypeError) throw clientProtocolError('NETWORK_UNAVAILABLE', requestId);
-    throw clientProtocolError('RESPONSE_INVALID', requestId);
+    if (error instanceof TypeError) throw new UserVisibleError(networkMessage || '无法连接服务，请检查网络后重试。', ['retry_request'], {
+      protocol: { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: requestId },
+    });
+    throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
   } finally {
     clearTimeout(timer);
     if (activeController === controller) activeController = null;
@@ -1456,41 +1372,37 @@ async function requestStream(
 }
 
 function responseItem(data) {
-  const publicMessage = canonicalPublicMessage(data);
-  if (!publicMessage) throw clientProtocolError('RESPONSE_INVALID', createRequestId());
   updateSessionContext(data);
-  const protocol = protocolFields(publicMessage);
+  const failure = data?.failure && typeof data.failure === 'object' ? data.failure : null;
+  const protocol = protocolFields(data);
+  const recoveryAction = protocolRecoveryAction(data?.action)
+    || String(failure?.recovery_action || '');
   return {
-    message: publicMessage.text,
+    message: data.text || '处理完成。',
     me: false,
-    images: Array.isArray(data.images) ? data.images.filter(isPersistentImage) : [],
-    imageAlt: ANSWER_MESSAGE_KEYS.has(publicMessage.message_key) ? '题库答案' : '相似题候选',
+    images: data.images || [],
+    imageAlt: data.intent === 'select_candidate' || data.intent === 'resend_answer' ? '题库答案' : '相似题候选',
     intent: data.intent || '',
-    messageKey: publicMessage.message_key,
-    taskRevision: Number(sessionContext.task_revision || 0),
-    candidateCount: Number(sessionContext.candidate_count || 0),
-    candidateGeneration: String(sessionContext.candidate_generation || ''),
-    variant: protocol.status === 'ERROR'
+    taskRevision: Number(data.session?.task_revision || 0),
+    candidateCount: Number(data.session?.candidate_count || 0),
+    candidateGeneration: String(data.session?.candidate_generation || ''),
+    variant: protocol.status === 'ERROR' || failure
       ? 'error'
       : protocol.status === 'PARTIAL' ? 'partial' : '',
-    allowedActions: publicMessage.allowed_actions,
-    recoveryActions: recoveryActionsFromAllowedActions(publicMessage.allowed_actions),
-    authorContact: normalizeAuthorContact(publicMessage.contact),
+    recoveryActions: recoveryAction ? [recoveryAction] : [],
+    authorContact: normalizeAuthorContact(data?.author_contact),
     messageId: createMessageId(),
     createdAt: Date.now(),
-    a3: normalizeA3Snapshot(sessionContext.a3),
+    a3: normalizeA3Snapshot(data.session?.a3),
     feedbackImages: normalizeFeedbackImages(data.feedback_images),
     ...protocol,
   };
 }
 
 function setResponseStatus(data) {
-  const message = canonicalPublicMessage(data);
-  if (!message) {
-    setStatus('error', '服务返回格式异常');
-  } else if (message.status === 'PARTIAL') {
+  if (data?.status === 'PARTIAL') {
     setStatus('ready', '结果已返回，部分能力暂时降级');
-  } else if (message.status === 'ERROR') {
+  } else if (data?.status === 'ERROR' || data?.failure) {
     setStatus('error', '处理失败，可重新尝试');
   } else {
     setStatus('ready', '准备就绪');
@@ -1498,15 +1410,14 @@ function setResponseStatus(data) {
 }
 
 function maybeOpenAutoPreparedA3Sheet(response) {
-  if (response.messageKey === 'page.units.prepared' && response.a3?.auto_prepare_all_units) {
+  if (response.intent === 'a3_units_prepared' && response.a3?.auto_prepare_all_units) {
     openA3Sheet();
   }
 }
 
 function updateSessionContext(data) {
-  const snapshot = normalizeSessionSnapshot(data?.session);
-  if (!snapshot) return;
-  sessionContext = { ...sessionContext, ...snapshot };
+  if (!data?.session) return;
+  sessionContext = { ...sessionContext, ...data.session };
   if (isPersistentImage(data.uploaded_image)) a3SourceUrl = data.uploaded_image;
   syncA3Interface();
 }
@@ -1607,7 +1518,6 @@ function syncA3Interface() {
     a3LocalDrafts.clear();
     a3PrepareSelection.clear();
     a3DismissedKey = '';
-    a3PublicCropFeedback = '';
   }
   a3KnownRevision = a3.task_revision;
   renderA3SheetUnits(a3);
@@ -1634,13 +1544,13 @@ async function selectA3Unit(unitId) {
       body: JSON.stringify({ unit_id: unitId, task_revision: Number(a3Current()?.task_revision || 0) }),
     }, A3_TIMEOUT_MS, '选题或搜题等待超时，请重新选择。', (event) => {
       if (operation !== operationVersion) return;
-      updatePendingMessage(pending, event.text);
-      setStatus('working', event.text);
+      updatePendingMessage(pending, event.message);
+      setStatus('working', event.message);
     });
     if (operation !== operationVersion) return;
     pending.remove();
     const response = responseItem(data);
-    if (!A3_SELECT_INLINE_MESSAGE_KEYS.has(data.message_key)) addMessage(response);
+    if (!A3_INLINE_ONLY_INTENTS.has(data.intent)) addMessage(response);
     setResponseStatus(data);
   } catch (error) {
     if (operation !== operationVersion) return;
@@ -1724,7 +1634,7 @@ function renderA3Selection() {
   a3Selection.style.width = `${bounds.width * 100}%`;
   a3Selection.style.height = `${bounds.height * 100}%`;
   a3CropStatus.textContent = a3Current()?.crop_review_required
-    ? (a3PublicCropFeedback || '裁剪结果未通过，请重新选择区域裁剪。')
+    ? (a3Current()?.crop_review_feedback || '裁剪结果未通过，请重新选择区域裁剪。')
     : '已框选，可以提交校验';
 }
 
@@ -1847,8 +1757,8 @@ async function submitA3Crop() {
       }),
     }, A3_TIMEOUT_MS, '裁剪校验或搜题等待超时，已保留裁剪范围。', (event) => {
       if (operation !== operationVersion) return;
-      a3CropStatus.textContent = event.text;
-      setStatus('working', event.text);
+      a3CropStatus.textContent = event.message;
+      setStatus('working', event.message);
     });
     if (operation !== operationVersion) return;
     const response = responseItem(data);
@@ -1859,13 +1769,13 @@ async function submitA3Crop() {
         taskRevision: response.taskRevision,
       });
     }
-    if (!A3_CROP_INLINE_MESSAGE_KEYS.has(data.message_key)) addMessage(response);
+    if (!A3_INLINE_ONLY_INTENTS.has(data.intent)) addMessage(response);
     setResponseStatus(data);
-    if (data.message_key === 'page.crop.rejected') {
+    if (data.intent === 'a3_crop_review_required') {
       a3CropStatus.classList.add('is-warning');
-      a3PublicCropFeedback = response.message
+      a3CropStatus.textContent = a3Current()?.crop_review_feedback
+        || response.message
         || '裁剪结果未通过，请重新选择区域裁剪。';
-      a3CropStatus.textContent = a3PublicCropFeedback;
     }
   } catch (error) {
     if (operation !== operationVersion) return;
@@ -1962,9 +1872,9 @@ function renderA3AutoSheetUnits(a3) {
     const detail = document.createElement('small');
     if (unit.completed) detail.textContent = '已完成';
     else if (unit.searched) detail.textContent = '已检索，不可重复进入';
-    else if (unit.preparation_status === 'ready') detail.textContent = '已校验，可直接检索';
+    else if (unit.validation_status === 'auto_ready') detail.textContent = '已校验，可直接检索';
     else if (unit.requested) detail.textContent = '需要人工裁剪';
-    else if (unit.preparation_status === 'located') detail.textContent = '待校验';
+    else if (unit.grounding_status === 'auto_ready') detail.textContent = '待千问校验';
     else if (unit.crop_available) detail.textContent = '自动框需要人工确认';
     else detail.textContent = '选择后使用人工裁剪';
     copy.append(title, detail);
@@ -2014,8 +1924,8 @@ async function prepareA3Units() {
       body: JSON.stringify({ unit_ids: unitIds, task_revision: Number(a3.task_revision || 0) }),
     }, A3_TIMEOUT_MS, '裁图校验等待超时，请重新选择。', (event) => {
       if (operation !== operationVersion) return;
-      a3SheetCount.textContent = event.text;
-      setStatus('working', event.text);
+      a3SheetCount.textContent = event.message;
+      setStatus('working', event.message);
     });
     if (operation !== operationVersion) return;
     const response = responseItem(data);
@@ -2128,13 +2038,13 @@ async function sendTextValue(value, displayValue = value, actionContext = null) 
       body: JSON.stringify({ text: clean, ...(actionContext ? { action_context: actionContext } : {}) }),
     }, timeoutMs, '请求等待时间过长，请稍后重试。', (event) => {
       if (operation !== operationVersion) return;
-      if (!pending) pending = addMessage({ message: event.text, variant: 'pending' }, false);
-      else updatePendingMessage(pending, event.text);
-      setStatus('working', event.text);
+      if (!pending) pending = addMessage({ message: event.message, variant: 'pending' }, false);
+      else updatePendingMessage(pending, event.message);
+      setStatus('working', event.message);
     }, '', { renewTimeoutOnProgress: autoPrepareRetry });
     if (operation !== operationVersion) return;
     pending?.remove();
-    if (data.message_key === 'page.session.reset' && data.status === 'SUCCESS') {
+    if (data.intent === 'a3_session_reset') {
       clearHistory();
       if (!a3CropWorkspace.hidden) finishCloseA3Crop({ dismiss: false });
       a3CropHistoryActive = false;
@@ -2241,8 +2151,8 @@ async function submitPreparedImage(prepared, uploadRow) {
       : sessionContext.a3?.enabled ? A3_TIMEOUT_MS : IMAGE_TIMEOUT_MS,
     '网络上传或题图识别超时，请直接重新上传。', (event) => {
       if (operation !== operationVersion) return;
-      updatePendingMessage(pending, event.text);
-      setStatus('working', event.text);
+      updatePendingMessage(pending, event.message);
+      setStatus('working', event.message);
     }, '网络上传失败，请检查网络后重试。', {
       renewTimeoutOnProgress: autoPrepareAll,
     });
@@ -2289,14 +2199,17 @@ async function uploadImage(selected) {
   if (isBusy) return;
   await sessionBootstrap;
   if (isBusy) return;
-  const validation = validateImage(selected);
+  const validationError = validateImage(selected);
   fileInput.value = '';
-  if (validation) {
+  if (validationError) {
+    const code = validationError.includes('太大')
+      ? 'UPLOAD_TOO_LARGE'
+      : validationError.includes('格式') ? 'UPLOAD_UNSUPPORTED_FORMAT' : 'UPLOAD_REQUIRED';
     addMessage({
-      message: validation.text,
+      message: validationError,
       variant: 'error',
       recoveryActions: ['reupload'],
-      status: 'NEEDS_INPUT', layer: 'upload', code: validation.code, retryable: false,
+      status: 'NEEDS_INPUT', layer: 'upload', code, retryable: false,
       action: 'retry_upload', requestId: createRequestId(), searchId: '',
     });
     return;
@@ -2320,9 +2233,9 @@ async function uploadImage(selected) {
     pendingUpload = prepared;
   } catch (error) {
     if (operation === operationVersion) {
-      setUploadRowStatus(uploadRow, '裁剪处理失败，请重新选择图片。', 'error');
+      setUploadRowStatus(uploadRow, error.message || '裁剪处理失败，请重新选择图片。', 'error');
       addMessage({
-        message: '图片处理失败，请重新选择图片。',
+        message: error.message || '图片处理失败，请重新选择图片。',
         variant: 'error', recoveryActions: ['reupload'],
         status: 'NEEDS_INPUT', layer: 'upload', code: 'UPLOAD_DECODE_FAILED',
         retryable: false, action: 'retry_upload', requestId: createRequestId(), searchId: '',

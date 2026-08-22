@@ -220,7 +220,6 @@ class FakeA2Runtime:
         }
         return AgentResponse(
             text="我从题库里找到了最相似的一道题。",
-            images=[str(image_path)] * self.candidate_count,
             state={
                 "phase": "WAIT_CANDIDATE_CHOICE",
                 "candidate_count": self.candidate_count,
@@ -243,7 +242,6 @@ class FakeA2Runtime:
         }
         return AgentResponse(
             text="我从题库里找到了最相似的一道题。",
-            images=[str(image_path)] * self.candidate_count,
             state={
                 "phase": "WAIT_CANDIDATE_CHOICE",
                 "candidate_count": self.candidate_count,
@@ -616,8 +614,8 @@ class A3RuntimeTests(unittest.TestCase):
 
         self.assertEqual(uploaded.status_code, 200)
         payload = uploaded.json()
-        self.assertNotIn("image_route", payload["session"])
-        self.assertNotIn("a3", payload["session"])
+        self.assertEqual(payload["session"]["image_route"], "A2")
+        self.assertFalse(payload["session"]["a3"]["enabled"])
         self.assertNotIn("裁剪", payload["text"])
 
     def test_direct_a2_route_is_reclassified_to_a1_when_load_screen_says_no(self):
@@ -925,9 +923,10 @@ class A3RuntimeTests(unittest.TestCase):
             {"x": 0.25, "y": 0.2, "width": 0.5, "height": 0.5},
         )
         self.assertEqual(searched.intent, "search_image")
-        self.assertIsNotNone(searched.output)
-        self.assertEqual(searched.output.message_key, "page.unit.candidates.ready")
-        self.assertEqual(searched.output.facts["question_label"], "四-2")
+        self.assertEqual(
+            searched.text,
+            "我从题库里找到了与「四-2」最相似的一道题。你看看是不是这道。",
+        )
         self.assertEqual(self.runtime.session_snapshot(session_id)["a3"]["phase"], A3_PHASE_A2_ACTIVE)
         _session, crop_path, kwargs = self.a2.prechecked_calls[0]
         with Image.open(crop_path) as crop_image:
@@ -940,12 +939,10 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(self.analyzer.calls, 0)
 
         answered = self.runtime.handle_text(session_id, "选择候选 1")
-        self.assertIsNotNone(answered.output)
         self.assertEqual(
-            answered.output.message_key,
-            "page.unit.answer.delivered_remaining",
+            answered.text,
+            "「四-2」的题库答案找到了，已经发给你。这道题处理好了，这张图里还有 1 道可以继续查。",
         )
-        self.assertEqual(answered.output.facts["question_label"], "四-2")
         a3 = self.runtime.session_snapshot(session_id)["a3"]
         self.assertEqual(a3["phase"], A3_PHASE_WAIT_SELECTION)
         self.assertEqual(a3["completed_unit_ids"], ["g1-u2"])
@@ -956,10 +953,9 @@ class A3RuntimeTests(unittest.TestCase):
             {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
         )
         completed = self.runtime.handle_text(session_id, "选择候选 1")
-        self.assertIsNotNone(completed.output)
         self.assertEqual(
-            completed.output.message_key,
-            "page.unit.answer.delivered_complete",
+            completed.text,
+            "「四-1」的题库答案找到了，已经发给你。这张图里的可处理题目已经全部完成。",
         )
 
     def test_review_required_preserves_crop_draft_and_does_not_enter_a2(self):
@@ -1064,9 +1060,7 @@ class A3RuntimeTests(unittest.TestCase):
         cancelled = self.runtime.handle_text(session_id, "算了")
 
         self.assertEqual(cancelled.intent, "cancel")
-        self.assertIsNotNone(cancelled.output)
-        self.assertEqual(cancelled.output.message_key, "page.unit.stopped_remaining")
-        self.assertEqual(cancelled.output.facts["remaining_count"], 2)
+        self.assertIn("还有 2 道", cancelled.text)
         a3 = self.runtime.session_snapshot(session_id)["a3"]
         self.assertEqual(a3["phase"], A3_PHASE_WAIT_SELECTION)
         self.assertEqual(a3["completed_unit_ids"], [])
@@ -1240,9 +1234,10 @@ class A3RuntimeTests(unittest.TestCase):
             {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
         )
 
-        self.assertIsNotNone(response.output)
-        self.assertEqual(response.output.message_key, "page.unit.candidates.ready")
-        self.assertEqual(response.output.facts["candidate_count"], 3)
+        self.assertEqual(
+            response.text,
+            "我从题库里找到了与「四-1」相似的 3 道题，已按相似度排序。",
+        )
 
     def test_active_a2_chapter_number_is_forwarded_instead_of_switching_units(self):
         session_id = "a3-active-chapter"
@@ -1299,7 +1294,7 @@ class A3RuntimeTests(unittest.TestCase):
             },
         )
         events = [json.loads(line) for line in cropped.text.splitlines() if line]
-        self.assertEqual(events[-1]["type"], "result", events)
+        self.assertEqual(events[-1]["type"], "result")
         crop_data = events[-1]["data"]
         self.assertEqual(crop_data["session"]["a3"]["phase"], A3_PHASE_A2_ACTIVE)
         self.assertTrue(crop_data["submitted_crop"].startswith("/api/media/"))
@@ -1349,14 +1344,14 @@ class A3RuntimeTests(unittest.TestCase):
         events = [json.loads(line) for line in prepared.text.splitlines() if line]
         self.assertEqual(events[-1]["type"], "result")
         units = events[-1]["data"]["session"]["a3"]["units"]
-        self.assertTrue(all(unit["preparation_status"] == "ready" for unit in units))
+        self.assertTrue(all(unit["validation_status"] == "auto_ready" for unit in units))
 
         selected = client.post(
             "/api/a3/select/stream",
             json={"unit_id": "g1-u2", "task_revision": 1},
         )
         select_events = [json.loads(line) for line in selected.text.splitlines() if line]
-        self.assertEqual(select_events[-1]["type"], "result", select_events)
+        self.assertEqual(select_events[-1]["type"], "result")
         select_data = select_events[-1]["data"]
         self.assertEqual(select_data["intent"], "search_image")
         self.assertEqual(select_data["session"]["a3"]["phase"], A3_PHASE_A2_ACTIVE)
@@ -1389,13 +1384,8 @@ class A3RuntimeTests(unittest.TestCase):
         a3 = upload_data["session"]["a3"]
         self.assertTrue(a3["auto_prepare_all_units"])
         self.assertEqual(a3["phase"], A3_PHASE_WAIT_SELECTION)
-        self.assertEqual(
-            [unit["unit_id"] for unit in a3["units"] if unit["requested"]],
-            ["g1-u1", "g1-u2"],
-        )
-        self.assertTrue(
-            all(unit["preparation_status"] == "ready" for unit in a3["units"])
-        )
+        self.assertEqual(a3["requested_unit_ids"], ["g1-u1", "g1-u2"])
+        self.assertTrue(all(unit["validation_status"] == "auto_ready" for unit in a3["units"]))
 
         selected = client.post(
             "/api/a3/select/stream",

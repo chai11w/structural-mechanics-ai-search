@@ -30,7 +30,7 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn("requestStream('/api/a3/prepare/stream'", self.script)
         self.assertIn("a3PrepareSelection", self.script)
         self.assertIn("a3SheetSubtitle.hidden = a3.auto_prepare_all_units", self.script)
-        self.assertIn("response.messageKey === 'page.units.prepared'", self.script)
+        self.assertIn("response.intent === 'a3_units_prepared'", self.script)
         self.assertIn("openA3Sheet();", self.script)
         self.assertIn("A3_AUTO_PREPARE_IDLE_TIMEOUT_MS = 210000", self.script)
         self.assertIn("renewTimeoutOnProgress: autoPrepareAll", self.script)
@@ -98,15 +98,14 @@ class A3WebUiCopyTests(unittest.TestCase):
         ]
 
         self.assertNotIn("addMessage({ message: `选择", select_body)
-        self.assertIn("!A3_SELECT_INLINE_MESSAGE_KEYS.has(data.message_key)", select_body)
-        self.assertIn("!A3_CROP_INLINE_MESSAGE_KEYS.has(data.message_key)", crop_body)
-        self.assertNotIn("crop_review_feedback", crop_body)
-        self.assertIn("a3PublicCropFeedback = response.message", crop_body)
+        self.assertIn("!A3_INLINE_ONLY_INTENTS.has(data.intent)", select_body)
+        self.assertIn("!A3_INLINE_ONLY_INTENTS.has(data.intent)", crop_body)
+        self.assertIn("a3CropStatus.textContent = a3Current()?.crop_review_feedback", crop_body)
         self.assertIn("className = 'a3-unit-choice a3-continue-crop'", self.script)
         self.assertIn("isPersistentImage(data.submitted_crop)", crop_body)
         self.assertLess(
             crop_body.index("message: '我提交了裁剪后的题图。'"),
-            crop_body.index("if (!A3_CROP_INLINE_MESSAGE_KEYS.has(data.message_key)) addMessage(response)"),
+            crop_body.index("if (!A3_INLINE_ONLY_INTENTS.has(data.intent)) addMessage(response)"),
         )
 
     def test_old_crop_workspace_echoes_are_removed_from_history(self):
@@ -154,10 +153,10 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn("作者${contact.channel}：", self.script)
         self.assertNotIn("button.textContent = '继续搜'", self.script)
 
-    def test_author_contact_is_never_inferred_from_reply_text(self):
-        self.assertNotIn("AUTHOR_CONTACT_FALLBACK", self.script)
-        self.assertNotIn("includes('联系作者手搓')", self.script)
-        self.assertIn("item.allowedActions?.includes('contact_author')", self.script)
+    def test_old_contact_fallback_reply_recovers_its_button_after_refresh(self):
+        self.assertIn("const AUTHOR_CONTACT_FALLBACK", self.script)
+        self.assertIn("includes('联系作者手搓')", self.script)
+        self.assertIn("authorContact: inferredAuthorContact", self.script)
 
     def test_author_contact_matches_adjacent_a3_action_style_and_row(self):
         page = (ROOT / "tiku_agent" / "demo_web" / "index.html").read_text(encoding="utf-8")

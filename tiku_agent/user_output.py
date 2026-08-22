@@ -24,7 +24,6 @@ from tiku_shared.request_protocol import (
     RequestLayer,
     RequestProtocol,
     RequestStatus,
-    ProtocolReason,
 )
 
 
@@ -161,9 +160,6 @@ _PUBLIC_CHAPTER_NAMES = frozenset(
     definition.display_name
     for definition in (*CHAPTER_DEFINITIONS, *UNSUPPORTED_TOPIC_DEFINITIONS)
     if definition.display_name
-)
-_SUPPORTED_CHAPTER_NAMES = tuple(
-    definition.display_name for definition in CHAPTER_DEFINITIONS
 )
 logger = logging.getLogger(__name__)
 
@@ -440,6 +436,14 @@ class ProgressCatalogEntry:
     max_chars: int = 100
 
 
+@dataclass(frozen=True)
+class ProtocolRule:
+    status: RequestStatus
+    layer: RequestLayer
+    retryable: bool
+    action: RequestAction = RequestAction.NONE
+
+
 def _fixed(text: str) -> Renderer:
     return lambda _facts, _bounded_text: text
 
@@ -453,19 +457,6 @@ def _render_chapter_required(facts: Mapping[str, Any], _bounded_text: str) -> st
     if chapters:
         return f"请告诉我题目所属章节或题型。目前支持：{_format_names(chapters)}。"
     return "请告诉我题目所属章节或题型。"
-
-
-def _render_supported_chapters(
-    _facts: Mapping[str, Any], _bounded_text: str
-) -> str:
-    return (
-        f"当前支持：{_format_names(_SUPPORTED_CHAPTER_NAMES)}。"
-        "矩阵位移法和影响线仅支持含具体外荷载的题目。"
-    )
-
-
-def _render_chapter_saved(facts: Mapping[str, Any], _bounded_text: str) -> str:
-    return f"已保存章节“{facts['chapter_name']}”。"
 
 
 def _render_chapter_unsupported(facts: Mapping[str, Any], _bounded_text: str) -> str:
@@ -488,10 +479,6 @@ def _render_candidates_ready(facts: Mapping[str, Any], _bounded_text: str) -> st
     return f"{prefix}找到了 {facts['candidate_count']} 道较相似的候选题，请选择候选编号。"
 
 
-def _render_candidates_recalled(facts: Mapping[str, Any], _bounded_text: str) -> str:
-    return f"当前有 {facts['candidate_count']} 道候选题，请选择候选编号。"
-
-
 def _render_no_match_chapter(facts: Mapping[str, Any], _bounded_text: str) -> str:
     return f"在“{facts['chapter_name']}”里没有找到足够可靠的相似题。请按可用操作继续。"
 
@@ -501,10 +488,6 @@ def _render_answer_ready(facts: Mapping[str, Any], _bounded_text: str) -> str:
     label = facts.get("question_label")
     prefix = f"{label}的" if label else ""
     return f"{prefix}答案图片已发出，共 {count} 张。"
-
-
-def _render_answer_resent(facts: Mapping[str, Any], _bounded_text: str) -> str:
-    return f"答案图片已重新发出，共 {facts['delivered_image_count']} 张。"
 
 
 _A1_REASON_TEXT = MappingProxyType(
@@ -536,12 +519,7 @@ def _render_units_prepared(facts: Mapping[str, Any], _bounded_text: str) -> str:
 
 
 def _render_crop_required(facts: Mapping[str, Any], _bounded_text: str) -> str:
-    prefix = (
-        f"已停止{facts['previous_question_label']}，现在处理{facts['question_label']}。"
-        if facts.get("previous_question_label")
-        else ""
-    )
-    return f"{prefix}{facts['question_label']}需要你手动框选，请只框选这一题后提交。"
+    return f"{facts['question_label']}需要你手动框选，请只框选这一题后提交。"
 
 
 _CROP_REASON_TEXT = MappingProxyType(
@@ -569,59 +547,23 @@ def _render_unit_cancelled(facts: Mapping[str, Any], _bounded_text: str) -> str:
     return f"{facts['question_label']}已结束，还剩 {facts['remaining_count']} 道题。"
 
 
-def _render_unit_stopped_remaining(
-    facts: Mapping[str, Any], _bounded_text: str
-) -> str:
-    return (
-        f"已停止{facts['question_label']}的当前处理，"
-        f"整页还有 {facts['remaining_count']} 道题可选择。"
-    )
-
-
-def _render_unit_stopped_complete(
-    facts: Mapping[str, Any], _bounded_text: str
-) -> str:
-    return (
-        f"已停止{facts['question_label']}的当前处理，这页没有其他待处理题目。"
-        "可以上传一张新题图。"
-    )
-
-
 def _render_page_candidates_ready(facts: Mapping[str, Any], _bounded_text: str) -> str:
-    switch_prefix = (
-        f"已停止{facts['previous_question_label']}，现在处理{facts['question_label']}。"
-        if facts.get("previous_question_label")
-        else ""
-    )
-    sources = facts.get("source_chapters")
-    source_text = f"从{_format_names(sources)}" if sources else ""
-    separator = "：" if sources else ""
     return (
-        f"{switch_prefix}{facts['question_label']}{separator}{source_text}找到了 "
-        f"{facts['candidate_count']} 道较相似的候选题，请选择候选编号。"
+        f"{facts['question_label']}找到了 {facts['candidate_count']} 道较相似的候选题，"
+        "请选择候选编号。"
     )
 
 
 def _render_page_answer_remaining(facts: Mapping[str, Any], _bounded_text: str) -> str:
-    switch_prefix = (
-        f"已停止{facts['previous_question_label']}，现在处理{facts['question_label']}。"
-        if facts.get("previous_question_label")
-        else ""
-    )
     return (
-        f"{switch_prefix}{facts['question_label']}的答案图片已发出，共 {facts['delivered_image_count']} 张；"
+        f"{facts['question_label']}的答案图片已发出，共 {facts['delivered_image_count']} 张；"
         f"整页还剩 {facts['remaining_count']} 道题。"
     )
 
 
 def _render_page_answer_complete(facts: Mapping[str, Any], _bounded_text: str) -> str:
-    switch_prefix = (
-        f"已停止{facts['previous_question_label']}，现在处理{facts['question_label']}。"
-        if facts.get("previous_question_label")
-        else ""
-    )
     return (
-        f"{switch_prefix}{facts['question_label']}的答案图片已发出，共 {facts['delivered_image_count']} 张；"
+        f"{facts['question_label']}的答案图片已发出，共 {facts['delivered_image_count']} 张；"
         "这页题目已经处理完成。"
     )
 
@@ -681,26 +623,6 @@ def _validate_exhausted_facts(facts: Mapping[str, Any]) -> None:
         raise OutputContractError("continuation_state_mismatch")
 
 
-def _validate_continuation_facts(facts: Mapping[str, Any]) -> None:
-    if facts.get("continuation_available") is not True:
-        raise OutputContractError("continuation_state_mismatch")
-
-
-def _validate_no_units_facts(facts: Mapping[str, Any]) -> None:
-    if facts.get("question_count") != 0:
-        raise OutputContractError("no_units_mismatch")
-
-
-def _validate_stopped_complete_facts(facts: Mapping[str, Any]) -> None:
-    if facts.get("remaining_count") != 0:
-        raise OutputContractError("remaining_state_mismatch")
-
-
-def _validate_crop_preserved_facts(facts: Mapping[str, Any]) -> None:
-    if facts.get("crop_draft_preserved") is not True:
-        raise OutputContractError("crop_not_preserved")
-
-
 _TOOL = frozenset({RequestLayer.TOOL})
 _SESSION = frozenset({RequestLayer.SESSION})
 _TOOL_OR_SESSION = frozenset({RequestLayer.TOOL, RequestLayer.SESSION})
@@ -711,35 +633,6 @@ _SUCCESS_OR_PARTIAL = frozenset({RequestStatus.SUCCESS, RequestStatus.PARTIAL})
 _ERROR = frozenset({RequestStatus.ERROR})
 _TRANSPORT_KINDS = (FinalOutputKind.TRANSPORT_ERROR,)
 _NETWORK_KINDS = (FinalOutputKind.TRANSPORT_ERROR, FinalOutputKind.CLIENT_ERROR)
-_GUIDANCE_PHASES = (
-    "WAIT_CHAPTER",
-    "WAIT_QUESTION_CHOICE",
-    "WAIT_CANDIDATE_CHOICE",
-    "NO_MATCH",
-    "ERROR",
-    "WAIT_UNIT_SELECTION",
-    "CROP_REQUIRED",
-    "A2_ACTIVE",
-    "COMPLETE",
-)
-_GUIDANCE_ACTIONS = (
-    UserAction.UPLOAD_IMAGE,
-    UserAction.SELECT_QUESTION,
-    UserAction.PREPARE_UNITS,
-    UserAction.CROP_QUESTION,
-    UserAction.SELECT_CANDIDATE,
-    UserAction.SHOW_CANDIDATES,
-    UserAction.CONTINUE_SEARCH,
-    UserAction.CHANGE_CHAPTER,
-    UserAction.GLOBAL_SEARCH,
-    UserAction.CANCEL_CURRENT_QUESTION,
-    UserAction.FINISH_PAGE,
-    UserAction.NEW_CHAT,
-    UserAction.REJECT_CANDIDATES,
-    UserAction.REPORT_ANSWER_MISMATCH,
-    UserAction.RESEND_ANSWER,
-    UserAction.CONTINUE_CURRENT,
-)
 
 
 def _entry(
@@ -794,79 +687,6 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
             ),
             mentioned=(UserAction.UPLOAD_IMAGE,),
         ),
-        "conversation.courtesy": _entry(
-            statuses=_SUCCESS,
-            layers=_TOOL_OR_SESSION,
-            codes=("REQUEST_SUCCEEDED",),
-            renderer=_fixed("不客气，需要时可以继续。"),
-        ),
-        "conversation.farewell": _entry(
-            statuses=_SUCCESS,
-            layers=_TOOL_OR_SESSION,
-            codes=("REQUEST_SUCCEEDED",),
-            renderer=_fixed("好的，需要时可以继续使用力答。"),
-        ),
-        "conversation.identity": _entry(
-            statuses=_SUCCESS,
-            layers=_TOOL_OR_SESSION,
-            codes=("REQUEST_SUCCEEDED",),
-            renderer=_fixed("我是力答，一个结构力学题库搜题助手。"),
-        ),
-        "conversation.capability": _entry(
-            statuses=_SUCCESS,
-            layers=_TOOL_OR_SESSION,
-            codes=("REQUEST_SUCCEEDED",),
-            renderer=_fixed(
-                "我可以识别结构力学题图、检索相似题并返回对应答案。"
-            ),
-        ),
-        "conversation.supported_chapters": _entry(
-            statuses=_SUCCESS,
-            layers=_TOOL_OR_SESSION,
-            codes=("REQUEST_SUCCEEDED",),
-            renderer=_render_supported_chapters,
-        ),
-        "conversation.workflow": _entry(
-            statuses=_SUCCESS,
-            layers=_TOOL_OR_SESSION,
-            codes=("REQUEST_SUCCEEDED",),
-            renderer=_fixed(
-                "处理流程包括题图识别、候选检索、候选确认和答案交付。"
-            ),
-        ),
-        "conversation.general": _entry(
-            statuses=_SUCCESS,
-            layers=_TOOL_OR_SESSION,
-            codes=("REQUEST_SUCCEEDED",),
-            renderer=_fixed("我可以继续帮助你处理结构力学题库检索。"),
-        ),
-        "conversation.current": _entry(
-            statuses=_NEEDS_INPUT,
-            layers=_SESSION,
-            codes=("CLARIFICATION_REQUIRED",),
-            renderer=_fixed("当前任务进度已保留，请按当前可用操作继续。"),
-            phases=_GUIDANCE_PHASES,
-            optional=("continuation_available", "global_search_offered"),
-            permitted=_GUIDANCE_ACTIONS,
-        ),
-        "conversation.out_of_scope": _entry(
-            statuses=_NEEDS_INPUT,
-            layers=_SESSION,
-            codes=("REQUEST_OUT_OF_SCOPE",),
-            renderer=_fixed(
-                "我目前只处理结构力学题库检索相关内容，请上传结构力学题图。"
-            ),
-            mentioned=(UserAction.UPLOAD_IMAGE,),
-        ),
-        "conversation.action_rejected": _entry(
-            statuses=_NEEDS_INPUT,
-            layers=_SESSION,
-            codes=("ACTION_NOT_ALLOWED",),
-            renderer=_fixed("当前状态不能执行这个操作，请按当前可用操作继续。"),
-            phases=_GUIDANCE_PHASES,
-            optional=("continuation_available", "global_search_offered"),
-            permitted=_GUIDANCE_ACTIONS,
-        ),
         "search.upload.required": _entry(
             statuses=_NEEDS_INPUT,
             layers=frozenset({RequestLayer.UPLOAD, RequestLayer.TOOL}),
@@ -875,39 +695,14 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
             phases=("IDLE", "PROCESSING", "NO_MATCH", "ERROR"),
             mentioned=(UserAction.RETRY_UPLOAD,),
         ),
-        "search.cancelled": _entry(
-            statuses=_SUCCESS,
-            layers=_TOOL,
-            codes=("REQUEST_SUCCEEDED",),
-            renderer=_fixed(
-                "当前检索已取消，需要继续时请上传一张新题图。"
-            ),
-            phases=("CANCELLED",),
-            mentioned=(UserAction.UPLOAD_IMAGE,),
-        ),
         "search.chapter.required": _entry(
             statuses=_NEEDS_INPUT,
             layers=_TOOL,
-            codes=("CHAPTER_REQUIRED", "UNKNOWN_CHAPTER"),
+            codes=("CHAPTER_REQUIRED",),
             renderer=_render_chapter_required,
             phases=("WAIT_CHAPTER",),
-            optional=("supported_chapters", "global_search_offered"),
+            optional=("supported_chapters",),
             mentioned=(UserAction.CHANGE_CHAPTER,),
-            permitted=(UserAction.CHANGE_CHAPTER, UserAction.GLOBAL_SEARCH),
-        ),
-        "search.chapter.saved": _entry(
-            statuses=_SUCCESS,
-            layers=_TOOL,
-            codes=("REQUEST_SUCCEEDED",),
-            renderer=_render_chapter_saved,
-            phases=(
-                "PROCESSING",
-                "WAIT_CHAPTER",
-                "READY_TO_ROUTE",
-                "READY_FOR_SEARCH",
-                "WAIT_CANDIDATE_CHOICE",
-            ),
-            required=("chapter_name",),
         ),
         "search.chapter.unsupported": _entry(
             statuses=_NEEDS_INPUT,
@@ -919,44 +714,14 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
             optional=("supported_chapters",),
             mentioned=(UserAction.CHANGE_CHAPTER,),
         ),
-        "search.clarification.required": _entry(
-            statuses=_NEEDS_INPUT,
-            layers=_SESSION,
-            codes=(
-                "MESSAGE_INVALID",
-                "CLARIFICATION_REQUIRED",
-                "QUESTION_INDEX_REQUIRED",
-                "CANDIDATE_RANK_REQUIRED",
-                "SELECTION_OUT_OF_RANGE",
-            ),
-            renderer=_fixed(
-                "我还不能确定你的意思，请按当前可用操作再说明一下。"
-            ),
-            phases=(
-                "IDLE",
-                "WAIT_CHAPTER",
-                "WAIT_QUESTION_CHOICE",
-                "WAIT_CANDIDATE_CHOICE",
-                "ANSWERED",
-                "NO_MATCH",
-                "ERROR",
-            ),
-            optional=("continuation_available", "global_search_offered"),
-            permitted=_GUIDANCE_ACTIONS,
-        ),
         "search.questions.ready": _entry(
-            statuses=_SUCCESS_OR_PARTIAL,
+            statuses=_SUCCESS,
             layers=_TOOL,
-            codes=(
-                "QUESTION_UNITS_PREPARED",
-                "MULTI_CROPS_UNAVAILABLE",
-                "REQUEST_SUCCEEDED",
-            ),
+            codes=("QUESTION_UNITS_PREPARED", "REQUEST_SUCCEEDED"),
             renderer=_render_questions_ready,
             phases=("WAIT_QUESTION_CHOICE",),
             required=("question_count",),
             mentioned=(UserAction.SELECT_QUESTION,),
-            permitted=(UserAction.SELECT_QUESTION, UserAction.RETRY_SEARCH),
             semantic_validator=_validate_question_list_facts,
         ),
         "search.candidates.ready": _entry(
@@ -972,7 +737,6 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
                 "STRUCTURE_CLASSIFICATION_FALLBACK",
                 "STRUCTURE_FILTER_SKIPPED_NO_IMAGE",
                 "STRUCTURE_TYPE_UNCERTAIN",
-                "REQUEST_SUCCEEDED",
             ),
             renderer=_render_candidates_ready,
             phases=("WAIT_CANDIDATE_CHOICE",),
@@ -995,7 +759,7 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
         "search.global.candidates.ready": _entry(
             statuses=_SUCCESS,
             layers=_TOOL,
-            codes=("GLOBAL_CANDIDATES_FOUND", "REQUEST_SUCCEEDED"),
+            codes=("GLOBAL_CANDIDATES_FOUND",),
             renderer=lambda facts, _bounded_text: (
                 f"从{_format_names(facts['source_chapters'])}找到了 "
                 f"{facts['candidate_count']} 道较相似的候选题，请选择候选编号。"
@@ -1005,40 +769,6 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
             mentioned=(UserAction.SELECT_CANDIDATE,),
             requires_usable_result=True,
             semantic_validator=_validate_candidate_facts,
-        ),
-        "search.candidates.unavailable": _entry(
-            statuses=_NEEDS_INPUT,
-            layers=_SESSION,
-            codes=("CANDIDATE_LIST_UNAVAILABLE",),
-            renderer=_fixed(
-                "当前候选列表不可用，请重新上传题图后再选择。"
-            ),
-            phases=("IDLE", "WAIT_CANDIDATE_CHOICE", "NO_MATCH", "ERROR"),
-            mentioned=(UserAction.RETRY_UPLOAD,),
-        ),
-        "search.candidates.recalled": _entry(
-            statuses=_SUCCESS,
-            layers=_TOOL,
-            codes=("REQUEST_SUCCEEDED",),
-            renderer=_render_candidates_recalled,
-            phases=("WAIT_CANDIDATE_CHOICE",),
-            required=("candidate_count",),
-            mentioned=(UserAction.SELECT_CANDIDATE,),
-            requires_usable_result=True,
-            semantic_validator=_validate_candidate_facts,
-        ),
-        "search.candidates.rejected_more": _entry(
-            statuses=_SUCCESS,
-            layers=_TOOL,
-            codes=("REQUEST_SUCCEEDED",),
-            renderer=_fixed(
-                "这批候选已排除，可以继续搜索下一批。"
-            ),
-            phases=("WAIT_CANDIDATE_CHOICE",),
-            required=("continuation_available",),
-            mentioned=(UserAction.CONTINUE_SEARCH,),
-            permitted=(UserAction.CONTINUE_SEARCH, UserAction.CHANGE_CHAPTER),
-            semantic_validator=_validate_continuation_facts,
         ),
         "search.candidates.rejected": _entry(
             statuses=_NO_MATCH,
@@ -1074,11 +804,7 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
         "search.no_match.global": _entry(
             statuses=_NO_MATCH,
             layers=_TOOL,
-            codes=(
-                "NO_GLOBAL_COARSE_CANDIDATES",
-                "NO_GLOBAL_RELIABLE_CANDIDATES",
-                "NO_MATCH",
-            ),
+            codes=("NO_GLOBAL_COARSE_CANDIDATES", "NO_GLOBAL_RELIABLE_CANDIDATES"),
             renderer=_fixed("全局题库中也没有找到足够可靠的相似题。请按可用操作继续。"),
             phases=("NO_MATCH",),
             optional=("author_contact_available",),
@@ -1102,38 +828,6 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
                 UserAction.RESEND_ANSWER,
                 UserAction.REPORT_ANSWER_MISMATCH,
                 UserAction.UPLOAD_IMAGE,
-            ),
-            requires_usable_result=True,
-            requires_delivery=True,
-        ),
-        "search.answer.mismatch": _entry(
-            statuses=_SUCCESS,
-            layers=_TOOL,
-            codes=("REQUEST_SUCCEEDED",),
-            renderer=_fixed(
-                "这个答案已标记为不匹配，请返回候选列表重新选择。"
-            ),
-            phases=("ANSWERED",),
-            optional=("continuation_available",),
-            mentioned=(UserAction.SHOW_CANDIDATES,),
-            permitted=(
-                UserAction.SHOW_CANDIDATES,
-                UserAction.SELECT_CANDIDATE,
-                UserAction.CONTINUE_SEARCH,
-            ),
-        ),
-        "search.answer.resent": _entry(
-            statuses=_SUCCESS_OR_PARTIAL,
-            layers=frozenset({RequestLayer.TOOL, RequestLayer.MEDIA}),
-            codes=("ANSWER_FILES_FOUND", "MEDIA_PERSIST_FAILED", "REQUEST_SUCCEEDED"),
-            renderer=_render_answer_resent,
-            phases=("ANSWERED",),
-            required=("delivered_image_count",),
-            optional=("has_usable_result",),
-            permitted=(
-                UserAction.RETRY_REQUEST,
-                UserAction.SHOW_CANDIDATES,
-                UserAction.REPORT_ANSWER_MISMATCH,
             ),
             requires_usable_result=True,
             requires_delivery=True,
@@ -1166,17 +860,6 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
             mentioned=(UserAction.RETRY_SEARCH,),
             requires_active_image=True,
         ),
-        "search.failed.nonretryable": _entry(
-            statuses=_ERROR,
-            layers=_TOOL,
-            codes=("BANK_ROUTE_FAILED",),
-            renderer=_fixed(
-                "当前题型暂时无法进入题库检索，请上传一张新题图。"
-            ),
-            phases=("ERROR",),
-            mentioned=(UserAction.UPLOAD_IMAGE,),
-            permitted=(UserAction.UPLOAD_IMAGE, UserAction.NEW_CHAT),
-        ),
         "triage.a1.reasoned": _entry(
             statuses=_NEEDS_INPUT,
             layers=_TOOL,
@@ -1207,18 +890,6 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
             phases=("PROCESSING", "COMPLETE"),
             mentioned=(UserAction.RETRY_UPLOAD,),
         ),
-        "page.no_units": _entry(
-            statuses=_NO_MATCH,
-            layers=_TOOL,
-            codes=("PAGE_NO_SEARCHABLE_UNITS",),
-            renderer=_fixed(
-                "这页没有识别到可检索的完整结构题，请重新上传清楚、完整的题图。"
-            ),
-            phases=("COMPLETE",),
-            required=("question_count",),
-            mentioned=(UserAction.RETRY_UPLOAD,),
-            semantic_validator=_validate_no_units_facts,
-        ),
         "page.selection.required": _entry(
             statuses=_NEEDS_INPUT,
             layers=_SESSION,
@@ -1233,23 +904,6 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
                 UserAction.FINISH_PAGE,
             ),
             semantic_validator=_validate_page_selection_facts,
-        ),
-        "page.current.guidance": _entry(
-            statuses=_NEEDS_INPUT,
-            layers=_SESSION,
-            codes=("CLARIFICATION_REQUIRED",),
-            renderer=_fixed(
-                "当前整页进度已保留，请按页面可用操作继续。"
-            ),
-            phases=(
-                "WAIT_UNIT_SELECTION",
-                "CROP_REQUIRED",
-                "A2_ACTIVE",
-                "ERROR",
-                "COMPLETE",
-            ),
-            optional=("continuation_available", "global_search_offered"),
-            permitted=_GUIDANCE_ACTIONS,
         ),
         "page.units.prepared": _entry(
             statuses=_SUCCESS_OR_PARTIAL,
@@ -1274,7 +928,7 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
             renderer=_render_crop_required,
             phases=("CROP_REQUIRED",),
             required=("question_label",),
-            optional=("page_index", "previous_question_label"),
+            optional=("page_index",),
             mentioned=(UserAction.CROP_QUESTION,),
             permitted=(
                 UserAction.CROP_QUESTION,
@@ -1298,18 +952,6 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
                 UserAction.FINISH_PAGE,
                 UserAction.CONTINUE_CURRENT,
             ),
-        ),
-        "page.crop.verification_failed": _entry(
-            statuses=_ERROR,
-            layers=_TOOL,
-            codes=("SERVICE_UNAVAILABLE",),
-            renderer=_fixed(
-                "裁剪图已保留，但这次校验没有完成，请重新提交当前裁剪。"
-            ),
-            phases=("CROP_REQUIRED",),
-            required=("crop_draft_preserved",),
-            mentioned=(UserAction.RETRY_REQUEST,),
-            semantic_validator=_validate_crop_preserved_facts,
         ),
         "page.namespace.clarification": _entry(
             statuses=_NEEDS_INPUT,
@@ -1350,30 +992,6 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
             mentioned=(UserAction.SELECT_QUESTION,),
             semantic_validator=_validate_remaining_facts,
         ),
-        "page.unit.stopped_remaining": _entry(
-            statuses=_SUCCESS,
-            layers=_TOOL,
-            codes=("REQUEST_SUCCEEDED",),
-            renderer=_render_unit_stopped_remaining,
-            phases=("WAIT_UNIT_SELECTION",),
-            required=("question_label", "remaining_count"),
-            optional=("page_index",),
-            mentioned=(UserAction.SELECT_QUESTION,),
-            permitted=(UserAction.SELECT_QUESTION, UserAction.FINISH_PAGE),
-            semantic_validator=_validate_remaining_facts,
-        ),
-        "page.unit.stopped_complete": _entry(
-            statuses=_SUCCESS,
-            layers=_TOOL,
-            codes=("REQUEST_SUCCEEDED",),
-            renderer=_render_unit_stopped_complete,
-            phases=("COMPLETE",),
-            required=("question_label", "remaining_count"),
-            optional=("page_index",),
-            mentioned=(UserAction.UPLOAD_IMAGE,),
-            permitted=(UserAction.UPLOAD_IMAGE, UserAction.NEW_CHAT),
-            semantic_validator=_validate_stopped_complete_facts,
-        ),
         "page.unit.candidates.ready": _entry(
             statuses=_SUCCESS_OR_PARTIAL,
             layers=_TOOL,
@@ -1388,17 +1006,11 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
                 "STRUCTURE_CLASSIFICATION_FALLBACK",
                 "STRUCTURE_FILTER_SKIPPED_NO_IMAGE",
                 "STRUCTURE_TYPE_UNCERTAIN",
-                "REQUEST_SUCCEEDED",
             ),
             renderer=_render_page_candidates_ready,
             phases=("A2_ACTIVE",),
             required=("question_label", "candidate_count"),
-            optional=(
-                "page_index",
-                "has_usable_result",
-                "source_chapters",
-                "previous_question_label",
-            ),
+            optional=("page_index", "has_usable_result"),
             mentioned=(UserAction.SELECT_CANDIDATE,),
             permitted=(UserAction.SELECT_CANDIDATE, UserAction.RETRY_SEARCH),
             requires_usable_result=True,
@@ -1411,7 +1023,7 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
             renderer=_render_page_answer_remaining,
             phases=("WAIT_UNIT_SELECTION",),
             required=("question_label", "delivered_image_count", "remaining_count"),
-            optional=("page_index", "has_usable_result", "previous_question_label"),
+            optional=("page_index", "has_usable_result"),
             mentioned=(UserAction.SELECT_QUESTION,),
             permitted=(UserAction.SELECT_QUESTION, UserAction.RETRY_REQUEST),
             requires_usable_result=True,
@@ -1425,7 +1037,7 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
             renderer=_render_page_answer_complete,
             phases=("COMPLETE",),
             required=("question_label", "delivered_image_count"),
-            optional=("page_index", "has_usable_result", "previous_question_label"),
+            optional=("page_index", "has_usable_result"),
             permitted=(
                 UserAction.RETRY_REQUEST,
                 UserAction.UPLOAD_IMAGE,
@@ -1441,25 +1053,6 @@ _CATALOG: Mapping[str, CatalogEntry] = MappingProxyType(
             renderer=_fixed("这页题目已经处理完成。"),
             phases=("COMPLETE",),
             permitted=(UserAction.UPLOAD_IMAGE, UserAction.NEW_CHAT),
-        ),
-        "page.ended": _entry(
-            statuses=_SUCCESS,
-            layers=_TOOL,
-            codes=("REQUEST_SUCCEEDED",),
-            renderer=_fixed(
-                "已结束这页题目的处理，当前对话记录仍然保留。可以上传一张新题图。"
-            ),
-            phases=("COMPLETE",),
-            mentioned=(UserAction.UPLOAD_IMAGE,),
-            permitted=(UserAction.UPLOAD_IMAGE, UserAction.NEW_CHAT),
-        ),
-        "page.session.reset": _entry(
-            statuses=_SUCCESS,
-            layers=_TOOL_OR_SESSION,
-            codes=("REQUEST_SUCCEEDED", "SESSION_RESET"),
-            renderer=_fixed("当前会话已清空，请上传一张新题图。"),
-            phases=("IDLE",),
-            mentioned=(UserAction.UPLOAD_IMAGE,),
         ),
         "page.stale.selection": _entry(
             statuses=_NEEDS_INPUT,
@@ -1686,9 +1279,71 @@ _PROGRESS_CATALOG: Mapping[str, ProgressCatalogEntry] = MappingProxyType(
 )
 
 
-def _protocol_rule_for(code: str) -> ProtocolReason | None:
-    """Use the shared protocol registry as the only public-code authority."""
-    return PROTOCOL_REASONS.get(code)
+def _rule(
+    status: RequestStatus,
+    *,
+    layer: RequestLayer = RequestLayer.TOOL,
+    retryable: bool = False,
+    action: RequestAction = RequestAction.NONE,
+) -> ProtocolRule:
+    return ProtocolRule(status, layer, retryable, action)
+
+
+# Tool codes are intentionally explicit.  A code that is absent here and from
+# PROTOCOL_REASONS is unknown even if it is syntactically valid.
+_DYNAMIC_PROTOCOL_RULES: Mapping[str, ProtocolRule] = MappingProxyType(
+    {
+        "UNKNOWN_CHAPTER": _rule(RequestStatus.NEEDS_INPUT),
+        "QUESTION_UNITS_PREPARED": _rule(RequestStatus.SUCCESS),
+        "COARSE_CANDIDATES_FOUND": _rule(RequestStatus.SUCCESS),
+        "GLOBAL_CANDIDATES_FOUND": _rule(RequestStatus.SUCCESS),
+        "RERANK_COMPLETED": _rule(RequestStatus.SUCCESS),
+        "RERANK_EMPTY_COARSE_FALLBACK": _rule(RequestStatus.PARTIAL, retryable=True),
+        "RERANK_INCOMPLETE_COARSE_FALLBACK": _rule(RequestStatus.PARTIAL, retryable=True),
+        "RERANK_SKIPPED_NO_IMAGE": _rule(RequestStatus.PARTIAL),
+        "MULTI_DETECTION_FALLBACK": _rule(RequestStatus.PARTIAL),
+        "MULTI_CROPS_UNAVAILABLE": _rule(RequestStatus.PARTIAL, retryable=True),
+        "STRUCTURE_CLASSIFICATION_FALLBACK": _rule(RequestStatus.PARTIAL, retryable=True),
+        "STRUCTURE_FILTER_SKIPPED_NO_IMAGE": _rule(RequestStatus.PARTIAL),
+        "STRUCTURE_TYPE_UNCERTAIN": _rule(RequestStatus.PARTIAL),
+        "NO_COARSE_CANDIDATES": _rule(RequestStatus.NO_MATCH),
+        "NO_RELIABLE_RERANK_CANDIDATES": _rule(RequestStatus.NO_MATCH),
+        "NO_GLOBAL_COARSE_CANDIDATES": _rule(RequestStatus.NO_MATCH),
+        "NO_GLOBAL_RELIABLE_CANDIDATES": _rule(RequestStatus.NO_MATCH),
+        "ANSWER_FILES_FOUND": _rule(RequestStatus.SUCCESS),
+        "ANSWER_FILES_NOT_FOUND": _rule(RequestStatus.NO_MATCH),
+        "IMAGE_ANALYSIS_FAILED": _rule(
+            RequestStatus.ERROR, retryable=True, action=RequestAction.RETRY_SEARCH
+        ),
+        "MULTI_DETAIL_FAILED": _rule(
+            RequestStatus.ERROR, retryable=True, action=RequestAction.RETRY_SEARCH
+        ),
+        "COARSE_SEARCH_FAILED": _rule(
+            RequestStatus.ERROR, retryable=True, action=RequestAction.RETRY_SEARCH
+        ),
+        "GLOBAL_SEARCH_FAILED": _rule(
+            RequestStatus.ERROR, retryable=True, action=RequestAction.RETRY_SEARCH
+        ),
+        "RERANK_FAILED": _rule(
+            RequestStatus.ERROR, retryable=True, action=RequestAction.RETRY_SEARCH
+        ),
+        "ANSWER_LOOKUP_FAILED": _rule(
+            RequestStatus.ERROR, retryable=True, action=RequestAction.RETRY_SEARCH
+        ),
+    }
+)
+
+
+def _protocol_rule_for(code: str) -> ProtocolRule | None:
+    registered = PROTOCOL_REASONS.get(code)
+    if registered is not None:
+        return ProtocolRule(
+            registered.status,
+            registered.layer,
+            registered.retryable,
+            registered.action,
+        )
+    return _DYNAMIC_PROTOCOL_RULES.get(code)
 
 
 def _contains_sensitive_text(value: str) -> bool:
@@ -1751,15 +1406,6 @@ def _validate_page_index(value: Any) -> int:
     return value
 
 
-def _validate_question_label(value: Any) -> str:
-    if not isinstance(value, str):
-        raise OutputContractError("question_label")
-    clean = value.strip()
-    if not clean or len(clean) > 40 or not _QUESTION_LABEL_RE.fullmatch(clean):
-        raise OutputContractError("question_label")
-    return re.sub(r"\s+", "", clean)
-
-
 def _validate_bool(value: Any) -> bool:
     if type(value) is not bool:
         raise OutputContractError("fact_type")
@@ -1794,14 +1440,12 @@ _FACT_VALIDATORS: Mapping[str, Callable[[Any], Any]] = MappingProxyType(
         "chapter_name": _validate_chapter_name,
         "continuation_available": _validate_bool,
         "crop_reason": _validate_crop_reason,
-        "crop_draft_preserved": _validate_bool,
         "delivered_image_count": _validate_count,
         "global_search_offered": _validate_bool,
         "has_usable_result": _validate_bool,
         "manual_count": _validate_count,
         "page_index": _validate_page_index,
         "question_count": _validate_count,
-        "previous_question_label": _validate_question_label,
         "ready_count": _validate_count,
         "remaining_count": _validate_count,
         "retry_after_seconds": _validate_retry_after,
@@ -2228,7 +1872,6 @@ def render_final_output(request: FinalOutputRequestV1) -> PublicMessageV1:
             "contact_not_allowed",
             "continuation_not_available",
             "continuation_state_mismatch",
-            "crop_not_preserved",
             "fallback_partial_without_result",
             "global_search_not_available",
             "media_not_delivered",
@@ -2236,14 +1879,12 @@ def render_final_output(request: FinalOutputRequestV1) -> PublicMessageV1:
             "message_kind_mismatch",
             "message_phase_mismatch",
             "next_action_missing",
-            "no_units_mismatch",
             "page_index",
             "partial_without_result",
             "positive_fact_required",
             "protocol_action_not_allowed",
             "question_label",
             "rendered_sensitive",
-            "remaining_state_mismatch",
             "retry_action_missing",
             "schema_version",
             "selection_count_missing",
