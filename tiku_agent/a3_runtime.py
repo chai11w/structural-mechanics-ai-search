@@ -1358,13 +1358,22 @@ class A3MvpRuntime:
         return self.artifacts.resolve_upload(clean, filename)
 
     def persist_media(self, session_id: str, source: str | Path) -> Path | None:
-        return self.a2_runtime.persist_media(_clean_session_id(session_id), source)
+        clean = _clean_session_id(session_id)
+        if self.store.load(clean) is None:
+            return None
+        persisted = self.a2_runtime.persist_media(clean, source)
+        if persisted is not None:
+            return persisted
+        return self.artifacts.persist_media(clean, source)
 
     def resolve_media(self, session_id: str, filename: str) -> Path | None:
         clean = _clean_session_id(session_id)
         if self.store.load(clean) is None:
             return None
-        return self.a2_runtime.resolve_media(clean, filename, allow_preserved=True)
+        persisted = self.a2_runtime.resolve_media(clean, filename, allow_preserved=True)
+        if persisted is not None:
+            return persisted
+        return self.artifacts.resolve_media(clean, filename)
 
     def record_protocol_event(self, *args: Any, **kwargs: Any) -> None:
         self.a2_runtime.record_protocol_event(*args, **kwargs)

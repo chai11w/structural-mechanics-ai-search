@@ -447,7 +447,7 @@ function conversationHtml(data) {
     const overlay = message.a3_overlay
       ? `<figure class="message-overlay"><figcaption>${icon('image')}整页框选结果</figcaption><a href="${attr(message.a3_overlay)}" target="_blank" rel="noreferrer"><img src="${attr(message.a3_overlay)}" alt="整页框选结果"></a></figure>`
       : target && message.intent === 'a3_units_prepared'
-        ? '<p class="message-overlay-missing">这条历史反馈提交时未保存整页框选结果。</p>'
+        ? '<p class="message-overlay-missing">这条反馈未保存整页框选结果。</p>'
         : '';
     return `<article class="message ${message.role === 'user' ? 'user' : ''} ${target ? 'target' : ''}" ${target ? 'id="feedback-target"' : ''}>${message.role === 'assistant' ? '<div class="message-avatar" aria-hidden="true">力</div>' : ''}<div class="message-body">${target ? `<span class="target-label">${icon(data.rating === 'negative' ? 'down' : 'up')}被反馈的回复</span>` : ''}<p class="message-text">${escapeHtml(message.message)}</p>${images ? `<div class="message-media">${images}</div>` : ''}${overlay}<time class="message-time">${message.created_at ? formatDateTime(message.created_at) : ''}</time></div></article>`;
   }).join('');

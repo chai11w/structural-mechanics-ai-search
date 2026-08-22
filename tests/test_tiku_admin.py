@@ -131,6 +131,8 @@ class TikuAdminTest(unittest.TestCase):
         self.assertIn("select.classList.toggle('is-placeholder', !select.value)", script)
         self.assertIn("整页框选结果", script)
         self.assertIn("message-overlay-missing", script)
+        self.assertIn("这条反馈未保存整页框选结果。", script)
+        self.assertNotIn("这条历史反馈提交时未保存整页框选结果。", script)
         styles = (
             Path(__file__).resolve().parents[1] / "tiku_admin" / "web" / "admin.css"
         ).read_text(encoding="utf-8")

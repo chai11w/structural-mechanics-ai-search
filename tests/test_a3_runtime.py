@@ -26,11 +26,13 @@ from tiku_agent.a3_runtime import (
     SQLiteA3SessionStore,
 )
 from tiku_agent.agent import AgentResponse
-from tiku_agent.fastapi_demo import create_app
+from tiku_agent.fastapi_demo import SESSION_COOKIE, create_app
 from tiku_agent.image_contracts import ImageTriageObservation
 from tiku_agent.image_triage import build_handoff
 from tiku_agent.image_triage_authority import ImageTriageDecision
 from tiku_agent.session_artifacts import SessionArtifacts
+from tiku_agent.session_runtime import AgentSessionRuntime
+from tiku_agent.session_store import SQLiteSessionStore
 from tiku_shared.request_protocol import RequestProtocol
 
 
@@ -1391,6 +1393,49 @@ class A3RuntimeTests(unittest.TestCase):
         )
         select_events = [json.loads(line) for line in selected.text.splitlines() if line]
         self.assertEqual(select_events[-1]["data"]["intent"], "search_image")
+
+    def test_feedback_overlay_persists_before_real_a2_session_exists(self):
+        a2_store = SQLiteSessionStore(self.root / "feedback-a2.sqlite3")
+        a2_artifacts = SessionArtifacts(self.root / "feedback-a2-sessions")
+        a2_runtime = AgentSessionRuntime(a2_store, artifacts=a2_artifacts)
+        a3_artifacts = SessionArtifacts(self.root / "feedback-a3-sessions")
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "feedback-a3.sqlite3"),
+            artifacts=a3_artifacts,
+            a2_runtime=a2_runtime,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            auto_cropper=FakeAutoCropper(second_status="auto_ready"),
+            auto_prepare_all_units=True,
+            external_load_screen=lambda _path: "yes",
+        )
+        client = TestClient(
+            create_app(runtime=runtime, incoming_dir=self.root / "feedback-incoming")
+        )
+
+        uploaded = client.post(
+            "/api/image/stream",
+            files={"file": ("page.jpg", self.source.read_bytes(), "image/jpeg")},
+        )
+
+        events = [json.loads(line) for line in uploaded.text.splitlines() if line]
+        payload = events[-1]["data"]
+        session_id = client.cookies.get(SESSION_COOKIE)
+        self.assertEqual(payload["intent"], "a3_units_prepared")
+        self.assertEqual(payload["session"]["a3"]["phase"], A3_PHASE_WAIT_SELECTION)
+        self.assertIsNone(a2_store.load(session_id))
+        self.assertEqual(
+            [item["kind"] for item in payload["feedback_images"]],
+            ["a3_overlay"],
+        )
+        media_url = payload["feedback_images"][0]["url"]
+        self.assertEqual(client.get(media_url).status_code, 200)
+        media_path = runtime.resolve_media(session_id, Path(media_url).name)
+        self.assertIsNotNone(media_path)
+        self.assertEqual(media_path.parent, a3_artifacts.session_dir(session_id) / "media")
+
+        legacy_media = a2_artifacts.persist_media(session_id, self.source)
+        self.assertEqual(runtime.resolve_media(session_id, legacy_media.name), legacy_media)
 
     def test_uploading_next_page_keeps_previous_upload_available(self):
         client = TestClient(create_app(runtime=self.runtime, incoming_dir=self.root / "incoming"))
