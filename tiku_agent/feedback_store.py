@@ -13,7 +13,7 @@ from typing import Callable, Sequence
 from uuid import uuid4
 
 
-FEEDBACK_SCHEMA_VERSION = 5
+FEEDBACK_SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True)
@@ -50,6 +50,75 @@ class MessageFeedback:
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+def scope_feedback_conversation(
+    conversation: Sequence[dict[str, object]], target_message_id: str
+) -> list[dict[str, object]]:
+    """Keep only the current uploaded page through the rated assistant reply."""
+
+    messages = [dict(item) for item in conversation if isinstance(item, dict)]
+    clean_target = str(target_message_id or "").strip()
+    if not clean_target:
+        return []
+    target_index = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if str(
+                messages[index].get("messageId")
+                or messages[index].get("message_id")
+                or ""
+            ).strip()
+            == clean_target
+        ),
+        -1,
+    )
+    if target_index < 0:
+        return []
+
+    visible = messages[: target_index + 1]
+
+    def revision(item: dict[str, object]) -> int:
+        try:
+            return max(
+                0,
+                int(item.get("taskRevision") or item.get("task_revision") or 0),
+            )
+        except (TypeError, ValueError):
+            return 0
+
+    def is_user(item: dict[str, object]) -> bool:
+        return (
+            str(item.get("role") or "").strip().lower() == "user"
+            or bool(item.get("me"))
+        )
+
+    target_revision = revision(visible[-1])
+    start_index = len(visible) - 1
+    if target_revision > 0:
+        for index in range(len(visible) - 1, -1, -1):
+            item = visible[index]
+            images = item.get("images") if isinstance(item.get("images"), list) else []
+            if (
+                is_user(item)
+                and revision(item) == target_revision
+                and any(str(value or "").strip() for value in images)
+            ):
+                start_index = index
+                break
+        else:
+            for index in range(len(visible) - 1, -1, -1):
+                item = visible[index]
+                if is_user(item) and revision(item) == target_revision:
+                    start_index = index
+                    break
+    else:
+        for index in range(len(visible) - 1, -1, -1):
+            if is_user(visible[index]):
+                start_index = index
+                break
+    return visible[start_index:]
 
 
 class SQLiteFeedbackStore:
@@ -115,7 +184,10 @@ class SQLiteFeedbackStore:
                 archived_at = str(existing["archived_at"]) if existing else ""
                 if conversation is not None:
                     sanitized = self._capture_conversation(
-                        feedback_id, conversation, media_resolver=media_resolver
+                        feedback_id,
+                        conversation,
+                        target_message_id=message_id,
+                        media_resolver=media_resolver,
                     )
                     conversation_json = json.dumps(
                         sanitized, ensure_ascii=False, separators=(",", ":")
@@ -500,10 +572,12 @@ class SQLiteFeedbackStore:
         feedback_id: str,
         conversation: list[dict[str, object]],
         *,
+        target_message_id: str,
         media_resolver: Callable[[str], Path | None] | None,
     ) -> list[dict[str, object]]:
         if not isinstance(conversation, list) or len(conversation) > 50:
             raise ValueError("conversation must contain no more than 50 messages")
+        conversation = scope_feedback_conversation(conversation, target_message_id)
         self._clear_case(feedback_id)
         case_dir = (self.cases_root / feedback_id).resolve()
         if case_dir.parent != self.cases_root:
@@ -528,10 +602,26 @@ class SQLiteFeedbackStore:
                 target = case_dir / f"{uuid4().hex}{suffix or '.bin'}"
                 shutil.copy2(source, target)
                 images.append(target.name)
+            overlay_name = ""
+            overlay_url = str(raw.get("a3Overlay") or raw.get("a3_overlay") or "").strip()
+            if overlay_url:
+                source = media_resolver(overlay_url) if media_resolver is not None else None
+                if source is not None and source.is_file():
+                    case_dir.mkdir(parents=True, exist_ok=True)
+                    suffix = source.suffix.lower() if len(source.suffix) <= 8 else ".bin"
+                    target = case_dir / f"{uuid4().hex}{suffix or '.bin'}"
+                    shutil.copy2(source, target)
+                    overlay_name = target.name
             sanitized.append({
-                "role": "user" if bool(raw.get("me")) else "assistant",
+                "role": (
+                    "user"
+                    if bool(raw.get("me"))
+                    or str(raw.get("role") or "").strip().lower() == "user"
+                    else "assistant"
+                ),
                 "message": text,
                 "images": images,
+                "a3_overlay": overlay_name,
                 "image_alt": str(raw.get("imageAlt") or "题目图片")[:100],
                 "intent": str(raw.get("intent") or "")[:80],
                 "variant": str(raw.get("variant") or "")[:40],

@@ -364,12 +364,31 @@ def create_app(
             raise HTTPException(status_code=400, detail="feedback detail is too long")
         if conversation is not None and not isinstance(conversation, list):
             raise HTTPException(status_code=400, detail="invalid feedback conversation")
+        target_message = _feedback_target_message(conversation, message_id)
+        if conversation is not None and not target_message:
+            raise HTTPException(status_code=400, detail="feedback target is missing")
         session_id = str(request.cookies.get(session_cookie) or "").strip()
         if not session_id:
             raise HTTPException(status_code=400, detail="session is required")
         snapshot = runtime.session_snapshot(session_id)
         identity_key = _identity_key(request) or "local"
-        revision = int(snapshot.get("task_revision") or 0)
+        try:
+            target_revision = int(
+                target_message.get("taskRevision")
+                or target_message.get("task_revision")
+                or 0
+            )
+        except (TypeError, ValueError):
+            target_revision = 0
+        revision = max(0, target_revision or int(snapshot.get("task_revision") or 0))
+        try:
+            target_candidate_count = int(
+                target_message.get("candidateCount")
+                if "candidateCount" in target_message
+                else target_message.get("candidate_count", snapshot.get("candidate_count") or 0)
+            )
+        except (TypeError, ValueError):
+            target_candidate_count = int(snapshot.get("candidate_count") or 0)
         clean_session_key = session_key(session_id)
         search_id = str(
             payload.get("search_id")
@@ -405,7 +424,7 @@ def create_app(
                 detail=detail,
                 task_revision=revision,
                 phase=str(snapshot.get("phase") or ""),
-                candidate_count=int(snapshot.get("candidate_count") or 0),
+                candidate_count=max(0, target_candidate_count),
                 search_duration_ms=search_duration_ms,
                 search_key=search_id,
                 request_id=rated_protocol.request_id,
@@ -1021,6 +1040,21 @@ def _resolve_feedback_media(
     return None
 
 
+def _feedback_target_message(
+    conversation: object, message_id: str
+) -> dict[str, object]:
+    if not isinstance(conversation, list):
+        return {}
+    clean_target = str(message_id or "").strip()
+    for raw in reversed(conversation):
+        if not isinstance(raw, dict):
+            continue
+        raw_id = str(raw.get("messageId") or raw.get("message_id") or "").strip()
+        if raw_id == clean_target:
+            return raw
+    return {}
+
+
 def _handle_text(
     runtime: AgentSessionRuntime,
     session_id: str,
@@ -1211,6 +1245,21 @@ def _agent_payload(
         if persisted_crop is not None:
             submitted_crop_url = f"/api/media/{persisted_crop.name}"
     snapshot = runtime.session_snapshot(session_id)
+    feedback_images: list[dict[str, str]] = []
+    if response.intent == "a3_units_prepared":
+        try:
+            overlay_resolver = getattr(runtime, "current_auto_crop_overlay_path", None)
+            overlay_path = overlay_resolver(session_id) if callable(overlay_resolver) else None
+            if overlay_path is not None and Path(overlay_path).is_file():
+                persisted_overlay = runtime.persist_media(session_id, Path(overlay_path))
+                if persisted_overlay is not None:
+                    feedback_images.append({
+                        "kind": "a3_overlay",
+                        "url": f"/api/media/{persisted_overlay.name}",
+                        "label": "整页框选结果",
+                    })
+        except Exception:  # noqa: BLE001 - feedback-only media must not fail the reply.
+            feedback_images = []
     if response.protocol:
         protocol = RequestProtocol.from_dict(response.protocol)
     elif snapshot.get("phase") == "ERROR":
@@ -1252,6 +1301,7 @@ def _agent_payload(
         "images": image_urls,
         "uploaded_image": uploaded_image_url,
         "submitted_crop": submitted_crop_url,
+        "feedback_images": feedback_images,
         "intent": response.intent,
         "author_contact": dict(response.author_contact),
         "session": snapshot,

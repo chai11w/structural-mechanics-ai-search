@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from tiku_admin.auth import AdminSession, AdminSessionAuth
 from tiku_admin.control_store import SQLiteControlStore, cny_to_micros, micros_to_cny
 from tiku_admin.reporting import AdminReporter
-from tiku_agent.feedback_store import SQLiteFeedbackStore
+from tiku_agent.feedback_store import SQLiteFeedbackStore, scope_feedback_conversation
 
 
 WEB_DIR = Path(__file__).with_name("web")
@@ -354,6 +354,18 @@ def create_admin_app(
             raise HTTPException(status_code=404, detail="反馈图片不存在或已过期。")
         if item.archived_at:
             raise HTTPException(status_code=409, detail="请先取消归档反馈，再查看详情。")
+        conversation = scope_feedback_conversation(item.conversation, item.message_id)
+        allowed_media = {
+            str(name)
+            for message in conversation
+            for name in (
+                list(message.get("images", []))
+                + ([message.get("a3_overlay")] if message.get("a3_overlay") else [])
+            )
+            if str(name or "").strip()
+        }
+        if media_name not in allowed_media:
+            raise HTTPException(status_code=404, detail="反馈图片不存在或已过期。")
         path = feedback_store.resolve_case_media(feedback_id, media_name)
         if path is None:
             raise HTTPException(status_code=404, detail="反馈图片不存在或已过期。")

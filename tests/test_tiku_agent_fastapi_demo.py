@@ -11,8 +11,8 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from tiku_agent.agent import AgentResponse
-from tiku_agent.fastapi_demo import MAX_FEEDBACK_BYTES, MAX_IMAGE_BYTES, SESSION_COOKIE, _SCRIPT, _STYLE, _write_incoming_image, create_app
-from tiku_agent.feedback_store import SQLiteFeedbackStore
+from tiku_agent.fastapi_demo import MAX_FEEDBACK_BYTES, MAX_IMAGE_BYTES, SESSION_COOKIE, _SCRIPT, _STYLE, _agent_payload, _write_incoming_image, create_app
+from tiku_agent.feedback_store import SQLiteFeedbackStore, scope_feedback_conversation
 from tiku_agent.invite_access import InviteAccess, build_invitation_config
 from tiku_agent.session_runtime import AgentBudgetExceededError, AgentRuntimeBusyError
 
@@ -86,6 +86,9 @@ class FakeRuntime:
             return None
         return self.image_path if filename == self.image_path.name and self.image_path.is_file() else None
 
+    def current_auto_crop_overlay_path(self, session_id: str) -> Path | None:
+        return self.image_path if session_id == self.upload_session else None
+
 
 class FastApiDemoTest(unittest.TestCase):
     def test_feedback_submission_captures_visible_conversation_and_session_media(self):
@@ -137,6 +140,117 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(len(saved.conversation), 2)
         media_name = saved.conversation[0]["images"][0]
         self.assertTrue(store.resolve_case_media(saved.feedback_id, media_name).is_file())
+        rejected_empty = client.post("/api/feedback", json={
+            "message_id": "message_case_123",
+            "rating": "positive",
+            "tags": ["found_answer"],
+            "detail": "",
+            "conversation": [],
+        })
+        self.assertEqual(rejected_empty.status_code, 400)
+        self.assertTrue(store.resolve_case_media(saved.feedback_id, media_name).is_file())
+
+    def test_feedback_scopes_latest_upload_and_captures_prepared_page_overlay(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        test_dir = runtime_dir / f"feedback_scope_{uuid4().hex}"
+        test_dir.mkdir(parents=True)
+        self.addCleanup(lambda: shutil.rmtree(test_dir, ignore_errors=True))
+        image_path = test_dir / "page.jpg"
+        Image.new("RGB", (12, 8), "white").save(image_path)
+        runtime = FakeRuntime(image_path)
+        store = SQLiteFeedbackStore(test_dir / "feedback.sqlite3")
+        client = TestClient(create_app(runtime=runtime, feedback_store=store))
+
+        upload_bytes = io.BytesIO()
+        Image.new("RGB", (12, 8), "white").save(upload_bytes, format="PNG")
+        uploaded = client.post(
+            "/api/image",
+            files={"file": ("page.png", upload_bytes.getvalue(), "image/png")},
+        )
+        self.assertEqual(uploaded.status_code, 200)
+        uploaded_url = uploaded.json()["uploaded_image"]
+        session_id = client.cookies.get(SESSION_COOKIE)
+        runtime.snapshot.update({
+            "task_revision": 99,
+            "candidate_count": 99,
+            "a3": {"task_revision": 2, "auto_crop_overlay_available": True},
+        })
+        prepared = _agent_payload(
+            AgentResponse(text="已准备 9 道题。", intent="a3_units_prepared"),
+            runtime,
+            session_id,
+        )
+        self.assertEqual(prepared["images"], [])
+        self.assertEqual(prepared["feedback_images"][0]["kind"], "a3_overlay")
+
+        target_id = "message_page_two"
+        response = client.post("/api/feedback", json={
+            "message_id": target_id,
+            "rating": "positive",
+            "tags": ["found_answer"],
+            "detail": "框选清楚",
+            "conversation": [
+                {"me": True, "message": "上一页", "images": [uploaded_url], "taskRevision": 1},
+                {"me": False, "message": "上一页结果", "messageId": "message_page_one", "taskRevision": 1},
+                {"me": True, "message": "我发了一张题图。", "images": [uploaded_url], "taskRevision": 2},
+                {
+                    "me": False,
+                    "message": "已准备 9 道题：9 道可以直接检索。请选择一道继续。",
+                    "messageId": target_id,
+                    "taskRevision": 2,
+                    "candidateCount": 9,
+                    "intent": "a3_units_prepared",
+                    "a3Overlay": prepared["feedback_images"][0]["url"],
+                },
+            ],
+        })
+
+        self.assertEqual(response.status_code, 200, response.text)
+        saved = store.list_feedback()[0]
+        self.assertEqual(saved.task_revision, 2)
+        self.assertEqual(saved.candidate_count, 9)
+        self.assertEqual(len(saved.conversation), 2)
+        self.assertEqual(saved.conversation[0]["message"], "我发了一张题图。")
+        overlay_name = saved.conversation[1]["a3_overlay"]
+        self.assertTrue(store.resolve_case_media(saved.feedback_id, overlay_name).is_file())
+
+    def test_feedback_scope_does_not_cross_task_revision_without_current_upload(self):
+        target_id = "message_current_revision"
+        scoped = scope_feedback_conversation(
+            [
+                {
+                    "me": True,
+                    "message": "上一页",
+                    "images": ["/api/upload/old.jpg"],
+                    "taskRevision": 1,
+                },
+                {
+                    "me": False,
+                    "message": "上一页结果",
+                    "messageId": "message_old_revision",
+                    "taskRevision": 1,
+                },
+                {
+                    "me": True,
+                    "message": "当前问题",
+                    "images": [],
+                    "taskRevision": 2,
+                },
+                {
+                    "me": False,
+                    "message": "当前回复",
+                    "messageId": target_id,
+                    "taskRevision": 2,
+                },
+            ],
+            target_id,
+        )
+
+        self.assertEqual(
+            [message["message"] for message in scoped],
+            ["当前问题", "当前回复"],
+        )
+        self.assertEqual(scope_feedback_conversation(scoped, "missing_target"), [])
 
     def test_message_feedback_is_private_bounded_and_upserted(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
@@ -290,7 +404,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260821-author-contact-v3"', 'src="/assets/demo.js?v=20260821-author-contact-v3"',
+            'href="/assets/demo.css?v=20260822-feedback-v1"', 'src="/assets/demo.js?v=20260822-feedback-v1"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -328,6 +442,8 @@ class FastApiDemoTest(unittest.TestCase):
             "function syncVisualViewport()", "window.visualViewport?.addEventListener('resize', syncVisualViewport",
             "window.visualViewport?.addEventListener('scroll', syncVisualViewport", "syncVisualViewport();",
             "function createMessageActions", "function openFeedback", "request('/api/feedback'",
+            "if (target < 0) return [];", "normalizeFeedbackImages(item.feedbackImages)",
+            "feedbackImages: normalizeFeedbackImages(data.feedback_images)",
             "function cancelFeedback", "method: 'DELETE'", "syncFeedbackButtons(context.article, '')",
             "['found_answer', '找到了正确答案']", "['not_found', '没找到正确题']",
             "const feedbackEligible = !item.me && item.variant !== 'pending'",

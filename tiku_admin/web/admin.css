@@ -138,12 +138,21 @@ svg.icon { width: 18px; height: 18px; flex: 0 0 18px; fill: none; stroke: curren
 .cell-actions { display: flex; align-items: center; justify-content: flex-end; gap: 2px; white-space: nowrap; }
 .invitation-table { min-width: 980px; }
 .invitation-table th:last-child, .invitation-table td:last-child { width: 148px; min-width: 148px; }
-.feedback-table th:last-child, .feedback-table td:last-child { min-width: 262px; }
+.feedback-table th:last-child, .feedback-table td:last-child { width: 176px; min-width: 176px; }
 .archived-actions { gap: 8px; }
 .archive-restore-button { height: 36px; min-width: 84px; padding: 0 13px; border: 0; border-radius: 7px; color: #2f2f2c; background: #f0f0ed; cursor: pointer; font-size: 13px; font-weight: 550; transition: background .15s, transform .1s; }
 .archive-restore-button:hover { background: #e5e5e1; }
 .archive-restore-button:active { transform: translateY(1px); }
-.feedback-table { min-width: 1080px; }
+.feedback-table { min-width: 1320px; table-layout: fixed; }
+.feedback-table th:nth-child(1) { width: 205px; }
+.feedback-table th:nth-child(2) { width: 200px; }
+.feedback-table th:nth-child(3) { width: 92px; }
+.feedback-table th:nth-child(4) { width: 210px; }
+.feedback-table th:nth-child(6) { width: 100px; }
+.feedback-table th:nth-child(7) { width: 104px; }
+.feedback-table td { height: 70px; padding-block: 12px; }
+.feedback-table .feedback-topic { min-width: 0; }
+.feedback-table .cell-actions { justify-content: flex-start; gap: 6px; }
 .feedback-number { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; white-space: nowrap; }
 .masked-code { min-width: 190px; display: flex; align-items: center; gap: 5px; }
 .masked-code code { color: #3d3d39; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; white-space: nowrap; }
@@ -203,6 +212,7 @@ svg.icon { width: 18px; height: 18px; flex: 0 0 18px; fill: none; stroke: curren
 .feedback-copy { min-width: 0; }
 .feedback-detail-text { max-width: 310px; overflow: hidden; color: #555550; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
 .tag-list { display: flex; flex-wrap: wrap; gap: 5px; }
+.feedback-table .tag-list { align-content: center; gap: 6px; }
 .tag { display: inline-flex; min-height: 22px; align-items: center; padding: 0 7px; border: 1px solid var(--line); border-radius: 5px; color: #686862; background: #fafaf8; font-size: 10px; white-space: nowrap; }
 .pagination { min-height: 46px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 7px 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 
@@ -225,6 +235,12 @@ svg.icon { width: 18px; height: 18px; flex: 0 0 18px; fill: none; stroke: curren
 .message-media { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 9px; margin-top: 11px; }
 .message-media a { display: block; overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: #fafaf8; }
 .message-media img { width: 100%; max-height: 360px; display: block; object-fit: contain; background: #fff; }
+.message-overlay { margin: 13px 0 0; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: #fafaf8; }
+.message-overlay figcaption { display: flex; align-items: center; gap: 6px; margin-bottom: 9px; color: #575752; font-size: 11px; font-weight: 650; }
+.message-overlay figcaption .icon { width: 14px; height: 14px; color: var(--accent); }
+.message-overlay a { display: block; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.message-overlay img { width: 100%; max-height: 520px; display: block; object-fit: contain; }
+.message-overlay-missing { margin: 11px 0 0; padding: 9px 10px; border: 1px dashed var(--line-strong); border-radius: 6px; color: var(--muted); background: #fafaf8; font-size: 10px; line-height: 1.5; }
 .case-expired { padding: 30px 18px; border: 1px dashed var(--line-strong); border-radius: 8px; color: var(--muted); text-align: center; font-size: 12px; line-height: 1.6; }
 .detail-side { position: sticky; top: 28px; align-self: start; }
 .detail-section { padding: 0 0 22px; margin-bottom: 22px; border-bottom: 1px solid var(--line); }

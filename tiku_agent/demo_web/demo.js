@@ -151,6 +151,14 @@ function isPersistentImage(url) {
   return typeof url === 'string' && (url.startsWith('/api/media/') || url.startsWith('/api/upload/'));
 }
 
+function normalizeFeedbackImages(value) {
+  return (Array.isArray(value) ? value : []).map((item) => ({
+    kind: String(item?.kind || ''),
+    url: String(item?.url || ''),
+    label: String(item?.label || ''),
+  })).filter((item) => item.kind === 'a3_overlay' && isPersistentImage(item.url));
+}
+
 function scheduleHistoryExpiry() {
   if (historyExpiryTimer !== null) clearTimeout(historyExpiryTimer);
   historyExpiryTimer = null;
@@ -252,6 +260,7 @@ function remember(item) {
     noticeKey: String(item.noticeKey || ''),
     createdAt: Number(item.createdAt || 0),
     feedback: item.feedback || null,
+    feedbackImages: normalizeFeedbackImages(item.feedbackImages),
     recoveryActions: normalizeRecoveryActions(item.recoveryActions),
     retryAction: normalizeRetryAction(item.retryAction),
     authorContact: normalizeAuthorContact(item.authorContact),
@@ -364,8 +373,40 @@ function closeLightbox() {
 
 function feedbackConversation(messageId) {
   const target = history.findIndex((item) => item.messageId === messageId);
-  const visible = target >= 0 ? history.slice(0, target + 1) : history.slice();
-  return visible.map((item) => ({
+  if (target < 0) return [];
+  const visible = history.slice(0, target + 1);
+  const targetRevision = Number(visible.at(-1)?.taskRevision || 0);
+  let start = visible.length - 1;
+  if (targetRevision > 0) {
+    for (let index = visible.length - 1; index >= 0; index -= 1) {
+      const item = visible[index];
+      if (
+        item.me
+        && Number(item.taskRevision || 0) === targetRevision
+        && (item.images || []).some(isPersistentImage)
+      ) {
+        start = index;
+        break;
+      }
+    }
+    if (start === visible.length - 1) {
+      for (let index = visible.length - 1; index >= 0; index -= 1) {
+        const item = visible[index];
+        if (item.me && Number(item.taskRevision || 0) === targetRevision) {
+          start = index;
+          break;
+        }
+      }
+    }
+  } else {
+    for (let index = visible.length - 1; index >= 0; index -= 1) {
+      if (visible[index].me) {
+        start = index;
+        break;
+      }
+    }
+  }
+  return visible.slice(start).map((item) => ({
     message: String(item.message || ''),
     me: Boolean(item.me),
     images: (item.images || []).filter(isPersistentImage),
@@ -376,6 +417,9 @@ function feedbackConversation(messageId) {
     candidateCount: Number(item.candidateCount || 0),
     messageId: String(item.messageId || ''),
     createdAt: Number(item.createdAt || 0),
+    a3Overlay: item.messageId === messageId
+      ? String(normalizeFeedbackImages(item.feedbackImages).find((image) => image.kind === 'a3_overlay')?.url || '')
+      : '',
   }));
 }
 
@@ -1350,6 +1394,7 @@ function responseItem(data) {
     messageId: createMessageId(),
     createdAt: Date.now(),
     a3: normalizeA3Snapshot(data.session?.a3),
+    feedbackImages: normalizeFeedbackImages(data.feedback_images),
     ...protocol,
   };
 }

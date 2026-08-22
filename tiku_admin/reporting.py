@@ -10,7 +10,11 @@ from typing import Iterable, Sequence
 from zoneinfo import ZoneInfo
 
 from tiku_admin.control_store import SQLiteControlStore, micros_to_cny
-from tiku_agent.feedback_store import MessageFeedback, SQLiteFeedbackStore
+from tiku_agent.feedback_store import (
+    MessageFeedback,
+    SQLiteFeedbackStore,
+    scope_feedback_conversation,
+)
 from tiku_shared.model_costs import estimate_cost
 
 
@@ -220,6 +224,7 @@ class AdminReporter:
             return None
         invitation = self.control_store.get_invitation(item.identity_key)
         detail = self._feedback_summaries([item], include_flow=True)[0]
+        conversation = scope_feedback_conversation(item.conversation, item.message_id)
         detail.update({
             "conversation": [
                 {
@@ -228,8 +233,13 @@ class AdminReporter:
                         f"/api/admin/feedback/{item.feedback_id}/media/{name}"
                         for name in message.get("images", [])
                     ],
+                    "a3_overlay": (
+                        f"/api/admin/feedback/{item.feedback_id}/media/{message.get('a3_overlay')}"
+                        if message.get("a3_overlay")
+                        else ""
+                    ),
                 }
-                for message in item.conversation
+                for message in conversation
             ],
             "admin_note": item.admin_note,
             "case_expires_at": item.case_expires_at,
@@ -576,7 +586,8 @@ def _route_label(route: str) -> str:
 
 
 def _feedback_summary(item: MessageFeedback) -> dict[str, object]:
-    preview = next((message for message in item.conversation if message.get("role") == "user"), {})
+    conversation = scope_feedback_conversation(item.conversation, item.message_id)
+    preview = next((message for message in conversation if message.get("role") == "user"), {})
     images = list(preview.get("images", [])) if isinstance(preview, dict) else []
     return {
         "feedback_id": item.feedback_id,
@@ -597,7 +608,7 @@ def _feedback_summary(item: MessageFeedback) -> dict[str, object]:
         "archived_at": item.archived_at,
         "created_at": item.created_at,
         "updated_at": item.updated_at,
-        "has_case": bool(item.conversation),
+        "has_case": bool(conversation),
         "preview_text": str(preview.get("message") or "")[:120] if isinstance(preview, dict) else "",
         "preview_image": (
             f"/api/admin/feedback/{item.feedback_id}/media/{images[0]}" if images else ""

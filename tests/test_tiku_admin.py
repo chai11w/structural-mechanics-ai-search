@@ -129,6 +129,8 @@ class TikuAdminTest(unittest.TestCase):
         self.assertIn("date-filter-value", script)
         self.assertIn("feedback-filter-select", script)
         self.assertIn("select.classList.toggle('is-placeholder', !select.value)", script)
+        self.assertIn("整页框选结果", script)
+        self.assertIn("message-overlay-missing", script)
         styles = (
             Path(__file__).resolve().parents[1] / "tiku_admin" / "web" / "admin.css"
         ).read_text(encoding="utf-8")
@@ -136,6 +138,9 @@ class TikuAdminTest(unittest.TestCase):
         self.assertIn(".date-filter-input { position: absolute;", styles)
         self.assertIn(".feedback-filter-select { font-size: 13px; }", styles)
         self.assertIn(".feedback-filter-select.is-placeholder { color: #8b8b84; }", styles)
+        self.assertIn(".feedback-table { min-width: 1320px; table-layout: fixed; }", styles)
+        self.assertIn(".feedback-table td { height: 70px; padding-block: 12px; }", styles)
+        self.assertIn(".message-overlay { margin: 13px 0 0;", styles)
         icons = (
             Path(__file__).resolve().parents[1] / "tiku_admin" / "web" / "lucide.svg"
         ).read_text(encoding="utf-8")
@@ -353,6 +358,126 @@ class TikuAdminTest(unittest.TestCase):
         store.set_archived(saved.feedback_number, archived=True)
         self.assertTrue(store.delete_archived(saved.feedback_number))
         self.assertIsNone(store.get_feedback(saved.feedback_number))
+
+    def test_feedback_media_route_rejects_unreferenced_case_files(self):
+        source = self.root / "current-page.jpg"
+        source.write_bytes(b"current-page")
+        store = SQLiteFeedbackStore(self.root / "feedback.sqlite3")
+        target_id = "message_current_page"
+        saved = store.upsert(
+            message_id=target_id,
+            identity_key="invite-media",
+            session_key="session-media",
+            rating="positive",
+            tags=("found_answer",),
+            detail="",
+            task_revision=1,
+            phase="WAIT_CHAPTER",
+            candidate_count=0,
+            conversation=[
+                {
+                    "me": True,
+                    "message": "当前整页",
+                    "images": ["/api/upload/current-page.jpg"],
+                    "taskRevision": 1,
+                },
+                {
+                    "me": False,
+                    "message": "当前回复",
+                    "messageId": target_id,
+                    "taskRevision": 1,
+                },
+            ],
+            media_resolver=lambda value: source if value.endswith(source.name) else None,
+        )
+        allowed_name = saved.conversation[0]["images"][0]
+        orphan_name = "old-page.jpg"
+        (store.cases_root / saved.feedback_id / orphan_name).write_bytes(b"old-page")
+        reporter = AdminReporter(
+            control_store=self.control,
+            cost_databases=(),
+            feedback_store=store,
+        )
+        client = TestClient(
+            create_admin_app(
+                control_store=self.control,
+                reporter=reporter,
+                feedback_store=store,
+            )
+        )
+        setup = client.post(
+            "/api/admin/setup",
+            json={
+                "password": "a-secure-admin-password",
+                "confirm_password": "a-secure-admin-password",
+            },
+        )
+        self.assertEqual(setup.status_code, 200)
+
+        media_root = f"/api/admin/feedback/{saved.feedback_id}/media"
+        self.assertEqual(client.get(f"{media_root}/{allowed_name}").status_code, 200)
+        self.assertEqual(client.get(f"{media_root}/{orphan_name}").status_code, 404)
+
+    def test_feedback_reporting_scopes_legacy_case_to_current_uploaded_page(self):
+        store = SQLiteFeedbackStore(self.root / "feedback.sqlite3")
+        target_id = "message_current_page"
+        saved = store.upsert(
+            message_id=target_id,
+            identity_key="invite-legacy",
+            session_key="session-legacy",
+            rating="positive",
+            tags=("found_answer",),
+            detail="框选正确",
+            task_revision=2,
+            phase="WAIT_CHAPTER",
+            candidate_count=9,
+            conversation=[
+                {
+                    "me": True,
+                    "message": "当前整页",
+                    "images": ["/api/upload/current.jpg"],
+                    "taskRevision": 2,
+                },
+                {
+                    "me": False,
+                    "message": "已准备 9 道题。",
+                    "messageId": target_id,
+                    "taskRevision": 2,
+                },
+            ],
+            media_resolver=lambda _value: None,
+        )
+        polluted = [
+            {"role": "user", "message": "上一页", "images": ["old.jpg"], "task_revision": 1},
+            {"role": "assistant", "message": "上一页结果", "images": [], "message_id": "message_old", "task_revision": 1},
+            {"role": "user", "message": "当前整页", "images": ["current.jpg"], "task_revision": 2},
+            {
+                "role": "assistant",
+                "message": "已准备 9 道题。",
+                "images": [],
+                "a3_overlay": "overlay.jpg",
+                "intent": "a3_units_prepared",
+                "message_id": target_id,
+                "task_revision": 2,
+            },
+        ]
+        with sqlite3.connect(store.path) as connection:
+            connection.execute(
+                "UPDATE message_feedback SET conversation_json = ? WHERE feedback_id = ?",
+                (json.dumps(polluted, ensure_ascii=False), saved.feedback_id),
+            )
+
+        reporter = AdminReporter(
+            control_store=self.control,
+            cost_databases=(),
+            feedback_store=store,
+        )
+        detail = reporter.feedback_detail(saved.feedback_number)
+        self.assertEqual(len(detail["conversation"]), 2)
+        self.assertEqual(detail["conversation"][0]["message"], "当前整页")
+        self.assertTrue(detail["conversation"][1]["a3_overlay"].endswith("/overlay.jpg"))
+        summary = reporter.feedback_list()["items"][0]
+        self.assertTrue(summary["preview_image"].endswith("/current.jpg"))
 
     def test_feedback_detail_combines_a3_workflow_and_a2_question_costs(self):
         self.control.initialize_admin("a-secure-admin-password")
