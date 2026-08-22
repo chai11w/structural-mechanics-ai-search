@@ -111,12 +111,19 @@ class TikuAdminTest(unittest.TestCase):
         script = (
             Path(__file__).resolve().parents[1] / "tiku_admin" / "web" / "admin.js"
         ).read_text(encoding="utf-8")
-        self.assertIn("<th>反馈编号</th><th>用户</th>", script)
+        self.assertIn('<th class="col-number">反馈编号</th>', script)
+        self.assertIn('<th class="col-scope">范围</th>', script)
         self.assertIn('for="filter-chapter">章节</label><select', script)
+        self.assertIn('for="filter-scope">反馈范围</label><select', script)
+        self.assertIn('<option value="page"', script)
+        self.assertIn('<option value="question"', script)
         self.assertIn('<option value="">全部章节</option>${chapterOptions}', script)
         self.assertNotIn('for="filter-tag">反馈原因</label>', script)
         self.assertIn("显示已归档", script)
-        self.assertIn("搜题耗时", script)
+        self.assertIn("流程耗时", script)
+        self.assertIn("关联费用", script)
+        self.assertIn("整页识别处理流程", script)
+        self.assertIn("单题检索处理流程", script)
         self.assertIn("取消归档", script)
         self.assertIn("永久删除反馈", script)
         self.assertIn('data-feedback-action="delete"', script)
@@ -129,6 +136,10 @@ class TikuAdminTest(unittest.TestCase):
         self.assertIn("date-filter-value", script)
         self.assertIn("feedback-filter-select", script)
         self.assertIn("select.classList.toggle('is-placeholder', !select.value)", script)
+        self.assertIn("feedbackSummaryCards", script)
+        self.assertIn("feedback_scope", script)
+        self.assertIn("today_page_searches", script)
+        self.assertIn("today_question_searches", script)
         self.assertIn("整页框选结果", script)
         self.assertIn("message-overlay-missing", script)
         self.assertIn("这条反馈未保存整页框选结果。", script)
@@ -137,15 +148,16 @@ class TikuAdminTest(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "tiku_admin" / "web" / "admin.css"
         ).read_text(encoding="utf-8")
         self.assertIn(".feedback-filters .input, .feedback-filters .select { min-width: 0;", styles)
+        self.assertIn(".feedback-filter-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));", styles)
         self.assertIn(".date-filter-input { position: absolute;", styles)
         self.assertIn(".feedback-filter-select { font-size: 13px; }", styles)
         self.assertIn(".feedback-filter-select.is-placeholder { color: #8b8b84; }", styles)
-        self.assertIn(
-            ".feedback-filters > .button { align-self: flex-end; height: 40px; min-height: 40px; }",
-            styles,
-        )
-        self.assertIn(".feedback-table { min-width: 1320px; table-layout: fixed; }", styles)
+        self.assertIn(".feedback-filter-submit { height: 40px; min-height: 40px; }", styles)
+        self.assertIn(".feedback-table { min-width: 1138px; table-layout: fixed; }", styles)
         self.assertIn(".feedback-table td { height: 70px; padding-block: 12px; }", styles)
+        self.assertIn(".feedback-card-list { display: none; }", styles)
+        self.assertIn(".feedback-list-table-wrap { display: none; }", styles)
+        self.assertIn(".feedback-scope.scope-page", styles)
         self.assertIn(".message-overlay { margin: 13px 0 0;", styles)
         icons = (
             Path(__file__).resolve().parents[1] / "tiku_admin" / "web" / "lucide.svg"
@@ -469,7 +481,8 @@ class TikuAdminTest(unittest.TestCase):
         ]
         with sqlite3.connect(store.path) as connection:
             connection.execute(
-                "UPDATE message_feedback SET conversation_json = ? WHERE feedback_id = ?",
+                "UPDATE message_feedback SET conversation_json = ?, "
+                "feedback_scope = '', schema_version = 6 WHERE feedback_id = ?",
                 (json.dumps(polluted, ensure_ascii=False), saved.feedback_id),
             )
 
@@ -479,19 +492,22 @@ class TikuAdminTest(unittest.TestCase):
             feedback_store=store,
         )
         detail = reporter.feedback_detail(saved.feedback_number)
+        self.assertEqual(detail["feedback_scope"], "page")
         self.assertEqual(len(detail["conversation"]), 2)
         self.assertEqual(detail["conversation"][0]["message"], "当前整页")
         self.assertTrue(detail["conversation"][1]["a3_overlay"].endswith("/overlay.jpg"))
         summary = reporter.feedback_list()["items"][0]
+        self.assertEqual(summary["feedback_scope"], "page")
         self.assertTrue(summary["preview_image"].endswith("/current.jpg"))
 
     def test_feedback_detail_combines_a3_workflow_and_a2_question_costs(self):
         self.control.initialize_admin("a-secure-admin-password")
         invitation, _code = self.control.create_invitation(label="流程用户")
+        other_invitation, _other_code = self.control.create_invitation(label="其他流程用户")
         feedback = SQLiteFeedbackStore(self.root / "feedback.sqlite3")
         workflow_db = self.root / "model_costs.sqlite3"
         question_db = self.root / "a2" / "model_costs.sqlite3"
-        started_at = datetime.now(UTC).isoformat()
+        started_at = (datetime.now(UTC) - timedelta(seconds=10)).isoformat()
 
         workflow = ModelCostCollector(
             run_id="workflow-run",
@@ -563,6 +579,16 @@ class TikuAdminTest(unittest.TestCase):
         SQLiteModelCostLedger(question_db).write_run(
             intent, finished_at=started_at, outcome="success"
         )
+        colliding = ModelCostCollector(
+            run_id="other-user-colliding-run",
+            identity_key=other_invitation.invite_id,
+            search_key="workflow-search",
+            task_kind="a3_page_understanding_retry",
+            started_at=started_at,
+        )
+        SQLiteModelCostLedger(workflow_db).write_run(
+            colliding, finished_at=started_at, outcome="success"
+        )
         saved = feedback.upsert(
             message_id="message_trace_01",
             identity_key=invitation.invite_id,
@@ -600,7 +626,149 @@ class TikuAdminTest(unittest.TestCase):
             {item["model"] for item in detail["cost"]["models"]},
             {"glm-5v-turbo", "qwen3.7-plus"},
         )
+        self.assertEqual(detail["feedback_scope"], "question")
+
+        target_created_at = datetime.fromisoformat(started_at) + timedelta(seconds=2)
+        page_saved = feedback.upsert(
+            message_id="message_page_trace_01",
+            identity_key=invitation.invite_id,
+            session_key="session-key",
+            rating="negative",
+            tags=("irrelevant_results",),
+            detail="整页框选需要复核",
+            task_revision=1,
+            phase="WAIT_UNIT_SELECTION",
+            candidate_count=2,
+            search_key="question-search",
+            search_id="question-search",
+            workflow_search_id="workflow-search",
+            image_route="A3",
+            conversation=[{
+                "me": False,
+                "message": "已准备 2 道题。",
+                "messageId": "message_page_trace_01",
+                 "intent": "a3_units_prepared",
+                 "taskRevision": 1,
+                 "createdAt": int(target_created_at.timestamp() * 1000),
+             }],
+         )
+        late_page_run = ModelCostCollector(
+            run_id="late-page-run",
+            identity_key=invitation.invite_id,
+            search_key="workflow-search",
+            task_kind="a3_page_understanding_retry",
+            started_at=(target_created_at + timedelta(seconds=2)).isoformat(),
+        )
+        SQLiteModelCostLedger(workflow_db).write_run(
+            late_page_run,
+            finished_at=(target_created_at + timedelta(seconds=2)).isoformat(),
+            outcome="success",
+        )
+        page_detail = reporter.feedback_detail(page_saved.feedback_id)
+        self.assertEqual(page_detail["feedback_scope"], "page")
+        self.assertEqual(
+            [step["key"] for step in page_detail["cost"]["flow"]],
+            ["a3_auto_crop_grounding"],
+        )
+        self.assertLess(
+            page_detail["cost"]["estimated_cost_micros"],
+            detail["cost"]["estimated_cost_micros"],
+        )
+        skewed_saved = feedback.upsert(
+            message_id="message_page_skewed_01",
+            identity_key=invitation.invite_id,
+            session_key="session-key",
+            rating="negative",
+            tags=("irrelevant_results",),
+            detail="设备时间异常时仍应显示费用",
+            task_revision=1,
+            phase="WAIT_UNIT_SELECTION",
+            candidate_count=2,
+            search_key="question-search",
+            search_id="question-search",
+            workflow_search_id="workflow-search",
+            image_route="A3",
+            conversation=[{
+                "me": False,
+                "message": "已准备 2 道题。",
+                "messageId": "message_page_skewed_01",
+                "intent": "a3_units_prepared",
+                "taskRevision": 1,
+                "createdAt": 2_000,
+            }],
+        )
+        skewed_detail = reporter.feedback_detail(skewed_saved.feedback_id)
+        self.assertGreater(skewed_detail["cost"]["estimated_cost_micros"], 0)
+        self.assertEqual(reporter.feedback_list(feedback_scope="page")["total"], 2)
+        self.assertEqual(reporter.feedback_list(feedback_scope="question")["total"], 1)
+        with self.assertRaisesRegex(ValueError, "feedback scope"):
+            reporter.feedback_list(feedback_scope="invalid")
         self.assertEqual(reporter.overview()["today_searches"], 1)
+
+    def test_usage_reports_uploaded_pages_and_a2_questions_as_separate_metrics(self):
+        first, _first_code = self.control.create_invitation(label="整页用户")
+        second, _second_code = self.control.create_invitation(label="历史整页用户")
+        costs = self.root / "model_costs.sqlite3"
+        ledger = SQLiteModelCostLedger(costs)
+        now = datetime.now(UTC).isoformat()
+        sequence = 0
+
+        def record(identity_key: str, search_key: str, task_kind: str) -> None:
+            nonlocal sequence
+            sequence += 1
+            ledger.write_run(
+                ModelCostCollector(
+                    run_id=f"usage-run-{sequence}",
+                    session_key=f"session-{identity_key}",
+                    identity_key=identity_key,
+                    search_key=search_key,
+                    task_kind=task_kind,
+                    started_at=now,
+                ),
+                finished_at=now,
+                outcome="success",
+            )
+
+        # One A3 upload emits several workflow stages but is one page.
+        record(first.invite_id, "workflow-page", "image_triage")
+        record(first.invite_id, "workflow-page", "a3_page_understanding")
+        record(first.invite_id, "workflow-page", "a3_page_understanding_retry")
+        record(first.invite_id, "workflow-page", "a3_auto_crop_grounding")
+        # Retries for one A2 question keep the same search key and count once.
+        record(first.invite_id, "question-one", "image")
+        record(first.invite_id, "question-one", "image")
+        record(first.invite_id, "question-two", "a3_verified_image")
+
+        # A direct A2 upload is still one user-initiated page.  Its parent
+        # triage key counts the page and its child A2 key counts the question.
+        record(first.invite_id, "workflow-direct-a2", "image_triage")
+        record(first.invite_id, "workflow-direct-a2", "a3_external_load_screen")
+        record(first.invite_id, "question-direct-a2", "image")
+
+        # Historical deployments can lack triage records.  A decisive A3 page
+        # stage remains sufficient.  Reused imported keys remain separate per
+        # identity for both page and question totals.
+        record(second.invite_id, "workflow-page", "a3_page_understanding")
+        record(second.invite_id, "question-one", "image")
+        record("", "anonymous-page", "image_triage")
+        record("", "anonymous-question", "image")
+
+        reporter = AdminReporter(
+            control_store=self.control,
+            cost_database=costs,
+            feedback_store=SQLiteFeedbackStore(self.root / "feedback.sqlite3"),
+        )
+        overview = reporter.overview()
+
+        self.assertEqual(overview["today_page_searches"], 4)
+        self.assertEqual(overview["today_question_searches"], 5)
+        self.assertEqual(overview["today_searches"], 5)
+        by_invite = {item["invite_id"]: item for item in overview["invites"]}
+        self.assertEqual(by_invite[first.invite_id]["today_page_searches"], 2)
+        self.assertEqual(by_invite[first.invite_id]["today_question_searches"], 3)
+        self.assertEqual(by_invite[first.invite_id]["today_searches"], 3)
+        self.assertEqual(by_invite[second.invite_id]["today_page_searches"], 1)
+        self.assertEqual(by_invite[second.invite_id]["today_question_searches"], 1)
 
     def test_admin_http_flow_covers_setup_invites_overview_feedback_and_settings(self):
         feedback = SQLiteFeedbackStore(self.root / "feedback.sqlite3")
@@ -682,12 +850,17 @@ class TikuAdminTest(unittest.TestCase):
                 "me": False,
                 "message": "请选择候选题。",
                 "messageId": "message_abcdefgh",
-                "createdAt": 2000,
+                "createdAt": int(datetime.now(UTC).timestamp() * 1000),
             }],
         )
 
         overview = client.get("/api/admin/overview").json()
         self.assertEqual(overview["today_searches"], 1)
+        self.assertEqual(overview["today_question_searches"], 1)
+        self.assertEqual(overview["today_page_searches"], 0)
+        self.assertEqual(overview["invites"][0]["today_searches"], 1)
+        self.assertEqual(overview["invites"][0]["today_question_searches"], 1)
+        self.assertEqual(overview["invites"][0]["today_page_searches"], 0)
         self.assertEqual(overview["pending_negative_feedback"], 1)
         self.assertEqual(overview["invites"][0]["today_cost_cny"], "1.25")
         filtered = client.get(
@@ -700,6 +873,7 @@ class TikuAdminTest(unittest.TestCase):
         self.assertEqual(filtered.status_code, 200, filtered.text)
         self.assertEqual(filtered.json()["total"], 1)
         self.assertEqual(filtered.json()["items"][0]["invite_label"], "真实用户 A")
+        self.assertEqual(filtered.json()["items"][0]["feedback_scope"], "question")
         self.assertEqual(filtered.json()["chapters"], ["4力法"])
         self.assertRegex(
             filtered.json()["items"][0]["feedback_number"],
@@ -719,11 +893,30 @@ class TikuAdminTest(unittest.TestCase):
             200,
         )
         self.assertEqual(
+            client.get(
+                "/api/admin/feedback", params={"feedback_scope": "question"}
+            ).json()["total"],
+            1,
+        )
+        self.assertEqual(
+            client.get(
+                "/api/admin/feedback", params={"feedback_scope": "page"}
+            ).json()["total"],
+            0,
+        )
+        self.assertEqual(
+            client.get(
+                "/api/admin/feedback", params={"feedback_scope": "invalid"}
+            ).status_code,
+            400,
+        )
+        self.assertEqual(
             client.get("/api/admin/feedback", params={"date": "not-a-date"}).status_code,
             400,
         )
         detail = client.get(f"/api/admin/feedback/{saved.feedback_id}")
         self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["feedback_scope"], "question")
         self.assertEqual(detail.json()["conversation"][0]["message"], "请选择候选题。")
         self.assertEqual(detail.json()["search_duration_ms"], 8_765)
         self.assertEqual(

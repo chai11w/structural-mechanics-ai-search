@@ -467,6 +467,7 @@ def create_app(
                 "message_id": saved.message_id,
                 "rating": saved.rating,
                 "tags": list(saved.tags),
+                "feedback_scope": saved.feedback_scope,
                 "updated_at": saved.updated_at,
             },
             **protocol.to_dict(),

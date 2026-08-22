@@ -13,7 +13,14 @@ from typing import Callable, Sequence
 from uuid import uuid4
 
 
-FEEDBACK_SCHEMA_VERSION = 6
+FEEDBACK_SCHEMA_VERSION = 7
+FEEDBACK_SCOPES = frozenset({"page", "question"})
+_PAGE_FEEDBACK_INTENTS = frozenset({
+    "a3_page_error",
+    "a3_page_ready",
+    "a3_auto_crops_ready",
+    "a3_units_prepared",
+})
 
 
 @dataclass(frozen=True)
@@ -39,6 +46,7 @@ class MessageFeedback:
     chapter: str
     image_route: str
     workflow_search_id: str
+    feedback_scope: str
     conversation: tuple[dict[str, object], ...]
     review_status: str
     admin_note: str
@@ -121,6 +129,28 @@ def scope_feedback_conversation(
     return visible[start_index:]
 
 
+def classify_feedback_scope(
+    target_message: dict[str, object] | None,
+    *,
+    image_route: str = "",
+) -> str:
+    """Classify the rated reply without trusting a client-provided scope value."""
+
+    target = target_message if isinstance(target_message, dict) else {}
+    intent = str(target.get("intent") or "").strip().lower()
+    has_page_overlay = bool(
+        str(target.get("a3Overlay") or target.get("a3_overlay") or "").strip()
+    )
+    route = str(image_route or "").strip().upper()
+    if has_page_overlay or intent in _PAGE_FEEDBACK_INTENTS:
+        # Historical cases did not always persist image_route, while these
+        # intents and the overlay are emitted only by the server-side A3 flow.
+        return "page"
+    if route == "A3" and intent.startswith("a3_page_"):
+        return "page"
+    return "question"
+
+
 class SQLiteFeedbackStore:
     def __init__(self, path: str | Path, *, cases_root: str | Path | None = None) -> None:
         self.path = Path(path)
@@ -195,6 +225,16 @@ class SQLiteFeedbackStore:
                     expiry = datetime.now(UTC).timestamp() + max(1, min(365, int(retention_days))) * 86400
                     case_expires_at = datetime.fromtimestamp(expiry, UTC).isoformat()
                     case_purged_at = ""
+                clean_image_route = (
+                    str(image_route).strip().upper()
+                    if str(image_route).strip().upper() in {"A1", "A2", "A3"}
+                    else ""
+                )
+                stored_conversation = _conversation_from_json(conversation_json)
+                feedback_scope = classify_feedback_scope(
+                    _target_feedback_message(stored_conversation, message_id),
+                    image_route=clean_image_route,
+                )
                 connection.execute(
                     """
                     INSERT INTO message_feedback (
@@ -202,10 +242,11 @@ class SQLiteFeedbackStore:
                         tags_json, detail, task_revision, phase, candidate_count,
                         search_duration_ms, search_key, request_id, search_id,
                         status, layer, code, chapter, image_route, workflow_search_id,
+                        feedback_scope,
                         conversation_json,
                         review_status, admin_note, archived_at,
                         case_expires_at, case_purged_at, created_at, updated_at, schema_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(identity_key, session_key, message_id) DO UPDATE SET
                         rating = excluded.rating,
                         tags_json = excluded.tags_json,
@@ -223,6 +264,7 @@ class SQLiteFeedbackStore:
                         chapter = excluded.chapter,
                         image_route = excluded.image_route,
                         workflow_search_id = excluded.workflow_search_id,
+                        feedback_scope = excluded.feedback_scope,
                         conversation_json = excluded.conversation_json,
                         case_expires_at = excluded.case_expires_at,
                         case_purged_at = excluded.case_purged_at,
@@ -249,12 +291,9 @@ class SQLiteFeedbackStore:
                         str(layer or "tool").strip().lower(),
                         str(code or "REQUEST_SUCCEEDED").strip().upper(),
                         str(chapter).strip()[:80],
-                        (
-                            str(image_route).strip().upper()
-                            if str(image_route).strip().upper() in {"A1", "A2", "A3"}
-                            else ""
-                        ),
+                        clean_image_route,
                         str(workflow_search_id or search_id or search_key).strip(),
+                        feedback_scope,
                         conversation_json,
                         review_status,
                         admin_note,
@@ -286,13 +325,10 @@ class SQLiteFeedbackStore:
             layer=str(layer or "tool").strip().lower(),
             code=str(code or "REQUEST_SUCCEEDED").strip().upper(),
             chapter=str(chapter).strip()[:80],
-            image_route=(
-                str(image_route).strip().upper()
-                if str(image_route).strip().upper() in {"A1", "A2", "A3"}
-                else ""
-            ),
+            image_route=clean_image_route,
             workflow_search_id=str(workflow_search_id or search_id or search_key).strip(),
-            conversation=tuple(json.loads(conversation_json)),
+            feedback_scope=feedback_scope,
+            conversation=tuple(stored_conversation),
             review_status=review_status,
             admin_note=admin_note,
             archived_at=archived_at,
@@ -319,6 +355,7 @@ class SQLiteFeedbackStore:
         self,
         *,
         rating: str = "",
+        feedback_scope: str = "",
         identity_key: str = "",
         identity_keys: Sequence[str] | None = None,
         chapter: str = "",
@@ -338,6 +375,7 @@ class SQLiteFeedbackStore:
         parameters: list[object] = []
         for column, value in (
             ("rating", rating),
+            ("feedback_scope", feedback_scope),
             ("identity_key", identity_key),
             ("chapter", chapter),
             ("review_status", review_status),
@@ -663,6 +701,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             chapter TEXT NOT NULL DEFAULT '',
             image_route TEXT NOT NULL DEFAULT '',
             workflow_search_id TEXT NOT NULL DEFAULT '',
+            feedback_scope TEXT NOT NULL DEFAULT 'question',
             conversation_json TEXT NOT NULL DEFAULT '[]',
             review_status TEXT NOT NULL DEFAULT 'pending',
             admin_note TEXT NOT NULL DEFAULT '',
@@ -691,6 +730,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         "chapter": "TEXT NOT NULL DEFAULT ''",
         "image_route": "TEXT NOT NULL DEFAULT ''",
         "workflow_search_id": "TEXT NOT NULL DEFAULT ''",
+        "feedback_scope": "TEXT NOT NULL DEFAULT ''",
         "conversation_json": "TEXT NOT NULL DEFAULT '[]'",
         "review_status": "TEXT NOT NULL DEFAULT 'pending'",
         "admin_note": "TEXT NOT NULL DEFAULT ''",
@@ -701,6 +741,27 @@ def _create_schema(connection: sqlite3.Connection) -> None:
     for name, definition in migrations.items():
         if name not in columns:
             connection.execute(f"ALTER TABLE message_feedback ADD COLUMN {name} {definition}")
+    scope_rows = connection.execute(
+        """
+        SELECT feedback_id, message_id, image_route, conversation_json
+        FROM message_feedback
+        WHERE feedback_scope NOT IN ('page', 'question')
+        """
+    ).fetchall()
+    for row in scope_rows:
+        conversation = _conversation_from_json(str(row[3]))
+        feedback_scope = classify_feedback_scope(
+            _target_feedback_message(conversation, str(row[1])),
+            image_route=str(row[2]),
+        )
+        connection.execute(
+            "UPDATE message_feedback SET feedback_scope = ? WHERE feedback_id = ?",
+            (feedback_scope, str(row[0])),
+        )
+    connection.execute(
+        "UPDATE message_feedback SET schema_version = ? WHERE schema_version < ?",
+        (FEEDBACK_SCHEMA_VERSION, FEEDBACK_SCHEMA_VERSION),
+    )
     rows = connection.execute(
         "SELECT feedback_id, created_at FROM message_feedback WHERE feedback_number = ''"
     ).fetchall()
@@ -729,6 +790,10 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_feedback_search_id "
         "ON message_feedback(search_id, updated_at)"
     )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_feedback_scope_updated "
+        "ON message_feedback(feedback_scope, updated_at)"
+    )
 
 
 def _feedback_from_row(row: sqlite3.Row) -> MessageFeedback:
@@ -754,7 +819,12 @@ def _feedback_from_row(row: sqlite3.Row) -> MessageFeedback:
         chapter=str(row["chapter"]),
         image_route=str(row["image_route"]),
         workflow_search_id=str(row["workflow_search_id"] or row["search_id"] or row["search_key"]),
-        conversation=tuple(json.loads(str(row["conversation_json"]))),
+        feedback_scope=(
+            str(row["feedback_scope"])
+            if str(row["feedback_scope"]) in FEEDBACK_SCOPES
+            else "question"
+        ),
+        conversation=tuple(_conversation_from_json(str(row["conversation_json"]))),
         review_status=str(row["review_status"]),
         admin_note=str(row["admin_note"]),
         archived_at=str(row["archived_at"]),
@@ -770,3 +840,24 @@ def _feedback_number(feedback_id: str, created_at: str) -> str:
     if len(date_part) != 8 or not date_part.isdigit():
         date_part = "00000000"
     return f"FB-{date_part}-{str(feedback_id)[:10].upper()}"
+
+
+def _conversation_from_json(value: str) -> list[dict[str, object]]:
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [dict(item) for item in parsed if isinstance(item, dict)]
+
+
+def _target_feedback_message(
+    conversation: Sequence[dict[str, object]], message_id: str
+) -> dict[str, object]:
+    clean_target = str(message_id or "").strip()
+    for item in reversed(conversation):
+        item_id = str(item.get("messageId") or item.get("message_id") or "").strip()
+        if item_id == clean_target:
+            return dict(item)
+    return {}

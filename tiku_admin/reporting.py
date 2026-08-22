@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from tiku_admin.control_store import SQLiteControlStore, micros_to_cny
 from tiku_agent.feedback_store import (
+    FEEDBACK_SCOPES,
     MessageFeedback,
     SQLiteFeedbackStore,
     scope_feedback_conversation,
@@ -68,6 +69,21 @@ _STAGE_ORDER = {
     "text": 80,
 }
 
+_QUESTION_SEARCH_TASK_KINDS = frozenset({"image", "a3_verified_image"})
+_TRUSTED_CLIENT_TIMESTAMP_LAG = timedelta(minutes=30)
+
+# ``image_triage`` runs once against the parent workflow search id for every
+# newly uploaded page, including A1 stops and direct A2 images.  Older A3
+# deployments can lack that record, so their page-scoped stages are accepted
+# as fallback evidence for the same parent workflow id.
+_A3_PAGE_WORKFLOW_TASK_KINDS = frozenset({
+    "a3_page_understanding",
+    "a3_page_understanding_retry",
+    "a3_auto_crop_grounding",
+    "a3_auto_crop_compare",
+    "a3_auto_external_load_screen",
+})
+
 
 class AdminReporter:
     def __init__(
@@ -105,9 +121,14 @@ class AdminReporter:
             usage = per_identity.get(invitation.invite_id, {})
             budget = invitation.daily_budget_micros or default_budget
             cost = int(usage.get("estimated_cost_micros", 0))
+            question_searches = int(usage.get("question_search_count", 0))
             invite_rows.append({
                 **invitation.to_dict(),
-                "today_searches": int(usage.get("search_count", 0)),
+                # ``today_searches`` remains the compatibility alias for the
+                # historical A2-question metric.
+                "today_searches": question_searches,
+                "today_question_searches": question_searches,
+                "today_page_searches": int(usage.get("page_search_count", 0)),
                 "today_cost_micros": cost,
                 "today_cost_cny": micros_to_cny(cost),
                 "effective_budget_micros": budget,
@@ -123,7 +144,9 @@ class AdminReporter:
         ])
         return {
             "date": datetime.now(ZoneInfo(str(settings["budget_timezone"]))).date().isoformat(),
-            "today_searches": int(total["search_count"]),
+            "today_searches": int(total["question_search_count"]),
+            "today_question_searches": int(total["question_search_count"]),
+            "today_page_searches": int(total["page_search_count"]),
             "today_cost_micros": int(total["estimated_cost_micros"]),
             "today_cost_cny": micros_to_cny(int(total["estimated_cost_micros"])),
             "active_invites": active_count,
@@ -155,6 +178,8 @@ class AdminReporter:
                 rows.append({
                     **invitation.to_dict(),
                     "today_searches": 0,
+                    "today_question_searches": 0,
+                    "today_page_searches": 0,
                     "today_cost_micros": 0,
                     "today_cost_cny": "0.00",
                     "effective_budget_micros": 0,
@@ -171,6 +196,9 @@ class AdminReporter:
             str(self.control_store.settings()["budget_timezone"]),
         )
         identity_status = str(filters.get("identity_status") or "").strip().lower()
+        feedback_scope = str(filters.get("feedback_scope") or "").strip().lower()
+        if feedback_scope and feedback_scope not in FEEDBACK_SCOPES:
+            raise ValueError("invalid feedback scope")
         identity_keys = None
         if identity_status:
             if identity_status != "archived":
@@ -182,6 +210,7 @@ class AdminReporter:
             ]
         items, total = self.feedback_store.query_feedback(
             rating=str(filters.get("rating") or ""),
+            feedback_scope=feedback_scope,
             identity_key=str(filters.get("identity_key") or ""),
             identity_keys=identity_keys,
             chapter=str(filters.get("chapter") or ""),
@@ -257,7 +286,7 @@ class AdminReporter:
         search_keys = sorted({
             key
             for item in items
-            for key in (item.search_key, item.workflow_search_id)
+            for key in _feedback_cost_search_keys(item)
             if key
         })
         runs = self._load_runs(search_keys=search_keys)
@@ -269,8 +298,15 @@ class AdminReporter:
         for item in items:
             summary = _feedback_summary(item)
             invitation = invitations.get(item.identity_key)
-            item_keys = {item.search_key, item.workflow_search_id} - {""}
-            item_runs = [run for run in runs if str(run["search_key"]) in item_keys]
+            item_keys = _feedback_cost_search_keys(item)
+            cutoff = _feedback_cost_cutoff(item)
+            item_runs = [
+                run
+                for run in runs
+                if str(run["search_key"]) in item_keys
+                and str(run["identity_key"]) == item.identity_key
+                and _run_started_by(run, cutoff)
+            ]
             summary.update({
                 "invite_label": invitation.label if invitation else item.identity_key,
                 "cost": _cost_summary(
@@ -287,41 +323,68 @@ class AdminReporter:
     ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
         runs = self._load_runs(started_at=started_at, finished_at=finished_at)
         if not runs:
-            return {"search_count": 0, "estimated_cost_micros": 0}, {}
+            return {
+                "search_count": 0,
+                "question_search_count": 0,
+                "page_search_count": 0,
+                "estimated_cost_micros": 0,
+            }, {}
         per_identity: dict[str, dict[str, object]] = {}
         for run in runs:
             identity_key = str(run["identity_key"])
             if not identity_key:
                 continue
             usage = per_identity.setdefault(identity_key, {
-                "search_keys": set(),
+                "question_search_keys": set(),
+                "page_search_keys": set(),
                 "estimated_cost_micros": 0,
                 "last_activity_at": "",
             })
             search_key = str(run["search_key"])
-            if search_key and str(run["task_kind"]) in {"image", "a3_verified_image"}:
-                usage["search_keys"].add(search_key)  # type: ignore[union-attr]
+            task_kind = str(run["task_kind"])
+            if search_key and task_kind in _QUESTION_SEARCH_TASK_KINDS:
+                usage["question_search_keys"].add(search_key)  # type: ignore[union-attr]
+            if search_key and (
+                task_kind == "image_triage"
+                or task_kind in _A3_PAGE_WORKFLOW_TASK_KINDS
+            ):
+                usage["page_search_keys"].add(search_key)  # type: ignore[union-attr]
             usage["estimated_cost_micros"] = int(usage["estimated_cost_micros"]) + int(
                 run["effective_cost_micros"]
             )
             usage["last_activity_at"] = max(
                 str(usage["last_activity_at"]), str(run["finished_at"])
             )
-        normalized = {
-            key: {
-                "search_count": len(value.pop("search_keys")),
+        normalized = {}
+        for key, value in per_identity.items():
+            question_search_count = len(value.pop("question_search_keys"))
+            page_search_count = len(value.pop("page_search_keys"))
+            normalized[key] = {
+                "search_count": question_search_count,
+                "question_search_count": question_search_count,
+                "page_search_count": page_search_count,
                 **value,
             }
-            for key, value in per_identity.items()
-        }
+        total_question_searches = len({
+            (str(run["identity_key"]), str(run["search_key"]))
+            for run in runs
+            if run["search_key"]
+            and str(run["task_kind"]) in _QUESTION_SEARCH_TASK_KINDS
+        })
+        total_page_searches = len({
+            (str(run["identity_key"]), str(run["search_key"]))
+            for run in runs
+            if run["search_key"]
+            and (
+                str(run["task_kind"]) == "image_triage"
+                or str(run["task_kind"]) in _A3_PAGE_WORKFLOW_TASK_KINDS
+            )
+        })
         return (
             {
-                "search_count": len({
-                    str(run["search_key"])
-                    for run in runs
-                    if run["search_key"]
-                    and str(run["task_kind"]) in {"image", "a3_verified_image"}
-                }),
+                "search_count": total_question_searches,
+                "question_search_count": total_question_searches,
+                "page_search_count": total_page_searches,
                 "estimated_cost_micros": sum(int(run["effective_cost_micros"]) for run in runs),
             },
             normalized,
@@ -604,6 +667,7 @@ def _feedback_summary(item: MessageFeedback) -> dict[str, object]:
         "chapter": item.chapter,
         "image_route": item.image_route,
         "workflow_search_id": item.workflow_search_id,
+        "feedback_scope": item.feedback_scope,
         "review_status": item.review_status,
         "archived_at": item.archived_at,
         "created_at": item.created_at,
@@ -614,6 +678,55 @@ def _feedback_summary(item: MessageFeedback) -> dict[str, object]:
             f"/api/admin/feedback/{item.feedback_id}/media/{images[0]}" if images else ""
         ),
     }
+
+
+def _feedback_cost_search_keys(item: MessageFeedback) -> set[str]:
+    if item.feedback_scope == "page":
+        return {item.workflow_search_id} - {""}
+    return {item.search_key, item.workflow_search_id} - {""}
+
+
+def _feedback_cost_cutoff(item: MessageFeedback) -> datetime | None:
+    submitted_at = _parse_iso_datetime(item.created_at)
+    target_messages = [
+        message
+        for message in scope_feedback_conversation(item.conversation, item.message_id)
+        if str(message.get("message_id") or message.get("messageId") or "").strip()
+        == item.message_id
+    ]
+    if target_messages:
+        try:
+            created_at_ms = int(target_messages[-1].get("created_at") or 0)
+        except (TypeError, ValueError):
+            created_at_ms = 0
+        if created_at_ms > 0:
+            target_at = datetime.fromtimestamp(created_at_ms / 1000, UTC)
+            if submitted_at is None:
+                return target_at
+            # Conversation timestamps originate from the browser.  They give
+            # us a more precise boundary for the reply being reviewed, but a
+            # badly skewed device clock must not erase legitimate server-side
+            # model runs.  Delayed/implausible values safely fall back to the
+            # server-recorded feedback submission time.
+            client_lag = submitted_at - target_at
+            if timedelta(0) <= client_lag <= _TRUSTED_CLIENT_TIMESTAMP_LAG:
+                return target_at
+    return submitted_at
+
+
+def _run_started_by(run: dict[str, object], cutoff: datetime | None) -> bool:
+    if cutoff is None:
+        return True
+    started_at = _parse_iso_datetime(str(run.get("started_at") or ""))
+    return started_at is None or started_at <= cutoff
+
+
+def _parse_iso_datetime(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
 
 
 def _json_list(value: object) -> list[str]:

@@ -16,7 +16,11 @@ from fastapi.staticfiles import StaticFiles
 from tiku_admin.auth import AdminSession, AdminSessionAuth
 from tiku_admin.control_store import SQLiteControlStore, cny_to_micros, micros_to_cny
 from tiku_admin.reporting import AdminReporter
-from tiku_agent.feedback_store import SQLiteFeedbackStore, scope_feedback_conversation
+from tiku_agent.feedback_store import (
+    FEEDBACK_SCOPES,
+    SQLiteFeedbackStore,
+    scope_feedback_conversation,
+)
 
 
 WEB_DIR = Path(__file__).with_name("web")
@@ -268,6 +272,7 @@ def create_admin_app(
     @app.get("/api/admin/feedback")
     def feedback_list(
         rating: str = "",
+        feedback_scope: str = "",
         identity_key: str = "",
         identity_status: str = "",
         chapter: str = "",
@@ -279,9 +284,12 @@ def create_admin_app(
     ) -> dict[str, object]:
         if identity_status and identity_status != "archived":
             raise HTTPException(status_code=400, detail="用户分组筛选无效。")
+        if feedback_scope and feedback_scope not in FEEDBACK_SCOPES:
+            raise HTTPException(status_code=400, detail="反馈范围筛选无效。")
         try:
             return reporter.feedback_list(
                 rating=rating,
+                feedback_scope=feedback_scope,
                 identity_key=identity_key,
                 identity_status=identity_status,
                 chapter=chapter,

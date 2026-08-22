@@ -2,6 +2,7 @@ import io
 import json
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import time
 import unittest
@@ -115,6 +116,7 @@ class FastApiDemoTest(unittest.TestCase):
             "rating": "negative",
             "tags": ["not_found"],
             "detail": "没有合适候选",
+            "feedback_scope": "page",
             "search_duration_ms": 1450,
             "conversation": [
                 {
@@ -133,7 +135,9 @@ class FastApiDemoTest(unittest.TestCase):
         })
 
         self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["feedback"]["feedback_scope"], "question")
         saved = store.list_feedback()[0]
+        self.assertEqual(saved.feedback_scope, "question")
         self.assertEqual(saved.search_key, f"{saved.session_key}:1")
         self.assertEqual(saved.search_duration_ms, 1450)
         self.assertRegex(saved.feedback_number, r"^FB-\d{8}-[0-9A-F]{10}$")
@@ -189,6 +193,7 @@ class FastApiDemoTest(unittest.TestCase):
             "rating": "positive",
             "tags": ["found_answer"],
             "detail": "框选清楚",
+            "feedback_scope": "question",
             "conversation": [
                 {"me": True, "message": "上一页", "images": [uploaded_url], "taskRevision": 1},
                 {"me": False, "message": "上一页结果", "messageId": "message_page_one", "taskRevision": 1},
@@ -206,13 +211,29 @@ class FastApiDemoTest(unittest.TestCase):
         })
 
         self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["feedback"]["feedback_scope"], "page")
         saved = store.list_feedback()[0]
+        self.assertEqual(saved.feedback_scope, "page")
         self.assertEqual(saved.task_revision, 2)
         self.assertEqual(saved.candidate_count, 9)
         self.assertEqual(len(saved.conversation), 2)
         self.assertEqual(saved.conversation[0]["message"], "我发了一张题图。")
         overlay_name = saved.conversation[1]["a3_overlay"]
         self.assertTrue(store.resolve_case_media(saved.feedback_id, overlay_name).is_file())
+        with sqlite3.connect(store.path) as connection:
+            connection.execute(
+                "UPDATE message_feedback SET feedback_scope = '', schema_version = 6 "
+                "WHERE feedback_id = ?",
+                (saved.feedback_id,),
+            )
+        migrated = store.get_feedback(saved.feedback_id)
+        self.assertEqual(migrated.feedback_scope, "page")
+        with sqlite3.connect(store.path) as connection:
+            schema_version = connection.execute(
+                "SELECT schema_version FROM message_feedback WHERE feedback_id = ?",
+                (saved.feedback_id,),
+            ).fetchone()[0]
+        self.assertEqual(schema_version, 7)
 
     def test_feedback_scope_does_not_cross_task_revision_without_current_upload(self):
         target_id = "message_current_revision"
