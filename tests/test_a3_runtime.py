@@ -980,6 +980,66 @@ class A3RuntimeTests(unittest.TestCase):
             "「四-1」的题库答案找到了，已经发给你。这张图里的可处理题目已经全部完成。",
         )
 
+    def test_media_delivery_failure_reopens_active_a3_unit(self):
+        session_id = "a3-media-failure-session"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u1")
+        searched = self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
+        )
+        self.assertEqual(
+            searched.state["_a3_media_guard"]["unit_id"],
+            "g1-u1",
+        )
+        self.assertEqual(
+            searched.state["_a3_media_guard"]["task_revision"],
+            1,
+        )
+        self.assertEqual(
+            searched.state["_a3_media_guard"]["candidate_generation"],
+            "1:1",
+        )
+        answered = self.runtime.handle_text(session_id, "选择候选 1")
+        self.assertEqual(answered.intent, "select_candidate")
+        self.assertEqual(
+            self.runtime.session_snapshot(session_id)["a3"]["completed_unit_ids"],
+            ["g1-u1"],
+        )
+
+        self.assertTrue(self.runtime.mark_media_delivery_failed(session_id))
+        reopened = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(reopened["phase"], A3_PHASE_A2_ACTIVE)
+        self.assertEqual(reopened["completed_unit_ids"], [])
+
+        retried = self.runtime.handle_text(session_id, "重试")
+        self.assertEqual(self.a2.text_calls[-1], (session_id, "重试"))
+        self.assertEqual(retried.intent, "select_candidate")
+
+    def test_stale_media_failure_token_does_not_reopen_current_unit(self):
+        session_id = "a3-stale-media-failure-session"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u1")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
+        )
+        before = self.runtime.session_snapshot(session_id)
+        a3_before = before["a3"]
+
+        self.assertFalse(
+            self.runtime.mark_media_delivery_failed(
+                session_id,
+                expected_unit_id="g1-u1",
+                expected_task_revision=int(a3_before["task_revision"]),
+                expected_candidate_generation="stale-generation",
+            )
+        )
+        after = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(after["phase"], A3_PHASE_A2_ACTIVE)
+        self.assertEqual(after["selected_unit"]["unit_id"], "g1-u1")
+        self.assertEqual(after["completed_unit_ids"], [])
+
     def test_review_required_preserves_crop_draft_and_does_not_enter_a2(self):
         session_id = "a3-review-session"
         self.runtime.handle_image(session_id, self.source)

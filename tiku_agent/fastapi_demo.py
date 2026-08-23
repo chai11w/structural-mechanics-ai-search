@@ -88,6 +88,9 @@ _PUBLIC_PROTOCOL_MESSAGES = {
     "UPLOAD_PERSIST_FAILED": "题图暂时无法保存，请稍后重试。",
     "MEDIA_NOT_FOUND": "请求的图片已失效，请重新上传题图。",
     "MEDIA_PERSIST_FAILED": "图片暂时无法保存，请稍后重试。",
+    "MEDIA_CANDIDATES_INCOMPLETE": "候选图片暂时无法完整发送，请回复“重试”。",
+    "MEDIA_ANSWERS_UNAVAILABLE": "答案暂时无法发送，请回复“重试”。",
+    "MEDIA_ANSWERS_PARTIAL": "答案只发送了一部分，请回复“重试”补发。",
     "QUEUE_FULL": "当前请求较多，请稍后再试。",
     "QUEUE_TIMEOUT": "请求等待超时，请稍后重试。",
     "GLOBAL_DAILY_QUOTA_EXCEEDED": "今日服务额度已用完，请明天再试。",
@@ -1382,18 +1385,33 @@ def _agent_payload(
     uploaded_image: Path | None = None,
     submitted_crop: Path | None = None,
 ) -> dict[str, object]:
-    image_urls = []
-    for image in response.images:
-        path = Path(image)
-        if not path.is_file():
-            continue
-        persisted = runtime.persist_media(session_id, path)
-        if persisted is not None:
-            image_urls.append(f"/api/media/{persisted.name}")
+    media_snapshot = runtime.session_snapshot(session_id)
+    media_guard = _media_delivery_guard(response, media_snapshot)
+    image_urls, media = _persist_response_media(response, runtime, session_id)
+    text = response.text
+    if media and media.get("status") in {
+        "unavailable",
+        "partial",
+        "incomplete",
+    }:
+        reopen = getattr(runtime, "mark_media_delivery_failed", None)
+        if callable(reopen):
+            try:
+                reopen(
+                    session_id,
+                    expected_unit_id=media_guard["expected_unit_id"],
+                    expected_task_revision=media_guard["expected_task_revision"],
+                    expected_candidate_generation=media_guard[
+                        "expected_candidate_generation"
+                    ],
+                    kind=str(media.get("kind") or "answer"),
+                )
+            except Exception:  # noqa: BLE001 - delivery state must not break the reply.
+                logger.warning("failed to reopen A3 unit after media failure")
     uploaded_image_url = f"/api/upload/{uploaded_image.name}" if uploaded_image is not None else ""
     submitted_crop_url = ""
     if submitted_crop is not None and submitted_crop.is_file():
-        persisted_crop = runtime.persist_media(session_id, submitted_crop)
+        persisted_crop = _persist_public_media(runtime, session_id, submitted_crop)
         if persisted_crop is not None:
             submitted_crop_url = f"/api/media/{persisted_crop.name}"
     snapshot = _public_session_snapshot(runtime.session_snapshot(session_id))
@@ -1403,7 +1421,9 @@ def _agent_payload(
             overlay_resolver = getattr(runtime, "current_auto_crop_overlay_path", None)
             overlay_path = overlay_resolver(session_id) if callable(overlay_resolver) else None
             if overlay_path is not None and Path(overlay_path).is_file():
-                persisted_overlay = runtime.persist_media(session_id, Path(overlay_path))
+                persisted_overlay = _persist_public_media(
+                    runtime, session_id, Path(overlay_path)
+                )
                 if persisted_overlay is not None:
                     feedback_images.append({
                         "kind": "a3_overlay",
@@ -1438,6 +1458,13 @@ def _agent_payload(
             request_id=new_request_id(),
             search_id=str(snapshot.get("search_id") or ""),
         )
+    if media and media.get("protocol_code"):
+        protocol = RequestProtocol.from_code(
+            str(media["protocol_code"]),
+            request_id=protocol.request_id or new_request_id(),
+            search_id=protocol.search_id or str(snapshot.get("search_id") or ""),
+        )
+        text = str(media.get("text") or text)
     failure = None
     if protocol.status is RequestStatus.ERROR:
         failure = {
@@ -1447,8 +1474,9 @@ def _agent_payload(
             ),
         }
     return {
-        "text": response.text,
+        "text": text,
         "images": image_urls,
+        "media": media,
         "uploaded_image": uploaded_image_url,
         "submitted_crop": submitted_crop_url,
         "feedback_images": feedback_images,
@@ -1458,6 +1486,164 @@ def _agent_payload(
         "failure": failure,
         **protocol.to_dict(),
     }
+
+
+def _persist_response_media(
+    response: AgentResponse,
+    runtime: AgentSessionRuntime,
+    session_id: str,
+) -> tuple[list[str], dict[str, object] | None]:
+    """Persist response media and make success depend on resolvable URLs.
+
+    Candidate images are an atomic group: a partial group is withheld rather
+    than shown with a misleading candidate list. Answer images may be sent
+    progressively, but the public text and protocol distinguish zero,
+    partial, and complete delivery.
+    """
+
+    intent = str(response.intent or "").strip()
+    state = response.state if isinstance(response.state, Mapping) else {}
+    candidate_items = state.get("candidates")
+    has_candidate_state = (
+        isinstance(candidate_items, (list, tuple)) and bool(candidate_items)
+    )
+    if intent in {"select_candidate", "resend_answer"}:
+        kind = "answer"
+    elif response.images or has_candidate_state:
+        kind = "candidates"
+    else:
+        return [], None
+
+    state_items = state.get("last_answer_paths" if kind == "answer" else "candidates")
+    state_count = len(state_items) if isinstance(state_items, (list, tuple)) else 0
+    expected = max(state_count, len(response.images))
+    if expected <= 0:
+        if kind == "answer":
+            return [], {
+                "kind": kind,
+                "requested_count": 0,
+                "delivered_count": 0,
+                "status": "unavailable",
+                "protocol_code": "MEDIA_ANSWERS_UNAVAILABLE",
+                "text": "答案暂时无法发送，请回复“重试”。",
+            }
+        return [], None
+
+    urls: list[str] = []
+    for raw_image in response.images:
+        try:
+            persisted_path = _persist_public_media(runtime, session_id, Path(raw_image))
+            if persisted_path is not None:
+                urls.append(f"/api/media/{persisted_path.name}")
+        except Exception:  # noqa: BLE001 - one bad media must not leak details.
+            logger.warning("response media persistence failed")
+
+    delivered = len(urls)
+    if kind == "candidates" and delivered != expected:
+        return [], {
+            "kind": kind,
+            "requested_count": expected,
+            "delivered_count": 0,
+            "status": "incomplete",
+            "protocol_code": "MEDIA_CANDIDATES_INCOMPLETE",
+            "text": "候选图片暂时无法完整发送，请回复“重试”。",
+        }
+    if kind == "answer" and delivered == 0:
+        return [], {
+            "kind": kind,
+            "requested_count": expected,
+            "delivered_count": 0,
+            "status": "unavailable",
+            "protocol_code": "MEDIA_ANSWERS_UNAVAILABLE",
+            "text": "答案暂时无法发送，请回复“重试”。",
+        }
+    if kind == "answer" and delivered < expected:
+        return urls, {
+            "kind": kind,
+            "requested_count": expected,
+            "delivered_count": delivered,
+            "status": "partial",
+            "protocol_code": "MEDIA_ANSWERS_PARTIAL",
+            "text": f"答案已发送 {delivered}/{expected} 张，剩余暂时无法发送，请回复“重试”。",
+        }
+    return urls, {
+        "kind": kind,
+        "requested_count": expected,
+        "delivered_count": delivered,
+        "status": "complete",
+    }
+
+
+def _media_delivery_guard(
+    response: AgentResponse,
+    snapshot: object,
+) -> dict[str, object]:
+    """Use the response-time A3 identity before falling back to a live snapshot."""
+
+    response_state = response.state if isinstance(response.state, Mapping) else {}
+    embedded = response_state.get("_a3_media_guard")
+    if isinstance(embedded, Mapping):
+        try:
+            revision = int(embedded.get("task_revision") or 0)
+        except (TypeError, ValueError):
+            revision = 0
+        return {
+            "expected_unit_id": str(embedded.get("unit_id") or ""),
+            "expected_task_revision": revision,
+            "expected_candidate_generation": str(
+                embedded.get("candidate_generation") or ""
+            ),
+        }
+
+    if not isinstance(snapshot, Mapping):
+        return {
+            "expected_unit_id": "",
+            "expected_task_revision": 0,
+            "expected_candidate_generation": "",
+        }
+    a3 = snapshot.get("a3")
+    a3_snapshot = a3 if isinstance(a3, Mapping) else {}
+    selected = a3_snapshot.get("selected_unit")
+    selected_snapshot = selected if isinstance(selected, Mapping) else {}
+    raw_revision = a3_snapshot.get("task_revision", snapshot.get("task_revision", 0))
+    try:
+        revision = int(raw_revision or 0)
+    except (TypeError, ValueError):
+        revision = 0
+    return {
+        "expected_unit_id": str(selected_snapshot.get("unit_id") or ""),
+        "expected_task_revision": revision,
+        "expected_candidate_generation": str(
+            snapshot.get("candidate_generation") or ""
+        ),
+    }
+
+
+def _persist_public_media(
+    runtime: AgentSessionRuntime,
+    session_id: str,
+    source: Path,
+) -> Path | None:
+    """Persist one media artifact and verify that the public URL can resolve."""
+
+    if not source.is_file():
+        return None
+    try:
+        persisted = runtime.persist_media(session_id, source)
+        if persisted is None:
+            return None
+        persisted_path = Path(persisted)
+        if not persisted_path.is_file():
+            return None
+        resolver = getattr(runtime, "resolve_media", None)
+        if callable(resolver):
+            resolved = resolver(session_id, persisted_path.name)
+            if resolved is None or not Path(resolved).is_file():
+                return None
+        return persisted_path
+    except Exception:  # noqa: BLE001 - media failures become structured state.
+        logger.warning("public media persistence failed")
+        return None
 
 
 def _public_session_snapshot(value: object) -> dict[str, object]:

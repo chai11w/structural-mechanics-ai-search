@@ -77,6 +77,7 @@ A3_CROP_REVIEW_MESSAGES = {
 }
 A3_CROP_REVIEW_CODES = frozenset(A3_CROP_REVIEW_MESSAGES)
 _A3_PAGE_ERROR_RETENTION = timedelta(days=30)
+_A3_MEDIA_RETRY_TEXTS = frozenset({"重试", "再试一次", "重新发送", "再发一次"})
 _CHINESE_ORDINALS = {
     "一": 1,
     "二": 2,
@@ -451,6 +452,22 @@ class A3MvpRuntime:
                     protocol=RequestProtocol.from_code("UPLOAD_REQUIRED").to_dict(),
                 )
             clean_text = str(text or "").strip()
+            if (
+                state.phase == A3_PHASE_A2_ACTIVE
+                and state.last_error in {
+                    "candidate_media_delivery_failed",
+                    "answer_media_delivery_failed",
+                }
+                and clean_text in _A3_MEDIA_RETRY_TEXTS
+            ):
+                response = self.a2_runtime.handle_text(
+                    clean,
+                    clean_text,
+                    identity_key=identity_key,
+                    progress=progress,
+                    request_id=request_id,
+                )
+                return self._after_a2_response(state, response)
             if state.entry_route == "A2":
                 return self.a2_runtime.handle_text(
                     clean,
@@ -1389,6 +1406,48 @@ class A3MvpRuntime:
             return persisted
         return self.artifacts.persist_media(clean, source)
 
+    def mark_media_delivery_failed(
+        self,
+        session_id: str,
+        *,
+        expected_unit_id: str = "",
+        expected_task_revision: int = 0,
+        expected_candidate_generation: str = "",
+        kind: str = "answer",
+    ) -> bool:
+        """Keep the active A3 unit reopenable when response media was not delivered."""
+
+        clean = _clean_session_id(session_id)
+        with self._lock(clean):
+            state = self.store.load(clean)
+            if state is None or state.entry_route != "A3" or not state.selected_unit_id:
+                return False
+            if expected_unit_id and state.selected_unit_id != str(expected_unit_id):
+                return False
+            if expected_task_revision and state.task_revision != int(expected_task_revision):
+                return False
+            if expected_candidate_generation:
+                child = self.a2_runtime.session_snapshot(clean)
+                if str(child.get("candidate_generation") or "") != str(
+                    expected_candidate_generation
+                ):
+                    return False
+            if state.selected_unit_id in state.completed_unit_ids:
+                state.completed_unit_ids = [
+                    value
+                    for value in state.completed_unit_ids
+                    if value != state.selected_unit_id
+                ]
+            state.phase = A3_PHASE_A2_ACTIVE
+            state.page_finished = False
+            state.last_error = (
+                "candidate_media_delivery_failed"
+                if str(kind).strip().lower() == "candidates"
+                else "answer_media_delivery_failed"
+            )
+            self.store.save(state)
+            return True
+
     def resolve_media(self, session_id: str, filename: str) -> Path | None:
         clean = _clean_session_id(session_id)
         if self.store.load(clean) is None:
@@ -1952,6 +2011,16 @@ class A3MvpRuntime:
         response: AgentResponse,
     ) -> AgentResponse:
         child_phase = str(response.state.get("phase") or "")
+        if (
+            child_phase == "WAIT_CANDIDATE_CHOICE"
+            or response.intent in {"select_candidate", "resend_answer"}
+        ):
+            child = self.a2_runtime.session_snapshot(state.session_id)
+            response.state["_a3_media_guard"] = {
+                "unit_id": state.selected_unit_id,
+                "task_revision": state.task_revision,
+                "candidate_generation": str(child.get("candidate_generation") or ""),
+            }
         if response.intent == "cancel" or child_phase == "CANCELLED":
             state.selected_unit_id = ""
             remaining = state.remaining_units
@@ -1970,6 +2039,7 @@ class A3MvpRuntime:
             display_label = str(selected.get("display_label") or "").strip()
             candidate_count = int(response.state.get("candidate_count") or 0)
             if child_phase == "WAIT_CANDIDATE_CHOICE" and display_label and candidate_count:
+                state.last_error = ""
                 notice = ""
                 marker = "\n\n提示："
                 if marker in response.text:
@@ -1988,6 +2058,7 @@ class A3MvpRuntime:
             response.text = f"「{display_label}」的题库答案找到了，已经发给你。"
         if state.selected_unit_id and state.selected_unit_id not in state.completed_unit_ids:
             state.completed_unit_ids.append(state.selected_unit_id)
+        state.last_error = ""
         remaining = state.remaining_units
         if remaining:
             state.phase = A3_PHASE_WAIT_SELECTION

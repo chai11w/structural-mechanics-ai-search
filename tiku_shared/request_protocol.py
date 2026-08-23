@@ -329,6 +329,15 @@ PROTOCOL_REASONS: dict[str, ProtocolReason] = {
     "MEDIA_PERSIST_FAILED": ProtocolReason(
         RequestStatus.PARTIAL, RequestLayer.MEDIA, True, RequestAction.RETRY_REQUEST
     ),
+    "MEDIA_CANDIDATES_INCOMPLETE": ProtocolReason(
+        RequestStatus.PARTIAL, RequestLayer.MEDIA, True, RequestAction.RETRY_SEARCH
+    ),
+    "MEDIA_ANSWERS_UNAVAILABLE": ProtocolReason(
+        RequestStatus.ERROR, RequestLayer.MEDIA, True, RequestAction.RETRY_SEARCH
+    ),
+    "MEDIA_ANSWERS_PARTIAL": ProtocolReason(
+        RequestStatus.PARTIAL, RequestLayer.MEDIA, True, RequestAction.RETRY_SEARCH
+    ),
     "FEEDBACK_INVALID": ProtocolReason(
         RequestStatus.NEEDS_INPUT, RequestLayer.FEEDBACK, False
     ),

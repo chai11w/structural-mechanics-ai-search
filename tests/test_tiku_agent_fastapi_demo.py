@@ -310,6 +310,140 @@ class FastApiDemoTest(unittest.TestCase):
             self.assertFalse(payload["retryable"])
             self.assertEqual(payload["action"], "")
 
+    def test_candidate_media_delivery_is_atomic(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        test_dir = runtime_dir / f"candidate_media_{uuid4().hex}"
+        test_dir.mkdir(parents=True)
+        self.addCleanup(lambda: shutil.rmtree(test_dir, ignore_errors=True))
+        image_path = test_dir / "candidate-1.jpg"
+        Image.new("RGB", (8, 8), "white").save(image_path)
+        runtime = FakeRuntime(image_path)
+
+        payload = _agent_payload(
+            AgentResponse(
+                text="找到了 2 道高相似题。",
+                images=[str(image_path), str(test_dir / "missing.jpg")],
+                state={"candidates": [{"path": str(image_path)}, {"path": "missing.jpg"}]},
+                intent="search_image",
+            ),
+            runtime,
+            "candidate-session",
+        )
+
+        self.assertEqual(payload["images"], [])
+        self.assertEqual(payload["status"], "PARTIAL")
+        self.assertEqual(payload["layer"], "media")
+        self.assertEqual(payload["code"], "MEDIA_CANDIDATES_INCOMPLETE")
+        self.assertEqual(payload["media"], {
+            "kind": "candidates",
+            "requested_count": 2,
+            "delivered_count": 0,
+            "status": "incomplete",
+            "protocol_code": "MEDIA_CANDIDATES_INCOMPLETE",
+            "text": "候选图片暂时无法完整发送，请回复“重试”。",
+        })
+        self.assertEqual(payload["text"], "候选图片暂时无法完整发送，请回复“重试”。")
+
+        empty_payload = _agent_payload(
+            AgentResponse(
+                text="找到了 2 道高相似题。",
+                images=[],
+                state={"candidates": [{"path": "missing-1.jpg"}, {"path": "missing-2.jpg"}]},
+                intent="search_image",
+            ),
+            runtime,
+            "candidate-empty-session",
+        )
+        self.assertEqual(empty_payload["status"], "PARTIAL")
+        self.assertEqual(empty_payload["code"], "MEDIA_CANDIDATES_INCOMPLETE")
+        self.assertEqual(empty_payload["media"]["requested_count"], 2)
+        self.assertEqual(empty_payload["media"]["delivered_count"], 0)
+        self.assertEqual(empty_payload["images"], [])
+
+    def test_answer_media_delivery_distinguishes_complete_partial_and_zero(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        test_dir = runtime_dir / f"answer_media_{uuid4().hex}"
+        test_dir.mkdir(parents=True)
+        self.addCleanup(lambda: shutil.rmtree(test_dir, ignore_errors=True))
+        first = test_dir / "answer-1.jpg"
+        second = test_dir / "answer-2.jpg"
+        Image.new("RGB", (8, 8), "white").save(first)
+        Image.new("RGB", (8, 8), "white").save(second)
+
+        complete_runtime = FakeRuntime(first)
+        complete = _agent_payload(
+            AgentResponse(
+                text="找到了，答案发你了。",
+                images=[str(first)],
+                state={"last_answer_paths": [str(first)]},
+                intent="select_candidate",
+            ),
+            complete_runtime,
+            "answer-complete-session",
+        )
+        self.assertEqual(complete["status"], "SUCCESS")
+        self.assertEqual(complete["text"], "找到了，答案发你了。")
+        self.assertEqual(complete["media"]["status"], "complete")
+        self.assertEqual(len(complete["images"]), 1)
+
+        partial_runtime = FakeRuntime(first)
+        original_persist = partial_runtime.persist_media
+
+        def persist_first_only(session_id, source):
+            if Path(source).resolve() == second.resolve():
+                raise RuntimeError("simulated media failure")
+            return original_persist(session_id, source)
+
+        partial_runtime.persist_media = persist_first_only
+        partial = _agent_payload(
+            AgentResponse(
+                text="找到了，答案发你了。",
+                images=[str(first), str(second)],
+                state={"last_answer_paths": [str(first), str(second)]},
+                intent="select_candidate",
+            ),
+            partial_runtime,
+            "answer-partial-session",
+        )
+        self.assertEqual(partial["status"], "PARTIAL")
+        self.assertEqual(partial["code"], "MEDIA_ANSWERS_PARTIAL")
+        self.assertEqual(partial["media"]["delivered_count"], 1)
+        self.assertEqual(partial["text"], "答案已发送 1/2 张，剩余暂时无法发送，请回复“重试”。")
+        self.assertEqual(len(partial["images"]), 1)
+
+        zero_runtime = FakeRuntime(first)
+        zero = _agent_payload(
+            AgentResponse(
+                text="找到了，答案发你了。",
+                images=[str(test_dir / "missing.jpg")],
+                state={"last_answer_paths": [str(test_dir / "missing.jpg")]},
+                intent="resend_answer",
+            ),
+            zero_runtime,
+            "answer-zero-session",
+        )
+        self.assertEqual(zero["status"], "ERROR")
+        self.assertEqual(zero["code"], "MEDIA_ANSWERS_UNAVAILABLE")
+        self.assertEqual(zero["media"]["delivered_count"], 0)
+        self.assertEqual(zero["text"], "答案暂时无法发送，请回复“重试”。")
+        self.assertEqual(zero["images"], [])
+
+        empty_zero = _agent_payload(
+            AgentResponse(
+                text="找到了，答案发你了。",
+                images=[],
+                state={"last_answer_paths": []},
+                intent="select_candidate",
+            ),
+            FakeRuntime(first),
+            "answer-empty-zero-session",
+        )
+        self.assertEqual(empty_zero["status"], "ERROR")
+        self.assertEqual(empty_zero["code"], "MEDIA_ANSWERS_UNAVAILABLE")
+        self.assertEqual(empty_zero["media"]["requested_count"], 0)
+        self.assertEqual(empty_zero["text"], "答案暂时无法发送，请回复“重试”。")
+        self.assertEqual(empty_zero["images"], [])
+
     def test_feedback_submission_captures_visible_conversation_and_session_media(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
         test_dir = runtime_dir / f"feedback_case_{uuid4().hex}"
