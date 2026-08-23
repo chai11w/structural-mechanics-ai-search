@@ -1,7 +1,9 @@
 param(
     [int]$Port = 8897,
     [string]$RuntimeDir,
-    [string]$PythonExe = "python"
+    [string]$PythonExe = "python",
+    [ValidateSet("v1", "v2", "v3")]
+    [string]$TriagePolicyVersion = "v3"
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,7 +62,8 @@ function Start-Agent {
         "scripts\run_tiku_agent_8897.py",
         "--host", "127.0.0.1",
         "--port", "$Port",
-        "--runtime-dir", "$RuntimeDir"
+        "--runtime-dir", "$RuntimeDir",
+        "--triage-policy-version", "$TriagePolicyVersion"
     )
     $process = Start-Process $PythonExe `
         -ArgumentList $arguments `
@@ -70,12 +73,12 @@ function Start-Agent {
         -WindowStyle Hidden `
         -PassThru
     Set-Content -LiteralPath $AgentPidFile -Value $process.Id -Encoding ASCII
-    Write-Status "Started 8897 A3-V1 agent: PID $($process.Id)"
+    Write-Status "Started 8897 A3-V1 agent: PID $($process.Id) TriagePolicy=$TriagePolicyVersion"
     return $process
 }
 
 Set-Content -LiteralPath $WatchdogPidFile -Value $PID -Encoding ASCII
-Set-Content -LiteralPath $StatusFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Watchdog started. Project=$ProjectDir Port=$Port RuntimeDir=$RuntimeDir" -Encoding UTF8
+Set-Content -LiteralPath $StatusFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Watchdog started. Project=$ProjectDir Port=$Port RuntimeDir=$RuntimeDir TriagePolicy=$TriagePolicyVersion" -Encoding UTF8
 foreach ($path in @($AgentOutLog, $AgentErrLog)) {
     if (-not (Test-Path -LiteralPath $path)) {
         New-Item -ItemType File -Path $path -Force | Out-Null

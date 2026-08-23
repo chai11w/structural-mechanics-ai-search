@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import urllib.request
+from collections.abc import Callable
 
 from tiku_shared.image_payload import image_to_model_data_url
 from tiku_shared.model_costs import timed_model_call
@@ -158,12 +159,14 @@ class QwenImageTriage:
         model: str = DEFAULT_QWEN_MODEL,
         timeout_seconds: float = 120.0,
         prompt_path: str | Path = DEFAULT_PROMPT_PATH,
+        observation_parser: Callable[[str], ImageTriageObservation] = observation_from_model_text,
     ) -> None:
         self.api_key = str(api_key or os.environ.get("DASHSCOPE_API_KEY", "")).strip()
         self.endpoint = str(endpoint).strip() or DEFAULT_QWEN_ENDPOINT
         self.model = str(model).strip() or DEFAULT_QWEN_MODEL
         self.timeout_seconds = max(1.0, float(timeout_seconds))
         self.prompt_path = Path(prompt_path)
+        self.observation_parser = observation_parser
 
     def observe(self, image_path: str | Path) -> ImageTriageObservation:
         return self.observe_with_metadata(image_path).observation
@@ -214,7 +217,7 @@ class QwenImageTriage:
         usage = data.get("usage") if isinstance(data, dict) else None
         usage = usage if isinstance(usage, dict) else {}
         return QwenImageTriageResult(
-            observation=observation_from_model_text(content),
+            observation=self.observation_parser(content),
             model=self.model,
             prompt_tokens=_non_negative_int(usage.get("prompt_tokens")),
             completion_tokens=_non_negative_int(usage.get("completion_tokens")),

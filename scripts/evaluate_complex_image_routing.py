@@ -18,11 +18,24 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from tiku_shared.image_payload import image_to_model_data_url
+from tiku_agent.image_triage import finalize_route, observation_from_model_text
+from tiku_agent.image_triage_8897 import (
+    finalize_route_8897,
+    finalize_route_8897_v1,
+    finalize_route_8897_v2,
+    observation_from_model_text_8897,
+    observation_from_model_text_8897_v1,
+    observation_from_model_text_8897_v2,
+)
 
 
 EVAL_ROOT = BASE / "experiments" / "complex_image_eval"
 MANIFEST_PATH = EVAL_ROOT / "manifest.json"
 PROMPT_PATH = EVAL_ROOT / "observation_prompt_scratch.md"
+PROMPT_8897_PATH = EVAL_ROOT / "observation_prompt_8897_boundary.md"
+PROMPT_8897_V1_PATH = EVAL_ROOT / "observation_prompt_8897_boundary_v1.md"
+PROMPT_8897_V2_PATH = EVAL_ROOT / "observation_prompt_8897_boundary_v2.md"
+PROMPT_8897_V3_PATH = EVAL_ROOT / "observation_prompt_8897_boundary_v3.md"
 DEFAULT_OUTPUT = BASE / ".tmp_complex_image_routing_eval" / "results.json"
 
 QWEN_ENDPOINT = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
@@ -89,6 +102,31 @@ def resolve_samples(*, include_question_bank: bool, config: dict) -> list[dict]:
     return samples
 
 
+def resolve_labeled_directory(root: Path) -> list[dict]:
+    """Load a small external A1/A2/A3 folder without copying its images."""
+
+    samples: list[dict] = []
+    allowed = {".jpg", ".jpeg", ".png", ".webp"}
+    for expected_route in ("A1", "A2", "A3"):
+        folder = root / expected_route
+        if not folder.is_dir():
+            raise FileNotFoundError(f"标注目录缺少 {expected_route}: {folder}")
+        for image_path in sorted(folder.iterdir()):
+            if image_path.is_file() and image_path.suffix.lower() in allowed:
+                samples.append(
+                    {
+                        "id": f"{expected_route}/{image_path.name}",
+                        "expected_route": expected_route,
+                        "label_status": "user_labeled",
+                        "source_kind": "labeled_directory",
+                        "image_path": image_path,
+                    }
+                )
+    if not samples:
+        raise FileNotFoundError(f"标注目录没有图片: {root}")
+    return samples
+
+
 def provider_settings(provider: str, config: dict) -> tuple[str, str, str]:
     if provider == "qwen":
         api_key = os.environ.get("DASHSCOPE_API_KEY", "") or config.get("dashscope_api_key", "")
@@ -133,6 +171,7 @@ def call_model(
     prompt: str,
     config: dict,
     timeout: int,
+    route_policy: str = "legacy",
 ) -> dict:
     endpoint, model, api_key = provider_settings(provider, config)
     if not api_key:
@@ -152,6 +191,18 @@ def call_model(
     if not isinstance(content, str):
         content = json.dumps(content, ensure_ascii=False)
     route = extract_route(content)
+    if route_policy in {"8897-boundary", "8897-v3"}:
+        observation = observation_from_model_text_8897(content)
+        final_route = finalize_route_8897(observation)
+    elif route_policy == "8897-v2":
+        observation = observation_from_model_text_8897_v2(content)
+        final_route = finalize_route_8897_v2(observation)
+    elif route_policy == "8897-v1":
+        observation = observation_from_model_text_8897_v1(content)
+        final_route = finalize_route_8897_v1(observation)
+    else:
+        observation = observation_from_model_text(content)
+        final_route = finalize_route(observation)
     return {
         "sample_id": sample["id"],
         "provider": provider,
@@ -159,7 +210,17 @@ def call_model(
         "expected_route": sample["expected_route"],
         "label_status": sample["label_status"],
         "suggested_route": route,
+        "final_route": final_route,
+        "question_count": observation.question_count,
+        "original_structure_count": observation.original_structure_count,
+        "auxiliary_diagram_count": observation.auxiliary_diagram_count,
+        "has_actual_load_evidence": observation.has_actual_load_evidence,
+        "image_recoverable": observation.image_recoverable,
+        "image_boundary_clear": getattr(observation, "image_boundary_clear", None),
+        "route_policy": route_policy,
+        "has_ambiguity": observation.has_ambiguity,
         "route_matches_label": route == sample["expected_route"],
+        "final_route_matches_label": final_route == sample["expected_route"],
         "elapsed_seconds": round(elapsed, 3),
         "usage": data.get("usage") or {},
         "raw_content": content,
@@ -181,6 +242,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="独立比较智谱和千问的复杂题图初步分流")
     parser.add_argument("--providers", nargs="+", choices=("qwen", "zhipu"), default=("qwen", "zhipu"))
     parser.add_argument("--include-question-bank", action="store_true", help="加入清单中的暂定 A2 题库单题")
+    parser.add_argument("--labeled-dir", type=Path, help="读取包含 A1/A2/A3 子目录的外部标注集")
+    parser.add_argument(
+        "--route-policy",
+        choices=("legacy", "8897-v1", "8897-v2", "8897-v3", "8897-boundary"),
+        default="legacy",
+        help="选择代码复核门禁；默认保持既有规则",
+    )
+    parser.add_argument("--prompt", type=Path, help="覆盖分流提示词文件")
     parser.add_argument("--sample-id", action="append", dest="sample_ids", help="只运行指定图片编号，可重复使用")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--timeout", type=int, default=120)
@@ -188,8 +257,20 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_local_config()
-    prompt = load_prompt()
-    samples = resolve_samples(include_question_bank=args.include_question_bank, config=config)
+    prompt_path = args.prompt or (
+        {
+            "8897-boundary": PROMPT_8897_V3_PATH,
+            "8897-v1": PROMPT_8897_V1_PATH,
+            "8897-v2": PROMPT_8897_V2_PATH,
+            "8897-v3": PROMPT_8897_V3_PATH,
+        }.get(args.route_policy, PROMPT_PATH)
+    )
+    prompt = load_prompt(prompt_path)
+    samples = (
+        resolve_labeled_directory(args.labeled_dir.resolve())
+        if args.labeled_dir
+        else resolve_samples(include_question_bank=args.include_question_bank, config=config)
+    )
     if args.sample_ids:
         requested = set(args.sample_ids)
         available = {sample["id"] for sample in samples}
@@ -206,7 +287,14 @@ def main() -> int:
 
     def run_job(provider: str, sample: dict) -> dict:
         try:
-            return call_model(provider, sample, prompt=prompt, config=config, timeout=args.timeout)
+            return call_model(
+                provider,
+                sample,
+                prompt=prompt,
+                config=config,
+                timeout=args.timeout,
+                route_policy=args.route_policy,
+            )
         except Exception as exc:  # noqa: BLE001 - each model failure belongs in the report.
             return {
                 "sample_id": sample["id"],
@@ -215,7 +303,9 @@ def main() -> int:
                 "expected_route": sample["expected_route"],
                 "label_status": sample["label_status"],
                 "suggested_route": None,
+                "final_route": None,
                 "route_matches_label": False,
+                "final_route_matches_label": False,
                 "elapsed_seconds": None,
                 "usage": {},
                 "raw_content": "",
@@ -229,7 +319,7 @@ def main() -> int:
             with lock:
                 results.append(result)
                 write_results(args.output, prompt_sha256=prompt_sha256, results=results)
-            status = result["suggested_route"] or "失败"
+            status = result.get("final_route") or result["suggested_route"] or "失败"
             print(f"{result['provider']:6} {result['sample_id']}: {status}", flush=True)
 
     success = sum(1 for item in results if not item["error"])

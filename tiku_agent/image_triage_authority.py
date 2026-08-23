@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,7 @@ import urllib.request
 
 from tiku_shared.model_costs import timed_model_call
 
-from .image_contracts import ImageTriageHandoff
+from .image_contracts import ImageTriageHandoff, ImageTriageObservation
 from .image_triage import QwenImageTriage, build_handoff
 
 
@@ -168,9 +169,11 @@ class ImageTriageAuthority:
         self,
         observer: QwenImageTriage,
         reply_client: QwenTriageReplyClient | None = None,
+        handoff_builder: Callable[[str, ImageTriageObservation], ImageTriageHandoff] = build_handoff,
     ) -> None:
         self.observer = observer
         self.reply_client = reply_client or QwenTriageReplyClient()
+        self.handoff_builder = handoff_builder
 
     def decide(self, image_path: str | Path) -> ImageTriageDecision:
         return self._decide(image_path, explain_routes={"A1", "A3"})
@@ -187,7 +190,7 @@ class ImageTriageAuthority:
         explain_routes: set[str],
     ) -> ImageTriageDecision:
         observation = self.observer.observe(image_path)
-        handoff = build_handoff(str(image_path), observation)
+        handoff = self.handoff_builder(str(image_path), observation)
         if handoff.route == "A1" and observation.has_actual_load_evidence is False:
             return ImageTriageDecision(
                 handoff=handoff,

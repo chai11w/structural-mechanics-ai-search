@@ -3,7 +3,12 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.evaluate_complex_image_routing import extract_route, load_prompt, resolve_samples
+from scripts.evaluate_complex_image_routing import (
+    extract_route,
+    load_prompt,
+    resolve_labeled_directory,
+    resolve_samples,
+)
 
 
 class EvaluateComplexImageRoutingTest(unittest.TestCase):
@@ -23,6 +28,19 @@ class EvaluateComplexImageRoutingTest(unittest.TestCase):
         self.assertEqual(len(samples), 8)
         self.assertTrue(all(item["image_path"].is_file() for item in samples))
         self.assertTrue(all(item["source_kind"] != "question_bank" for item in samples))
+
+    def test_resolve_user_labeled_a1_a2_a3_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for route in ("A1", "A2", "A3"):
+                folder = root / route
+                folder.mkdir()
+                (folder / f"{route.lower()}.jpg").write_bytes(b"test")
+
+            samples = resolve_labeled_directory(root)
+
+        self.assertEqual([item["expected_route"] for item in samples], ["A1", "A2", "A3"])
+        self.assertTrue(all(item["label_status"] == "user_labeled" for item in samples))
 
 
 if __name__ == "__main__":
