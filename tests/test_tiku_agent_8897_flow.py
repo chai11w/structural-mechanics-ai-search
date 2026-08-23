@@ -52,7 +52,7 @@ class TikuAgent8897FlowTest(unittest.TestCase):
             self.assertIsInstance(runtime_8896.auto_cropper, GlmA3AutoCropper)
             self.assertIsInstance(runtime_8897.auto_cropper, GlmA3AutoCropper)
             self.assertTrue(runtime_8896.auto_prepare_all_units)
-            self.assertFalse(runtime_8897.auto_prepare_all_units)
+            self.assertTrue(runtime_8897.auto_prepare_all_units)
             self.assertNotEqual(
                 runtime_8896.store.database_path,
                 runtime_8897.store.database_path,
@@ -76,6 +76,15 @@ class TikuAgent8897FlowTest(unittest.TestCase):
                 runtime_8897.image_triage_authority.observer.prompt_path,
                 TRIAGE_PROMPT_PATH,
             )
+
+    def test_8897_uses_a3_page_understanding_v3_without_changing_8896(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runtime_8896 = build_8896_runtime(root / "8896", enable_triage=False)
+            runtime_8897 = build_runtime(root / "8897", enable_triage=False)
+
+            self.assertTrue(runtime_8896.page_observer.prompt_path.name.endswith("v2.txt"))
+            self.assertEqual(runtime_8897.page_observer.prompt_path.name, "a3_page_understanding_v3.txt")
 
     def test_8897_boundary_policy_keeps_routes_narrow(self):
         def observe(summary: str):

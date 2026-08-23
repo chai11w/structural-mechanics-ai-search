@@ -14,6 +14,7 @@ if str(BASE) not in sys.path:
 
 from scripts.run_tiku_agent_8896 import build_runtime as build_manual_runtime
 from tiku_agent.a3_auto_crop import GlmA3AutoCropper
+from tiku_agent.a3_models import QwenA3PageObserver
 from tiku_agent.fastapi_demo import create_app
 from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.image_triage import QwenImageTriage
@@ -85,12 +86,16 @@ def build_runtime(
     return build_manual_runtime(
         root,
         model_timeout_seconds=model_timeout_seconds,
-        auto_prepare_all_units=False,
+        auto_prepare_all_units=True,
         enable_triage=enable_triage,
         triage_timeout_seconds=triage_timeout_seconds,
         reply_timeout_seconds=reply_timeout_seconds,
         image_triage_authority=authority,
-        page_observer=page_observer,
+        page_observer=page_observer
+        or QwenA3PageObserver(
+            timeout_seconds=model_timeout_seconds,
+            prompt_path=BASE / "tiku_agent" / "prompts" / "a3_page_understanding_v3.txt",
+        ),
         crop_verifier=crop_verifier,
         auto_cropper=auto_cropper
         or GlmA3AutoCropper(timeout_seconds=grounding_timeout_seconds),

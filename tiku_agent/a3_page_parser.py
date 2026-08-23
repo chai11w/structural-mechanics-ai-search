@@ -7,6 +7,7 @@ the legacy decomposer produces block-backed crop candidates.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import json
 import re
@@ -351,6 +352,54 @@ def parse_a3_page_understanding(
     # with a partially visible question. Only discard that group when no
     # diagram claims it; a claimed empty group remains unsafe to interpret.
     raw_diagrams = _array(data.get("diagrams"), "diagrams")
+    # Vision models occasionally emit only one side of the required
+    # unit<->diagram reference. Restore only references asserted by the other
+    # side before strict checks; conflicting references remain errors.
+    raw_groups = deepcopy(raw_groups)
+    raw_diagrams = deepcopy(raw_diagrams)
+    raw_unit_by_id: dict[str, Any] = {}
+    for raw_group in raw_groups:
+        for raw_unit in _array(_object(raw_group, "group").get("units"), "group.units"):
+            unit = _object(raw_unit, "unit")
+            unit_id = _text(unit.get("unit_id"), "unit.unit_id")
+            if unit_id:
+                raw_unit_by_id.setdefault(unit_id, unit)
+    raw_diagram_by_id: dict[str, Any] = {}
+    for raw_diagram in raw_diagrams:
+        diagram = _object(raw_diagram, "diagram")
+        diagram_id = _text(diagram.get("diagram_id"), "diagram.diagram_id")
+        if diagram_id:
+            raw_diagram_by_id.setdefault(diagram_id, diagram)
+    inferred_diagrams_by_unit: dict[str, list[str]] = {}
+    for diagram in raw_diagram_by_id.values():
+        references = _string_list(diagram.get("unit_ids"), "diagram.unit_ids")
+        if not references:
+            continue
+        for unit_id in references:
+            if unit_id in raw_unit_by_id and not _string_list(
+                raw_unit_by_id[unit_id].get("diagram_ids"), "unit.diagram_ids"
+            ):
+                inferred_diagrams_by_unit.setdefault(unit_id, []).append(
+                    str(diagram["diagram_id"])
+                )
+    for unit_id, diagram_ids in inferred_diagrams_by_unit.items():
+        raw_unit_by_id[unit_id]["diagram_ids"] = list(dict.fromkeys(diagram_ids))
+
+    inferred_units_by_diagram: dict[str, list[str]] = {}
+    for unit in raw_unit_by_id.values():
+        unit_id = str(unit["unit_id"])
+        for diagram_id in _string_list(unit.get("diagram_ids"), "unit.diagram_ids"):
+            diagram = raw_diagram_by_id.get(diagram_id)
+            if diagram is None or _string_list(
+                diagram.get("unit_ids"), "diagram.unit_ids"
+            ):
+                continue
+            inferred_units_by_diagram.setdefault(diagram_id, []).append(unit_id)
+    for diagram_id, unit_ids_for_diagram in inferred_units_by_diagram.items():
+        raw_diagram_by_id[diagram_id]["unit_ids"] = list(
+            dict.fromkeys(unit_ids_for_diagram)
+        )
+
     referenced_group_ids: set[str] = set()
     for diagram_index, raw_diagram in enumerate(raw_diagrams):
         diagram = _object(raw_diagram, f"diagrams[{diagram_index}]")
@@ -573,11 +622,6 @@ def parse_a3_page_understanding(
         if unit.searchability == "searchable_candidate" and not original_diagrams:
             raise A3PageParseError(
                 f"candidate unit {unit.unit_id} has no original_structure diagram",
-                code="invalid_state_combination",
-            )
-        if unit.searchability == "a1_out_of_scope" and original_diagrams:
-            raise A3PageParseError(
-                f"A1 unit {unit.unit_id} cannot bind an original_structure diagram",
                 code="invalid_state_combination",
             )
 

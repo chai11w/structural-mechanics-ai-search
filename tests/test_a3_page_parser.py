@@ -250,6 +250,48 @@ class A3PageParserTests(unittest.TestCase):
         with self.assertRaisesRegex(A3PageParseError, "a1_only"):
             parse_a3_page_understanding(payload)
 
+    def test_a1_unit_is_excluded_from_searchable_units(self):
+        payload = valid_payload()
+        payload["groups"][0]["units"][0]["searchability"] = "a1_out_of_scope"
+        payload["groups"][0]["units"][0]["reason_codes"] = ["no_actual_external_load"]
+        payload["groups"][0]["units"][0]["diagram_ids"] = []
+        payload["diagrams"] = []
+        payload["page_disposition"] = "a1_only"
+        result = parse_a3_page_understanding(payload)
+
+        self.assertEqual(result.searchable_units, ())
+        self.assertEqual(result.units[0].searchability, "a1_out_of_scope")
+
+    def test_repairs_unambiguous_one_sided_diagram_reference(self):
+        payload = valid_payload()
+        payload["groups"][0]["units"][0]["diagram_ids"] = []
+
+        result = parse_a3_page_understanding(payload)
+
+        self.assertEqual(result.units[0].diagram_ids, ("d1",))
+
+    def test_repairs_all_references_when_unit_has_multiple_claiming_diagrams(self):
+        payload = valid_payload()
+        payload["groups"][0]["units"][0]["diagram_ids"] = []
+        second = deepcopy(payload["diagrams"][0])
+        second["diagram_id"] = "d2"
+        payload["diagrams"].append(second)
+
+        result = parse_a3_page_understanding(payload)
+
+        self.assertEqual(result.units[0].diagram_ids, ("d1", "d2"))
+
+    def test_a1_unit_can_keep_its_original_structure_binding(self):
+        payload = valid_payload()
+        payload["groups"][0]["units"][0]["searchability"] = "a1_out_of_scope"
+        payload["groups"][0]["units"][0]["reason_codes"] = ["no_actual_external_load"]
+        payload["page_disposition"] = "a1_only"
+
+        result = parse_a3_page_understanding(payload)
+
+        self.assertEqual(result.searchable_units, ())
+        self.assertEqual(result.units[0].diagram_ids, ("d1",))
+
 
 if __name__ == "__main__":
     unittest.main()
