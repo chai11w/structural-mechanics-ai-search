@@ -19,3 +19,8 @@ powershell -ExecutionPolicy Bypass -File scripts/tiku_agent_watchdog_8897.ps1 -T
 ```
 
 V3 的验收优先级是：不误放带相邻题残片的图片进入 A2；不破坏原有清晰 A2；截断图进 A3 可以接受。
+
+## 统计口径
+
+以上数字按保存的模型原文重新运行对应版本的本地门禁得到，不能直接使用 JSON 中调用当时写入的 `final_route` 字段。V3 唯一排除项是新增的截断图：
+`A1/Snipaste_2026-08-23_16-44-28.png`。因此当前关注的非截断样本为 `16/16`，没有清晰 A2 回归。
