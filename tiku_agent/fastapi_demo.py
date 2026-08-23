@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from tiku_agent.agent import AgentResponse
+from tiku_agent.output_watchdog_v0 import inspect_output
 from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.invite_access import InviteAccess, InviteIdentity
 from tiku_agent.session_artifacts import session_key
@@ -1297,6 +1298,21 @@ def _agent_payload(
                 "retry_search" if snapshot.get("has_active_image") is True else "new_chat"
             ),
         }
+    watchdog = inspect_output(
+        response.text,
+        expected_media=len(response.images),
+        delivered_media=len(image_urls),
+    )
+    if watchdog.action != "pass":
+        logger.warning(
+            "output watchdog observe: action=%s reasons=%s intent=%s text_length=%d expected_media=%d delivered_media=%d",
+            watchdog.action,
+            ",".join(watchdog.reasons),
+            response.intent,
+            watchdog.original_length,
+            len(response.images),
+            len(image_urls),
+        )
     return {
         "text": response.text,
         "images": image_urls,
