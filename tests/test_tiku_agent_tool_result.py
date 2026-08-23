@@ -1,7 +1,7 @@
 import unittest
 
-from tiku_agent.tool_result import ToolOutcome, ToolResult
-from tiku_shared.request_protocol import RequestAction
+from tiku_agent.tool_result import _PUBLIC_CODES_BY_OUTCOME, ToolOutcome, ToolResult
+from tiku_shared.request_protocol import PROTOCOL_REASONS, RequestAction, RequestLayer
 
 
 class ToolResultContractTest(unittest.TestCase):
@@ -142,6 +142,182 @@ class ToolResultContractTest(unittest.TestCase):
                 RequestAction.CHANGE_CHAPTER,
                 RequestAction.RETRY_SEARCH,
                 RequestAction.RETRY_REQUEST,
+            ],
+        )
+
+    def test_public_serialization_excludes_internal_text_and_payloads(self):
+        result = ToolResult.tool_error(
+            tool="route_bank",
+            code="TOOL_FAILED",
+            error="Traceback C:\\private\\provider.py token=secret",
+            data={"raw_model_output": "LEAK_DATA"},
+            error_category="provider_internal",
+            safe_facts={"debug_note": "LEAK_FACT"},
+            retryable=True,
+            action=RequestAction.RETRY_REQUEST,
+        )
+
+        internal = result.to_dict()
+        public = result.to_public_dict()
+
+        self.assertIn("error", internal)
+        self.assertEqual(
+            public,
+            {
+                "outcome": "ERROR",
+                "status": "ERROR",
+                "layer": "tool",
+                "code": "TOOL_FAILED",
+                "completed": False,
+                "retryable": True,
+                "action": "retry_search",
+            },
+        )
+        self.assertTrue({"error", "data", "safe_facts", "error_category"}.isdisjoint(public))
+
+    def test_public_serialization_replaces_unstable_code_and_ids(self):
+        result = ToolResult.tool_error(
+            code="token=secret",
+            error="internal",
+            error_category="test",
+        )
+        result.request_id = "req_sk-proj-secret"
+        result.search_id = "search_valid_01"
+
+        public = result.to_public_dict()
+
+        self.assertEqual(public["code"], "TOOL_FAILED")
+        self.assertNotIn("request_id", public)
+        self.assertEqual(public["search_id"], "search_valid_01")
+
+    def test_public_serialization_does_not_trust_result_protocol_metadata(self):
+        registered = ToolResult.needs_input(
+            code="CHAPTER_REQUIRED",
+            error="internal",
+            next_state="WAIT_INPUT",
+        )
+        registered.layer = RequestLayer.LOGIN
+        registered.retryable = True
+        registered.action = RequestAction.RELOGIN
+
+        public = registered.to_public_dict()
+
+        self.assertEqual(public["layer"], "tool")
+        self.assertFalse(public["retryable"])
+        self.assertEqual(public["action"], "change_chapter")
+
+        unregistered = ToolResult.needs_input(
+            code="CANDIDATE_RANK_INVALID",
+            error="internal",
+            next_state="WAIT_INPUT",
+        )
+        unregistered.layer = RequestLayer.LOGIN
+        unregistered.retryable = True
+        unregistered.action = RequestAction.RELOGIN
+
+        public = unregistered.to_public_dict()
+
+        self.assertEqual(public["layer"], "tool")
+        self.assertFalse(public["retryable"])
+        self.assertEqual(public["action"], "")
+
+    def test_public_serialization_uses_registered_recovery_semantics(self):
+        cases = [
+            (
+                ToolResult.needs_input(
+                    code="UNKNOWN_CHAPTER",
+                    error="internal",
+                    next_state="WAIT_CHAPTER",
+                    action=RequestAction.RETRY_SEARCH,
+                ),
+                "NEEDS_INPUT",
+                False,
+                "change_chapter",
+            ),
+            (
+                ToolResult.needs_input(
+                    code="GLOBAL_SEARCH_IMAGE_REQUIRED",
+                    error="internal",
+                    next_state="WAIT_IMAGE",
+                ),
+                "NEEDS_INPUT",
+                False,
+                "retry_upload",
+            ),
+            (
+                ToolResult.tool_error(
+                    code="GLOBAL_SEARCH_UNSUPPORTED_ROUTE",
+                    error="internal",
+                    error_category="invalid_tool_input",
+                    retryable=True,
+                    action=RequestAction.RETRY_SEARCH,
+                ),
+                "ERROR",
+                False,
+                "",
+            ),
+        ]
+
+        for result, outcome, retryable, action in cases:
+            with self.subTest(code=result.code):
+                public = result.to_public_dict()
+                self.assertEqual(public["outcome"], outcome)
+                self.assertEqual(public["retryable"], retryable)
+                self.assertEqual(public["action"], action)
+
+    def test_every_public_tool_code_has_registered_status_and_layer(self):
+        for outcome, codes in _PUBLIC_CODES_BY_OUTCOME.items():
+            for code in codes:
+                with self.subTest(code=code):
+                    reason = PROTOCOL_REASONS.get(code)
+                    self.assertIsNotNone(reason)
+                    self.assertEqual(reason.status, outcome)
+                    self.assertEqual(reason.layer.value, "tool")
+
+    def test_public_serialization_uses_consistent_fallback_for_each_outcome(self):
+        results = [
+            ToolResult.success(code="INTERNAL_DEBUG_STATE"),
+            ToolResult.no_match(code="INTERNAL_DEBUG_STATE"),
+            ToolResult.needs_input(
+                code="TOOL_FAILED",
+                error="internal",
+                next_state="WAIT_INPUT",
+            ),
+            ToolResult.partial(
+                code="INTERNAL_DEBUG_STATE",
+                next_state="PARTIAL",
+            ),
+            ToolResult.tool_error(
+                code="INTERNAL_DEBUG_STATE",
+                error="internal",
+                error_category="test",
+            ),
+        ]
+
+        public = [result.to_public_dict() for result in results]
+
+        self.assertEqual(
+            [item["code"] for item in public],
+            [
+                "REQUEST_SUCCEEDED",
+                "NO_MATCH",
+                "TOOL_INPUT_REQUIRED",
+                "PARTIAL_RESULT",
+                "TOOL_FAILED",
+            ],
+        )
+        self.assertEqual(
+            [item["completed"] for item in public],
+            [True, True, False, False, False],
+        )
+        self.assertEqual(
+            [(item["retryable"], item["action"]) for item in public],
+            [
+                (False, ""),
+                (False, "change_chapter"),
+                (False, ""),
+                (True, "retry_search"),
+                (True, "retry_search"),
             ],
         )
 

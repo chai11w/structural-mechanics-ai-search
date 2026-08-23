@@ -656,6 +656,23 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertIn("荷载信息暂时无法可靠选择题库", response.text)
         self.assertEqual(response.protocol["action"], "retry_upload")
 
+    def test_tool_protocol_uses_registered_recovery_metadata(self):
+        fake = FakeTools(chapter="4力法")
+        fake.route_bank = lambda loads: ToolResult.tool_error(
+            error="internal route failure",
+            code="BANK_ROUTE_FAILED",
+            retryable=True,
+            action=RequestAction.RETRY_SEARCH,
+            error_category="internal_logic",
+        )
+        agent = self.make_agent(fake)
+
+        response = agent.handle_image("q.jpg")
+
+        self.assertEqual(response.protocol["code"], "BANK_ROUTE_FAILED")
+        self.assertFalse(response.protocol["retryable"])
+        self.assertEqual(response.protocol["action"], "")
+
     def test_partial_rerank_is_consumed_and_candidates_remain_available(self):
         fake = FakeTools(chapter="4力法")
 

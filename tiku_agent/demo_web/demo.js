@@ -79,6 +79,16 @@ const LEGACY_EXPIRED_MEDIA_MESSAGE = '题图或结果图片已失效，请重新
 const A3_INLINE_ONLY_INTENTS = new Set([
   'a3_unit_selected', 'a3_unit_already_selected', 'a3_crop_review_required',
 ]);
+const A3_CROP_REVIEW_MESSAGES = Object.freeze({
+  SELECTED_DIAGRAM_MISMATCH: '裁剪结果未通过，裁剪图与所选题目不匹配，请重新选择区域裁剪。',
+  MULTIPLE_DIAGRAMS: '裁剪结果未通过，裁剪区域包含多个结构图，请重新选择区域裁剪。',
+  EXTERNAL_LOADS_INCOMPLETE: '裁剪结果未通过，结构荷载不完整，请重新选择区域裁剪。',
+  STRUCTURE_INCOMPLETE: '裁剪结果未通过，结构图不完整，请重新选择区域裁剪。',
+  IMAGE_UNCLEAR: '裁剪结果未通过，裁剪图不清晰，请重新选择区域裁剪。',
+  CROP_UNCONFIRMED: '裁剪结果未通过，无法确认裁剪图完整，请重新选择区域裁剪。',
+  LOAD_CHECK_UNAVAILABLE: '裁剪结果暂时无法确认外荷载，请重新提交裁剪。',
+  EXTERNAL_LOADS_NOT_FOUND: '裁剪结果未通过，未识别到结构荷载，请重新选择区域裁剪。',
+});
 const a3PrepareSelection = new Set();
 const ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp']);
 const ALLOWED_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp']);
@@ -316,11 +326,7 @@ function normalizeA3Snapshot(value) {
     auto_prepare_all_enabled: Boolean(value.auto_prepare_all_enabled),
     auto_prepare_all_units: Boolean(value.auto_prepare_all_units),
     phase: String(value.phase || ''),
-    intent_v1_enabled: Boolean(value.intent_v1_enabled),
     page_finished: Boolean(value.page_finished),
-    pending_intent_clarification: value.pending_intent_clarification && typeof value.pending_intent_clarification === 'object'
-      ? value.pending_intent_clarification : {},
-    last_intent: value.last_intent && typeof value.last_intent === 'object' ? value.last_intent : {},
     units: Array.isArray(value.units) ? value.units.map((unit) => ({
       unit_id: String(unit.unit_id || ''),
       page_index: Number(unit.page_index || 0),
@@ -330,25 +336,17 @@ function normalizeA3Snapshot(value) {
       searched: Boolean(unit.searched),
       selected: Boolean(unit.selected),
       requested: Boolean(unit.requested),
-      grounding_status: String(unit.grounding_status || ''),
-      validation_status: String(unit.validation_status || ''),
       crop_available: Boolean(unit.crop_available),
-      auto_bounds: validA3Bounds(unit.auto_bounds),
-      reason_codes: Array.isArray(unit.reason_codes) ? unit.reason_codes.map(String) : [],
+      preparation_status: String(unit.preparation_status || 'pending'),
     })) : [],
     selected_unit: value.selected_unit && typeof value.selected_unit === 'object' ? {
       unit_id: String(value.selected_unit.unit_id || ''),
       display_label: String(value.selected_unit.display_label || ''),
       context_text: String(value.selected_unit.context_text || ''),
     } : { unit_id: '', display_label: '', context_text: '' },
-    completed_unit_ids: Array.isArray(value.completed_unit_ids) ? value.completed_unit_ids.map(String) : [],
-    searched_unit_ids: Array.isArray(value.searched_unit_ids) ? value.searched_unit_ids.map(String) : [],
-    remaining_count: Number(value.remaining_count || 0),
-    requested_unit_ids: Array.isArray(value.requested_unit_ids) ? value.requested_unit_ids.map(String) : [],
-    auto_crop_page_status: String(value.auto_crop_page_status || ''),
     auto_crop_overlay_available: Boolean(value.auto_crop_overlay_available),
     crop_review_required: Boolean(value.crop_review_required),
-    crop_review_feedback: String(value.crop_review_feedback || ''),
+    crop_review_code: String(value.crop_review_code || ''),
     crop_draft: value.crop_draft && typeof value.crop_draft === 'object' ? value.crop_draft : {},
     task_revision: Number(value.task_revision || 0),
   };
@@ -1417,7 +1415,11 @@ function maybeOpenAutoPreparedA3Sheet(response) {
 
 function updateSessionContext(data) {
   if (!data?.session) return;
-  sessionContext = { ...sessionContext, ...data.session };
+  sessionContext = {
+    ...sessionContext,
+    ...data.session,
+    a3: normalizeA3Snapshot(data.session.a3),
+  };
   if (isPersistentImage(data.uploaded_image)) a3SourceUrl = data.uploaded_image;
   syncA3Interface();
 }
@@ -1433,6 +1435,12 @@ function invalidateCandidateActions() {
 
 function a3Current() {
   return normalizeA3Snapshot(sessionContext.a3);
+}
+
+function a3CropReviewMessage(a3 = a3Current()) {
+  const code = String(a3?.crop_review_code || '');
+  return A3_CROP_REVIEW_MESSAGES[code]
+    || '裁剪结果未通过，请重新选择区域裁剪。';
 }
 
 function a3DraftKey(a3 = a3Current()) {
@@ -1634,7 +1642,7 @@ function renderA3Selection() {
   a3Selection.style.width = `${bounds.width * 100}%`;
   a3Selection.style.height = `${bounds.height * 100}%`;
   a3CropStatus.textContent = a3Current()?.crop_review_required
-    ? (a3Current()?.crop_review_feedback || '裁剪结果未通过，请重新选择区域裁剪。')
+    ? a3CropReviewMessage()
     : '已框选，可以提交校验';
 }
 
@@ -1773,8 +1781,8 @@ async function submitA3Crop() {
     setResponseStatus(data);
     if (data.intent === 'a3_crop_review_required') {
       a3CropStatus.classList.add('is-warning');
-      a3CropStatus.textContent = a3Current()?.crop_review_feedback
-        || response.message
+      a3CropStatus.textContent = response.message
+        || a3CropReviewMessage()
         || '裁剪结果未通过，请重新选择区域裁剪。';
     }
   } catch (error) {
@@ -1872,10 +1880,9 @@ function renderA3AutoSheetUnits(a3) {
     const detail = document.createElement('small');
     if (unit.completed) detail.textContent = '已完成';
     else if (unit.searched) detail.textContent = '已检索，不可重复进入';
-    else if (unit.validation_status === 'auto_ready') detail.textContent = '已校验，可直接检索';
-    else if (unit.requested) detail.textContent = '需要人工裁剪';
-    else if (unit.grounding_status === 'auto_ready') detail.textContent = '待千问校验';
-    else if (unit.crop_available) detail.textContent = '自动框需要人工确认';
+    else if (unit.preparation_status === 'ready') detail.textContent = '已校验，可直接检索';
+    else if (unit.preparation_status === 'located') detail.textContent = '待校验';
+    else if (unit.preparation_status === 'manual') detail.textContent = '需要人工裁剪';
     else detail.textContent = '选择后使用人工裁剪';
     copy.append(title, detail);
     host.append(visual, copy);

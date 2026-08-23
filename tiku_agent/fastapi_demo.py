@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from io import BytesIO
 import inspect
 import json
 import logging
+import math
 import re
 import secrets
 from pathlib import Path
@@ -19,8 +21,10 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
+from tiku_agent.a3_runtime import A3_CROP_REVIEW_CODES
 from tiku_agent.agent import AgentResponse
 from tiku_agent.feedback_store import SQLiteFeedbackStore
+from tiku_agent.intent_contract import CHAPTERS
 from tiku_agent.invite_access import InviteAccess, InviteIdentity
 from tiku_agent.session_artifacts import session_key
 from tiku_agent.session_runtime import (
@@ -30,8 +34,10 @@ from tiku_agent.session_runtime import (
     AgentSessionRuntime,
 )
 from tiku_agent.session_store import SQLiteSessionStore
+from tiku_agent.tool_result import is_public_tool_code
 from tiku_shared.model_costs import SQLiteModelCostLedger
 from tiku_shared.request_protocol import (
+    PROTOCOL_REASONS,
     RequestAction,
     RequestLayer,
     RequestProtocol,
@@ -92,8 +98,57 @@ _PUBLIC_PROTOCOL_MESSAGES = {
     "FEEDBACK_SAVE_FAILED": "反馈暂时无法保存，请稍后重试。",
     "SERVICE_UNAVAILABLE": "服务暂时异常，请稍后重试。",
     "AGENT_FAILED": "这次处理没有完成，请稍后重试。",
+    "AGENT_FAILED_NO_IMAGE": "这次处理没有完成，请重新上传题图。",
     "TOOL_FAILED": "这次处理没有完成，请稍后重试。",
+    "TOOL_INPUT_REQUIRED": "还需要补充信息后才能继续。",
 }
+_PUBLIC_PROGRESS_EXACT = {
+    "queued": frozenset({"前面有任务正在处理，已进入队列…"}),
+    "dequeued": frozenset({"轮到你的题目了，正在开始处理…"}),
+    "triage": frozenset({"正在检查图片并决定处理路线…"}),
+    "searching": frozenset({
+        "正在搜索题目…",
+        "图片适合直接检索，正在识别题目信息…",
+        "自动裁图已通过校验，正在进入题库检索…",
+    }),
+    "global_searching": frozenset({"正在全局搜索题目，可能需要一点时间…"}),
+    "a3_understanding": frozenset({
+        "正在理解整页题目和图形关系…",
+        "正在重新理解整页题目…",
+    }),
+    "a3_auto_grounding": frozenset({"正在一次定位整页所有可检索结构图…"}),
+    "a3_auto_validating": frozenset({"所选题目需要人工裁剪，正在准备…"}),
+    "a3_verifying": frozenset({"正在核对裁剪图和所选题目…"}),
+    "a3_analyzing_unit": frozenset({"校验通过，正在结合题干识别章节和荷载…"}),
+}
+_PUBLIC_PROGRESS_CHAPTER_RE = re.compile(r"^正在按「(.{1,64})」搜索题目…$")
+_PUBLIC_PROGRESS_AUTO_START_RE = re.compile(r"^正在并发校验 ([1-9][0-9]{0,2}) 张自动裁图…$")
+_PUBLIC_PROGRESS_AUTO_DONE_RE = re.compile(
+    r"^已完成 ([1-9][0-9]{0,2})/([1-9][0-9]{0,2}) 张自动裁图校验…$"
+)
+
+_PUBLIC_STATE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$")
+_PUBLIC_STATE_PHASE_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
+_PUBLIC_STATE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_PUBLIC_STATE_SENSITIVE_PATTERNS = (
+    re.compile(r"https?://", re.IGNORECASE),
+    re.compile(r"[A-Za-z]:[\\/]"),
+    re.compile(r"/(?:app|etc|home|opt|private|root|srv|tmp|usr|var)(?:/|\b)", re.IGNORECASE),
+    re.compile(
+        r"\b(?:authorization|bearer|api[_ -]?key|access[_ -]?token|password|cookie)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:traceback|raw_model_output|reasoning|confidence|debug|prompt)\b", re.IGNORECASE),
+    re.compile(r"\b[A-Za-z_][A-Za-z0-9_.]{0,80}(?:Error|Exception)\s*:", re.IGNORECASE),
+    re.compile(
+        r"(?:^|[^A-Za-z0-9])(?:token|secret|password|api[_-]?key)[_:= -][A-Za-z0-9_-]{4,}",
+        re.IGNORECASE,
+    ),
+)
+_PUBLIC_STATE_SENSITIVE_ID_RE = re.compile(
+    r"(?:bearer|token|secret|password|api[_-]?key|sk[-_](?:proj[-_])?)",
+    re.IGNORECASE,
+)
 logger = logging.getLogger(__name__)
 _PAGE = (WEB_DIR / "index.html").read_text(encoding="utf-8")
 _STYLE = (WEB_DIR / "demo.css").read_text(encoding="utf-8")
@@ -558,7 +613,7 @@ def create_app(
     def session(request: Request) -> JSONResponse:
         session_id = _session_id(request, cookie_name=session_cookie)
         path = runtime.current_image_path(session_id)
-        snapshot = runtime.session_snapshot(session_id)
+        snapshot = _public_session_snapshot(runtime.session_snapshot(session_id))
         result = JSONResponse({
             "uploaded_image": f"/api/upload/{path.name}" if path is not None else "",
             "session": snapshot,
@@ -991,6 +1046,7 @@ def _protocol_json_response(
     status_code: int,
     headers: dict[str, str] | None = None,
 ) -> JSONResponse:
+    protocol = _public_response_protocol(protocol)
     return JSONResponse(
         {"detail": _public_protocol_message(protocol), **protocol.to_dict()},
         status_code=status_code,
@@ -1013,6 +1069,54 @@ def _public_protocol_message(protocol: RequestProtocol) -> str:
     if protocol.status is RequestStatus.NO_MATCH:
         return "暂时没有找到足够可靠的结果。"
     return "请求已完成。"
+
+
+def _public_response_protocol(protocol: RequestProtocol) -> RequestProtocol:
+    """Project arbitrary internal protocol metadata onto the public registry."""
+
+    code = protocol.code
+    registered = PROTOCOL_REASONS.get(code)
+    registered_match = (
+        registered is not None
+        and registered.status is protocol.status
+        and registered.layer is protocol.layer
+    )
+    tool_match = (
+        protocol.layer is RequestLayer.TOOL
+        and is_public_tool_code(code, protocol.status)
+    )
+    request_id = _public_state_id(protocol.request_id, prefix="req_")
+    search_id = _public_state_id(protocol.search_id, prefix="search_")
+    if registered_match:
+        return RequestProtocol.from_code(
+            code,
+            request_id=request_id,
+            search_id=search_id,
+        )
+
+    fallback_code = {
+        RequestStatus.SUCCESS: "REQUEST_SUCCEEDED",
+        RequestStatus.NO_MATCH: "NO_MATCH",
+        RequestStatus.NEEDS_INPUT: "TOOL_INPUT_REQUIRED",
+        RequestStatus.PARTIAL: "PARTIAL_RESULT",
+        RequestStatus.ERROR: "TOOL_FAILED",
+    }[protocol.status]
+    fallback = RequestProtocol.from_code(
+        fallback_code,
+        request_id=request_id,
+        search_id=search_id,
+    )
+    if tool_match:
+        return RequestProtocol(
+            status=protocol.status,
+            layer=RequestLayer.TOOL,
+            code=code,
+            retryable=fallback.retryable,
+            action=fallback.action,
+            request_id=request_id,
+            search_id=search_id,
+        )
+    return fallback
 
 
 def _http_error_protocol(
@@ -1292,7 +1396,7 @@ def _agent_payload(
         persisted_crop = runtime.persist_media(session_id, submitted_crop)
         if persisted_crop is not None:
             submitted_crop_url = f"/api/media/{persisted_crop.name}"
-    snapshot = runtime.session_snapshot(session_id)
+    snapshot = _public_session_snapshot(runtime.session_snapshot(session_id))
     feedback_images: list[dict[str, str]] = []
     if response.intent == "a3_units_prepared":
         try:
@@ -1309,17 +1413,15 @@ def _agent_payload(
         except Exception:  # noqa: BLE001 - feedback-only media must not fail the reply.
             feedback_images = []
     if response.protocol:
-        protocol = RequestProtocol.from_dict(response.protocol)
+        protocol = _public_response_protocol(
+            RequestProtocol.from_dict(response.protocol)
+        )
     elif snapshot.get("phase") == "ERROR":
-        protocol = RequestProtocol(
-            status=RequestStatus.ERROR,
-            layer=RequestLayer.TOOL,
-            code="AGENT_FAILED",
-            retryable=True,
-            action=(
-                RequestAction.RETRY_SEARCH
+        protocol = RequestProtocol.from_code(
+            (
+                "AGENT_FAILED"
                 if snapshot.get("has_active_image") is True
-                else RequestAction.NEW_CHAT
+                else "AGENT_FAILED_NO_IMAGE"
             ),
             request_id=new_request_id(),
             search_id=str(snapshot.get("search_id") or ""),
@@ -1356,6 +1458,167 @@ def _agent_payload(
         "failure": failure,
         **protocol.to_dict(),
     }
+
+
+def _public_session_snapshot(value: object) -> dict[str, object]:
+    """Expose only state required by the current browser workflow."""
+
+    snapshot = value if isinstance(value, Mapping) else {}
+    result: dict[str, object] = {
+        "session_valid": snapshot.get("session_valid") is True,
+        "phase": _public_phase(snapshot.get("phase")),
+        "has_active_image": snapshot.get("has_active_image") is True,
+        "task_revision": _public_nonnegative_int(snapshot.get("task_revision")),
+        "candidate_generation": _public_state_id(snapshot.get("candidate_generation")),
+        "candidate_count": _public_nonnegative_int(snapshot.get("candidate_count")),
+        "chapter": _public_state_text(snapshot.get("chapter"), 64),
+        "search_id": _public_state_id(snapshot.get("search_id"), prefix="search_"),
+    }
+    a3 = _public_a3_snapshot(snapshot.get("a3"))
+    # An explicit null clears stale A3 state when a later upload routes to A1/A2.
+    result["a3"] = a3
+    return result
+
+
+def _public_a3_snapshot(value: object) -> dict[str, object] | None:
+    if not isinstance(value, Mapping) or value.get("enabled") is not True:
+        return None
+    units: list[dict[str, object]] = []
+    raw_units = value.get("units")
+    if isinstance(raw_units, (list, tuple)):
+        for raw_unit in raw_units[:100]:
+            if not isinstance(raw_unit, Mapping):
+                continue
+            unit_id = _public_state_id(raw_unit.get("unit_id"))
+            if not unit_id:
+                continue
+            page_index = _public_positive_int(raw_unit.get("page_index"))
+            display_label = _public_state_text(raw_unit.get("display_label"), 64)
+            if not display_label and page_index:
+                display_label = f"图片第 {page_index} 题"
+            validation_status = str(raw_unit.get("validation_status") or "")
+            grounding_status = str(raw_unit.get("grounding_status") or "")
+            crop_available = raw_unit.get("crop_available") is True
+            requested = raw_unit.get("requested") is True
+            if validation_status == "auto_ready":
+                preparation_status = "ready"
+            elif requested:
+                preparation_status = "manual"
+            elif grounding_status == "auto_ready":
+                preparation_status = "located"
+            elif crop_available:
+                preparation_status = "manual"
+            else:
+                preparation_status = "pending"
+            units.append({
+                "unit_id": unit_id,
+                "page_index": page_index,
+                "display_label": display_label,
+                "title_text": _public_state_text(raw_unit.get("title_text"), 160),
+                "completed": raw_unit.get("completed") is True,
+                "searched": raw_unit.get("searched") is True,
+                "selected": raw_unit.get("selected") is True,
+                "requested": requested,
+                "crop_available": crop_available,
+                "preparation_status": preparation_status,
+            })
+
+    selected_raw = value.get("selected_unit")
+    selected = selected_raw if isinstance(selected_raw, Mapping) else {}
+    selected_id = _public_state_id(selected.get("unit_id"))
+    selected_label = _public_state_text(selected.get("display_label"), 64)
+    selected_unit = next(
+        (item for item in units if item["unit_id"] == selected_id),
+        None,
+    )
+    if not selected_label and selected_unit is not None:
+        selected_label = str(selected_unit["display_label"])
+
+    crop_draft_raw = value.get("crop_draft")
+    crop_draft = crop_draft_raw if isinstance(crop_draft_raw, Mapping) else {}
+    crop_review_required = value.get("crop_review_required") is True
+    crop_review_code = str(value.get("crop_review_code") or "").strip().upper()
+    if not crop_review_required or crop_review_code not in A3_CROP_REVIEW_CODES:
+        crop_review_code = ""
+    return {
+        "enabled": True,
+        "auto_crop_enabled": value.get("auto_crop_enabled") is True,
+        "auto_prepare_all_enabled": value.get("auto_prepare_all_enabled") is True,
+        "auto_prepare_all_units": value.get("auto_prepare_all_units") is True,
+        "phase": _public_phase(value.get("phase")),
+        "page_finished": value.get("page_finished") is True,
+        "units": units,
+        "selected_unit": {
+            "unit_id": selected_id,
+            "display_label": selected_label,
+            "context_text": _public_state_text(selected.get("context_text"), 480),
+        },
+        "auto_crop_overlay_available": value.get("auto_crop_overlay_available") is True,
+        "crop_review_required": crop_review_required,
+        "crop_review_code": crop_review_code,
+        "crop_draft": {
+            "bounds": _public_crop_bounds(crop_draft.get("bounds")),
+            "available": crop_draft.get("available") is True,
+        },
+        "task_revision": _public_nonnegative_int(value.get("task_revision")),
+    }
+
+
+def _public_crop_bounds(value: object) -> dict[str, float]:
+    if not isinstance(value, Mapping):
+        return {}
+    bounds: dict[str, float] = {}
+    for key in ("x", "y", "width", "height"):
+        number = value.get(key)
+        if isinstance(number, bool) or not isinstance(number, (int, float)):
+            return {}
+        number = float(number)
+        if not math.isfinite(number) or not 0 <= number <= 1:
+            return {}
+        bounds[key] = round(number, 6)
+    if bounds["width"] < 0.02 or bounds["height"] < 0.02:
+        return {}
+    if bounds["x"] + bounds["width"] > 1.000001:
+        return {}
+    if bounds["y"] + bounds["height"] > 1.000001:
+        return {}
+    return bounds
+
+
+def _public_state_text(value: object, max_chars: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    clean = value.replace("\r\n", "\n").replace("\r", "\n")
+    clean = _PUBLIC_STATE_CONTROL_RE.sub("", clean).strip()
+    if not clean or any(pattern.search(clean) for pattern in _PUBLIC_STATE_SENSITIVE_PATTERNS):
+        return ""
+    return clean[:max_chars]
+
+
+def _public_state_id(value: object, *, prefix: str = "") -> str:
+    clean = value.strip() if isinstance(value, str) else ""
+    if not _PUBLIC_STATE_ID_RE.fullmatch(clean):
+        return ""
+    if prefix and not clean.startswith(prefix):
+        return ""
+    if _PUBLIC_STATE_SENSITIVE_ID_RE.search(clean):
+        return ""
+    if any(pattern.search(clean) for pattern in _PUBLIC_STATE_SENSITIVE_PATTERNS):
+        return ""
+    return clean
+
+
+def _public_phase(value: object) -> str:
+    clean = value.strip().upper() if isinstance(value, str) else "IDLE"
+    return clean if _PUBLIC_STATE_PHASE_RE.fullmatch(clean) else "IDLE"
+
+
+def _public_nonnegative_int(value: object) -> int:
+    return value if type(value) is int and 0 <= value <= 1_000_000 else 0
+
+
+def _public_positive_int(value: object) -> int:
+    return value if type(value) is int and 0 < value <= 10_000 else 0
 
 
 def _validate_action_context(
@@ -1426,7 +1689,7 @@ async def _stream_agent_events(
     def progress(stage: str, message: str) -> None:
         loop.call_soon_threadsafe(
             queue.put_nowait,
-            {"type": "progress", "stage": stage, "message": message},
+            _public_progress_event(stage, message),
         )
 
     async def run() -> None:
@@ -1434,9 +1697,11 @@ async def _stream_agent_events(
             payload = await asyncio.to_thread(execute, progress)
             await queue.put({"type": "result", "data": payload})
         except (AgentRuntimeBusyError, AgentBudgetExceededError) as exc:
-            protocol = exc.bind(
-                request_id=exc.request_id or request_id or new_request_id(),
-                search_id=exc.search_id or search_id,
+            protocol = _public_response_protocol(
+                exc.bind(
+                    request_id=exc.request_id or request_id or new_request_id(),
+                    search_id=exc.search_id or search_id,
+                )
             )
             await queue.put({
                 "type": "error",
@@ -1445,10 +1710,12 @@ async def _stream_agent_events(
             })
         except Exception:  # noqa: BLE001 - keep internal failures out of the public stream.
             logger.exception("streamed Agent request failed")
-            protocol = RequestProtocol.from_code(
-                "SERVICE_UNAVAILABLE",
-                request_id=request_id or new_request_id(),
-                search_id=search_id,
+            protocol = _public_response_protocol(
+                RequestProtocol.from_code(
+                    "SERVICE_UNAVAILABLE",
+                    request_id=request_id or new_request_id(),
+                    search_id=search_id,
+                )
             )
             await queue.put({
                 "type": "error",
@@ -1465,6 +1732,37 @@ async def _stream_agent_events(
             break
         yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
     await task
+
+
+def _public_progress_event(stage: object, message: object) -> dict[str, str]:
+    public_stage = str(stage or "").strip().lower()
+    public_message = str(message or "").strip()
+    if public_message in _PUBLIC_PROGRESS_EXACT.get(public_stage, ()):
+        return {"type": "progress", "stage": public_stage, "message": public_message}
+
+    chapter_match = (
+        _PUBLIC_PROGRESS_CHAPTER_RE.fullmatch(public_message)
+        if public_stage == "searching"
+        else None
+    )
+    if chapter_match and chapter_match.group(1) in CHAPTERS:
+        return {"type": "progress", "stage": public_stage, "message": public_message}
+
+    if public_stage == "a3_auto_validating":
+        started = _PUBLIC_PROGRESS_AUTO_START_RE.fullmatch(public_message)
+        if started and int(started.group(1)) <= 100:
+            return {"type": "progress", "stage": public_stage, "message": public_message}
+        completed = _PUBLIC_PROGRESS_AUTO_DONE_RE.fullmatch(public_message)
+        if completed:
+            done, total = map(int, completed.groups())
+            if done <= total <= 100:
+                return {"type": "progress", "stage": public_stage, "message": public_message}
+
+    return {
+        "type": "progress",
+        "stage": "working",
+        "message": "正在处理当前请求…",
+    }
 
 
 async def _periodic_session_cleanup(cleaner: Callable[[], None], interval_seconds: float) -> None:

@@ -100,7 +100,10 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertNotIn("addMessage({ message: `选择", select_body)
         self.assertIn("!A3_INLINE_ONLY_INTENTS.has(data.intent)", select_body)
         self.assertIn("!A3_INLINE_ONLY_INTENTS.has(data.intent)", crop_body)
-        self.assertIn("a3CropStatus.textContent = a3Current()?.crop_review_feedback", crop_body)
+        self.assertIn("a3CropStatus.textContent = response.message", crop_body)
+        self.assertNotIn("crop_review_feedback", self.script)
+        self.assertIn("function a3CropReviewMessage", self.script)
+        self.assertIn("a3: normalizeA3Snapshot(data.session.a3)", self.script)
         self.assertIn("className = 'a3-unit-choice a3-continue-crop'", self.script)
         self.assertIn("isPersistentImage(data.submitted_crop)", crop_body)
         self.assertLess(

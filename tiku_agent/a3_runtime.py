@@ -65,6 +65,17 @@ _A3_PHASES = {
     A3_PHASE_COMPLETE,
     A3_PHASE_ERROR,
 }
+A3_CROP_REVIEW_MESSAGES = {
+    "SELECTED_DIAGRAM_MISMATCH": "裁剪结果未通过，裁剪图与所选题目不匹配，请重新选择区域裁剪。",
+    "MULTIPLE_DIAGRAMS": "裁剪结果未通过，裁剪区域包含多个结构图，请重新选择区域裁剪。",
+    "EXTERNAL_LOADS_INCOMPLETE": "裁剪结果未通过，结构荷载不完整，请重新选择区域裁剪。",
+    "STRUCTURE_INCOMPLETE": "裁剪结果未通过，结构图不完整，请重新选择区域裁剪。",
+    "IMAGE_UNCLEAR": "裁剪结果未通过，裁剪图不清晰，请重新选择区域裁剪。",
+    "CROP_UNCONFIRMED": "裁剪结果未通过，无法确认裁剪图完整，请重新选择区域裁剪。",
+    "LOAD_CHECK_UNAVAILABLE": "裁剪结果暂时无法确认外荷载，请重新提交裁剪。",
+    "EXTERNAL_LOADS_NOT_FOUND": "裁剪结果未通过，未识别到结构荷载，请重新选择区域裁剪。",
+}
+A3_CROP_REVIEW_CODES = frozenset(A3_CROP_REVIEW_MESSAGES)
 _A3_PAGE_ERROR_RETENTION = timedelta(days=30)
 _CHINESE_ORDINALS = {
     "一": 1,
@@ -99,6 +110,7 @@ class A3SessionState:
     auto_crop_overlay_path: str = ""
     requested_unit_ids: list[str] = field(default_factory=list)
     crop_review_required: bool = False
+    crop_review_code: str = ""
     crop_review_feedback: str = ""
     task_revision: int = 0
     current_search_id: str = ""
@@ -127,6 +139,10 @@ class A3SessionState:
             raise ValueError("requested A3 unit is unavailable")
         if any(value not in unit_ids for value in self.auto_crops):
             raise ValueError("automatic crop is bound to an unavailable unit")
+        if self.crop_review_code and self.crop_review_code not in A3_CROP_REVIEW_CODES:
+            raise ValueError("unknown A3 crop review code")
+        if self.crop_review_code and not self.crop_review_required:
+            raise ValueError("A3 crop review code requires an active review")
         page_indexes = [int(item.get("page_index") or 0) for item in self.units]
         if any(value < 1 for value in page_indexes) or len(page_indexes) != len(set(page_indexes)):
             raise ValueError("A3 page indexes must be positive and unique")
@@ -762,6 +778,7 @@ class A3MvpRuntime:
             state.page_finished = True
             state.phase = A3_PHASE_COMPLETE
             state.crop_review_required = False
+            state.crop_review_code = ""
             state.crop_review_feedback = ""
             self.store.save(state)
             return _response(
@@ -776,6 +793,7 @@ class A3MvpRuntime:
             state.selected_unit_id = ""
             state.phase = A3_PHASE_WAIT_SELECTION if state.remaining_units else A3_PHASE_COMPLETE
             state.crop_review_required = False
+            state.crop_review_code = ""
             state.crop_review_feedback = ""
             self.store.save(state)
             return _response(
@@ -1153,6 +1171,7 @@ class A3MvpRuntime:
             }
             state.phase = A3_PHASE_VERIFYING
             state.crop_review_required = False
+            state.crop_review_code = ""
             state.crop_review_feedback = ""
             self.store.save(state)
             if progress is not None:
@@ -1182,10 +1201,10 @@ class A3MvpRuntime:
             if not verdict.verified:
                 state.phase = A3_PHASE_CROP_REQUIRED
                 state.crop_review_required = True
-                state.crop_review_feedback = _crop_review_feedback(
-                    verdict,
-                    str(selected.get("display_label") or "").strip(),
-                )
+                state.crop_review_code = _crop_review_code(verdict)
+                state.crop_review_feedback = A3_CROP_REVIEW_MESSAGES[
+                    state.crop_review_code
+                ]
                 self.store.save(state)
                 return _response(
                     state.crop_review_feedback,
@@ -1207,7 +1226,10 @@ class A3MvpRuntime:
                 except Exception as exc:  # noqa: BLE001 - do not pass an unverified crop to A2.
                     state.phase = A3_PHASE_CROP_REQUIRED
                     state.crop_review_required = True
-                    state.crop_review_feedback = "裁剪结果暂时无法确认外荷载，请重新提交裁剪。"
+                    state.crop_review_code = "LOAD_CHECK_UNAVAILABLE"
+                    state.crop_review_feedback = A3_CROP_REVIEW_MESSAGES[
+                        state.crop_review_code
+                    ]
                     state.last_error = type(exc).__name__
                     self.store.save(state)
                     return _response(
@@ -1219,9 +1241,10 @@ class A3MvpRuntime:
                 if load_verdict != "yes":
                     state.phase = A3_PHASE_CROP_REQUIRED
                     state.crop_review_required = True
-                    state.crop_review_feedback = (
-                        "裁剪结果未通过，未识别到结构荷载，请重新选择区域裁剪。"
-                    )
+                    state.crop_review_code = "EXTERNAL_LOADS_NOT_FOUND"
+                    state.crop_review_feedback = A3_CROP_REVIEW_MESSAGES[
+                        state.crop_review_code
+                    ]
                     state.last_error = "external_load_not_confirmed"
                     self.store.save(state)
                     return _response(
@@ -1851,6 +1874,7 @@ class A3MvpRuntime:
                 }
                 state.phase = A3_PHASE_A2_ACTIVE
                 state.crop_review_required = False
+                state.crop_review_code = ""
                 state.crop_review_feedback = ""
                 state.last_error = ""
                 self.store.save(state)
@@ -1868,6 +1892,7 @@ class A3MvpRuntime:
 
         state.phase = A3_PHASE_CROP_REQUIRED
         state.crop_review_required = False
+        state.crop_review_code = ""
         state.crop_review_feedback = ""
         state.last_error = ""
         auto_bounds = dict(auto_record.get("bounds") or {})
@@ -1907,6 +1932,7 @@ class A3MvpRuntime:
         remaining = state.remaining_units
         state.phase = A3_PHASE_WAIT_SELECTION if remaining else A3_PHASE_COMPLETE
         state.crop_review_required = False
+        state.crop_review_code = ""
         state.crop_review_feedback = ""
         state.last_error = ""
         self.store.save(state)
@@ -2100,6 +2126,7 @@ class A3MvpRuntime:
             "auto_crop_page_status": str(state.auto_crop_page.get("page_status") or ""),
             "auto_crop_overlay_available": bool(state.auto_crop_overlay_path),
             "crop_review_required": state.crop_review_required,
+            "crop_review_code": state.crop_review_code,
             "crop_review_feedback": state.crop_review_feedback,
             "crop_draft": {
                 "bounds": dict(draft.get("bounds") or {}),
@@ -2444,22 +2471,19 @@ def _response(
     )
 
 
-def _crop_review_feedback(result: CropCompareResult, display_label: str) -> str:
+def _crop_review_code(result: CropCompareResult) -> str:
     checks = result.checks
     if checks.get("selected_diagram_match") is False:
-        reason = f"裁剪图不是{display_label}" if display_label else "裁剪图与所选题目不匹配"
-        return f"裁剪结果未通过，{reason}，请重新选择区域裁剪。"
+        return "SELECTED_DIAGRAM_MISMATCH"
     if checks.get("single_target_diagram") is False:
-        reason = "裁剪区域包含多个结构图"
-    elif checks.get("external_loads_complete") is False:
-        reason = "结构荷载不完整"
-    elif checks.get("structure_complete") is False or checks.get("supports_complete") is False:
-        reason = "结构图不完整"
-    elif checks.get("image_clear") is False:
-        reason = "裁剪图不清晰"
-    elif not any(value is False for value in checks.values()):
-        reason = "无法确认裁剪图完整"
-    return f"裁剪结果未通过，{reason}，请重新选择区域裁剪。"
+        return "MULTIPLE_DIAGRAMS"
+    if checks.get("external_loads_complete") is False:
+        return "EXTERNAL_LOADS_INCOMPLETE"
+    if checks.get("structure_complete") is False or checks.get("supports_complete") is False:
+        return "STRUCTURE_INCOMPLETE"
+    if checks.get("image_clear") is False:
+        return "IMAGE_UNCLEAR"
+    return "CROP_UNCONFIRMED"
 
 
 def _clean_session_id(session_id: str) -> str:

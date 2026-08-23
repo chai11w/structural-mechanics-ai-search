@@ -419,6 +419,7 @@ class A3RuntimeTests(unittest.TestCase):
         snapshot = self.runtime.session_snapshot(session_id)["a3"]
         self.assertEqual(snapshot["phase"], A3_PHASE_CROP_REQUIRED)
         self.assertEqual(snapshot["selected_unit"]["unit_id"], "g1-u2")
+        self.assertEqual(snapshot["last_intent"]["action"], "clarification")
         self.assertEqual(
             snapshot["pending_intent_clarification"]["options"],
             [
@@ -614,9 +615,29 @@ class A3RuntimeTests(unittest.TestCase):
 
         self.assertEqual(uploaded.status_code, 200)
         payload = uploaded.json()
-        self.assertEqual(payload["session"]["image_route"], "A2")
-        self.assertFalse(payload["session"]["a3"]["enabled"])
+        self.assertNotIn("image_route", payload["session"])
+        self.assertIsNone(payload["session"]["a3"])
         self.assertNotIn("裁剪", payload["text"])
+
+    def test_web_response_clears_a3_snapshot_when_next_upload_routes_to_a2(self):
+        authority = FakeFlowAuthority("A3")
+        self.runtime.image_triage_authority = authority
+        client = TestClient(create_app(runtime=self.runtime, incoming_dir=self.root / "incoming-transition"))
+
+        a3_upload = client.post(
+            "/api/image",
+            files={"file": ("page.jpg", self.source.read_bytes(), "image/jpeg")},
+        )
+        self.assertTrue(a3_upload.json()["session"]["a3"]["enabled"])
+
+        authority.route = "A2"
+        a2_upload = client.post(
+            "/api/image",
+            files={"file": ("single.jpg", self.source.read_bytes(), "image/jpeg")},
+        )
+
+        self.assertEqual(a2_upload.status_code, 200)
+        self.assertIsNone(a2_upload.json()["session"]["a3"])
 
     def test_direct_a2_route_is_reclassified_to_a1_when_load_screen_says_no(self):
         authority = FakeFlowAuthority("A2")
@@ -669,6 +690,7 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(snapshot["auto_crop_page_status"], "partially_ready")
         self.assertEqual(snapshot["units"][0]["grounding_status"], "auto_ready")
         self.assertEqual(snapshot["units"][1]["grounding_status"], "review_required")
+        self.assertEqual(snapshot["units"][1]["reason_codes"], ["crop_boundary_uncertain"])
         self.assertTrue(snapshot["units"][0]["crop_available"])
         self.assertTrue(snapshot["auto_crop_overlay_available"])
         self.assertTrue(runtime.current_auto_crop_overlay_path("auto-page").is_file())
@@ -980,6 +1002,7 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(self.a2.preanalyzed_calls, [])
         a3 = self.runtime.session_snapshot(session_id)["a3"]
         self.assertEqual(a3["phase"], A3_PHASE_CROP_REQUIRED)
+        self.assertEqual(a3["crop_review_code"], "EXTERNAL_LOADS_INCOMPLETE")
         self.assertEqual(a3["crop_review_feedback"], response.text)
         self.assertTrue(a3["crop_draft"]["available"])
         self.assertEqual(a3["crop_draft"]["bounds"]["width"], 0.7)
@@ -1004,6 +1027,7 @@ class A3RuntimeTests(unittest.TestCase):
         a3 = self.runtime.session_snapshot(session_id)["a3"]
         self.assertEqual(a3["phase"], A3_PHASE_CROP_REQUIRED)
         self.assertTrue(a3["crop_review_required"])
+        self.assertEqual(a3["crop_review_code"], "EXTERNAL_LOADS_NOT_FOUND")
 
     def test_external_load_screen_error_fails_closed_before_a2(self):
         session_id = "a3-load-screen-error-session"
@@ -1027,8 +1051,12 @@ class A3RuntimeTests(unittest.TestCase):
             self.runtime.session_snapshot(session_id)["a3"]["phase"],
             A3_PHASE_CROP_REQUIRED,
         )
+        self.assertEqual(
+            self.runtime.session_snapshot(session_id)["a3"]["crop_review_code"],
+            "LOAD_CHECK_UNAVAILABLE",
+        )
 
-    def test_review_required_names_the_selected_question_on_binding_mismatch(self):
+    def test_review_required_uses_fixed_message_on_binding_mismatch(self):
         session_id = "a3-mismatch-session"
         self.runtime.handle_image(session_id, self.source)
         self.runtime.select_unit(session_id, "g1-u1")
@@ -1043,9 +1071,13 @@ class A3RuntimeTests(unittest.TestCase):
             {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
         )
 
-        self.assertRegex(
+        self.assertEqual(
             response.text,
-            r"^裁剪结果未通过，裁剪图不是.+，请重新选择区域裁剪。$",
+            "裁剪结果未通过，裁剪图与所选题目不匹配，请重新选择区域裁剪。",
+        )
+        self.assertEqual(
+            self.runtime.session_snapshot(session_id)["a3"]["crop_review_code"],
+            "SELECTED_DIAGRAM_MISMATCH",
         )
 
     def test_cancel_returns_to_page_units_and_natural_label_can_resume(self):
@@ -1344,7 +1376,7 @@ class A3RuntimeTests(unittest.TestCase):
         events = [json.loads(line) for line in prepared.text.splitlines() if line]
         self.assertEqual(events[-1]["type"], "result")
         units = events[-1]["data"]["session"]["a3"]["units"]
-        self.assertTrue(all(unit["validation_status"] == "auto_ready" for unit in units))
+        self.assertTrue(all(unit["preparation_status"] == "ready" for unit in units))
 
         selected = client.post(
             "/api/a3/select/stream",
@@ -1384,8 +1416,13 @@ class A3RuntimeTests(unittest.TestCase):
         a3 = upload_data["session"]["a3"]
         self.assertTrue(a3["auto_prepare_all_units"])
         self.assertEqual(a3["phase"], A3_PHASE_WAIT_SELECTION)
-        self.assertEqual(a3["requested_unit_ids"], ["g1-u1", "g1-u2"])
-        self.assertTrue(all(unit["validation_status"] == "auto_ready" for unit in a3["units"]))
+        self.assertEqual(
+            [unit["unit_id"] for unit in a3["units"] if unit["requested"]],
+            ["g1-u1", "g1-u2"],
+        )
+        self.assertTrue(
+            all(unit["preparation_status"] == "ready" for unit in a3["units"])
+        )
 
         selected = client.post(
             "/api/a3/select/stream",

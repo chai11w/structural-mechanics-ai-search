@@ -60,6 +60,24 @@ class ProtocolReason:
 
 PROTOCOL_REASONS: dict[str, ProtocolReason] = {
     "REQUEST_SUCCEEDED": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "IMAGE_ANALYZED": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "SINGLE_QUESTION_DETECTED": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "MULTI_QUESTION_DETECTED": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "TRIAGE_SINGLE_QUESTION_CONFIRMED": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "QUESTION_UNITS_PREPARED": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "SCOPE_ANALYSIS_REUSED": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "BANK_ROUTE_SELECTED": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "STRUCTURE_FILTER_NOT_APPLICABLE": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "STRUCTURE_CLASSIFIED_FROM_TEXT": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "STRUCTURE_CLASSIFIED_FROM_IMAGE": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "COARSE_CANDIDATES_FOUND": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "GLOBAL_CANDIDATES_FOUND": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "RERANK_NOT_REQUIRED": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "RERANK_COMPLETED": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "CANDIDATE_ACTION_CANCEL": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "CANDIDATE_DELETE_SELECTED": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "CANDIDATE_ANSWER_SELECTED": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
+    "ANSWER_FILES_FOUND": ProtocolReason(RequestStatus.SUCCESS, RequestLayer.TOOL, False),
     "MESSAGE_INVALID": ProtocolReason(
         RequestStatus.NEEDS_INPUT, RequestLayer.SESSION, False
     ),
@@ -99,8 +117,29 @@ PROTOCOL_REASONS: dict[str, ProtocolReason] = {
     "NO_MATCH": ProtocolReason(
         RequestStatus.NO_MATCH, RequestLayer.TOOL, False, RequestAction.CHANGE_CHAPTER
     ),
+    "NO_COARSE_CANDIDATES": ProtocolReason(
+        RequestStatus.NO_MATCH, RequestLayer.TOOL, False, RequestAction.CHANGE_CHAPTER
+    ),
     "CHAPTER_REQUIRED": ProtocolReason(
         RequestStatus.NEEDS_INPUT, RequestLayer.TOOL, False, RequestAction.CHANGE_CHAPTER
+    ),
+    "UNKNOWN_CHAPTER": ProtocolReason(
+        RequestStatus.NEEDS_INPUT, RequestLayer.TOOL, False, RequestAction.CHANGE_CHAPTER
+    ),
+    "GLOBAL_SEARCH_IMAGE_REQUIRED": ProtocolReason(
+        RequestStatus.NEEDS_INPUT, RequestLayer.TOOL, False, RequestAction.RETRY_UPLOAD
+    ),
+    "CANDIDATE_NUMBER_REQUIRED": ProtocolReason(
+        RequestStatus.NEEDS_INPUT, RequestLayer.TOOL, False
+    ),
+    "CANDIDATE_DELETE_RANK_OUT_OF_RANGE": ProtocolReason(
+        RequestStatus.NEEDS_INPUT, RequestLayer.TOOL, False
+    ),
+    "CANDIDATE_RANK_OUT_OF_RANGE": ProtocolReason(
+        RequestStatus.NEEDS_INPUT, RequestLayer.TOOL, False
+    ),
+    "CANDIDATE_RANK_INVALID": ProtocolReason(
+        RequestStatus.NEEDS_INPUT, RequestLayer.TOOL, False
     ),
     "LOAD_ROUTE_MIXED_REVIEW_REQUIRED": ProtocolReason(
         RequestStatus.NEEDS_INPUT,
@@ -128,8 +167,89 @@ PROTOCOL_REASONS: dict[str, ProtocolReason] = {
     "TOOL_FAILED": ProtocolReason(
         RequestStatus.ERROR, RequestLayer.TOOL, True, RequestAction.RETRY_SEARCH
     ),
+    "TOOL_INPUT_REQUIRED": ProtocolReason(
+        RequestStatus.NEEDS_INPUT, RequestLayer.TOOL, False
+    ),
+    "MULTI_DETECTION_FALLBACK": ProtocolReason(
+        RequestStatus.PARTIAL, RequestLayer.TOOL, False
+    ),
+    "STRUCTURE_FILTER_SKIPPED_NO_IMAGE": ProtocolReason(
+        RequestStatus.PARTIAL, RequestLayer.TOOL, False
+    ),
+    "STRUCTURE_TYPE_UNCERTAIN": ProtocolReason(
+        RequestStatus.PARTIAL, RequestLayer.TOOL, False
+    ),
+    "RERANK_SKIPPED_NO_IMAGE": ProtocolReason(
+        RequestStatus.PARTIAL, RequestLayer.TOOL, False
+    ),
+    "BANK_ROUTE_FAILED": ProtocolReason(
+        RequestStatus.ERROR, RequestLayer.TOOL, False
+    ),
+    "GLOBAL_SEARCH_UNSUPPORTED_ROUTE": ProtocolReason(
+        RequestStatus.ERROR, RequestLayer.TOOL, False
+    ),
+    "CANDIDATE_ACTION_INVALID_STATE": ProtocolReason(
+        RequestStatus.ERROR, RequestLayer.TOOL, False
+    ),
+    "NO_GLOBAL_COARSE_CANDIDATES": ProtocolReason(
+        RequestStatus.NO_MATCH, RequestLayer.TOOL, False
+    ),
+    "NO_GLOBAL_RELIABLE_CANDIDATES": ProtocolReason(
+        RequestStatus.NO_MATCH, RequestLayer.TOOL, False
+    ),
+    "NO_CANDIDATES_TO_RERANK": ProtocolReason(
+        RequestStatus.NO_MATCH, RequestLayer.TOOL, False
+    ),
+    "ANSWER_FILES_NOT_FOUND": ProtocolReason(
+        RequestStatus.NO_MATCH, RequestLayer.TOOL, False
+    ),
+    "NO_RELIABLE_RERANK_CANDIDATES": ProtocolReason(
+        RequestStatus.NO_MATCH, RequestLayer.TOOL, False, RequestAction.CHANGE_CHAPTER
+    ),
+    "MULTI_CROPS_UNAVAILABLE": ProtocolReason(
+        RequestStatus.PARTIAL, RequestLayer.TOOL, True
+    ),
+    "STRUCTURE_CLASSIFICATION_FALLBACK": ProtocolReason(
+        RequestStatus.PARTIAL, RequestLayer.TOOL, True
+    ),
+    "GLOBAL_RERANK_INCOMPLETE": ProtocolReason(
+        RequestStatus.PARTIAL, RequestLayer.TOOL, True, RequestAction.RETRY_SEARCH
+    ),
+    "RERANK_INCOMPLETE_COARSE_FALLBACK": ProtocolReason(
+        RequestStatus.PARTIAL, RequestLayer.TOOL, True
+    ),
+    "RERANK_EMPTY_COARSE_FALLBACK": ProtocolReason(
+        RequestStatus.PARTIAL, RequestLayer.TOOL, True
+    ),
+    "IMAGE_ANALYSIS_FAILED": ProtocolReason(
+        RequestStatus.ERROR, RequestLayer.TOOL, True, RequestAction.RETRY_SEARCH
+    ),
+    "MULTI_DETAIL_INVALID": ProtocolReason(
+        RequestStatus.ERROR, RequestLayer.TOOL, True, RequestAction.RETRY_SEARCH
+    ),
+    "MULTI_DETAIL_FAILED": ProtocolReason(
+        RequestStatus.ERROR, RequestLayer.TOOL, True, RequestAction.RETRY_SEARCH
+    ),
+    "MULTI_DETECTION_FAILED": ProtocolReason(
+        RequestStatus.ERROR, RequestLayer.TOOL, True, RequestAction.RETRY_SEARCH
+    ),
+    "COARSE_SEARCH_FAILED": ProtocolReason(
+        RequestStatus.ERROR, RequestLayer.TOOL, True, RequestAction.RETRY_SEARCH
+    ),
+    "GLOBAL_SEARCH_FAILED": ProtocolReason(
+        RequestStatus.ERROR, RequestLayer.TOOL, True, RequestAction.RETRY_SEARCH
+    ),
+    "RERANK_FAILED": ProtocolReason(
+        RequestStatus.ERROR, RequestLayer.TOOL, True, RequestAction.RETRY_SEARCH
+    ),
+    "ANSWER_LOOKUP_FAILED": ProtocolReason(
+        RequestStatus.ERROR, RequestLayer.TOOL, True, RequestAction.RETRY_SEARCH
+    ),
     "AGENT_FAILED": ProtocolReason(
         RequestStatus.ERROR, RequestLayer.TOOL, True, RequestAction.RETRY_SEARCH
+    ),
+    "AGENT_FAILED_NO_IMAGE": ProtocolReason(
+        RequestStatus.ERROR, RequestLayer.TOOL, True, RequestAction.NEW_CHAT
     ),
     "EXTERNAL_LOAD_NOT_FOUND": ProtocolReason(
         RequestStatus.NEEDS_INPUT,

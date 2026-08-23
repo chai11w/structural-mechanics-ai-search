@@ -55,7 +55,7 @@ from tiku_agent.tools import (
     prepare_question_units_tool,
 )
 from tiku_shared.request_protocol import (
-    RequestAction,
+    PROTOCOL_REASONS,
     RequestProtocol,
     RequestStatus,
 )
@@ -1000,18 +1000,7 @@ class TikuSearchAgent:
         self.state.fail(safe_error)
         protocol = None
         if result is not None:
-            protocol = RequestProtocol(
-                status=RequestStatus.ERROR,
-                layer=result.layer,
-                code=result.code or "TOOL_FAILED",
-                retryable=result.retryable,
-                action=(
-                    result.action
-                    if result.action is not RequestAction.NONE
-                    else RequestAction.RETRY_SEARCH
-                ),
-                search_id=self.state.current_search_id,
-            ).to_dict()
+            protocol = self._protocol_from_tool_result(result)
         return self._response(
             safe_error,
             IntentResult("unsupported", ok=False, error=safe_error),
@@ -1091,15 +1080,26 @@ class TikuSearchAgent:
         )
 
     def _protocol_from_tool_result(self, result: ToolResult) -> dict[str, Any]:
-        action = result.action
-        if action is RequestAction.NONE and result.outcome is RequestStatus.ERROR:
-            action = RequestAction.RETRY_SEARCH
-        return RequestProtocol(
-            status=result.outcome,
-            layer=result.layer,
-            code=result.code or "TOOL_FAILED",
-            retryable=result.retryable,
-            action=action,
+        code = str(result.code or "").strip().upper()
+        registered = PROTOCOL_REASONS.get(code)
+        if (
+            registered is not None
+            and registered.status is result.outcome
+            and registered.layer is result.layer
+        ):
+            return RequestProtocol.from_code(
+                code,
+                search_id=self.state.current_search_id,
+            ).to_dict()
+        fallback_code = {
+            RequestStatus.SUCCESS: "REQUEST_SUCCEEDED",
+            RequestStatus.NO_MATCH: "NO_MATCH",
+            RequestStatus.NEEDS_INPUT: "TOOL_INPUT_REQUIRED",
+            RequestStatus.PARTIAL: "PARTIAL_RESULT",
+            RequestStatus.ERROR: "TOOL_FAILED",
+        }[result.outcome]
+        return RequestProtocol.from_code(
+            fallback_code,
             search_id=self.state.current_search_id,
         ).to_dict()
 

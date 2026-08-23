@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import re
 from typing import Any
 
 from tiku_shared.request_protocol import (
+    PROTOCOL_REASONS,
     RequestAction,
     RequestLayer,
     RequestStatus,
@@ -14,6 +16,113 @@ from tiku_shared.request_protocol import (
 
 
 ToolOutcome = RequestStatus
+_PUBLIC_CODES_BY_OUTCOME = {
+    ToolOutcome.SUCCESS: frozenset({
+        "REQUEST_SUCCEEDED",
+        "IMAGE_ANALYZED",
+        "SINGLE_QUESTION_DETECTED",
+        "MULTI_QUESTION_DETECTED",
+        "TRIAGE_SINGLE_QUESTION_CONFIRMED",
+        "QUESTION_UNITS_PREPARED",
+        "SCOPE_ANALYSIS_REUSED",
+        "BANK_ROUTE_SELECTED",
+        "STRUCTURE_FILTER_NOT_APPLICABLE",
+        "STRUCTURE_CLASSIFIED_FROM_TEXT",
+        "STRUCTURE_CLASSIFIED_FROM_IMAGE",
+        "COARSE_CANDIDATES_FOUND",
+        "GLOBAL_CANDIDATES_FOUND",
+        "RERANK_NOT_REQUIRED",
+        "RERANK_COMPLETED",
+        "CANDIDATE_ACTION_CANCEL",
+        "CANDIDATE_DELETE_SELECTED",
+        "CANDIDATE_ANSWER_SELECTED",
+        "ANSWER_FILES_FOUND",
+    }),
+    ToolOutcome.NO_MATCH: frozenset({
+        "NO_MATCH",
+        "NO_COARSE_CANDIDATES",
+        "NO_GLOBAL_COARSE_CANDIDATES",
+        "NO_GLOBAL_RELIABLE_CANDIDATES",
+        "NO_CANDIDATES_TO_RERANK",
+        "NO_RELIABLE_RERANK_CANDIDATES",
+        "ANSWER_FILES_NOT_FOUND",
+    }),
+    ToolOutcome.NEEDS_INPUT: frozenset({
+        "TOOL_INPUT_REQUIRED",
+        "CHAPTER_REQUIRED",
+        "LOAD_ROUTE_MIXED_REVIEW_REQUIRED",
+        "LOAD_ROUTE_INPUT_UNUSABLE",
+        "LOAD_ROUTE_NEEDS_REVIEW",
+        "UNKNOWN_CHAPTER",
+        "GLOBAL_SEARCH_IMAGE_REQUIRED",
+        "CANDIDATE_NUMBER_REQUIRED",
+        "CANDIDATE_DELETE_RANK_OUT_OF_RANGE",
+        "CANDIDATE_RANK_OUT_OF_RANGE",
+        "CANDIDATE_RANK_INVALID",
+    }),
+    ToolOutcome.PARTIAL: frozenset({
+        "PARTIAL_RESULT",
+        "MULTI_DETECTION_FALLBACK",
+        "MULTI_CROPS_UNAVAILABLE",
+        "STRUCTURE_FILTER_SKIPPED_NO_IMAGE",
+        "STRUCTURE_TYPE_UNCERTAIN",
+        "STRUCTURE_CLASSIFICATION_FALLBACK",
+        "GLOBAL_RERANK_INCOMPLETE",
+        "RERANK_SKIPPED_NO_IMAGE",
+        "RERANK_INCOMPLETE_COARSE_FALLBACK",
+        "RERANK_EMPTY_COARSE_FALLBACK",
+    }),
+    ToolOutcome.ERROR: frozenset({
+        "TOOL_FAILED",
+        "IMAGE_ANALYSIS_FAILED",
+        "MULTI_DETAIL_INVALID",
+        "MULTI_DETAIL_FAILED",
+        "MULTI_DETECTION_FAILED",
+        "BANK_ROUTE_FAILED",
+        "COARSE_SEARCH_FAILED",
+        "GLOBAL_SEARCH_UNSUPPORTED_ROUTE",
+        "GLOBAL_SEARCH_FAILED",
+        "RERANK_FAILED",
+        "CANDIDATE_ACTION_INVALID_STATE",
+        "ANSWER_LOOKUP_FAILED",
+    }),
+}
+_PUBLIC_FALLBACK_BY_OUTCOME = {
+    ToolOutcome.SUCCESS: (
+        "REQUEST_SUCCEEDED", True, False, RequestAction.NONE,
+    ),
+    ToolOutcome.NO_MATCH: (
+        "NO_MATCH", True, False, RequestAction.CHANGE_CHAPTER,
+    ),
+    ToolOutcome.NEEDS_INPUT: (
+        "TOOL_INPUT_REQUIRED", False, False, RequestAction.NONE,
+    ),
+    ToolOutcome.PARTIAL: (
+        "PARTIAL_RESULT", False, True, RequestAction.RETRY_SEARCH,
+    ),
+    ToolOutcome.ERROR: (
+        "TOOL_FAILED", False, True, RequestAction.RETRY_SEARCH,
+    ),
+}
+_PUBLIC_ID_PATTERNS = {
+    "request_id": re.compile(r"^req_[A-Za-z0-9][A-Za-z0-9_-]{3,123}$"),
+    "search_id": re.compile(r"^search_[A-Za-z0-9][A-Za-z0-9_-]{3,120}$"),
+}
+_PUBLIC_ID_SENSITIVE_RE = re.compile(
+    r"(?:bearer|token|secret|password|api[_-]?key|sk[-_](?:proj[-_])?)",
+    re.IGNORECASE,
+)
+
+
+def is_public_tool_code(code: object, outcome: ToolOutcome | str) -> bool:
+    """Return whether a tool code is registered for the given public outcome."""
+
+    try:
+        normalized_outcome = normalize_status(outcome)
+    except ValueError:
+        return False
+    clean_code = str(code or "").strip().upper()
+    return clean_code in _PUBLIC_CODES_BY_OUTCOME[normalized_outcome]
 
 
 @dataclass
@@ -211,9 +320,51 @@ class ToolResult:
         return self
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the complete internal result for logs and compatibility."""
+
         payload = asdict(self)
         payload["outcome"] = self.outcome.value
         payload["status"] = self.outcome.value
         payload["layer"] = self.layer.value
         payload["action"] = self.action.value
+        return payload
+
+    def to_public_dict(self) -> dict[str, Any]:
+        """Serialize only the stable, user-boundary-safe result metadata.
+
+        ``error``, ``data`` and ``safe_facts`` are intentionally excluded.  A
+        caller that needs approved facts must project them by code rather than
+        forwarding an arbitrary dictionary.
+        """
+
+        code = str(self.code or "").strip().upper()
+        known_code = is_public_tool_code(code, self.outcome)
+        if known_code:
+            completed = self.outcome in {ToolOutcome.SUCCESS, ToolOutcome.NO_MATCH}
+            registered = PROTOCOL_REASONS.get(code)
+            if registered is not None and registered.status is self.outcome:
+                retryable = registered.retryable
+                action = registered.action
+                layer = registered.layer
+            else:
+                _, _, retryable, action = _PUBLIC_FALLBACK_BY_OUTCOME[self.outcome]
+                layer = RequestLayer.TOOL
+        else:
+            code, completed, retryable, action = _PUBLIC_FALLBACK_BY_OUTCOME[
+                self.outcome
+            ]
+            layer = RequestLayer.TOOL
+        payload: dict[str, Any] = {
+            "outcome": self.outcome.value,
+            "status": self.outcome.value,
+            "layer": layer.value,
+            "code": code,
+            "completed": completed,
+            "retryable": retryable,
+            "action": action.value,
+        }
+        for field_name, pattern in _PUBLIC_ID_PATTERNS.items():
+            value = str(getattr(self, field_name) or "").strip()
+            if pattern.fullmatch(value) and not _PUBLIC_ID_SENSITIVE_RE.search(value):
+                payload[field_name] = value
         return payload
