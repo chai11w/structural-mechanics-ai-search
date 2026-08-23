@@ -782,11 +782,7 @@ class TikuSearchAgent:
         if reranked.outcome is ToolOutcome.NO_MATCH:
             self.state.set_candidates([])
             return self._response(
-                (
-                    "没有找到相似候选题，你可以联系作者手搓。"
-                    if self.enable_author_contact_fallback
-                    else reranked.error or "未找到可靠相似题。"
-                ),
+                render.render_tool_feedback(reranked, context="no_match"),
                 intent or IntentResult("search_image"),
                 include_author_contact=self.enable_author_contact_fallback,
             )
@@ -879,7 +875,7 @@ class TikuSearchAgent:
             return stopped
         if answered.outcome is ToolOutcome.NO_MATCH:
             return self._response(
-                answered.error or "未找到该候选题对应的答案文件。",
+                render.render_tool_feedback(answered, context="no_match"),
                 intent,
                 protocol=self._protocol_from_tool_result(answered),
             )
@@ -995,8 +991,13 @@ class TikuSearchAgent:
             )
         )
 
-    def _fail(self, error: str, result: ToolResult | None = None) -> AgentResponse:
-        self.state.fail(error)
+    def _fail(self, error: str = "", result: ToolResult | None = None) -> AgentResponse:
+        safe_error = (
+            render.render_tool_feedback(result, context="error")
+            if result is not None
+            else str(error or "工具执行失败，请稍后重试。")
+        )
+        self.state.fail(safe_error)
         protocol = None
         if result is not None:
             protocol = RequestProtocol(
@@ -1012,8 +1013,8 @@ class TikuSearchAgent:
                 search_id=self.state.current_search_id,
             ).to_dict()
         return self._response(
-            render.render_error(error),
-            IntentResult("unsupported", ok=False, error=error),
+            safe_error,
+            IntentResult("unsupported", ok=False, error=safe_error),
             protocol=protocol,
         )
 
@@ -1027,19 +1028,20 @@ class TikuSearchAgent:
         """Apply the five-state contract before consuming tool data."""
 
         if result.outcome is ToolOutcome.ERROR:
-            return self._fail(result.error or "工具执行失败，请稍后重试。", result)
+            return self._fail(result=result)
         if result.outcome is ToolOutcome.NEEDS_INPUT and not allow_needs_input:
-            message = result.error or "需要补充信息后才能继续。"
+            message = render.render_tool_feedback(result, context="needs_input")
             return self._response(
                 message,
                 IntentResult("clarification"),
                 protocol=self._protocol_from_tool_result(result),
             )
         if result.outcome is ToolOutcome.PARTIAL and not allow_partial:
-            self.state.fail(result.error or "工具只完成了部分处理，请稍后重试。")
+            message = render.render_tool_feedback(result, context="error")
+            self.state.fail(message)
             return self._response(
-                render.render_error(self.state.last_error),
-                IntentResult("unsupported", ok=False, error=self.state.last_error),
+                message,
+                IntentResult("unsupported", ok=False, error=message),
                 protocol=self._protocol_from_tool_result(result),
             )
         return None
@@ -1049,7 +1051,7 @@ class TikuSearchAgent:
             return
         if not self._turn_protocol:
             self._turn_protocol = self._protocol_from_tool_result(result)
-        note = str(result.error or result.data.get("rerank_note") or "").strip()
+        note = render.render_tool_feedback(result, context="partial")
         if note and note not in notices:
             notices.append(note)
 

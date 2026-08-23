@@ -41,6 +41,9 @@ class ToolResult:
     action: RequestAction | str = RequestAction.NONE
     request_id: str = ""
     search_id: str = ""
+    # Facts approved for user-facing rendering.  Keep this separate from the
+    # legacy ``error`` and internal ``data`` fields during the migration.
+    safe_facts: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.outcome is None:
@@ -54,6 +57,7 @@ class ToolResult:
 
         self.layer = RequestLayer(self.layer)
         self.action = RequestAction(self.action)
+        self.safe_facts = dict(self.safe_facts or {})
         semantic_ok = self.outcome is not ToolOutcome.ERROR
         if self.ok is None:
             self.ok = semantic_ok
@@ -79,6 +83,8 @@ class ToolResult:
         code: str,
         data: dict[str, Any] | None = None,
         next_state: str = "",
+        safe_facts: dict[str, Any] | None = None,
+        action: RequestAction | str = RequestAction.NONE,
     ) -> "ToolResult":
         return cls(
             outcome=ToolOutcome.SUCCESS,
@@ -86,6 +92,8 @@ class ToolResult:
             code=code,
             data=dict(data or {}),
             next_state=next_state,
+            safe_facts=safe_facts,
+            action=action,
         )
 
     @classmethod
@@ -97,6 +105,8 @@ class ToolResult:
         data: dict[str, Any] | None = None,
         error: str = "",
         next_state: str = "NO_MATCH",
+        safe_facts: dict[str, Any] | None = None,
+        action: RequestAction | str = RequestAction.NONE,
     ) -> "ToolResult":
         return cls(
             outcome=ToolOutcome.NO_MATCH,
@@ -105,6 +115,8 @@ class ToolResult:
             data=dict(data or {}),
             error=error,
             next_state=next_state,
+            safe_facts=safe_facts,
+            action=action,
         )
 
     @classmethod
@@ -116,6 +128,8 @@ class ToolResult:
         error: str,
         data: dict[str, Any] | None = None,
         next_state: str,
+        safe_facts: dict[str, Any] | None = None,
+        action: RequestAction | str = RequestAction.NONE,
     ) -> "ToolResult":
         return cls(
             outcome=ToolOutcome.NEEDS_INPUT,
@@ -125,6 +139,8 @@ class ToolResult:
             error=error,
             next_state=next_state,
             completed=False,
+            safe_facts=safe_facts,
+            action=action,
         )
 
     @classmethod
@@ -138,6 +154,8 @@ class ToolResult:
         next_state: str,
         retryable: bool = False,
         error_category: str = "",
+        safe_facts: dict[str, Any] | None = None,
+        action: RequestAction | str = RequestAction.NONE,
     ) -> "ToolResult":
         return cls(
             outcome=ToolOutcome.PARTIAL,
@@ -149,6 +167,8 @@ class ToolResult:
             completed=False,
             retryable=retryable,
             error_category=error_category,
+            safe_facts=safe_facts,
+            action=action,
         )
 
     @classmethod
@@ -162,6 +182,8 @@ class ToolResult:
         next_state: str = "ERROR",
         retryable: bool = False,
         error_category: str,
+        safe_facts: dict[str, Any] | None = None,
+        action: RequestAction | str = RequestAction.NONE,
     ) -> "ToolResult":
         return cls(
             outcome=ToolOutcome.ERROR,
@@ -173,6 +195,8 @@ class ToolResult:
             completed=False,
             retryable=retryable,
             error_category=error_category,
+            safe_facts=safe_facts,
+            action=action,
         )
 
     def with_tool(self, tool: str) -> "ToolResult":

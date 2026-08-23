@@ -1,9 +1,11 @@
 import unittest
 
+from tiku_agent import render
 from tiku_agent.agent import AgentToolbox, TikuSearchAgent
 from tiku_agent.safe_answer_generator_v0 import SafeAnswerGeneratorV0
 from tiku_agent.state import AgentState, PHASE_ANSWERED, PHASE_ERROR, STATE_WAIT_CANDIDATE_CHOICE, STATE_WAIT_CHAPTER
 from tiku_agent.tools import AgentToolConfig, ToolResult
+from tiku_shared.request_protocol import RequestAction
 
 
 class FakeTools:
@@ -602,8 +604,40 @@ class TikuSearchAgentTest(unittest.TestCase):
         response = agent.handle_image("q.jpg")
 
         self.assertEqual(agent.state.phase, PHASE_ERROR)
-        self.assertEqual(agent.state.last_error, "图片分析暂时不可用。")
+        self.assertIn("图片分析暂时失败", agent.state.last_error)
         self.assertIn("重试", response.text)
+
+    def test_unmapped_tool_feedback_never_echoes_internal_error(self):
+        agent = self.make_agent(FakeTools(chapter="4力法"))
+        raw = "Traceback: C:\\private\\token=secret mixed symbolic and numeric load"
+
+        needs_input = ToolResult.needs_input(
+            code="UNMAPPED_NEEDS_INPUT",
+            error=raw,
+            next_state="WAIT_INPUT",
+        )
+        response = agent._stop_for_tool_result(needs_input)
+        self.assertIsNotNone(response)
+        self.assertNotIn(raw, response.text)
+        self.assertNotIn("Traceback", response.text)
+        self.assertNotIn("secret", response.text)
+
+        partial = ToolResult.partial(
+            code="UNMAPPED_PARTIAL",
+            error=raw,
+            next_state="ERROR",
+        )
+        response = agent._stop_for_tool_result(partial)
+        self.assertIsNotNone(response)
+        self.assertNotIn(raw, response.text)
+
+        self.assertNotIn(
+            raw,
+            render.render_tool_feedback(
+                ToolResult.no_match(code="UNMAPPED_NO_MATCH", error=raw),
+                context="no_match",
+            ),
+        )
 
     def test_route_needs_input_clarifies_without_entering_error_phase(self):
         fake = FakeTools(chapter="4力法")
@@ -611,6 +645,7 @@ class TikuSearchAgentTest(unittest.TestCase):
             error="请确认荷载是字母还是数值。",
             code="LOAD_ROUTE_NEEDS_REVIEW",
             next_state="WAIT_LOAD_CONFIRMATION",
+            action=RequestAction.RETRY_UPLOAD,
         )
         agent = self.make_agent(fake)
 
@@ -618,7 +653,8 @@ class TikuSearchAgentTest(unittest.TestCase):
 
         self.assertEqual(response.intent, "clarification")
         self.assertNotEqual(agent.state.phase, PHASE_ERROR)
-        self.assertIn("请确认荷载", response.text)
+        self.assertIn("荷载信息暂时无法可靠选择题库", response.text)
+        self.assertEqual(response.protocol["action"], "retry_upload")
 
     def test_partial_rerank_is_consumed_and_candidates_remain_available(self):
         fake = FakeTools(chapter="4力法")
@@ -720,7 +756,7 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.phase, "NO_MATCH")
         self.assertEqual(agent.state.candidate_count, 0)
         self.assertEqual(response.images, [])
-        self.assertEqual(response.text, "未找到可靠相似题。")
+        self.assertIn("没有找到足够可靠的相似候选题", response.text)
 
     def test_partial_global_search_enters_retryable_error_phase(self):
         fake = FakeTools(chapter="")
@@ -738,7 +774,7 @@ class TikuSearchAgentTest(unittest.TestCase):
         response = agent.handle_text("可以全局搜")
 
         self.assertEqual(agent.state.phase, PHASE_ERROR)
-        self.assertEqual(agent.state.last_error, "全局复筛只完成了部分候选。")
+        self.assertEqual(agent.state.last_error, "全局复筛未完成，请稍后重试。")
         self.assertIn("重试", response.text)
 
     def test_answer_no_match_keeps_candidate_choice_state(self):

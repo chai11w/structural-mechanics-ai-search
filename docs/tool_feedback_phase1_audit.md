@@ -28,6 +28,21 @@ HTTP 出口，以及共享 `RuleRouter` 的 CLI、飞书和旧 GUI 使用点。�
 
 用户见到的 `mixed symbolic and numeric load` 不是模型偶发输出，而是这项契约缺口的确定性结果。
 
+## 本地第一阶段修复状态（2026-08-23）
+
+已在当前 Agent 主线完成本地修复，尚未启动服务、切换端口或上线：
+
+- `ToolResult` 增加独立的 `safe_facts`，非成功工厂支持传入 `action`；旧 `error` 和旧构造方式保留兼容。
+- `route_bank_tool` 按稳定的 `RuleRouter.category` 区分混合荷载和空/未知荷载，分别返回
+  `LOAD_ROUTE_MIXED_REVIEW_REQUIRED` 与 `LOAD_ROUTE_INPUT_UNUSABLE`，并附带审查过的事实和
+  `retry_upload` 动作；不再按英文 `reason` 做业务判断。
+- Agent 的错误、需要补充信息、部分成功和无匹配出口统一经过确定性 `code -> 中文安全文案`
+  映射；未知 code 按结果状态固定回退，绝不读取 `result.error`、`data` 或动态 `rerank_note`。
+- 已覆盖混合荷载真实工具链、动作/事实序列化、旧构造兼容和注入英文/路径/Traceback 的安全回退。
+
+本地验证：聚焦 Agent 测试 80 项通过，项目测试 758 项通过。下一步仍需在不上线的前提下继续
+检查 HTTP/A3 转发和其他入口的公共序列化，再决定是否进入受控模型润色或薄看门狗阶段。
+
 ## 当前 ToolResult 契约
 
 | 字段 | 当前含义 | 主要缺口 |
@@ -52,7 +67,7 @@ HTTP 出口，以及共享 `RuleRouter` 的 CLI、飞书和旧 GUI 使用点。�
 | `analyze_image` | 缺章节、识别失败 | `error` 为固定中文，但 `data` 含图片路径和模型分类原文 | 当前文案安全；仍需公开事实白名单 |
 | `analyze_multi_image` | 多题判断降级 | 固定中文通过 PARTIAL notice 直出 | 当前内容安全，但依赖自由文本约定 |
 | `prepare_question_units` | 识别失败、裁图降级 | 原异常被丢弃，公开文字固定；`data` 含裁图路径 | 当前内容安全；路径不得进入模型 |
-| `route_bank` | 荷载需复核、路由失败 | `route.reason` 可为英文，并同时进入 `data.reason` 和 `error` | **P0，已确认真实泄漏** |
+| `route_bank` | 荷载需复核、路由失败 | 基线中 `route.reason` 可为英文，并同时进入 `data.reason` 和 `error`；本地第一阶段已在 Agent 出口隔离 | **P0，已确认真实泄漏；本地 Agent 已修复** |
 | `classify_structure` | 缺图、类型不确定、模型降级 | 公开文字固定；`data.reason` 可能来自模型 | 当前用户文本安全；未来模型输入不能使用完整 `data` |
 | `coarse_search` | 章节不存在、无匹配、失败 | 固定中文或空 `error`；`data` 含候选路径 | 当前内容安全；缺明确恢复动作 |
 | `global_search` | 缺图、不支持、部分完成、无匹配、失败 | 固定中文；缺图和失败动作仍为空 | 当前内容安全；协议与动作不完整 |
@@ -69,7 +84,7 @@ HTTP 出口，以及共享 `RuleRouter` 的 CLI、飞书和旧 GUI 使用点。�
 | `analyze_image` | `CHAPTER_REQUIRED` | - | - | `IMAGE_ANALYSIS_FAILED` |
 | `analyze_multi_image` | - | `MULTI_DETECTION_FALLBACK` | - | - |
 | `prepare_question_units` | - | `MULTI_CROPS_UNAVAILABLE` | - | `MULTI_DETAIL_INVALID`、`MULTI_DETAIL_FAILED` |
-| `route_bank` | `LOAD_ROUTE_NEEDS_REVIEW` | - | - | `BANK_ROUTE_FAILED` |
+| `route_bank` | `LOAD_ROUTE_MIXED_REVIEW_REQUIRED`、`LOAD_ROUTE_INPUT_UNUSABLE`（兼容旧 `LOAD_ROUTE_NEEDS_REVIEW`） | - | - | `BANK_ROUTE_FAILED` |
 | `classify_structure` | - | `STRUCTURE_FILTER_SKIPPED_NO_IMAGE`、`STRUCTURE_TYPE_UNCERTAIN`、`STRUCTURE_CLASSIFICATION_FALLBACK` | - | - |
 | `coarse_search` | `UNKNOWN_CHAPTER` | - | `NO_COARSE_CANDIDATES` | `COARSE_SEARCH_FAILED` |
 | `global_search` | `GLOBAL_SEARCH_IMAGE_REQUIRED` | `GLOBAL_RERANK_INCOMPLETE` | `NO_GLOBAL_COARSE_CANDIDATES`、`NO_GLOBAL_RELIABLE_CANDIDATES` | `GLOBAL_SEARCH_UNSUPPORTED_ROUTE`、`GLOBAL_SEARCH_FAILED` |
@@ -101,7 +116,7 @@ TikuSearchAgent._stop_for_tool_result
 A3 原样转发 -> HTTP 原样返回
 ```
 
-最终真实结构是：
+修复前的真实结构是：
 
 ```text
 intent=clarification

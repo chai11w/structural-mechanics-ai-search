@@ -38,6 +38,7 @@ from tiku_shared.multi_question import (
 )
 from tiku_agent.intent_contract import CHAPTERS
 from tiku_agent.tool_result import ToolOutcome, ToolResult
+from tiku_shared.request_protocol import RequestAction
 from tiku_shared.model_costs import submit_with_model_cost_context
 
 
@@ -289,11 +290,30 @@ def route_bank_tool(loads: list[dict[str, Any]]) -> ToolResult:
                 "load_details": load_details,
             }
         if route.route == "needs_review":
+            if route.category == "mixed_symbolic_numeric":
+                return ToolResult.needs_input(
+                    code="LOAD_ROUTE_MIXED_REVIEW_REQUIRED",
+                    error=route.reason or "mixed symbolic and numeric load",
+                    data=data,
+                    next_state="WAIT_INPUT",
+                    safe_facts={
+                        "load_representation": "mixed",
+                        "has_numeric_load": True,
+                        "has_unassigned_symbolic_load": True,
+                        "automatic_search_supported": False,
+                    },
+                    action=RequestAction.RETRY_UPLOAD,
+                )
             return ToolResult.needs_input(
-                code="LOAD_ROUTE_NEEDS_REVIEW",
+                code="LOAD_ROUTE_INPUT_UNUSABLE",
                 error=route.reason or "荷载信息不足，无法安全选择题库。",
                 data=data,
                 next_state="WAIT_INPUT",
+                safe_facts={
+                    "load_representation": "unknown",
+                    "automatic_search_supported": False,
+                },
+                action=RequestAction.RETRY_UPLOAD,
             )
         return ToolResult.success(
             code="BANK_ROUTE_SELECTED",

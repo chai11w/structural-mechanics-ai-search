@@ -102,6 +102,26 @@ PROTOCOL_REASONS: dict[str, ProtocolReason] = {
     "CHAPTER_REQUIRED": ProtocolReason(
         RequestStatus.NEEDS_INPUT, RequestLayer.TOOL, False, RequestAction.CHANGE_CHAPTER
     ),
+    "LOAD_ROUTE_MIXED_REVIEW_REQUIRED": ProtocolReason(
+        RequestStatus.NEEDS_INPUT,
+        RequestLayer.TOOL,
+        False,
+        RequestAction.RETRY_UPLOAD,
+    ),
+    "LOAD_ROUTE_INPUT_UNUSABLE": ProtocolReason(
+        RequestStatus.NEEDS_INPUT,
+        RequestLayer.TOOL,
+        False,
+        RequestAction.RETRY_UPLOAD,
+    ),
+    # Compatibility for results emitted before the route categories were
+    # split into separate stable codes.
+    "LOAD_ROUTE_NEEDS_REVIEW": ProtocolReason(
+        RequestStatus.NEEDS_INPUT,
+        RequestLayer.TOOL,
+        False,
+        RequestAction.RETRY_UPLOAD,
+    ),
     "PARTIAL_RESULT": ProtocolReason(
         RequestStatus.PARTIAL, RequestLayer.TOOL, True, RequestAction.RETRY_SEARCH
     ),

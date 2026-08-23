@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from tiku_agent.state import AgentState
+from tiku_agent.tool_result import ToolOutcome, ToolResult
 from tiku_shared.chapter_catalog import supported_topic_names
 
 
@@ -175,6 +176,87 @@ def render_error(error: str) -> str:
     if "HTTP Error 5" in str(error) or "timed out" in str(error).lower() or "timeout" in str(error).lower():
         return f"题图识别服务暂时异常（{detail}）。题图已保留，你可以直接回复“重试”。"
     return "这次没查成功。题图已保留，你可以直接回复“重试”。"
+
+
+# Tool ``error`` and ``data`` are internal compatibility fields.  Only this
+# deterministic catalog may turn a non-success result into user-facing text.
+_TOOL_FEEDBACK_BY_CODE = {
+    "LOAD_ROUTE_MIXED_REVIEW_REQUIRED": (
+        "识别到数字荷载和未赋值的字母荷载同时出现，当前无法可靠选择题库。"
+        "请换一张更清楚的题图。"
+    ),
+    "LOAD_ROUTE_NEEDS_REVIEW": (
+        "识别到的荷载信息暂时无法可靠选择题库，请换一张更清楚的题图。"
+    ),
+    "LOAD_ROUTE_INPUT_UNUSABLE": "暂时无法可靠识别题目的荷载信息，请上传更清楚的题图。",
+    "CHAPTER_REQUIRED": "我还不能确定这题属于哪一章，请告诉我章节名称或解题方法。",
+    "UNKNOWN_CHAPTER": "指定章节不存在，请选择当前支持的章节。",
+    "GLOBAL_SEARCH_IMAGE_REQUIRED": "全局搜索需要当前题图，请重新上传题目。",
+    "CANDIDATE_NUMBER_REQUIRED": "请回复候选编号，例如 1，或回复 0 取消。",
+    "CANDIDATE_DELETE_RANK_OUT_OF_RANGE": "这个候选编号超出当前范围，请换一个。",
+    "CANDIDATE_RANK_OUT_OF_RANGE": "这个候选编号超出当前范围，请换一个。",
+    "CANDIDATE_RANK_INVALID": "这个候选编号无效，请从当前候选中选择。",
+    "MULTI_DETECTION_FALLBACK": "多题判断未完成，已按单题流程继续。",
+    "MULTI_CROPS_UNAVAILABLE": "部分题图裁剪未完成，仍可按题号继续。",
+    "STRUCTURE_FILTER_SKIPPED_NO_IMAGE": "缺少题图，已跳过结构类型筛选。",
+    "STRUCTURE_TYPE_UNCERTAIN": "结构类型无法可靠确定，已跳过该筛选。",
+    "STRUCTURE_CLASSIFICATION_FALLBACK": "结构类型识别未完成，已跳过该筛选。",
+    "RERANK_SKIPPED_NO_IMAGE": "缺少查询题图，已显示粗筛结果。",
+    "RERANK_INCOMPLETE_COARSE_FALLBACK": "复筛未完成，已回退粗筛排序。",
+    "RERANK_EMPTY_COARSE_FALLBACK": "视觉复筛未返回结果，已显示粗筛结果。",
+    "GLOBAL_RERANK_INCOMPLETE": "全局复筛未完成，请稍后重试。",
+    "NO_COARSE_CANDIDATES": "当前章节没有找到足够相似的题，可以换章节或发一张更清楚的题图。",
+    "NO_GLOBAL_COARSE_CANDIDATES": "我已经全局搜过了，但暂时没有足够可靠的结果。",
+    "NO_GLOBAL_RELIABLE_CANDIDATES": "我已经全局搜过了，但暂时没有足够可靠的结果。",
+    "NO_CANDIDATES_TO_RERANK": "没有找到可供复筛的候选题。",
+    "NO_RELIABLE_RERANK_CANDIDATES": (
+        "没有找到足够可靠的相似候选题，可以换章节或发一张更清楚的题图。"
+    ),
+    "ANSWER_FILES_NOT_FOUND": "未找到该候选题对应的答案文件，请返回候选后选择其他题。",
+    "IMAGE_ANALYSIS_FAILED": "题图识别暂时失败，题图已保留，你可以直接回复“重试”。",
+    "MULTI_DETAIL_INVALID": "多题识别暂时失败，题图已保留，你可以直接回复“重试”。",
+    "MULTI_DETAIL_FAILED": "多题识别暂时失败，题图已保留，你可以直接回复“重试”。",
+    "MULTI_DETECTION_FAILED": "图片分析暂时失败，题图已保留，你可以直接回复“重试”。",
+    "BANK_ROUTE_FAILED": "题库路由暂时失败，请稍后重试。",
+    "COARSE_SEARCH_FAILED": "题库粗筛暂时失败，请稍后重试。",
+    "GLOBAL_SEARCH_UNSUPPORTED_ROUTE": "当前题库路由不支持全局搜索，请重新上传题图或换章节。",
+    "GLOBAL_SEARCH_FAILED": "全局搜索暂时失败，请稍后重试。",
+    "RERANK_FAILED": "候选视觉复筛暂时失败，请稍后重试。",
+    "ANSWER_LOOKUP_FAILED": "答案文件读取暂时失败，请稍后重试。",
+    "CANDIDATE_ACTION_INVALID_STATE": "当前状态无法处理候选操作，请重新上传题图。",
+}
+
+
+def render_tool_feedback(result: ToolResult, *, context: str = "") -> str:
+    """Render a non-success tool result without exposing internal fields.
+
+    ``context`` is intentionally narrow: ``partial`` is used for a notice on
+    an otherwise usable result; all other contexts are terminal feedback.
+    ``safe_facts`` is reserved for reviewed facts and is currently only needed
+    to preserve the route-code migration boundary.
+    """
+
+    code = str(result.code or "").strip().upper()
+    if (
+        code == "LOAD_ROUTE_NEEDS_REVIEW"
+        and result.safe_facts.get("load_representation") == "unknown"
+    ):
+        return _TOOL_FEEDBACK_BY_CODE["LOAD_ROUTE_INPUT_UNUSABLE"]
+    if code in _TOOL_FEEDBACK_BY_CODE:
+        return _TOOL_FEEDBACK_BY_CODE[code]
+
+    outcome = result.outcome
+    if outcome is ToolOutcome.ERROR:
+        return "这次处理没有完成，题图已保留，你可以直接回复“重试”。"
+    if outcome is ToolOutcome.NEEDS_INPUT:
+        return "还需要补充题图或章节信息后才能继续。"
+    if outcome is ToolOutcome.NO_MATCH:
+        return "暂时没有找到足够可靠的结果。"
+    if outcome is ToolOutcome.PARTIAL:
+        if context == "partial":
+            return "部分处理未完成，已保留当前可用结果。"
+        return "这次处理没有完成，题图已保留，你可以直接回复“重试”。"
+    return ""
 
 
 def render_failure_explanation(state: AgentState) -> str:

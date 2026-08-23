@@ -480,8 +480,20 @@ class TikuAgentToolsTest(unittest.TestCase):
 
         self.assertEqual(result.outcome, ToolOutcome.NEEDS_INPUT)
         self.assertEqual(result.tool, "route_bank")
-        self.assertEqual(result.code, "LOAD_ROUTE_NEEDS_REVIEW")
+        self.assertEqual(result.code, "LOAD_ROUTE_MIXED_REVIEW_REQUIRED")
+        self.assertEqual(result.action.value, "retry_upload")
+        self.assertEqual(result.safe_facts["load_representation"], "mixed")
+        self.assertTrue(result.safe_facts["has_numeric_load"])
+        self.assertTrue(result.safe_facts["has_unassigned_symbolic_load"])
         self.assertFalse(result.completed)
+
+    def test_route_bank_marks_unusable_loads_separately(self):
+        result = route_bank_tool([])
+
+        self.assertEqual(result.outcome, ToolOutcome.NEEDS_INPUT)
+        self.assertEqual(result.code, "LOAD_ROUTE_INPUT_UNUSABLE")
+        self.assertEqual(result.safe_facts["load_representation"], "unknown")
+        self.assertEqual(result.action.value, "retry_upload")
 
     def test_analyze_image_marks_unknown_chapter_as_needs_input(self):
         class FakeQwen:
