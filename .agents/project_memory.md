@@ -8,7 +8,6 @@
 - 反馈修复已在 8790/8795 上线：列表等高等距；指定旧记录由 10 条收敛为当前 revision 的 2 条；A3“已准备 N 道题”在子 A2 尚未创建时也会由父 A3 会话保存整页框选图。
 - 8795 已把今日使用拆成“发起页面 / 实际检索题目”，反馈按被评价回复区分“整页识别 / 单题检索”；移动端反馈使用两列筛选和卡片列表。
 - live 题库目前可检索内部目录 `2静定结构`～`8影响线` 七类；字母库覆盖仍窄。
-- 输出层大实验已回退到原主线；轻量输出看门狗仅以 `observe` 接入 8790/8896 共用发送边界，记录异常类别和媒体交付不一致，不改用户文本。
 
 ## Implemented
 
@@ -28,12 +27,11 @@
 - 8795 桌面反馈表新增范围筛选与标签并压缩到 1440px 可见核心列；移动端不再横向拖动 1138px 表格，改为反馈卡片。393px 下 6 个筛选控件均为 176.5×40、按钮为 88×40；320px 下无横向溢出。
 - 费用归属稳定邀请码；8790 父 A3 与子 A2 共用账本，8795 兼容旧双账本并只读补算缺价调用。管理员密码/邀请码只存哈希，新码用 AES-GCM，复制受会话、CSRF 和审计保护。
 - 请求协议固定五状态；Agent、API、网络边界、任务日志和反馈已接入，同题重试沿用 `search_id`，旧数据只读兼容。8891 已完成隔离权威分流 MVP；8892 Paddle 质检器固定为 review-required 的 V2 试验。
-- 轻量输出看门狗为纯文本检查器，正常回复原样放行；可标记空文本、超长、控制字符、重复空白、堆栈/异常、原始 JSON、本地路径、凭据、提示词、命令及媒体交付不一致。旁路日志不记录原文；相关 `17/17` 项测试、语法检查和 `git diff --check` 通过。
+- 统计、反馈范围与管理后台布局改动相关 `33/33` 项测试和全仓 `754/754` 测试通过；JS 语法检查与 `git diff --check` 通过。
 
 ## In Progress
 
 - 继续观察 8790 的真实多题页、范围澄清、“继续”、低清/旋转及小荷载/支座边界；不主动产生模型费用。
-- 收集输出看门狗旁路命中，先审查误报和媒体交付不一致，再决定是否在 8790/8896 分别启用拦截；当前未启用模型二次润色。
 
 ## Not Implemented
 
@@ -43,7 +41,6 @@
 - 桁架高度几何计算未实现；模型只抄录明确标注。
 - 视觉重排评分校准未完成；“候选超过 5 个后二次荷载位置复筛”只是待真实样本验证的方案。
 - 现有真实触发覆盖不能证明其他章节、梁、桁架或单边尺寸均有相同效果。
-- 输出看门狗尚未启用拦截，也未接受限模型润色；缺章节、缺题号、缺候选号和越界等旧话术尚未逐项修正。
 
 ## Architecture Rules
 
@@ -84,14 +81,13 @@
 
 ## Next Best Step
 
-1. 在 8790/8896 独立观察输出看门狗日志，按危险文本、轻微异常和媒体交付不一致整理真实误报/漏报，不主动产生模型费用。
-2. 旁路样本稳定后，仅启用危险异常固定回退和必要旧话术修复；正常规则与原模型润色继续原样放行。
-3. 继续验收真实 A3 多题页、范围澄清、题号冲突、低清/旋转和小荷载/支座；观察期保留 8896、8897 与 `--disable-auto-crop`。
+1. 用下一条真实 A3 多题反馈检查整页框选图质量；若框偏移或缺题，保留反馈编号继续定位。
+2. 继续在 8790 验收真实题页，记录多题混排、范围澄清、题号冲突、低清/旋转和小荷载/支座失败。
+3. 观察期保留 8896、8897 与 `--disable-auto-crop`；稳定后再决定停止 8897，但不删除其运行状态。
 
 ## Important Commands
 
 - `python -m unittest discover -s tests -p 'test_*.py'`
-- `python -m unittest tests.test_output_watchdog_v0 tests.test_tiku_agent_safe_answer_generator_v0 -q`
 - `powershell -ExecutionPolicy Bypass -File scripts/tiku_admin_watchdog_8795.ps1`
 - `powershell -ExecutionPolicy Bypass -File scripts/tiku_agent_watchdog_8790.ps1`
 - `python scripts/run_tiku_agent_8790.py --help`
@@ -101,3 +97,4 @@
 - `python scripts/inspect_paddle_layout_candidates.py --help`
 - `python scripts/search_by_loads.py --help`
 - `python search.py --help`
+- `python scripts/evaluate_rerank_matrix.py --dry-run --prompts v1 v4 --providers zhipu qwen --workers 10`
