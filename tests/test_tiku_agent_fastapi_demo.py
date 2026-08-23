@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from tiku_agent.agent import AgentResponse
-from tiku_agent.fastapi_demo import MAX_FEEDBACK_BYTES, MAX_IMAGE_BYTES, SESSION_COOKIE, _SCRIPT, _STYLE, _agent_payload, _write_incoming_image, create_app
+from tiku_agent.fastapi_demo import MAX_FEEDBACK_BYTES, MAX_IMAGE_BYTES, SESSION_COOKIE, _SCRIPT, _STYLE, _agent_payload, _public_protocol_message, _write_incoming_image, create_app
 from tiku_agent.feedback_store import SQLiteFeedbackStore, scope_feedback_conversation
 from tiku_agent.invite_access import InviteAccess, build_invitation_config
 from tiku_agent.session_runtime import AgentBudgetExceededError, AgentRuntimeBusyError
@@ -759,7 +759,7 @@ class FastApiDemoTest(unittest.TestCase):
         Image.new("RGB", (4, 4), "white").save(image_path)
 
         class GuardedRuntime(FakeRuntime):
-            error = AgentRuntimeBusyError("当前请求较多，请稍后再试。")
+            error = AgentRuntimeBusyError("Traceback: C:\\private\\provider-token=secret")
 
             def handle_text(self, session_id: str, text: str, *, progress=None) -> AgentResponse:
                 raise self.error
@@ -775,6 +775,8 @@ class FastApiDemoTest(unittest.TestCase):
         events = [json.loads(line) for line in stream.text.splitlines() if line]
         self.assertEqual(events[0]["type"], "error")
         self.assertEqual(events[0]["message"], "当前请求较多，请稍后再试。")
+        self.assertNotIn("Traceback", events[0]["message"])
+        self.assertNotIn("secret", events[0]["message"])
         self.assertEqual(events[0]["status"], "ERROR")
         self.assertEqual(events[0]["layer"], "queue")
         self.assertEqual(events[0]["code"], "QUEUE_FULL")
@@ -782,10 +784,25 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(events[0]["action"], "retry_request")
         self.assertTrue(events[0]["request_id"].startswith("req_"))
 
-        runtime.error = AgentBudgetExceededError("今日服务额度已用完，请明天再试。")
+        runtime.error = AgentBudgetExceededError("internal/path/token=secret")
         budget = client.post("/api/message", json={"text": "你好"})
         self.assertEqual(budget.status_code, 503)
         self.assertEqual(budget.headers["retry-after"], "3600")
+        self.assertNotIn("secret", budget.text)
+        self.assertIn("今日服务额度已用完", budget.json()["detail"])
+
+    def test_unknown_protocol_uses_safe_status_fallback(self):
+        from tiku_shared.request_protocol import RequestLayer, RequestProtocol, RequestStatus
+
+        protocol = RequestProtocol(
+            status=RequestStatus.ERROR,
+            layer=RequestLayer.TOOL,
+            code="UNMAPPED_INTERNAL_FAILURE",
+        )
+        self.assertEqual(
+            _public_protocol_message(protocol),
+            "服务暂时异常，请稍后重试。",
+        )
 
     def test_lifespan_periodically_purges_expired_sessions(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"

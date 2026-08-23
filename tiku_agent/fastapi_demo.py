@@ -64,6 +64,36 @@ FEEDBACK_TAGS = {
         "too_slow", "system_error", "other",
     },
 }
+
+# API error details are a public contract. Keep provider/runtime text out of
+# this boundary even when an exception was constructed with an arbitrary
+# message.
+_PUBLIC_PROTOCOL_MESSAGES = {
+    "LOGIN_REQUIRED": "请先使用有效邀请码登录。",
+    "INVITE_INVALID": "邀请码无效或已停用，请检查后重试。",
+    "LOGIN_EXPIRED": "登录状态已失效，请重新登录。",
+    "MESSAGE_INVALID": "请求内容无效，请重新提交。",
+    "STALE_ACTION": "这个操作已经失效，请使用当前页面中的操作。",
+    "STALE_CANDIDATE": "这个候选已经失效，请重新上传题图。",
+    "UPLOAD_REQUIRED": "请先上传题图。",
+    "UPLOAD_TOO_LARGE": "题图文件过大，请压缩后重新上传。",
+    "UPLOAD_UNSUPPORTED_FORMAT": "暂不支持这种图片格式，请重新上传 JPG、PNG 或 WEBP。",
+    "UPLOAD_DECODE_FAILED": "这张图片无法正常读取，请重新上传。",
+    "UPLOAD_PERSIST_FAILED": "题图暂时无法保存，请稍后重试。",
+    "MEDIA_NOT_FOUND": "请求的图片已失效，请重新上传题图。",
+    "MEDIA_PERSIST_FAILED": "图片暂时无法保存，请稍后重试。",
+    "QUEUE_FULL": "当前请求较多，请稍后再试。",
+    "QUEUE_TIMEOUT": "请求等待超时，请稍后重试。",
+    "GLOBAL_DAILY_QUOTA_EXCEEDED": "今日服务额度已用完，请明天再试。",
+    "INVITE_DAILY_QUOTA_EXCEEDED": "该邀请码今日额度已用完，请明天再试。",
+    "INVITE_IDENTITY_MISSING": "当前请求缺少有效邀请码，请重新登录。",
+    "FEEDBACK_INVALID": "反馈内容无效，请检查后重试。",
+    "FEEDBACK_TOO_LARGE": "反馈内容过大，请缩短后重试。",
+    "FEEDBACK_SAVE_FAILED": "反馈暂时无法保存，请稍后重试。",
+    "SERVICE_UNAVAILABLE": "服务暂时异常，请稍后重试。",
+    "AGENT_FAILED": "这次处理没有完成，请稍后重试。",
+    "TOOL_FAILED": "这次处理没有完成，请稍后重试。",
+}
 logger = logging.getLogger(__name__)
 _PAGE = (WEB_DIR / "index.html").read_text(encoding="utf-8")
 _STYLE = (WEB_DIR / "demo.css").read_text(encoding="utf-8")
@@ -962,10 +992,27 @@ def _protocol_json_response(
     headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     return JSONResponse(
-        {"detail": detail, **protocol.to_dict()},
+        {"detail": _public_protocol_message(protocol), **protocol.to_dict()},
         status_code=status_code,
         headers=headers,
     )
+
+
+def _public_protocol_message(protocol: RequestProtocol) -> str:
+    """Return catalog text for an API-bound protocol error."""
+
+    message = _PUBLIC_PROTOCOL_MESSAGES.get(protocol.code)
+    if message:
+        return message
+    if protocol.status is RequestStatus.ERROR:
+        return "服务暂时异常，请稍后重试。"
+    if protocol.status is RequestStatus.NEEDS_INPUT:
+        return "请求信息不完整，请按提示重新提交。"
+    if protocol.status is RequestStatus.PARTIAL:
+        return "这次处理未完全完成，请稍后重试。"
+    if protocol.status is RequestStatus.NO_MATCH:
+        return "暂时没有找到足够可靠的结果。"
+    return "请求已完成。"
 
 
 def _http_error_protocol(
@@ -1393,7 +1440,7 @@ async def _stream_agent_events(
             )
             await queue.put({
                 "type": "error",
-                "message": str(exc),
+                "message": _public_protocol_message(protocol),
                 **protocol.to_dict(),
             })
         except Exception:  # noqa: BLE001 - keep internal failures out of the public stream.
