@@ -382,6 +382,7 @@ class AgentState:
         if not self.candidates:
             raise ValueError("no candidates to reject")
         self.current_candidates_rejected = True
+        self.continuation_available = False
 
     def report_answer_mismatch(self) -> None:
         if not self.last_answer_paths:

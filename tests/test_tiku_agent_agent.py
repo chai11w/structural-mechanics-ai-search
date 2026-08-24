@@ -192,7 +192,8 @@ class TikuSearchAgentTest(unittest.TestCase):
         response = agent.handle_text("忙吗，能接着看题不")
 
         self.assertEqual(response.intent, "clarification")
-        self.assertIn("继续搜题", response.text)
+        self.assertIn("选择候选编号", response.text)
+        self.assertNotIn("继续搜", response.text)
         self.assertEqual(fake.search_chapters, searches_before)
 
     def test_v2_model_failure_safely_clarifies_without_running_tools(self):
@@ -492,7 +493,7 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(response.intent, "reject_candidates")
         self.assertEqual(
             response.text,
-            "收到，这批候选都先排除。你可以回复“继续搜”看下一批，或联系作者手搓。",
+            "收到，目前没有更多相似候选题，你可以联系作者手搓。",
         )
         self.assertTrue(agent.state.current_candidates_rejected)
         self.assertEqual(response.media_kind, "")
@@ -1050,36 +1051,38 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(fake.search_chapters, ["4力法", "4力法"])
         self.assertIn("比较像", response.text)
 
-    def test_candidate_rejection_continues_with_a_non_repeating_batch(self):
+    def test_candidate_rejection_stops_after_the_best_batch(self):
         fake = FakeTools(chapter="4力法")
-        agent = self.make_v2_agent(fake)
+        agent = self.make_v2_agent(fake, enable_author_contact_fallback=True)
         first = agent.handle_image("q.jpg")
-        first_paths = [item["path"] for item in agent.state.candidates]
         self.assertEqual(first.intent, "search_image")
-        self.assertTrue(agent.state.continuation_available)
+        self.assertFalse(agent.state.continuation_available)
 
         rejected = agent.handle_text("没有")
         self.assertEqual(rejected.intent, "reject_candidates")
         self.assertTrue(agent.state.current_candidates_rejected)
         self.assertEqual(len(fake.search_chapters), 1)
-
-        continued = agent.handle_text("搜题")
-        second_paths = [item["path"] for item in agent.state.candidates]
-        self.assertEqual(continued.intent, "continue_search")
-        self.assertTrue(set(first_paths).isdisjoint(second_paths))
         self.assertEqual(
-            set(fake.search_exclusions[-1]),
-            {"4力法|main|q1.jpg", "4力法|main|q2.jpg"},
+            rejected.text,
+            "收到，目前没有更多相似候选题，你可以联系作者手搓。",
         )
+
+        # A persisted pre-release session may still claim another batch exists.
+        agent.state.continuation_available = True
+        continued = agent.handle_text("换一批")
+        self.assertEqual(continued.intent, "clarification")
+        self.assertEqual(
+            continued.text,
+            "收到，目前没有更多相似候选题，你可以联系作者手搓。",
+        )
+        self.assertEqual(
+            continued.author_contact,
+            {"label": "联系作者", "channel": "微信", "value": "jglxfd6666"},
+        )
+        self.assertEqual(len(fake.search_chapters), 1)
         self.assertFalse(agent.state.continuation_available)
         self.assertEqual(fake.route_calls, 1)
         self.assertEqual(fake.structure_calls, 1)
-
-        calls_before = len(fake.search_chapters)
-        exhausted = agent.handle_text("换一批")
-        self.assertEqual(exhausted.intent, "clarification")
-        self.assertIn("没有更多候选", exhausted.text)
-        self.assertEqual(len(fake.search_chapters), calls_before)
 
     def test_8896_author_fallback_keeps_continue_as_text_only(self):
         fake = FakeTools(chapter="4力法")
@@ -1090,7 +1093,7 @@ class TikuSearchAgentTest(unittest.TestCase):
 
         self.assertEqual(
             rejected.text,
-            "收到，这批候选都先排除。你可以回复“继续搜”看下一批，或联系作者手搓。",
+            "收到，目前没有更多相似候选题，你可以联系作者手搓。",
         )
         self.assertEqual(rejected.media_kind, "")
         self.assertEqual(
@@ -1112,21 +1115,22 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(shown.intent, "show_candidates")
         self.assertEqual(shown.images, ["4力法/q1.jpg", "4力法/q2.jpg"])
 
-    def test_answer_mismatch_with_explicit_next_batch_continues_immediately(self):
+    def test_answer_mismatch_with_explicit_next_batch_stops_without_searching(self):
         fake = FakeTools(chapter="4力法")
-        agent = self.make_v2_agent(fake)
+        agent = self.make_v2_agent(fake, enable_author_contact_fallback=True)
         agent.handle_image("q.jpg")
         agent.handle_text("候选1")
 
         continued = agent.handle_text("这个答案不对，换一批")
 
-        self.assertEqual(continued.intent, "continue_search")
+        self.assertEqual(continued.intent, "clarification")
         self.assertEqual(
-            [item["path"] for item in agent.state.candidates],
-            ["4力法/q3.jpg", "4力法/q4.jpg"],
+            continued.text,
+            "收到，目前没有更多相似候选题，你可以联系作者手搓。",
         )
-        self.assertEqual(agent.state.last_answer_paths, [])
-        self.assertEqual(agent.state.phase, STATE_WAIT_CANDIDATE_CHOICE)
+        self.assertEqual(len(fake.search_chapters), 1)
+        self.assertEqual(agent.state.last_answer_paths, ["out/answer1.jpg"])
+        self.assertEqual(agent.state.phase, PHASE_ANSWERED)
 
 
 if __name__ == "__main__":

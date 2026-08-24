@@ -292,7 +292,7 @@ class SafeAnswerStateAwareAcceptanceTest(unittest.TestCase):
         cases = (
             (
                 STATE_WAIT_CANDIDATE_CHOICE,
-                ("选择候选题", "说明候选都不合适", "查看下一批候选"),
+                ("选择候选题", "说明候选都不合适"),
             ),
             (
                 PHASE_ANSWERED,

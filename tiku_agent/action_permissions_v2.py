@@ -174,9 +174,7 @@ def authorize_action_v2(
             return _clarify("candidate_list_required")
         if context.candidate_count == 0 or not context.has_active_image:
             return _clarify("candidate_list_required")
-        if not context.continuation_available:
-            return _clarify("continuation_exhausted")
-        return _allow("continue_search", STATE_UPDATE_TASK, TOOLS_FIXED_SEARCH_PIPELINE)
+        return _clarify("continuation_exhausted")
 
     if decision.action == "show_candidates":
         if context.phase not in {"WAIT_CANDIDATE_CHOICE", "ANSWERED"}:

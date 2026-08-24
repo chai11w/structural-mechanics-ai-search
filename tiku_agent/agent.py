@@ -432,6 +432,21 @@ class TikuSearchAgent:
                 return self._chapter_scope_clarification_response(
                     include_supported_topics=previous_action == "clarification",
                 )
+        if (
+            decision.action == "clarification"
+            and decision.clarification_reason == "no_more_candidates"
+            and self.enable_author_contact_fallback
+        ):
+            if self.state.candidates:
+                self.state.reject_current_candidates()
+            return self._response(
+                render.render_no_more_candidates(
+                    self.state,
+                    author_contact_fallback=True,
+                ),
+                IntentResult("clarification"),
+                include_author_contact=True,
+            )
         if is_reply_shell_action(decision.action):
             return AgentResponse(
                 text=render_reply_shell_v2(decision, context),
@@ -503,7 +518,14 @@ class TikuSearchAgent:
             )
         if intent.intent == "continue_search":
             self.state.reject_current_candidates()
-            return self._run_search(intent=intent, classified=self._selected_question(), continuing=True)
+            return self._response(
+                render.render_no_more_candidates(
+                    self.state,
+                    author_contact_fallback=self.enable_author_contact_fallback,
+                ),
+                intent,
+                include_author_contact=self.enable_author_contact_fallback,
+            )
         if intent.intent == "show_candidates":
             return self._response(
                 render.render_existing_candidates(self.state),
@@ -756,7 +778,7 @@ class TikuSearchAgent:
         if stopped is not None:
             return stopped
         candidates = list(coarse.data.get("candidates") or [])
-        self.state.record_search_batch(candidates, has_more=bool(coarse.data.get("has_more")))
+        self.state.record_search_batch(candidates, has_more=False)
         if not candidates:
             self.state.set_candidates([])
             text = (

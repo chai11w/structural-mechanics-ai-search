@@ -64,21 +64,21 @@ class SafeAnswerContextV0Test(unittest.TestCase):
         ctx = build_safe_answer_context(state)
         self.assertIn("选择候选题", ctx.allowed_actions)
         self.assertIn("说明候选都不合适", ctx.allowed_actions)
-        self.assertIn("查看下一批候选", ctx.allowed_actions)
+        self.assertNotIn("查看下一批候选", ctx.allowed_actions)
         self.assertIn("重新查看候选列表", ctx.allowed_actions)
         self.assertIn("补充或更换章节", ctx.allowed_actions)
         self.assertNotIn("确认后查找全部章节", ctx.allowed_actions)
         self.assertEqual(ctx.candidate_count, 3)
         self.assertEqual(ctx.chapter, "4力法")
 
-    def test_continue_search_only_when_continuation_available(self):
+    def test_continue_search_is_not_offered_even_to_legacy_continuation_state(self):
         base = dict(
             phase=STATE_WAIT_CANDIDATE_CHOICE,
             current_image_path="D:/bank/4/q1.jpg",
             candidates=[{"rank": 1}, {"rank": 2}],
         )
         with_cont = build_safe_answer_context(_candidate_state(**base, continuation_available=True))
-        self.assertIn("查看下一批候选", with_cont.allowed_actions)
+        self.assertNotIn("查看下一批候选", with_cont.allowed_actions)
         without_cont = build_safe_answer_context(_candidate_state(**base, continuation_available=False))
         self.assertNotIn("查看下一批候选", without_cont.allowed_actions)
 

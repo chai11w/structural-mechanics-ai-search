@@ -993,7 +993,7 @@ class A3RuntimeTests(unittest.TestCase):
             {"x": 0.25, "y": 0.2, "width": 0.5, "height": 0.5},
         )
         fallback = (
-            "收到，这批候选都先排除。你可以回复“继续搜”看下一批，或联系作者手搓。"
+            "收到，目前没有更多相似候选题，你可以联系作者手搓。"
         )
 
         def reject_candidates(_session_id, _text, **_kwargs):

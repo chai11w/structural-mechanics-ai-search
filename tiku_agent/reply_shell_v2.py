@@ -47,8 +47,6 @@ def render_reply_shell_v2(
 
 def _render_clarification(reason: str, context: ConversationContextV2) -> str:
     if reason == "ambiguous_action" and context.candidate_count:
-        if context.continuation_available:
-            return "你想继续搜题看下一批、选择候选编号，还是换章节？"
         return "你想选择候选编号、换章节，还是发下一张题图？"
     replies = {
         "ambiguous_reference": "你指的是哪一道题，还是哪个候选？",

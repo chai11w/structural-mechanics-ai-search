@@ -230,8 +230,9 @@ class ActionPermissionsV2Test(unittest.TestCase):
         shown = authorize_action_v2(ActionDecisionV2(action="show_candidates"), context)
         self.assertTrue(rejected.allowed)
         self.assertEqual(rejected.tool_effect, TOOLS_NONE)
-        self.assertTrue(continued.allowed)
-        self.assertEqual(continued.tool_effect, TOOLS_FIXED_SEARCH_PIPELINE)
+        self.assertEqual(continued.outcome, OUTCOME_CLARIFY)
+        self.assertEqual(continued.code, "continuation_exhausted")
+        self.assertEqual(continued.tool_effect, TOOLS_NONE)
         self.assertTrue(shown.allowed)
         self.assertEqual(shown.state_effect, STATE_PRESERVE)
 

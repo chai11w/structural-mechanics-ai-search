@@ -173,7 +173,8 @@ class IntentV2Test(unittest.TestCase):
                 decision = decide_intent_v2("是", context)
                 self.assertNotEqual(decision.action, "select_candidate")
         compound = decide_intent_v2("是可以，但我想继续搜", unique_with_more)
-        self.assertEqual(compound.action, "continue_search")
+        self.assertEqual(compound.action, "clarification")
+        self.assertEqual(compound.clarification_reason, "no_more_candidates")
 
     def test_forbidden_and_conversation_rules_never_call_model(self):
         calls = []
@@ -521,11 +522,11 @@ class IntentV2Test(unittest.TestCase):
             continuation_available=True,
         )
         self.assertEqual(decide_intent_v2("没有", context).action, "reject_candidates")
-        self.assertEqual(decide_intent_v2("继续搜", context).action, "continue_search")
-        self.assertEqual(
-            decide_intent_v2("这几个都不是，换一批", context).action,
-            "continue_search",
-        )
+        for text in ("继续搜", "这几个都不是，换一批"):
+            with self.subTest(text=text):
+                decision = decide_intent_v2(text, context)
+                self.assertEqual(decision.action, "clarification")
+                self.assertEqual(decision.clarification_reason, "no_more_candidates")
 
         unique_candidate = ConversationContextV2(
             phase="WAIT_CANDIDATE_CHOICE",
@@ -594,7 +595,11 @@ class IntentV2Test(unittest.TestCase):
                     context,
                     llm_client=lambda _prompt, action=expected: {"action": action},
                 )
-                self.assertEqual(decision.action, expected)
+                if expected == "continue_search":
+                    self.assertEqual(decision.action, "clarification")
+                    self.assertEqual(decision.clarification_reason, "no_more_candidates")
+                else:
+                    self.assertEqual(decision.action, expected)
 
     def test_model_continuation_is_blocked_after_candidates_are_exhausted(self):
         exhausted = ConversationContextV2(

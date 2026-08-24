@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "status": "review_draft",
-  "description": "Candidate rejection, bounded continuation, candidate return, and answer mismatch recovery cases.",
+  "description": "Candidate rejection, disabled continuation, candidate return, and answer mismatch recovery cases.",
   "cases": [
     {
       "id": "feedback_reject_plain_none",
@@ -33,7 +33,7 @@
       "history": [{"role": "assistant", "content": "这批候选已排除，可以继续搜。"}],
       "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "continuation_available": true, "current_candidates_rejected": true},
       "input": {"event_type": "text", "text": "继续搜"},
-      "expected_decision": {"action": "continue_search"}
+      "expected_decision": {"action": "clarification", "clarification_reason": "no_more_candidates"}
     },
     {
       "id": "feedback_continue_short_search",
@@ -41,7 +41,7 @@
       "history": [{"role": "assistant", "content": "你还可以继续找下一批。"}],
       "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "continuation_available": true, "current_candidates_rejected": true},
       "input": {"event_type": "text", "text": "搜题"},
-      "expected_decision": {"action": "continue_search"}
+      "expected_decision": {"action": "clarification", "clarification_reason": "no_more_candidates"}
     },
     {
       "id": "feedback_continue_change_batch",
@@ -49,7 +49,7 @@
       "history": [{"role": "assistant", "content": "当前候选里有想要的吗？"}],
       "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "continuation_available": true},
       "input": {"event_type": "text", "text": "换一批"},
-      "expected_decision": {"action": "continue_search"}
+      "expected_decision": {"action": "clarification", "clarification_reason": "no_more_candidates"}
     },
     {
       "id": "feedback_continue_find_more",
@@ -57,7 +57,7 @@
       "history": [{"role": "assistant", "content": "当前候选里有想要的吗？"}],
       "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "continuation_available": true},
       "input": {"event_type": "text", "text": "再找几个"},
-      "expected_decision": {"action": "continue_search"}
+      "expected_decision": {"action": "clarification", "clarification_reason": "no_more_candidates"}
     },
     {
       "id": "feedback_reject_and_continue",
@@ -65,7 +65,7 @@
       "history": [{"role": "assistant", "content": "当前候选里有想要的吗？"}],
       "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "continuation_available": true},
       "input": {"event_type": "text", "text": "这些都不对，继续找"},
-      "expected_decision": {"action": "continue_search"}
+      "expected_decision": {"action": "clarification", "clarification_reason": "no_more_candidates"}
     },
     {
       "id": "feedback_continuation_exhausted",
@@ -121,7 +121,7 @@
       "history": [{"role": "assistant", "content": "这批候选都先排除了。"}],
       "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 3, "has_active_image": true, "continuation_available": true, "current_candidates_rejected": true},
       "input": {"event_type": "text", "text": "后面还有别的吗"},
-      "expected_decision": {"action": "continue_search"}
+      "expected_decision": {"action": "clarification", "clarification_reason": "no_more_candidates"}
     },
     {
       "id": "feedback_model_page_forward",
@@ -129,7 +129,7 @@
       "history": [{"role": "assistant", "content": "当前还有未展示候选。"}],
       "context": {"phase": "WAIT_CANDIDATE_CHOICE", "active_namespace": "candidate", "candidate_count": 2, "has_active_image": true, "continuation_available": true},
       "input": {"event_type": "text", "text": "往后翻翻看"},
-      "expected_decision": {"action": "continue_search"}
+      "expected_decision": {"action": "clarification", "clarification_reason": "no_more_candidates"}
     },
     {
       "id": "feedback_model_restore_list",

@@ -392,7 +392,7 @@ class FastApiDemoTest(unittest.TestCase):
         cases = (
             (
                 "reject_candidates",
-                "收到，这批候选都先排除。你可以回复“继续搜”看下一批，或联系作者手搓。",
+                "收到，目前没有更多相似候选题，你可以联系作者手搓。",
                 retained_state,
             ),
             ("report_answer_mismatch", "收到，这个答案先标记为不匹配。", retained_state),
