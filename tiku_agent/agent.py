@@ -97,6 +97,7 @@ class AgentResponse:
     fallback_reason: str = ""
     protocol: dict[str, Any] = field(default_factory=dict)
     author_contact: dict[str, str] = field(default_factory=dict)
+    media_kind: str = ""
 
 
 @dataclass
@@ -479,7 +480,13 @@ class TikuSearchAgent:
             self.state.cancel()
             return self._response(render.render_cancelled(), intent)
         if intent.intent == "resend_answer":
-            return self._response(render.render_resend_answer(self.state), intent, images=self.state.last_answer_paths)
+            answer_paths = list(self.state.last_answer_paths)
+            return self._response(
+                render.render_resend_answer(self.state),
+                intent,
+                images=answer_paths,
+                media_kind="answer" if answer_paths else "",
+            )
         if intent.intent == "explain_failure":
             return self._response(render.render_failure_explanation(self.state), intent)
         if intent.intent == "retry_search":
@@ -502,6 +509,7 @@ class TikuSearchAgent:
                 render.render_existing_candidates(self.state),
                 intent,
                 images=[str(item.get("path")) for item in self.state.candidates if item.get("path")],
+                media_kind="candidates",
             )
         if intent.intent == "report_answer_mismatch":
             self.state.report_answer_mismatch()
@@ -796,7 +804,12 @@ class TikuSearchAgent:
             reranked=bool(reranked.data.get("reranked")),
             note=self._join_notices(notices),
         )
-        return self._response(text, intent or IntentResult("search_image"), images=[str(item.get("path")) for item in visible if item.get("path")])
+        return self._response(
+            text,
+            intent or IntentResult("search_image"),
+            images=[str(item.get("path")) for item in visible if item.get("path")],
+            media_kind="candidates",
+        )
 
     def _run_global_search(self, intent: IntentResult) -> AgentResponse:
         if not self.state.consume_global_search_offer():
@@ -850,6 +863,7 @@ class TikuSearchAgent:
             ),
             intent,
             images=[str(item.get("path")) for item in candidates if item.get("path")],
+            media_kind="candidates",
         )
 
     def _selected_question(self) -> dict[str, Any] | None:
@@ -881,7 +895,12 @@ class TikuSearchAgent:
             )
         paths = list(answered.data.get("copied_paths") or answered.data.get("answer_paths") or [])
         self.state.set_answer_paths([str(path) for path in paths])
-        return self._response(render.render_answer(self.state), intent, images=self.state.last_answer_paths)
+        return self._response(
+            render.render_answer(self.state),
+            intent,
+            images=self.state.last_answer_paths,
+            media_kind="answer" if self.state.last_answer_paths else "",
+        )
 
     @staticmethod
     def _resolve_analysis_scope(payload: dict[str, Any]) -> ChapterScopeResult:
@@ -1054,9 +1073,12 @@ class TikuSearchAgent:
         intent: IntentResult,
         *,
         images: list[str] | None = None,
+        media_kind: str = "",
         protocol: dict[str, Any] | None = None,
         include_author_contact: bool = False,
     ) -> AgentResponse:
+        if media_kind not in {"", "candidates", "answer"}:
+            raise ValueError(f"unsupported response media kind: {media_kind}")
         derived_protocol = protocol
         if derived_protocol is None and self.state.phase in {
             PHASE_ERROR,
@@ -1077,6 +1099,7 @@ class TikuSearchAgent:
                 if include_author_contact
                 else {}
             ),
+            media_kind=media_kind,
         )
 
     def _protocol_from_tool_result(self, result: ToolResult) -> dict[str, Any]:

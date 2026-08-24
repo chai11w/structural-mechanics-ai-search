@@ -527,6 +527,17 @@ class IntentV2Test(unittest.TestCase):
             "continue_search",
         )
 
+        unique_candidate = ConversationContextV2(
+            phase="WAIT_CANDIDATE_CHOICE",
+            active_namespace="candidate",
+            candidate_count=1,
+            has_active_image=True,
+            continuation_available=True,
+        )
+        short_rejection = decide_intent_v2("不是", unique_candidate)
+        self.assertEqual(short_rejection.action, "reject_candidates")
+        self.assertEqual(short_rejection.source, "rule")
+
     def test_continue_search_does_not_reuse_error_retry_semantics(self):
         exhausted = ConversationContextV2(
             phase="WAIT_CANDIDATE_CHOICE",

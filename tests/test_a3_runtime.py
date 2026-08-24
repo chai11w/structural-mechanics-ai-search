@@ -226,6 +226,7 @@ class FakeA2Runtime:
             },
             intent="search_image",
             protocol=RequestProtocol.from_code("REQUEST_SUCCEEDED").to_dict(),
+            media_kind="candidates",
         )
 
     def handle_preanalyzed_image(self, session_id, image_path, **kwargs):
@@ -248,6 +249,7 @@ class FakeA2Runtime:
             },
             intent="search_image",
             protocol=RequestProtocol.from_code("REQUEST_SUCCEEDED").to_dict(),
+            media_kind="candidates",
         )
 
     def handle_text(self, session_id, text, **_kwargs):
@@ -267,6 +269,7 @@ class FakeA2Runtime:
                 state={"phase": "WAIT_CANDIDATE_CHOICE"},
                 intent="set_chapter",
                 protocol=RequestProtocol.from_code("REQUEST_SUCCEEDED").to_dict(),
+                media_kind="candidates",
             )
         self.sessions[session_id]["phase"] = "ANSWERED"
         return AgentResponse(
@@ -274,6 +277,7 @@ class FakeA2Runtime:
             state={"phase": "ANSWERED"},
             intent="select_candidate",
             protocol=RequestProtocol.from_code("REQUEST_SUCCEEDED").to_dict(),
+            media_kind="answer",
         )
 
     def session_snapshot(self, session_id):
@@ -979,6 +983,35 @@ class A3RuntimeTests(unittest.TestCase):
             completed.text,
             "「四-1」的题库答案找到了，已经发给你。这张图里的可处理题目已经全部完成。",
         )
+
+    def test_active_a2_candidate_rejection_keeps_fixed_text_only_fallback(self):
+        session_id = "a3-candidate-rejection-fallback"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.25, "y": 0.2, "width": 0.5, "height": 0.5},
+        )
+        fallback = (
+            "收到，这批候选都先排除。你可以回复“继续搜”看下一批，或联系作者手搓。"
+        )
+
+        def reject_candidates(_session_id, _text, **_kwargs):
+            return AgentResponse(
+                text=fallback,
+                state={"phase": "WAIT_CANDIDATE_CHOICE", "candidate_count": 1},
+                intent="reject_candidates",
+                protocol=RequestProtocol.from_code("REQUEST_SUCCEEDED").to_dict(),
+            )
+
+        self.a2.handle_text = reject_candidates
+        response = self.runtime.handle_text(session_id, "不是")
+
+        self.assertEqual(response.text, fallback)
+        self.assertEqual(response.media_kind, "")
+        a3 = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(a3["phase"], A3_PHASE_A2_ACTIVE)
+        self.assertEqual(self.runtime.store.load(session_id).last_error, "")
 
     def test_media_delivery_failure_reopens_active_a3_unit(self):
         session_id = "a3-media-failure-session"

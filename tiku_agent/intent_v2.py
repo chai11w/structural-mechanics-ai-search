@@ -521,6 +521,12 @@ def _result_feedback_decision(
         return _simple("continue_search")
     if context.phase == "ANSWERED" and _has_answer_mismatch_evidence(text):
         return _simple("report_answer_mismatch")
+    if (
+        context.phase == "WAIT_CANDIDATE_CHOICE"
+        and context.candidate_count == 1
+        and _is_short_negative_feedback(text)
+    ):
+        return _simple("reject_candidates")
     if _has_reject_candidates_evidence(text):
         return _simple("reject_candidates")
     return None
@@ -556,6 +562,11 @@ def _has_reject_candidates_evidence(text: str) -> bool:
     if compact in {"没有", "都不是", "都不对", "没一个对", "一个都不是", "没有想要的", "没有我想要的"}:
         return True
     return bool(re.search(r"(?:这些|这几个|这一批|候选|都|一个也?).{0,6}(?:不对|不是|不匹配|不合适|没想要)", compact))
+
+
+def _is_short_negative_feedback(text: str) -> bool:
+    compact = re.sub(r"[\s，。！？!?、,.]+", "", text)
+    return compact in {"不是", "不对", "不匹配", "不合适"}
 
 
 def _has_continue_search_evidence(text: str) -> bool:

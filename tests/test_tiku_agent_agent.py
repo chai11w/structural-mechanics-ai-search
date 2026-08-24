@@ -456,6 +456,48 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.last_answer_paths, ["out/answer1.jpg"])
         self.assertEqual(model_calls, [])
 
+    def test_v2_safe_answer_route_treats_no_as_unique_candidate_rejection(self):
+        fake = FakeTools(chapter="4力法")
+        candidate = {
+            "rank": 1,
+            "path": "4力法/q1.jpg",
+            "name": "q1.jpg",
+            "score": 0.99,
+            "candidate_key": "4力法|main|q1.jpg",
+        }
+        state = AgentState(
+            phase=STATE_WAIT_CANDIDATE_CHOICE,
+            current_image_path="q.jpg",
+            current_question_image_path="q.jpg",
+            current_loads=[{"type": "集中", "raw": "P"}],
+            current_chapter="4力法",
+            candidates=[candidate],
+            continuation_available=True,
+        )
+        model_calls = []
+        agent = TikuSearchAgent(
+            state=state,
+            tools=fake.toolbox(),
+            config=AgentToolConfig(top_k=3, rerank_top=3),
+            use_llm_intent=False,
+            enable_safe_answer_v0=True,
+            safe_answer_generator_v0=SafeAnswerGeneratorV0(
+                lambda request: model_calls.append(request) or "不应调用模型。"
+            ),
+            enable_author_contact_fallback=True,
+        )
+
+        response = agent.handle_text("不是")
+
+        self.assertEqual(response.intent, "reject_candidates")
+        self.assertEqual(
+            response.text,
+            "收到，这批候选都先排除。你可以回复“继续搜”看下一批，或联系作者手搓。",
+        )
+        self.assertTrue(agent.state.current_candidates_rejected)
+        self.assertEqual(response.media_kind, "")
+        self.assertEqual(model_calls, [])
+
     def test_v2_explicit_candidate_selection_does_not_reselect_multi_question(self):
         fake = FakeTools(chapter="")
         fake.analyze_multi_image = lambda image_path, *, config=None: ToolResult(
@@ -820,10 +862,12 @@ class TikuSearchAgentTest(unittest.TestCase):
         self.assertEqual(agent.state.phase, PHASE_ANSWERED)
         self.assertEqual(agent.state.last_answer_paths, ["out/answer1.jpg"])
         self.assertIn("答案发你了", answer.text)
+        self.assertEqual(answer.media_kind, "answer")
 
         resend = agent.handle_text("刚才答案再发我")
         self.assertIn("再发你一次", resend.text)
         self.assertEqual(resend.images, ["out/answer1.jpg"])
+        self.assertEqual(resend.media_kind, "answer")
 
     def test_correct_chapter_after_answer_reruns_search(self):
         fake = FakeTools(chapter="4力法")
@@ -1048,6 +1092,7 @@ class TikuSearchAgentTest(unittest.TestCase):
             rejected.text,
             "收到，这批候选都先排除。你可以回复“继续搜”看下一批，或联系作者手搓。",
         )
+        self.assertEqual(rejected.media_kind, "")
         self.assertEqual(
             rejected.author_contact,
             {"label": "联系作者", "channel": "微信", "value": "jglxfd6666"},

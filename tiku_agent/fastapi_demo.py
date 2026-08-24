@@ -1498,21 +1498,21 @@ def _persist_response_media(
     Candidate images are an atomic group: a partial group is withheld rather
     than shown with a misleading candidate list. Answer images may be sent
     progressively, but the public text and protocol distinguish zero,
-    partial, and complete delivery.
+    partial, and complete delivery. Persisted session media never implies that
+    the current response promised another delivery.
     """
 
     intent = str(response.intent or "").strip()
     state = response.state if isinstance(response.state, Mapping) else {}
-    candidate_items = state.get("candidates")
-    has_candidate_state = (
-        isinstance(candidate_items, (list, tuple)) and bool(candidate_items)
-    )
-    if intent in {"select_candidate", "resend_answer"}:
-        kind = "answer"
-    elif response.images or has_candidate_state:
-        kind = "candidates"
-    else:
-        return [], None
+    kind = str(getattr(response, "media_kind", "") or "").strip().lower()
+    if kind not in {"candidates", "answer"}:
+        if not response.images:
+            return [], None
+        kind = (
+            "answer"
+            if intent in {"select_candidate", "resend_answer"}
+            else "candidates"
+        )
 
     state_items = state.get("last_answer_paths" if kind == "answer" else "candidates")
     state_count = len(state_items) if isinstance(state_items, (list, tuple)) else 0

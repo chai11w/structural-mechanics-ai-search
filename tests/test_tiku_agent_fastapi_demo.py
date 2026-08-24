@@ -39,6 +39,7 @@ class FakeRuntime:
         self.progress_stage = "searching"
         self.progress_message = "正在按「4力法」搜索题目…"
         self.response_protocol = {}
+        self.media_failure_calls = []
         self.snapshot = {
             "session_valid": False,
             "phase": "IDLE",
@@ -108,6 +109,9 @@ class FakeRuntime:
 
     def current_auto_crop_overlay_path(self, session_id: str) -> Path | None:
         return self.image_path if session_id == self.upload_session else None
+
+    def mark_media_delivery_failed(self, session_id: str, **kwargs) -> None:
+        self.media_failure_calls.append((session_id, kwargs))
 
 
 class FastApiDemoTest(unittest.TestCase):
@@ -325,6 +329,7 @@ class FastApiDemoTest(unittest.TestCase):
                 images=[str(image_path), str(test_dir / "missing.jpg")],
                 state={"candidates": [{"path": str(image_path)}, {"path": "missing.jpg"}]},
                 intent="search_image",
+                media_kind="candidates",
             ),
             runtime,
             "candidate-session",
@@ -350,6 +355,7 @@ class FastApiDemoTest(unittest.TestCase):
                 images=[],
                 state={"candidates": [{"path": "missing-1.jpg"}, {"path": "missing-2.jpg"}]},
                 intent="search_image",
+                media_kind="candidates",
             ),
             runtime,
             "candidate-empty-session",
@@ -359,6 +365,72 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(empty_payload["media"]["requested_count"], 2)
         self.assertEqual(empty_payload["media"]["delivered_count"], 0)
         self.assertEqual(empty_payload["images"], [])
+
+        show_payload = _agent_payload(
+            AgentResponse(
+                text="好，回到当前候选。",
+                images=[],
+                state={"candidates": [{"path": "missing.jpg"}]},
+                intent="show_candidates",
+                media_kind="candidates",
+            ),
+            runtime,
+            "candidate-show-session",
+        )
+        self.assertEqual(show_payload["code"], "MEDIA_CANDIDATES_INCOMPLETE")
+        self.assertEqual(show_payload["media"]["requested_count"], 1)
+
+    def test_text_only_responses_keep_fixed_copy_with_retained_media_state(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"retained_media_{uuid4().hex}.jpg"
+        Image.new("RGB", (8, 8), "white").save(image_path)
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        retained_state = {
+            "candidates": [{"path": str(image_path)}],
+            "last_answer_paths": [str(image_path)],
+        }
+        cases = (
+            (
+                "reject_candidates",
+                "收到，这批候选都先排除。你可以回复“继续搜”看下一批，或联系作者手搓。",
+                retained_state,
+            ),
+            ("report_answer_mismatch", "收到，这个答案先标记为不匹配。", retained_state),
+            ("clarification", "我还不能确定你想执行什么。", retained_state),
+            ("cancel", "好，已经取消了。", retained_state),
+            ("safe_answer", "我会保留当前搜题进度。", retained_state),
+            ("explain_failure", "刚才没有查成功，请稍后重试。", retained_state),
+            (
+                "select_candidate",
+                "未找到该候选题对应的答案文件。",
+                {"candidates": retained_state["candidates"], "last_answer_paths": []},
+            ),
+            (
+                "resend_answer",
+                "我这里还没有上一题答案记录，请先选一个候选。",
+                {"candidates": retained_state["candidates"], "last_answer_paths": []},
+            ),
+            ("set_chapter", "好，下一张题图按力法检索。", retained_state),
+        )
+
+        for intent, text, state in cases:
+            with self.subTest(intent=intent):
+                runtime = FakeRuntime(image_path)
+                payload = _agent_payload(
+                    AgentResponse(
+                        text=text,
+                        images=[],
+                        state=state,
+                        intent=intent,
+                    ),
+                    runtime,
+                    f"text-only-{intent}",
+                )
+
+                self.assertEqual(payload["text"], text)
+                self.assertEqual(payload["images"], [])
+                self.assertIsNone(payload["media"])
+                self.assertEqual(runtime.media_failure_calls, [])
 
     def test_answer_media_delivery_distinguishes_complete_partial_and_zero(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
@@ -377,6 +449,7 @@ class FastApiDemoTest(unittest.TestCase):
                 images=[str(first)],
                 state={"last_answer_paths": [str(first)]},
                 intent="select_candidate",
+                media_kind="answer",
             ),
             complete_runtime,
             "answer-complete-session",
@@ -401,6 +474,7 @@ class FastApiDemoTest(unittest.TestCase):
                 images=[str(first), str(second)],
                 state={"last_answer_paths": [str(first), str(second)]},
                 intent="select_candidate",
+                media_kind="answer",
             ),
             partial_runtime,
             "answer-partial-session",
@@ -418,6 +492,7 @@ class FastApiDemoTest(unittest.TestCase):
                 images=[str(test_dir / "missing.jpg")],
                 state={"last_answer_paths": [str(test_dir / "missing.jpg")]},
                 intent="resend_answer",
+                media_kind="answer",
             ),
             zero_runtime,
             "answer-zero-session",
@@ -434,6 +509,7 @@ class FastApiDemoTest(unittest.TestCase):
                 images=[],
                 state={"last_answer_paths": []},
                 intent="select_candidate",
+                media_kind="answer",
             ),
             FakeRuntime(first),
             "answer-empty-zero-session",

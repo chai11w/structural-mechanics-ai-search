@@ -2011,10 +2011,18 @@ class A3MvpRuntime:
         response: AgentResponse,
     ) -> AgentResponse:
         child_phase = str(response.state.get("phase") or "")
-        if (
-            child_phase == "WAIT_CANDIDATE_CHOICE"
-            or response.intent in {"select_candidate", "resend_answer"}
-        ):
+        response_media_kind = str(
+            getattr(response, "media_kind", "") or ""
+        ).strip().lower()
+        if response_media_kind not in {"candidates", "answer"}:
+            response_media_kind = ""
+            if response.images:
+                response_media_kind = (
+                    "answer"
+                    if response.intent in {"select_candidate", "resend_answer"}
+                    else "candidates"
+                )
+        if response_media_kind:
             child = self.a2_runtime.session_snapshot(state.session_id)
             response.state["_a3_media_guard"] = {
                 "unit_id": state.selected_unit_id,
@@ -2038,7 +2046,12 @@ class A3MvpRuntime:
             selected = state.unit(state.selected_unit_id) or {}
             display_label = str(selected.get("display_label") or "").strip()
             candidate_count = int(response.state.get("candidate_count") or 0)
-            if child_phase == "WAIT_CANDIDATE_CHOICE" and display_label and candidate_count:
+            if (
+                child_phase == "WAIT_CANDIDATE_CHOICE"
+                and response_media_kind == "candidates"
+                and display_label
+                and candidate_count
+            ):
                 state.last_error = ""
                 notice = ""
                 marker = "\n\n提示："
