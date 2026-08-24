@@ -10,6 +10,7 @@ param(
     [string]$ControlDb,
     [switch]$DisableExternalLoadScreen,
     [switch]$DisableAutoCrop,
+    [switch]$DisableOutputWatchdog,
     [string]$PythonExe = "python"
 )
 
@@ -104,6 +105,9 @@ function Start-Bot {
     }
     if ($DisableAutoCrop) {
         $arguments += "--disable-auto-crop"
+    }
+    if ($DisableOutputWatchdog) {
+        $arguments += "--disable-output-watchdog"
     }
     $process = Start-Process $PythonExe `
         -ArgumentList $arguments `

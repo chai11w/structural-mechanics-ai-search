@@ -20,6 +20,10 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
         self.assertEqual(DEFAULT_RUNTIME_DIR.name, ".tmp_tiku_agent_v2_prod_8790")
         self.assertTrue(defaults.enable_triage)
         self.assertTrue(defaults.enable_auto_crop)
+        self.assertTrue(defaults.enable_output_watchdog)
+        self.assertFalse(
+            build_argument_parser().parse_args(["--disable-output-watchdog"]).enable_output_watchdog
+        )
 
     def test_control_database_protects_the_a3_app(self):
         with tempfile.TemporaryDirectory() as temp:

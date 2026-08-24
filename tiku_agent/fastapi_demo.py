@@ -26,6 +26,7 @@ from tiku_agent.agent import AgentResponse
 from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.intent_contract import CHAPTERS
 from tiku_agent.invite_access import InviteAccess, InviteIdentity
+from tiku_agent.output_watchdog import observe_output, observe_public_output
 from tiku_agent.session_artifacts import session_key
 from tiku_agent.session_runtime import (
     AgentBudgetExceededError,
@@ -178,6 +179,7 @@ def create_app(
     invite_access: InviteAccess | None = None,
     feedback_store: SQLiteFeedbackStore | None = None,
     feedback_retention_days_provider: Callable[[], int] | None = None,
+    output_watchdog: object | None = None,
 ) -> FastAPI:
     """Create a local-only demo app without any existing Feishu configuration."""
     session_cookie = str(session_cookie).strip()
@@ -187,6 +189,11 @@ def create_app(
         SQLiteSessionStore(DEFAULT_RUNTIME_DIR / "session.db"),
         cost_ledger=SQLiteModelCostLedger(DEFAULT_RUNTIME_DIR / "model_costs.sqlite3"),
     )
+    if output_watchdog is not None:
+        try:
+            setattr(runtime, "output_watchdog", output_watchdog)
+        except Exception:  # noqa: BLE001 - an observer is strictly optional.
+            pass
     cleaner = getattr(runtime, "purge_expired", None)
 
     @asynccontextmanager
@@ -239,6 +246,7 @@ def create_app(
             protocol,
             status_code=exc.status_code,
             headers=exc.headers,
+            output_watchdog=output_watchdog,
         )
 
     @app.exception_handler(AgentRuntimeBusyError)
@@ -252,6 +260,7 @@ def create_app(
             protocol,
             status_code=429,
             headers={"Retry-After": "15", "Cache-Control": "no-store"},
+            output_watchdog=output_watchdog,
         )
 
     @app.exception_handler(AgentBudgetExceededError)
@@ -265,6 +274,7 @@ def create_app(
             protocol,
             status_code=503,
             headers={"Retry-After": "3600", "Cache-Control": "no-store"},
+            output_watchdog=output_watchdog,
         )
 
     @app.exception_handler(AgentProtocolError)
@@ -278,6 +288,7 @@ def create_app(
             protocol,
             status_code=500,
             headers={"Cache-Control": "no-store"},
+            output_watchdog=output_watchdog,
         )
 
     @app.exception_handler(Exception)
@@ -306,6 +317,7 @@ def create_app(
             protocol,
             status_code=500,
             headers={"Cache-Control": "no-store"},
+            output_watchdog=output_watchdog,
         )
 
     @app.middleware("http")
@@ -332,6 +344,7 @@ def create_app(
                         ),
                         status_code=401,
                         headers={"Cache-Control": "no-store"},
+                        output_watchdog=output_watchdog,
                     )
                     result.headers["X-Request-ID"] = _request_id(request)
                     return result
@@ -1048,10 +1061,21 @@ def _protocol_json_response(
     *,
     status_code: int,
     headers: dict[str, str] | None = None,
+    output_watchdog: object | None = None,
 ) -> JSONResponse:
     protocol = _public_response_protocol(protocol)
+    message = _public_protocol_message(protocol)
+    observe_output(
+        output_watchdog,
+        message,
+        intent="http_error",
+        protocol_code=protocol.code,
+        media_status="",
+        endpoint="http_error",
+        session_id="",
+    )
     return JSONResponse(
-        {"detail": _public_protocol_message(protocol), **protocol.to_dict()},
+        {"detail": message, **protocol.to_dict()},
         status_code=status_code,
         headers=headers,
     )
@@ -1465,6 +1489,15 @@ def _agent_payload(
             search_id=protocol.search_id or str(snapshot.get("search_id") or ""),
         )
         text = str(media.get("text") or text)
+    observe_public_output(
+        runtime,
+        text,
+        intent=response.intent,
+        protocol_code=protocol.code,
+        media_status=str(media.get("status") or "") if media else "",
+        endpoint="web_a3",
+        session_id=session_id,
+    )
     failure = None
     if protocol.status is RequestStatus.ERROR:
         failure = {

@@ -18,6 +18,7 @@ from tiku_admin.control_store import SQLiteControlStore
 from tiku_agent.fastapi_demo import SESSION_COOKIE, create_app
 from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.invite_access import InviteAccess
+from tiku_agent.output_watchdog import OutputWatchdog
 
 
 DEFAULT_PORT = 8790
@@ -35,6 +36,7 @@ def build_app(
     enable_triage: bool = True,
     triage_timeout_seconds: float = 120.0,
     reply_timeout_seconds: float = 60.0,
+    enable_output_watchdog: bool = True,
 ):
     root = Path(runtime_dir).resolve()
     if control_db is not None and invite_config is not None:
@@ -43,6 +45,10 @@ def build_app(
     if control_path is not None and not control_path.is_file():
         raise ValueError(f"control database not found: {control_path}")
     control_store = SQLiteControlStore(control_path) if control_path is not None else None
+    output_watchdog = OutputWatchdog(
+        root / "output_watchdog",
+        enabled=enable_output_watchdog,
+    )
     return create_app(
         runtime=build_a3_runtime(
             root,
@@ -62,6 +68,7 @@ def build_app(
         ),
         incoming_dir=root / "incoming",
         session_cookie=SESSION_COOKIE,
+        output_watchdog=output_watchdog,
         invite_access=(
             SQLiteInviteAccess(control_store)
             if control_store is not None
@@ -85,6 +92,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--triage-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--reply-timeout-seconds", type=float, default=60.0)
     parser.add_argument(
+        "--disable-output-watchdog",
+        dest="enable_output_watchdog",
+        action="store_false",
+        help="Disable fail-open output observation",
+    )
+    parser.add_argument(
         "--disable-triage",
         dest="enable_triage",
         action="store_false",
@@ -96,7 +109,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Roll A3 back to the V0 manual-crop flow",
     )
-    parser.set_defaults(enable_triage=True, enable_auto_crop=True)
+    parser.set_defaults(
+        enable_triage=True,
+        enable_auto_crop=True,
+        enable_output_watchdog=True,
+    )
     return parser
 
 
@@ -113,6 +130,7 @@ def main() -> int:
             enable_triage=args.enable_triage,
             triage_timeout_seconds=args.triage_timeout_seconds,
             reply_timeout_seconds=args.reply_timeout_seconds,
+            enable_output_watchdog=args.enable_output_watchdog,
         ),
         host=args.host,
         port=args.port,

@@ -22,6 +22,7 @@ from tiku_agent.fastapi_demo import create_app
 from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.image_triage import QwenImageTriage
 from tiku_agent.image_triage_authority import ImageTriageAuthority, QwenTriageReplyClient
+from tiku_agent.output_watchdog import OutputWatchdog
 from tiku_agent.session_artifacts import SessionArtifacts
 from tiku_shared.model_costs import SQLiteModelCostLedger
 
@@ -133,8 +134,13 @@ def build_app(
     reply_timeout_seconds: float = 60.0,
     enable_a3_intent_v1: bool = True,
     enable_a3_intent_model_fallback: bool = True,
+    enable_output_watchdog: bool = True,
 ):
     root = Path(runtime_dir).resolve()
+    output_watchdog = OutputWatchdog(
+        root / "output_watchdog",
+        enabled=enable_output_watchdog,
+    )
     return create_app(
         runtime=runtime
         or build_runtime(
@@ -150,6 +156,7 @@ def build_app(
         ),
         incoming_dir=root / "incoming",
         session_cookie=SESSION_COOKIE,
+        output_watchdog=output_watchdog,
         feedback_store=SQLiteFeedbackStore(root / "feedback.sqlite3"),
     )
 
@@ -181,10 +188,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Temporarily use the legacy A3 text rules",
     )
+    parser.add_argument(
+        "--disable-output-watchdog",
+        dest="enable_output_watchdog",
+        action="store_false",
+        help="Disable fail-open output observation",
+    )
     parser.set_defaults(
         enable_triage=True,
         enable_auto_crop=True,
         enable_a3_intent_v1=True,
+        enable_output_watchdog=True,
     )
     return parser
 
@@ -201,6 +215,7 @@ def main() -> int:
             triage_timeout_seconds=args.triage_timeout_seconds,
             reply_timeout_seconds=args.reply_timeout_seconds,
             enable_a3_intent_v1=args.enable_a3_intent_v1,
+            enable_output_watchdog=args.enable_output_watchdog,
         ),
         host=args.host,
         port=args.port,

@@ -27,6 +27,8 @@ class TikuAgentWatchdog8896Test(unittest.TestCase):
     def test_watchdog_exposes_manual_crop_rollback_switch(self):
         self.assertIn("[switch]$DisableAutoCrop", self.script)
         self.assertIn('$arguments += "--disable-auto-crop"', self.script)
+        self.assertIn("[switch]$DisableOutputWatchdog", self.script)
+        self.assertIn('$arguments += "--disable-output-watchdog"', self.script)
 
 
 if __name__ == "__main__":

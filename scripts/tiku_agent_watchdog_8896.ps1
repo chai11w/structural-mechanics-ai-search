@@ -2,7 +2,8 @@ param(
     [int]$Port = 8896,
     [string]$RuntimeDir,
     [string]$PythonExe = "python",
-    [switch]$DisableAutoCrop
+    [switch]$DisableAutoCrop,
+    [switch]$DisableOutputWatchdog
 )
 
 $ErrorActionPreference = "Stop"
@@ -68,6 +69,9 @@ function Start-Agent {
     )
     if ($DisableAutoCrop) {
         $arguments += "--disable-auto-crop"
+    }
+    if ($DisableOutputWatchdog) {
+        $arguments += "--disable-output-watchdog"
     }
     $process = Start-Process $PythonExe `
         -ArgumentList $arguments `

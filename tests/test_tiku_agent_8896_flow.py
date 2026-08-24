@@ -24,6 +24,10 @@ class TikuAgent8896FlowTest(unittest.TestCase):
         self.assertEqual(DEFAULT_PORT, 8896)
         self.assertEqual(DEFAULT_RUNTIME_DIR.name, ".tmp_tiku_agent_a3_mvp_8896")
         self.assertEqual(SESSION_COOKIE, "tiku_agent_8896_session")
+        self.assertTrue(build_argument_parser().parse_args([]).enable_output_watchdog)
+        self.assertFalse(
+            build_argument_parser().parse_args(["--disable-output-watchdog"]).enable_output_watchdog
+        )
         self.assertTrue(defaults.enable_triage)
         self.assertTrue(defaults.enable_auto_crop)
         self.assertTrue(defaults.enable_a3_intent_v1)

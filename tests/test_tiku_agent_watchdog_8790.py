@@ -14,6 +14,8 @@ class TikuAgentWatchdog8790Test(unittest.TestCase):
         self.assertIn('".tmp_tiku_admin_8795\\control.sqlite3"', script)
         self.assertIn("[switch]$DisableAutoCrop", script)
         self.assertIn('"--disable-auto-crop"', script)
+        self.assertIn("[switch]$DisableOutputWatchdog", script)
+        self.assertIn('"--disable-output-watchdog"', script)
         self.assertNotIn('"scripts\\run_tiku_agent_demo.py"', script)
 
 
