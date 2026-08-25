@@ -1,10 +1,11 @@
 # Trace Phase 1 Audit and Minimal Contract
 
-Status: Phase 1 complete; implementation has not started
+Status: Phase 1 complete after observability supplement; implementation has not started
 
 Date: 2026-08-25
 
-Scope: new Agent/Web on 8790 and the isolated 8896 acceptance route
+Scope: new Agent/Web on 8790, isolated 8896 acceptance, and 8795 feedback/cost reporting;
+8788 Feishu remains outside the change boundary
 
 ## Objective and boundary
 
@@ -28,6 +29,10 @@ Authoritative sources reviewed:
 - `tiku_agent/feedback_store.py` and `tiku_admin/reporting.py` for feedback/cost joins;
 - focused request-protocol, runtime, A3, cost, FastAPI and administrator tests.
 
+The detailed log/error/feedback generation and storage matrix is maintained in
+[`trace_phase1_observability_inventory.md`](trace_phase1_observability_inventory.md). The
+minimal contract in this file must be read together with that verified current-state inventory.
+
 ## Decision
 
 Add a server-authoritative `trace_id`; do not relabel the current `request_id` as the trace.
@@ -42,7 +47,7 @@ It therefore cannot be the authoritative internal join key. Existing `request_id
 | Identifier | Current owner and lifetime | Current uses | Finding |
 | --- | --- | --- | --- |
 | HTTP `request_id` | Browser normally creates `req_<32 hex>` for one HTTP attempt; the server validates it or generates a replacement | Response protocol, `X-Request-ID`, A2 task log, streamed errors | Caller-controlled correlation ID, not an authoritative trace |
-| Protocol `request_id` | Server copies the HTTP ID into `RequestProtocol` | Public result/error and feedback payload | Same spelling as the provider ID below |
+| Protocol `request_id` | A2 and most HTTP boundary paths copy the HTTP ID; pure A3 may generate another value or omit it | Public result/error and feedback payload | Not reliably equal to `X-Request-ID`; same spelling as the provider ID below |
 | Model-call `request_id` | Provider response `request_id` or `id` | `model_cost_calls.request_id` | Semantically a provider request ID, not the HTTP request ID |
 | `search_id` | A2 creates one for a new image search; text/candidate/answer turns retain it | Agent state, protocol, task log, cost `search_key`, feedback | Correct question-search identity, but not a request/turn identity |
 | `workflow_search_id` | A3 creates one for the uploaded page and retains it across child questions | A3 state, feedback and page-cost reporting | Correct A3 parent identity; direct A2 compatibility needs an explicit rule |
@@ -55,7 +60,7 @@ It therefore cannot be the authoritative internal join key. Existing `request_id
 | `candidate_generation` | One candidate-list generation | Stale candidate and media-delivery guards | A version/concurrency field, not a trace ID |
 | `message_id` | Browser creates one for a rendered chat item | Feedback target and browser history | The server has no authoritative response row behind it |
 | `feedback_id` | Feedback store creates one per unique identity/session/message | Feedback administration and case media | Stable feedback identity; rated response linkage is currently client-mediated |
-| `session_key` | Server hashes the session ID | Logs, costs and feedback | Private join dimension; must not be exposed publicly |
+| `session_key` | Server hashes the session ID | Logs, costs and feedback | Private join dimension; feedback hashing alone does not prove current session validity or response ownership |
 | `identity_key` | Stable invitation identity | Budget, costs, feedback and administration | Private identity dimension; never log invite plaintext |
 
 `request_id`, `search_id`, `workflow_search_id`, `run_id`, and `provider_request_id` are
@@ -66,14 +71,18 @@ different concepts even when historical rows happen to contain the same string.
 ### HTTP and public protocol
 
 The browser sends `X-Request-ID`; middleware validates the exact `req_<32 hex>` format and
-stores it on the request. HTTP, streaming and A3/A2 handlers propagate that value into the
-public protocol. This is useful end-to-end metadata, but a client can deliberately reuse a
+stores it on the request. HTTP and A2 handlers normally propagate that value into the public
+protocol. Pure A3 responses are inconsistent: `_response()` creates a separate request ID and
+some direct `AgentResponse.from_code` paths omit it, while the FastAPI payload adapter does not
+replace it with the HTTP header value. Thus an A3 payload request ID may differ from
+`X-Request-ID` or be empty. Even where propagation works, a client can deliberately reuse a
 valid value, so it is not an authoritative database key.
 
 ### A2 task, tool and cost flow
 
 A2 creates a new `search_id` for a new uploaded image and retains it for later text turns.
-The runtime writes one structured task-log entry per turn and one cost run. The task log has
+The runtime normally writes one structured task-log entry per turn and one cost run; an internal
+exception may also produce a second API-boundary entry for the same request. The task log has
 the public request/search IDs and safe protocol outcome. The cost run uses the HTTP request
 ID as `run_id`, while provider calls store the provider response ID in a field also named
 `request_id`.
@@ -92,6 +101,8 @@ ID and separately retains the workflow ID.
 Gaps:
 
 - A3 model runs create independent `run_id` values and do not retain the HTTP request ID.
+- Pure A3 public responses do not reliably retain the ingress request ID; payload and header
+  correlation can diverge before any trace implementation exists.
 - A3 has bounded page-error records but no unified task/stage event stream.
 - `current_search_id` is route-dependent and must not be the canonical parent-child field.
 - `unit_id` is not persisted on model cost runs, so per-unit validation costs cannot always be
@@ -101,8 +112,9 @@ Gaps:
 
 The server returns safe protocol metadata. The browser creates `message_id`, copies the
 response request/search IDs into history, and later submits those values with feedback. The
-feedback store validates their format and scopes the captured conversation to the rated
-message.
+feedback store validates their format. Only when `conversation` is submitted does it verify the
+target is present and crop evidence to that message; omitting conversation currently bypasses
+target binding.
 
 Gaps:
 
@@ -122,6 +134,8 @@ Gaps:
 | P1 | No server response identity | Feedback cannot bind authoritatively to the rated output |
 | P1 | No explicit A3 workflow/unit fields on every relevant event/run | Multi-question attribution still needs inference |
 | P1 | Task log, model cost, page errors and feedback are separate contracts | Operators must manually correlate stores |
+| P1 | Observability writers can fail or drop records silently | Missing evidence is currently indistinguishable from an event that never occurred |
+| P1 | Feedback retention provider is not wired and cleanup runs only when 8795 starts | New cases use fixed 30-day expiry and that per-row deadline is not continuously enforced |
 | P2 | Admin reporting uses search/time fallback joins | Correct enough for current summaries, insufficient for incident reconstruction |
 
 ## Minimal Trace Contract V1
@@ -141,7 +155,7 @@ Gaps:
 | `call_id` | Existing locally generated value | One provider call record |
 | `provider_request_id` | Opaque provider value | Provider-side correlation only; replaces the semantic use of `model_cost_calls.request_id` in the next additive schema |
 | `feedback_id` | Existing server-generated value | One saved feedback record |
-| `rated_response_id` | Existing `response_id` supplied back by the client and verified by the server | Exact response rated by feedback; never inferred from the latest session state when present |
+| `rated_response_id` | New batch-2.4 `response_id`, returned to the client and supplied back with feedback | Verified by the server as the exact owned response; never inferred from latest session state |
 
 `trace_id` is internal operational metadata in V1. Public APIs continue to expose `request_id`
 and `search_id`; exposing trace IDs to users is not required to obtain reliable internal joins.
@@ -228,27 +242,33 @@ safe stage names and hashed/private join keys. It must not store:
 - local absolute media/config paths, stack traces or arbitrary exception messages;
 - unrestricted `safe_attributes` copied from tool/model payloads.
 
-`safe_attributes` requires an event-type-specific whitelist. Existing media and feedback case
-retention stays authoritative; trace metadata must not extend media/content lifetime.
+`safe_attributes` requires an event-type-specific whitelist. A case's already stored per-record
+expiry must not be extended by trace metadata. Wiring the configured retention provider and
+adding periodic cleanup remain known gaps rather than properties of the current system.
 
 ## Compatibility and implementation constraints
 
 - Introduce fields/tables additively and keep historical cost, feedback and task-log records
   readable. Do not reinterpret historical `model_cost_calls.request_id` as an app request ID.
-- Keep the five-state public protocol unchanged in the trace propagation stage.
+- Keep the five-state public protocol unchanged in the trace propagation stage; separately add
+  contract tests for registered reasons, production emitters and browser-local reasons/actions.
 - Do not change A2/A3 routing, chapter boundaries, retrieval order, candidate ranking, answer
-  delivery, budget checks or feedback fail-closed behavior.
+  delivery, budget checks, or feedback evidence content. Target ownership hardening is isolated
+  to roadmap batch 2.4 and must retain old records read-only.
 - 8790 and 8896 use independent trace stores under their existing runtime roots. Do not share
-  state with 8788, 8794 or 8795; 8795 may later receive read-only reporting access.
+  runtime state with 8788, 8794 or 8795; 8795 may later receive read-only access to the new trace
+  stores in addition to its current feedback/cost access.
 - Trace writes are local and fail-open. No external observability service is introduced in V1.
+- Do not weaken existing feedback validation. In batch 2.4, exact `rated_response_id` ownership
+  verification must close the optional-conversation bypass while old records remain readable.
 
-## Acceptance scenarios for the next stage
+## Acceptance scenarios for the remaining Trace stage
 
-These examples are the required tests for Trace Context and ID propagation, not optional
-illustrations.
+These are required stage-wide tests, not optional illustrations. They are implemented in the
+five ordered batches in `.agents/roadmap.md`; they are not all part of the first code batch.
 
 1. **Direct A2 success:** one HTTP operation has one trace; task log, cost run, provider calls
-   and final response carry that trace and one question `search_id`.
+   and the server-side finalized-response record carry that trace and one question `search_id`.
 2. **A3 multi-question page:** the upload trace records the parent workflow and page model
    stages; selecting a unit records `(workflow_search_id, unit_id)` and a child `search_id`;
    another unit gets another child search without changing the workflow ID.
@@ -265,10 +285,20 @@ illustrations.
    the failure does not trigger a retry.
 8. **Privacy regression:** serialized events reject secrets, arbitrary paths, raw exception
    text, raw prompts/output and unregistered safe attributes.
+9. **JSON/stream parity:** an equivalent terminal failure produces the same public protocol and
+   one authoritative terminal event in both response modes.
+10. **Media post-processing:** the terminal event reflects the protocol actually delivered after
+    media persistence, rather than the earlier A2 business result.
+11. **Client-local failure:** network/timeout/invalid-response reports can be distinguished from
+    a server terminal event and do not silently assert that the server did no work or incur no cost.
+12. **Feedback target enforcement:** omitting conversation cannot create feedback for an
+    unverified arbitrary message; the server verifies `rated_response_id` and session ownership.
 
 ## Next implementation step
 
-Implement only Trace Context and ID propagation first: server trace creation, context
-propagation across threads/A3/A2/model cost scopes, additive event envelope/storage, and the
-acceptance scenarios above. Do not combine this with the later task-snapshot, checkpoint,
-idempotency or pause/resume stages.
+Implement only roadmap batch 2.2 first: server trace creation and additive propagation across
+HTTP, threads, A3, A2, tool and model-cost scopes. Reuse the V1 envelope contract but leave the
+full terminal event stream, authoritative response/feedback binding and 8795 timeline to batches
+2.3–2.5. Preserve the active/legacy path distinctions, writer-failure requirements and feedback
+trust boundaries in the observability inventory. Do not combine this with task snapshots,
+checkpoints, idempotency or pause/resume.
