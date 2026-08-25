@@ -314,8 +314,8 @@ def check_multi_agent_routing() -> list[str]:
         {"rank": 3, "path": "c.jpg", "score": 0.81},
         {"rank": 4, "path": "d.jpg", "score": 0.80},
     ])
-    if [item["path"] for item in display_below_ninety] != ["a.jpg"]:
-        failures.append(f"rerank display should keep only the best <90% result, got {display_below_ninety}")
+    if [item["path"] for item in display_below_ninety] != ["a.jpg", "b.jpg", "c.jpg"]:
+        failures.append(f"rerank display should keep the ranked top 3 below 90%, got {display_below_ninety}")
 
     display_boundary = search.select_display_results([
         {"rank": 1, "path": "a.jpg", "score": 0.90},

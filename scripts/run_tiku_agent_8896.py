@@ -117,7 +117,14 @@ def build_runtime(
         store=SQLiteA3SessionStore(root / "a3_sessions.sqlite3"),
         artifacts=SessionArtifacts(root / "a3_sessions"),
         a2_runtime=a2_runtime,
-        page_observer=page_observer or QwenA3PageObserver(timeout_seconds=model_timeout_seconds),
+        page_observer=page_observer
+        or QwenA3PageObserver(
+            timeout_seconds=model_timeout_seconds,
+            prompt_path=Path(__file__).resolve().parents[1]
+            / "tiku_agent"
+            / "prompts"
+            / "a3_page_understanding_v3.txt",
+        ),
         crop_verifier=crop_verifier or QwenA3CropVerifier(timeout_seconds=model_timeout_seconds),
         auto_cropper=resolved_auto_cropper,
         auto_prepare_all_units=auto_prepare_all_units and enable_auto_crop,

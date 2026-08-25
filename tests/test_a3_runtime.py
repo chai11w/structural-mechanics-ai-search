@@ -1382,6 +1382,26 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(a3["phase"], A3_PHASE_A2_ACTIVE)
         self.assertEqual(a3["selected_unit"]["unit_id"], "g1-u2")
 
+    def test_active_a2_chapter_prompt_names_selected_question(self):
+        session_id = "a3-active-chapter-prompt"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+        )
+        self.a2.sessions[session_id]["phase"] = "WAIT_CHAPTER"
+        self.a2.handle_text = lambda _session_id, _text, **_kwargs: AgentResponse(
+            text="我还不能确定这题属于哪一章。你知道的话告诉我就行。",
+            state={"phase": "WAIT_CHAPTER"},
+            intent="chapter_required",
+            protocol=RequestProtocol.from_code("REQUEST_SUCCEEDED").to_dict(),
+        )
+
+        response = self.runtime.handle_text(session_id, "继续")
+
+        self.assertEqual(response.text, "我还不能确定「四-2」属于哪一章。你知道的话告诉我就行。")
+
     def test_active_a2_ambiguous_switch_request_requires_one_unit(self):
         session_id = "a3-active-ambiguous-switch"
         self.runtime.handle_image(session_id, self.source)

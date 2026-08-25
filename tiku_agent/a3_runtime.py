@@ -2045,6 +2045,8 @@ class A3MvpRuntime:
             state.phase = A3_PHASE_A2_ACTIVE
             selected = state.unit(state.selected_unit_id) or {}
             display_label = str(selected.get("display_label") or "").strip()
+            if child_phase == "WAIT_CHAPTER" and display_label:
+                response.text = response.text.replace("这题", f"「{display_label}」", 1)
             candidate_count = int(response.state.get("candidate_count") or 0)
             if (
                 child_phase == "WAIT_CANDIDATE_CHOICE"
