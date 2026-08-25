@@ -21,6 +21,10 @@ from tiku_agent.external_load_screen import QwenExternalLoadScreen
 from tiku_agent.fastapi_demo import create_app
 from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.image_triage import QwenImageTriage
+from tiku_agent.image_triage_8897 import (
+    build_handoff_8897_v1,
+    observation_from_model_text_8897_v1,
+)
 from tiku_agent.image_triage_authority import ImageTriageAuthority, QwenTriageReplyClient
 from tiku_agent.output_watchdog import OutputWatchdog
 from tiku_agent.session_artifacts import SessionArtifacts
@@ -87,8 +91,16 @@ def build_runtime(
     authority = image_triage_authority
     if authority is None and enable_triage:
         authority = ImageTriageAuthority(
-            QwenImageTriage(timeout_seconds=triage_timeout_seconds),
+            QwenImageTriage(
+                timeout_seconds=triage_timeout_seconds,
+                prompt_path=Path(__file__).resolve().parents[1]
+                / "experiments"
+                / "complex_image_eval"
+                / "observation_prompt_8897_boundary_v1.md",
+                observation_parser=observation_from_model_text_8897_v1,
+            ),
             QwenTriageReplyClient(timeout_seconds=reply_timeout_seconds),
+            handoff_builder=build_handoff_8897_v1,
         )
     resolved_auto_cropper = auto_cropper
     if resolved_auto_cropper is None and enable_auto_crop:

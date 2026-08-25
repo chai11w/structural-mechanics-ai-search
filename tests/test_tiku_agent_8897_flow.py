@@ -14,7 +14,6 @@ from scripts.run_tiku_agent_8897 import (
     build_runtime,
 )
 from tiku_agent.a3_auto_crop import GlmA3AutoCropper
-from tiku_agent.image_triage import DEFAULT_PROMPT_PATH
 from tiku_agent.image_triage_8897 import (
     finalize_route_8897,
     finalize_route_8897_v2,
@@ -62,7 +61,7 @@ class TikuAgent8897FlowTest(unittest.TestCase):
                 runtime_8897.artifacts.root,
             )
 
-    def test_8897_uses_boundary_prompt_without_changing_8896_default(self):
+    def test_8896_uses_promoted_v1_while_8897_keeps_isolated_default(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             runtime_8896 = build_8896_runtime(root / "8896")
@@ -70,7 +69,7 @@ class TikuAgent8897FlowTest(unittest.TestCase):
 
             self.assertEqual(
                 runtime_8896.image_triage_authority.observer.prompt_path,
-                DEFAULT_PROMPT_PATH,
+                TRIAGE_POLICIES["v1"][0],
             )
             self.assertEqual(
                 runtime_8897.image_triage_authority.observer.prompt_path,
