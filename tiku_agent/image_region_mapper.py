@@ -423,7 +423,7 @@ class QwenA3RegionObserver:
             model=self.model,
             call_type="qwen_a3_region_map",
             usage_getter=lambda value: value.get("usage", {}),
-            request_id_getter=lambda value: str(
+            provider_request_id_getter=lambda value: str(
                 value.get("request_id") or value.get("id") or ""
             ),
         )

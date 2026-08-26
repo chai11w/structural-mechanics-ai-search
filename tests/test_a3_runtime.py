@@ -34,6 +34,11 @@ from tiku_agent.session_artifacts import SessionArtifacts
 from tiku_agent.session_runtime import AgentSessionRuntime
 from tiku_agent.session_store import SQLiteSessionStore
 from tiku_shared.request_protocol import RequestProtocol
+from tiku_shared.trace_context import (
+    TraceContext,
+    current_trace_id,
+    trace_context_scope,
+)
 
 
 def _page_payload() -> dict:
@@ -204,9 +209,11 @@ class FakeA2Runtime:
         self.preanalyzed_calls = []
         self.prechecked_calls = []
         self.text_calls = []
+        self.trace_ids = []
         self.candidate_count = 1
 
     def handle_prechecked_image(self, session_id, image_path, **kwargs):
+        self.trace_ids.append(current_trace_id())
         self.prechecked_calls.append((session_id, Path(image_path), kwargs))
         self.sessions[session_id] = {
             "session_valid": True,
@@ -402,10 +409,21 @@ class A3RuntimeTests(unittest.TestCase):
             cost_ledger=ledger,
         )
 
-        runtime.handle_image("identity-flow", self.source, identity_key="invite-001")
+        trace_id = "trace_22222222222222222222222222222222"
+        request_id = "req_22222222222222222222222222222222"
+        with trace_context_scope(TraceContext(trace_id, request_id=request_id)):
+            response = runtime.handle_image(
+                "identity-flow",
+                self.source,
+                identity_key="invite-001",
+                request_id=request_id,
+            )
         snapshot = runtime.session_snapshot("identity-flow")
 
         self.assertEqual(len(ledger.collectors), 1)
+        self.assertEqual(response.protocol["request_id"], request_id)
+        self.assertEqual(ledger.collectors[0].trace_id, trace_id)
+        self.assertRegex(ledger.collectors[0].run_id, r"^run_[0-9a-f]{32}$")
         self.assertEqual(ledger.collectors[0].identity_key, "invite-001")
         self.assertEqual(ledger.collectors[0].search_key, snapshot["workflow_search_id"])
         self.assertEqual(snapshot["search_id"], snapshot["workflow_search_id"])
@@ -590,13 +608,18 @@ class A3RuntimeTests(unittest.TestCase):
     def test_full_flow_a2_skips_a3_crop_and_continues_in_original_a2(self):
         authority = FakeFlowAuthority("A2")
         self.runtime.image_triage_authority = authority
+        trace_id = "trace_44444444444444444444444444444444"
 
-        response = self.runtime.handle_image("full-flow-a2", self.source)
+        with trace_context_scope(TraceContext(trace_id)):
+            response = self.runtime.handle_image("full-flow-a2", self.source)
 
         self.assertEqual(response.intent, "search_image")
         self.assertEqual(authority.calls, 1)
         self.assertEqual(self.runtime.page_observer.calls, 0)
         self.assertEqual(len(self.a2.prechecked_calls), 1)
+        self.assertEqual(self.a2.prechecked_calls[0][2]["request_id"], response.protocol["request_id"])
+        self.assertEqual(self.a2.trace_ids, [trace_id])
+        self.assertEqual(current_trace_id(), "")
         self.assertEqual(self.a2.preanalyzed_calls, [])
         snapshot = self.runtime.session_snapshot("full-flow-a2")
         self.assertEqual(snapshot["image_route"], "A2")
@@ -729,7 +752,12 @@ class A3RuntimeTests(unittest.TestCase):
         barrier = threading.Barrier(2)
 
         class ConcurrentVerifier(FakeVerifier):
+            def __init__(self):
+                super().__init__()
+                self.trace_ids = []
+
             def verify(self, page, crop, selected, understanding):
+                self.trace_ids.append(current_trace_id())
                 barrier.wait(timeout=2)
                 return super().verify(page, crop, selected, understanding)
 
@@ -745,11 +773,13 @@ class A3RuntimeTests(unittest.TestCase):
             external_load_screen=lambda path: load_calls.append(Path(path)) or "yes",
         )
 
-        response = runtime.handle_image(
-            "auto-prepare-all",
-            self.source,
-            progress=lambda stage, message: progress_events.append((stage, message)),
-        )
+        trace_id = "trace_33333333333333333333333333333333"
+        with trace_context_scope(TraceContext(trace_id)):
+            response = runtime.handle_image(
+                "auto-prepare-all",
+                self.source,
+                progress=lambda stage, message: progress_events.append((stage, message)),
+            )
 
         self.assertEqual(response.intent, "a3_units_prepared")
         snapshot = runtime.session_snapshot("auto-prepare-all")["a3"]
@@ -762,6 +792,7 @@ class A3RuntimeTests(unittest.TestCase):
             all(unit["validation_status"] == "auto_ready" for unit in snapshot["units"])
         )
         self.assertCountEqual(verifier.calls, ["g1-u1", "g1-u2"])
+        self.assertEqual(verifier.trace_ids, [trace_id, trace_id])
         self.assertEqual(len(load_calls), 2)
         self.assertEqual(self.a2.prechecked_calls, [])
         validation_progress = [

@@ -206,7 +206,7 @@ class QwenImageTriage:
             model=self.model,
             call_type="qwen_image_triage",
             usage_getter=lambda value: value.get("usage", {}),
-            request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
+            provider_request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
         )
         try:
             content = data["choices"][0]["message"].get("content") or ""

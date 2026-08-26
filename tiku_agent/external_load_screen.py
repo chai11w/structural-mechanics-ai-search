@@ -105,7 +105,7 @@ class ZhipuExternalLoadScreen:
             model=self.model,
             call_type="external_load_screen",
             usage_getter=lambda value: value.get("usage") or {},
-            request_id_getter=lambda value: str(value.get("request_id") or ""),
+            provider_request_id_getter=lambda value: str(value.get("request_id") or ""),
         )
         return str(result["verdict"])
 
@@ -184,6 +184,6 @@ class QwenExternalLoadScreen:
             model=self.model,
             call_type="external_load_screen",
             usage_getter=lambda value: value.get("usage") or {},
-            request_id_getter=lambda value: str(value.get("request_id") or ""),
+            provider_request_id_getter=lambda value: str(value.get("request_id") or ""),
         )
         return str(result["verdict"])

@@ -10,7 +10,7 @@ visual reranking.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from contextvars import ContextVar, copy_context
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, ROUND_HALF_UP
@@ -22,9 +22,11 @@ import time
 from typing import Any, Callable, Iterator, Mapping
 from uuid import uuid4
 
+from tiku_shared.trace_context import current_trace_id, submit_with_trace_context
+
 
 CATALOG_PATH = Path(__file__).with_name("model_price_catalog.json")
-COST_SCHEMA_VERSION = 2
+COST_SCHEMA_VERSION = 3
 MICRO_CNY = Decimal("1000000")
 TOKENS_PER_MILLION = Decimal("1000000")
 
@@ -46,11 +48,14 @@ class ModelCallRecord:
     output_tokens: int = 0
     total_tokens: int = 0
     attempt_count: int = 1
+    # Deprecated provider-ID mirror retained for v2 readers; never an app request ID.
     request_id: str = ""
     error_kind: str = ""
     price_version: str = ""
     pricing_status: str = "unpriced"
     estimated_cost_micros: int = 0
+    trace_id: str = ""
+    provider_request_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -64,6 +69,7 @@ class ModelCostCollector:
     search_key: str = ""
     task_kind: str = ""
     started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    trace_id: str = field(default_factory=current_trace_id)
     _records: list[ModelCallRecord] = field(default_factory=list, init=False, repr=False)
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
@@ -79,9 +85,11 @@ class ModelCostCollector:
         latency_ms: int,
         usage: Any = None,
         attempt_count: int = 1,
+        provider_request_id: str = "",
         request_id: str = "",
         error_kind: str = "",
     ) -> ModelCallRecord:
+        provider_id = str(provider_request_id or request_id or "").strip()
         tokens = normalize_usage(usage)
         pricing = estimate_cost(provider, model, tokens)
         with self._lock:
@@ -102,7 +110,11 @@ class ModelCostCollector:
                 output_tokens=tokens["output_tokens"],
                 total_tokens=tokens["total_tokens"],
                 attempt_count=max(1, int(attempt_count or 1)),
-                request_id=str(request_id or ""),
+                trace_id=str(self.trace_id or "").strip(),
+                provider_request_id=provider_id,
+                # Deprecated compatibility mirror. It remains provider-side
+                # metadata and must never be joined as an app request ID.
+                request_id=provider_id,
                 error_kind=str(error_kind or ""),
                 price_version=pricing["price_version"],
                 pricing_status=pricing["pricing_status"],
@@ -141,6 +153,7 @@ def record_model_call(
     latency_ms: int,
     usage: Any = None,
     attempt_count: int = 1,
+    provider_request_id: str = "",
     request_id: str = "",
     error_kind: str = "",
 ) -> ModelCallRecord | None:
@@ -157,16 +170,22 @@ def record_model_call(
         latency_ms=latency_ms,
         usage=usage,
         attempt_count=attempt_count,
+        provider_request_id=provider_request_id,
         request_id=request_id,
         error_kind=error_kind,
     )
 
 
 def submit_with_model_cost_context(executor: Any, function: Callable, /, *args: Any, **kwargs: Any) -> Any:
-    """Submit work with a fresh copy of the caller's cost context."""
+    """Compatibility helper that delegates generic context propagation."""
 
-    context = copy_context()
-    return executor.submit(context.run, function, *args, **kwargs)
+    return submit_with_trace_context(executor, function, *args, **kwargs)
+
+
+def new_run_id() -> str:
+    """Return an independent local identity for one model-cost collector."""
+
+    return f"run_{uuid4().hex}"
 
 
 def utc_now() -> str:
@@ -180,11 +199,16 @@ def timed_model_call(
     model: str,
     call_type: str,
     usage_getter: Callable[[Any], Any],
+    provider_request_id_getter: Callable[[Any], str] | None = None,
     request_id_getter: Callable[[Any], str] | None = None,
     attempt_count_getter: Callable[[Any], int] | None = None,
     attempt_count: int = 1,
 ) -> Any:
     """Run one provider request and emit usage without changing its return value."""
+
+    if provider_request_id_getter is not None and request_id_getter is not None:
+        raise ValueError("provide only provider_request_id_getter")
+    provider_id_getter = provider_request_id_getter or request_id_getter
 
     started_at = utc_now()
     started = time.perf_counter()
@@ -214,7 +238,7 @@ def timed_model_call(
         latency_ms=round((time.perf_counter() - started) * 1000),
         usage=usage_getter(result),
         attempt_count=(attempt_count_getter(result) if attempt_count_getter else attempt_count),
-        request_id=request_id_getter(result) if request_id_getter else "",
+        provider_request_id=provider_id_getter(result) if provider_id_getter else "",
     )
     return result
 
@@ -297,14 +321,16 @@ class SQLiteModelCostLedger:
                 _create_schema(connection)
                 connection.execute(
                     """
-                    INSERT OR REPLACE INTO model_cost_runs (
-                        run_id, session_key, identity_key, search_key, task_kind, started_at, finished_at,
+                    INSERT INTO model_cost_runs (
+                        run_id, trace_id, session_key, identity_key, search_key, task_kind,
+                        started_at, finished_at,
                         outcome, call_count, total_tokens, estimated_cost_micros,
                         warning_codes_json, schema_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         collector.run_id,
+                        collector.trace_id,
                         collector.session_key,
                         collector.identity_key,
                         collector.search_key,
@@ -325,9 +351,10 @@ class SQLiteModelCostLedger:
                         call_id, run_id, sequence, provider, model, call_type,
                         status, started_at, finished_at, latency_ms, input_tokens,
                         image_tokens, cached_tokens, output_tokens, total_tokens,
-                        attempt_count, request_id, error_kind, price_version,
+                        attempt_count, trace_id, provider_request_id, request_id,
+                        error_kind, price_version,
                         pricing_status, estimated_cost_micros, schema_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -335,7 +362,8 @@ class SQLiteModelCostLedger:
                             item.model, item.call_type, item.status, item.started_at,
                             item.finished_at, item.latency_ms, item.input_tokens,
                             item.image_tokens, item.cached_tokens, item.output_tokens,
-                            item.total_tokens, item.attempt_count, item.request_id,
+                            item.total_tokens, item.attempt_count, item.trace_id,
+                            item.provider_request_id, item.request_id,
                             item.error_kind, item.price_version, item.pricing_status,
                             item.estimated_cost_micros, COST_SCHEMA_VERSION,
                         )
@@ -432,7 +460,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             total_tokens INTEGER NOT NULL,
             estimated_cost_micros INTEGER NOT NULL,
             warning_codes_json TEXT NOT NULL,
-            schema_version INTEGER NOT NULL
+            schema_version INTEGER NOT NULL,
+            trace_id TEXT NOT NULL DEFAULT ''
         )
         """
     )
@@ -443,9 +472,17 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE model_cost_runs ADD COLUMN identity_key TEXT NOT NULL DEFAULT ''"
         )
+    if "trace_id" not in columns:
+        connection.execute(
+            "ALTER TABLE model_cost_runs ADD COLUMN trace_id TEXT NOT NULL DEFAULT ''"
+        )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_model_cost_runs_started_identity "
         "ON model_cost_runs(started_at, identity_key)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_model_cost_runs_trace_started "
+        "ON model_cost_runs(trace_id, started_at)"
     )
     connection.execute(
         """
@@ -472,12 +509,30 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             pricing_status TEXT NOT NULL,
             estimated_cost_micros INTEGER NOT NULL,
             schema_version INTEGER NOT NULL,
+            trace_id TEXT NOT NULL DEFAULT '',
+            provider_request_id TEXT NOT NULL DEFAULT '',
             FOREIGN KEY(run_id) REFERENCES model_cost_runs(run_id)
         )
         """
     )
+    call_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(model_cost_calls)")
+    }
+    if "trace_id" not in call_columns:
+        connection.execute(
+            "ALTER TABLE model_cost_calls ADD COLUMN trace_id TEXT NOT NULL DEFAULT ''"
+        )
+    if "provider_request_id" not in call_columns:
+        connection.execute(
+            "ALTER TABLE model_cost_calls "
+            "ADD COLUMN provider_request_id TEXT NOT NULL DEFAULT ''"
+        )
     connection.execute("CREATE INDEX IF NOT EXISTS idx_model_cost_runs_started ON model_cost_runs(started_at)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_model_cost_calls_run ON model_cost_calls(run_id, sequence)")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_model_cost_calls_trace_sequence "
+        "ON model_cost_calls(trace_id, sequence)"
+    )
 
 
 def _price_entry(provider: str, model: str) -> dict[str, Any] | None:

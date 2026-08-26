@@ -62,7 +62,7 @@ def qwen_structure_type(image_path: Path, *, endpoint: str, model: str, api_key:
         model=model,
         call_type="qwen_structure_type",
         usage_getter=lambda value: value.get("usage", {}),
-        request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
+        provider_request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
     )
 
     content = data["choices"][0]["message"]["content"]

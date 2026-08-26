@@ -225,8 +225,9 @@ Do not create one event type per protocol code or per model. Those belong in rev
    trace uniqueness must not depend on the caller.
 4. Retrying the same question retains `search_id`; a new upload or newly selected A3 unit gets
    a new child `search_id`. The A3 page retains `workflow_search_id` throughout.
-5. Every model run gets its own `run_id`; every provider attempt gets a `call_id`. Provider IDs
-   are stored only as `provider_request_id`.
+5. Every model run gets its own `run_id`; every provider attempt gets a `call_id`. New code reads
+   provider IDs from `provider_request_id`; the deprecated `request_id` column may mirror the
+   same provider value during the additive compatibility window and is never an app request ID.
 6. The server assigns `response_id` when the final safe public payload is assembled. Feedback
    has its own request trace and binds to `rated_response_id` after ownership/session checks.
 7. Trace writing is fail-open for the user request but records an observable local warning;
@@ -256,8 +257,9 @@ adding periodic cleanup remain known gaps rather than properties of the current 
   delivery, budget checks, or feedback evidence content. Target ownership hardening is isolated
   to roadmap batch 2.4 and must retain old records read-only.
 - 8790 and 8896 use independent trace stores under their existing runtime roots. Do not share
-  runtime state with 8788, 8794 or 8795; 8795 may later receive read-only access to the new trace
-  stores in addition to its current feedback/cost access.
+  runtime state with 8788, 8794 or 8795. The primary consumer is a stable local diagnostic
+  query layer for Codex/Agent; 8795 may optionally receive read-only access as a temporary UI
+  adapter, but it is not the trace owner or a runtime dependency.
 - Trace writes are local and fail-open. No external observability service is introduced in V1.
 - Do not weaken existing feedback validation. In batch 2.4, exact `rated_response_id` ownership
   verification must close the optional-conversation bypass while old records remain readable.
@@ -294,11 +296,14 @@ five ordered batches in `.agents/roadmap.md`; they are not all part of the first
 12. **Feedback target enforcement:** omitting conversation cannot create feedback for an
     unverified arbitrary message; the server verifies `rated_response_id` and session ownership.
 
-## Next implementation step
+## Implementation status
 
-Implement only roadmap batch 2.2 first: server trace creation and additive propagation across
-HTTP, threads, A3, A2, tool and model-cost scopes. Reuse the V1 envelope contract but leave the
-full terminal event stream, authoritative response/feedback binding and 8795 timeline to batches
-2.3–2.5. Preserve the active/legacy path distinctions, writer-failure requirements and feedback
-trust boundaries in the observability inventory. Do not combine this with task snapshots,
-checkpoints, idempotency or pause/resume.
+Roadmap batch 2.2 is complete: middleware creates one server-owned trace per inbound operation;
+explicit stream and thread propagation retains it through A3, A2, tools, task logs and model-cost
+runs/calls. New cost records use independent `run_...` IDs and canonical `provider_request_id`;
+the historical provider-valued `request_id` remains a compatibility mirror and never carries
+the app request ID.
+
+The next batch is 2.3 only: add the minimal structured event stream and authoritative terminal
+event parity. Leave response/feedback ownership and bounded diagnostic queries to batches 2.4
+and 2.5; do not combine them with task snapshots, checkpoints, idempotency or pause/resume.

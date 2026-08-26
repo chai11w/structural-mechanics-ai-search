@@ -331,7 +331,7 @@ def call_qwen_a3_intent_v1(
         model=model,
         call_type="qwen_a3_intent_decision",
         usage_getter=lambda value: value.get("usage", {}),
-        request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
+        provider_request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
     )
     return parse_model_json(data["choices"][0]["message"]["content"])
 

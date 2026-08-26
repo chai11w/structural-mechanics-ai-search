@@ -38,8 +38,18 @@ from tiku_agent.agent import AgentResponse
 from tiku_agent.image_triage_authority import NO_EXTERNAL_LOAD_REPLY
 from tiku_agent.session_artifacts import SessionArtifacts, session_key
 from tiku_agent.session_runtime import AgentProtocolError, AgentSessionRuntime, ProgressReporter
-from tiku_shared.model_costs import ModelCostCollector, SQLiteModelCostLedger, model_cost_scope
+from tiku_shared.model_costs import (
+    ModelCostCollector,
+    SQLiteModelCostLedger,
+    model_cost_scope,
+    new_run_id,
+)
 from tiku_shared.request_protocol import RequestProtocol, new_request_id, new_search_id
+from tiku_shared.trace_context import (
+    current_request_id,
+    current_trace_id,
+    submit_with_trace_context,
+)
 
 
 A3_PHASE_IDLE = "IDLE"
@@ -1024,7 +1034,8 @@ class A3MvpRuntime:
             workers = min(self.auto_crop_max_workers, len(candidates))
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {
-                    executor.submit(
+                    submit_with_trace_context(
+                        executor,
                         self._validate_auto_crop,
                         state,
                         unit_id,
@@ -2236,7 +2247,8 @@ class A3MvpRuntime:
         identity_key: str = "",
     ) -> Any:
         collector = ModelCostCollector(
-            run_id=new_request_id(),
+            run_id=new_run_id(),
+            trace_id=current_trace_id(),
             session_key=session_key(state.session_id),
             identity_key=str(identity_key).strip(),
             search_key=state.current_search_id,
@@ -2546,7 +2558,7 @@ def _response(
 ) -> AgentResponse:
     protocol = RequestProtocol.from_code(
         code,
-        request_id=new_request_id(),
+        request_id=current_request_id() or new_request_id(),
         search_id=state.current_search_id,
     )
     return AgentResponse(

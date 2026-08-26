@@ -45,6 +45,11 @@ from tiku_shared.request_protocol import (
     RequestStatus,
     new_request_id,
 )
+from tiku_shared.trace_context import (
+    TraceContext,
+    current_request_id,
+    trace_context_scope,
+)
 from tiku_agent.tools import DEFAULT_RUNTIME_DIR
 
 
@@ -322,49 +327,53 @@ def create_app(
 
     @app.middleware("http")
     async def secure_public_requests(request: Request, call_next):
-        request.state.request_id = _incoming_request_id(request)
-        if _forwarded_proto(request) == "http":
-            return RedirectResponse(str(request.url.replace(scheme="https")), status_code=308)
-        if invite_access is not None:
-            cookie_value = str(request.cookies.get(invite_access.cookie_name) or "")
-            identity = invite_access.verify_cookie(cookie_value)
-            request.state.invite_identity = identity
-            public_path = (
-                request.url.path == "/health"
-                or request.url.path == "/invite"
-                or request.url.path == "/api/invite/login"
-                or request.url.path.startswith("/assets/")
+        request_id = _incoming_request_id(request)
+        trace_context = TraceContext.create(request_id=request_id)
+        request.state.request_id = request_id
+        request.state.trace_context = trace_context
+        with trace_context_scope(trace_context):
+            if _forwarded_proto(request) == "http":
+                return RedirectResponse(str(request.url.replace(scheme="https")), status_code=308)
+            if invite_access is not None:
+                cookie_value = str(request.cookies.get(invite_access.cookie_name) or "")
+                identity = invite_access.verify_cookie(cookie_value)
+                request.state.invite_identity = identity
+                public_path = (
+                    request.url.path == "/health"
+                    or request.url.path == "/invite"
+                    or request.url.path == "/api/invite/login"
+                    or request.url.path.startswith("/assets/")
+                )
+                if identity is None and not public_path:
+                    if request.url.path.startswith("/api/"):
+                        result = _protocol_json_response(
+                            "请先使用有效邀请码登录。",
+                            RequestProtocol.from_code(
+                                "LOGIN_REQUIRED", request_id=_request_id(request)
+                            ),
+                            status_code=401,
+                            headers={"Cache-Control": "no-store"},
+                            output_watchdog=output_watchdog,
+                        )
+                        result.headers["X-Request-ID"] = _request_id(request)
+                        return result
+                    target = "/invite?reason=session_expired" if cookie_value else "/invite"
+                    return RedirectResponse(target, status_code=303)
+            result = await call_next(request)
+            result.headers["Content-Security-Policy"] = (
+                "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; "
+                "script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'"
             )
-            if identity is None and not public_path:
-                if request.url.path.startswith("/api/"):
-                    result = _protocol_json_response(
-                        "请先使用有效邀请码登录。",
-                        RequestProtocol.from_code(
-                            "LOGIN_REQUIRED", request_id=_request_id(request)
-                        ),
-                        status_code=401,
-                        headers={"Cache-Control": "no-store"},
-                        output_watchdog=output_watchdog,
-                    )
-                    result.headers["X-Request-ID"] = _request_id(request)
-                    return result
-                target = "/invite?reason=session_expired" if cookie_value else "/invite"
-                return RedirectResponse(target, status_code=303)
-        result = await call_next(request)
-        result.headers["Content-Security-Policy"] = (
-            "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; "
-            "script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'"
-        )
-        result.headers["X-Content-Type-Options"] = "nosniff"
-        result.headers["X-Frame-Options"] = "DENY"
-        result.headers["Referrer-Policy"] = "no-referrer"
-        result.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-        if _is_secure_request(request):
-            result.headers["Strict-Transport-Security"] = "max-age=31536000"
-        if request.url.path.startswith("/api/"):
-            result.headers.setdefault("Cache-Control", "private, no-store")
-            result.headers["X-Request-ID"] = _request_id(request)
-        return result
+            result.headers["X-Content-Type-Options"] = "nosniff"
+            result.headers["X-Frame-Options"] = "DENY"
+            result.headers["Referrer-Policy"] = "no-referrer"
+            result.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+            if _is_secure_request(request):
+                result.headers["Strict-Transport-Security"] = "max-age=31536000"
+            if request.url.path.startswith("/api/"):
+                result.headers.setdefault("Cache-Control", "private, no-store")
+                result.headers["X-Request-ID"] = _request_id(request)
+            return result
 
     @app.get("/invite", response_class=HTMLResponse)
     def invite_page(request: Request) -> Response:
@@ -689,26 +698,35 @@ def create_app(
         if not text:
             raise HTTPException(status_code=400, detail="text is required")
         session_id = _session_id(request, cookie_name=session_cookie)
+        request_id = _request_id(request)
+        identity_key = _identity_key(request)
+        trace_context = _request_trace_context(request)
 
         def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
             stale = _validate_action_context(
                 runtime,
                 session_id,
                 payload.get("action_context"),
-                request_id=_request_id(request),
+                request_id=request_id,
             )
             if stale is not None:
                 return _agent_payload(stale, runtime, session_id)
             response = _handle_text(
-                runtime, session_id, text, request=request, progress=progress
+                runtime,
+                session_id,
+                text,
+                request_id=request_id,
+                identity_key=identity_key,
+                progress=progress,
             )
             return _agent_payload(response, runtime, session_id)
 
         result = StreamingResponse(
             _stream_agent_events(
                 execute,
-                request_id=_request_id(request),
+                request_id=request_id,
                 search_id=str(runtime.session_snapshot(session_id).get("search_id") or ""),
+                trace_context=trace_context,
             ),
             media_type="application/x-ndjson",
         )
@@ -772,11 +790,19 @@ def create_app(
             content_type,
             incoming_dir=incoming_dir,
         )
+        request_id = _request_id(request)
+        identity_key = _identity_key(request)
+        trace_context = _request_trace_context(request)
 
         def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
             try:
                 response = _handle_image(
-                    runtime, session_id, incoming, request=request, progress=progress
+                    runtime,
+                    session_id,
+                    incoming,
+                    request_id=request_id,
+                    identity_key=identity_key,
+                    progress=progress,
                 )
                 uploaded_image = runtime.current_image_path(session_id)
                 return _agent_payload(
@@ -789,7 +815,11 @@ def create_app(
                 incoming.unlink(missing_ok=True)
 
         result = StreamingResponse(
-            _stream_agent_events(execute, request_id=_request_id(request)),
+            _stream_agent_events(
+                execute,
+                request_id=request_id,
+                trace_context=trace_context,
+            ),
             media_type="application/x-ndjson",
         )
         _set_session_cookie(
@@ -864,14 +894,16 @@ def create_app(
             except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail="task_revision is required") from exc
             session_id = _session_id(request, cookie_name=session_cookie)
+            request_id = _request_id(request)
+            identity_key = _identity_key(request)
+            trace_context = _request_trace_context(request)
 
             def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
                 kwargs: dict[str, object] = {
                     "task_revision": task_revision,
                     "progress": progress,
-                    "request_id": _request_id(request),
+                    "request_id": request_id,
                 }
-                identity_key = _identity_key(request)
                 if identity_key:
                     kwargs["identity_key"] = identity_key
                 response = runtime.select_unit(  # type: ignore[attr-defined]
@@ -894,8 +926,9 @@ def create_app(
             result = StreamingResponse(
                 _stream_agent_events(
                     execute,
-                    request_id=_request_id(request),
+                    request_id=request_id,
                     search_id=str(runtime.session_snapshot(session_id).get("search_id") or ""),
+                    trace_context=trace_context,
                 ),
                 media_type="application/x-ndjson",
             )
@@ -923,14 +956,16 @@ def create_app(
             except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail="task_revision is required") from exc
             session_id = _session_id(request, cookie_name=session_cookie)
+            request_id = _request_id(request)
+            identity_key = _identity_key(request)
+            trace_context = _request_trace_context(request)
 
             def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
                 kwargs: dict[str, object] = {
                     "task_revision": task_revision,
                     "progress": progress,
-                    "request_id": _request_id(request),
+                    "request_id": request_id,
                 }
-                identity_key = _identity_key(request)
                 if identity_key:
                     kwargs["identity_key"] = identity_key
                 response = runtime.prepare_units(  # type: ignore[attr-defined]
@@ -943,8 +978,9 @@ def create_app(
             result = StreamingResponse(
                 _stream_agent_events(
                     execute,
-                    request_id=_request_id(request),
+                    request_id=request_id,
                     search_id=str(runtime.session_snapshot(session_id).get("search_id") or ""),
+                    trace_context=trace_context,
                 ),
                 media_type="application/x-ndjson",
             )
@@ -972,13 +1008,15 @@ def create_app(
             if not unit_id:
                 raise HTTPException(status_code=400, detail="unit_id is required")
             session_id = _session_id(request, cookie_name=session_cookie)
+            request_id = _request_id(request)
+            identity_key = _identity_key(request)
+            trace_context = _request_trace_context(request)
 
             def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
                 kwargs: dict[str, object] = {
                     "progress": progress,
-                    "request_id": _request_id(request),
+                    "request_id": request_id,
                 }
-                identity_key = _identity_key(request)
                 if identity_key:
                     kwargs["identity_key"] = identity_key
                 response = runtime.handle_crop(  # type: ignore[attr-defined]
@@ -1004,8 +1042,9 @@ def create_app(
             result = StreamingResponse(
                 _stream_agent_events(
                     execute,
-                    request_id=_request_id(request),
+                    request_id=request_id,
                     search_id=str(runtime.session_snapshot(session_id).get("search_id") or ""),
+                    trace_context=trace_context,
                 ),
                 media_type="application/x-ndjson",
             )
@@ -1053,6 +1092,13 @@ def _incoming_request_id(request: Request) -> str:
 
 def _request_id(request: Request) -> str:
     return str(getattr(request.state, "request_id", "") or new_request_id())
+
+
+def _request_trace_context(request: Request) -> TraceContext:
+    context = getattr(request.state, "trace_context", None)
+    if not isinstance(context, TraceContext):
+        raise RuntimeError("request trace context is unavailable")
+    return context
 
 
 def _protocol_json_response(
@@ -1144,6 +1190,24 @@ def _public_response_protocol(protocol: RequestProtocol) -> RequestProtocol:
             search_id=search_id,
         )
     return fallback
+
+
+def _with_protocol_request_id(
+    protocol: RequestProtocol,
+    request_id: str,
+) -> RequestProtocol:
+    if not request_id or protocol.request_id == request_id:
+        return protocol
+    return RequestProtocol(
+        status=protocol.status,
+        layer=protocol.layer,
+        code=protocol.code,
+        retryable=protocol.retryable,
+        action=protocol.action,
+        request_id=request_id,
+        search_id=protocol.search_id,
+        schema_version=protocol.schema_version,
+    )
 
 
 def _http_error_protocol(
@@ -1239,13 +1303,17 @@ def _handle_text(
     session_id: str,
     text: str,
     *,
-    request: Request,
+    request: Request | None = None,
+    request_id: str = "",
+    identity_key: str = "",
     progress: Callable[[str, str], None] | None = None,
 ) -> AgentResponse:
-    identity_key = _identity_key(request)
+    if request is not None:
+        request_id = request_id or _request_id(request)
+        identity_key = identity_key or _identity_key(request)
     kwargs: dict[str, object] = {"progress": progress}
     if _accepts_keyword(runtime.handle_text, "request_id"):
-        kwargs["request_id"] = _request_id(request)
+        kwargs["request_id"] = request_id
     if identity_key:
         kwargs["identity_key"] = identity_key
     return runtime.handle_text(session_id, text, **kwargs)
@@ -1256,13 +1324,17 @@ def _handle_image(
     session_id: str,
     image_path: Path,
     *,
-    request: Request,
+    request: Request | None = None,
+    request_id: str = "",
+    identity_key: str = "",
     progress: Callable[[str, str], None] | None = None,
 ) -> AgentResponse:
-    identity_key = _identity_key(request)
+    if request is not None:
+        request_id = request_id or _request_id(request)
+        identity_key = identity_key or _identity_key(request)
     kwargs: dict[str, object] = {"progress": progress}
     if _accepts_keyword(runtime.handle_image, "request_id"):
-        kwargs["request_id"] = _request_id(request)
+        kwargs["request_id"] = request_id
     if identity_key:
         kwargs["identity_key"] = identity_key
     return runtime.handle_image(session_id, image_path, **kwargs)
@@ -1456,9 +1528,12 @@ def _agent_payload(
                     })
         except Exception:  # noqa: BLE001 - feedback-only media must not fail the reply.
             feedback_images = []
+    active_request_id = current_request_id()
+    fallback_request_id = active_request_id or new_request_id()
     if response.protocol:
-        protocol = _public_response_protocol(
-            RequestProtocol.from_dict(response.protocol)
+        protocol = _with_protocol_request_id(
+            _public_response_protocol(RequestProtocol.from_dict(response.protocol)),
+            active_request_id,
         )
     elif snapshot.get("phase") == "ERROR":
         protocol = RequestProtocol.from_code(
@@ -1467,25 +1542,25 @@ def _agent_payload(
                 if snapshot.get("has_active_image") is True
                 else "AGENT_FAILED_NO_IMAGE"
             ),
-            request_id=new_request_id(),
+            request_id=fallback_request_id,
             search_id=str(snapshot.get("search_id") or ""),
         )
     elif snapshot.get("phase") == "NO_MATCH":
         protocol = RequestProtocol.from_code(
             "NO_MATCH",
-            request_id=new_request_id(),
+            request_id=fallback_request_id,
             search_id=str(snapshot.get("search_id") or ""),
         )
     else:
         protocol = RequestProtocol.from_code(
             "REQUEST_SUCCEEDED",
-            request_id=new_request_id(),
+            request_id=fallback_request_id,
             search_id=str(snapshot.get("search_id") or ""),
         )
     if media and media.get("protocol_code"):
         protocol = RequestProtocol.from_code(
             str(media["protocol_code"]),
-            request_id=protocol.request_id or new_request_id(),
+            request_id=protocol.request_id or fallback_request_id,
             search_id=protocol.search_id or str(snapshot.get("search_id") or ""),
         )
         text = str(media.get("text") or text)
@@ -1901,6 +1976,7 @@ async def _stream_agent_events(
     *,
     request_id: str = "",
     search_id: str = "",
+    trace_context: TraceContext,
 ):
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
@@ -1912,37 +1988,38 @@ async def _stream_agent_events(
         )
 
     async def run() -> None:
-        try:
-            payload = await asyncio.to_thread(execute, progress)
-            await queue.put({"type": "result", "data": payload})
-        except (AgentRuntimeBusyError, AgentBudgetExceededError) as exc:
-            protocol = _public_response_protocol(
-                exc.bind(
-                    request_id=exc.request_id or request_id or new_request_id(),
-                    search_id=exc.search_id or search_id,
+        with trace_context_scope(trace_context):
+            try:
+                payload = await asyncio.to_thread(execute, progress)
+                await queue.put({"type": "result", "data": payload})
+            except (AgentRuntimeBusyError, AgentBudgetExceededError) as exc:
+                protocol = _public_response_protocol(
+                    exc.bind(
+                        request_id=exc.request_id or request_id or new_request_id(),
+                        search_id=exc.search_id or search_id,
+                    )
                 )
-            )
-            await queue.put({
-                "type": "error",
-                "message": _public_protocol_message(protocol),
-                **protocol.to_dict(),
-            })
-        except Exception:  # noqa: BLE001 - keep internal failures out of the public stream.
-            logger.exception("streamed Agent request failed")
-            protocol = _public_response_protocol(
-                RequestProtocol.from_code(
-                    "SERVICE_UNAVAILABLE",
-                    request_id=request_id or new_request_id(),
-                    search_id=search_id,
+                await queue.put({
+                    "type": "error",
+                    "message": _public_protocol_message(protocol),
+                    **protocol.to_dict(),
+                })
+            except Exception:  # noqa: BLE001 - keep internal failures out of the public stream.
+                logger.exception("streamed Agent request failed")
+                protocol = _public_response_protocol(
+                    RequestProtocol.from_code(
+                        "SERVICE_UNAVAILABLE",
+                        request_id=request_id or new_request_id(),
+                        search_id=search_id,
+                    )
                 )
-            )
-            await queue.put({
-                "type": "error",
-                "message": "服务端处理失败，请稍后重试。",
-                **protocol.to_dict(),
-            })
-        finally:
-            await queue.put(None)
+                await queue.put({
+                    "type": "error",
+                    "message": "服务端处理失败，请稍后重试。",
+                    **protocol.to_dict(),
+                })
+            finally:
+                await queue.put(None)
 
     task = asyncio.create_task(run())
     while True:

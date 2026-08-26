@@ -26,6 +26,7 @@ from tiku_shared.model_costs import (
     ModelCostCollector,
     SQLiteModelCostLedger,
     model_cost_scope,
+    new_run_id,
     submit_with_model_cost_context,
 )
 from tiku_shared.request_protocol import (
@@ -33,6 +34,7 @@ from tiku_shared.request_protocol import (
     new_request_id,
     new_search_id,
 )
+from tiku_shared.trace_context import current_trace_id, submit_with_trace_context
 
 
 AgentFactory = Callable[[AgentState], TikuSearchAgent]
@@ -465,7 +467,8 @@ class AgentSessionRuntime:
         started = time.perf_counter()
         task_id = request_id
         collector = ModelCostCollector(
-            run_id=task_id,
+            run_id=new_run_id(),
+            trace_id=current_trace_id(),
             session_key=session_key(session_id),
             identity_key=str(identity_key).strip(),
             task_kind="image",
@@ -596,7 +599,8 @@ class AgentSessionRuntime:
             if not search_future.done():
                 self._track_background_image_future(session_id, search_future)
             assert self._observer_executor is not None
-            self._observer_executor.submit(
+            submit_with_trace_context(
+                self._observer_executor,
                 self._finish_screened_observability,
                 futures,
                 task_id=task_id,
@@ -699,6 +703,7 @@ class AgentSessionRuntime:
             response=response,
             error_kind="",
             identity_key=identity_key,
+            trace_id=collector.trace_id,
         )
         if self.cost_ledger is not None:
             try:
@@ -879,7 +884,8 @@ class AgentSessionRuntime:
         started = time.perf_counter()
         task_id = request_id
         cost_collector = ModelCostCollector(
-            run_id=task_id,
+            run_id=new_run_id(),
+            trace_id=current_trace_id(),
             session_key=session_key(clean_session_id),
             identity_key=str(identity_key).strip(),
             task_kind=kind,
@@ -1052,6 +1058,7 @@ class AgentSessionRuntime:
         error_kind: str,
         identity_key: str = "",
         protocol: RequestProtocol | None = None,
+        trace_id: str = "",
     ) -> None:
         outcome = _task_outcome(state, response, error_kind)
         resolved_protocol = protocol or _request_protocol(
@@ -1075,6 +1082,7 @@ class AgentSessionRuntime:
             chapter=state.current_chapter,
             route=state.current_route,
             error_kind=error_kind or ("agent_error" if state.phase == "ERROR" else ""),
+            trace_id=str(trace_id or current_trace_id()),
             request_id=resolved_protocol.request_id or task_id,
             search_id=resolved_protocol.search_id or state.current_search_id,
             identity_key=str(identity_key or "").strip(),

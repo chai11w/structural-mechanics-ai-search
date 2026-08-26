@@ -295,7 +295,7 @@ class QwenA3Observer:
             model=self.model,
             call_type="qwen_a3_decomposition",
             usage_getter=lambda value: value.get("usage", {}),
-            request_id_getter=lambda value: str(
+            provider_request_id_getter=lambda value: str(
                 value.get("request_id") or value.get("id") or ""
             ),
         )
@@ -428,7 +428,7 @@ class QwenA3ChapterObserver:
             model=self.model,
             call_type="qwen_a3_chapter_recognition",
             usage_getter=lambda value: value.get("usage", {}),
-            request_id_getter=lambda value: str(
+            provider_request_id_getter=lambda value: str(
                 value.get("request_id") or value.get("id") or ""
             ),
         )

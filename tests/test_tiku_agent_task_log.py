@@ -30,18 +30,25 @@ class TaskLogContractTest(unittest.TestCase):
             candidate_count=3,
             chapter="7矩阵位移",
             route="main",
+            trace_id="trace_0123456789abcdef0123456789abcdef",
         )
 
         data = entry.to_dict()
 
         self.assertEqual(data["schema_version"], TASK_LOG_SCHEMA_VERSION)
+        self.assertEqual(
+            data["trace_id"],
+            "trace_0123456789abcdef0123456789abcdef",
+        )
         self.assertNotIn("user_text", data)
         self.assertNotIn("image_path", data)
         self.assertNotIn("raw_content", data)
 
-    def test_jsonl_logger_appends_one_utf8_json_record(self):
+    def test_jsonl_logger_appends_v3_without_rewriting_v2_history(self):
         path = RUNTIME_DIR / f"task_log_test_{uuid4().hex}.jsonl"
         self.addCleanup(lambda: path.unlink(missing_ok=True))
+        historical = '{"schema_version":2,"task_id":"historical"}'
+        path.write_text(historical + "\n", encoding="utf-8")
         entry = TaskLogEntry(
             task_id="task-1",
             session_key="hashed-session",
@@ -59,8 +66,9 @@ class TaskLogContractTest(unittest.TestCase):
         JsonlTaskLogger(path).write(entry)
 
         lines = path.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(len(lines), 1)
-        self.assertEqual(json.loads(lines[0]), entry.to_dict())
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0], historical)
+        self.assertEqual(json.loads(lines[1]), entry.to_dict())
 
 
 if __name__ == "__main__":

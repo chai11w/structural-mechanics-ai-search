@@ -17,6 +17,7 @@ from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_log import TaskLogEntry, TaskLogger
 from tiku_agent.tools import ToolResult
+from tiku_shared.trace_context import TraceContext, trace_context_scope
 
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
@@ -152,6 +153,57 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.assertEqual(entry.status, "NEEDS_INPUT")
         self.assertEqual(entry.layer, "session")
         self.assertEqual(entry.code, "CANDIDATE_LIST_UNAVAILABLE")
+
+    def test_task_and_cost_run_keep_trace_while_run_id_is_independent(self):
+        class CapturingLedger:
+            def __init__(self):
+                self.collectors = []
+
+            def estimated_cost_micros_since(
+                self, _started_at: str, *, identity_key: str | None = None
+            ) -> int:
+                del identity_key
+                return 0
+
+            def write_run(self, collector, *, finished_at: str, outcome: str) -> None:
+                del finished_at, outcome
+                self.collectors.append(collector)
+
+        ledger = CapturingLedger()
+        runtime = AgentSessionRuntime(
+            self.store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            cost_ledger=ledger,
+            agent_factory=lambda state: TikuSearchAgent(
+                state=state,
+                tools=FakeTools().toolbox(),
+                use_llm_intent=False,
+            ),
+        )
+        trace_id = "trace_0123456789abcdef0123456789abcdef"
+        request_id = "req_0123456789abcdef0123456789abcdef"
+
+        with trace_context_scope(TraceContext(trace_id, request_id=request_id)):
+            runtime.handle_text("trace-session", "你好", request_id=request_id)
+        second_trace_id = "trace_fedcba9876543210fedcba9876543210"
+        with trace_context_scope(TraceContext(second_trace_id, request_id=request_id)):
+            runtime.handle_text("trace-session", "继续", request_id=request_id)
+
+        self.assertEqual(
+            [entry.trace_id for entry in self.logger.entries[-2:]],
+            [trace_id, second_trace_id],
+        )
+        self.assertEqual(len(ledger.collectors), 2)
+        self.assertEqual(
+            [collector.trace_id for collector in ledger.collectors],
+            [trace_id, second_trace_id],
+        )
+        run_ids = [collector.run_id for collector in ledger.collectors]
+        for run_id in run_ids:
+            self.assertRegex(run_id, r"^run_[0-9a-f]{32}$")
+        self.assertEqual(len(set(run_ids)), 2)
+        self.assertNotIn(request_id, run_ids)
 
     def test_cancel_clears_persisted_session(self):
         session_id = "cancel-session"

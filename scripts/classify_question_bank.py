@@ -512,7 +512,7 @@ def tracked_qwen_request(
         model=model,
         call_type=call_type,
         usage_getter=lambda value: value.get("usage", {}),
-        request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
+        provider_request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
         attempt_count_getter=lambda value: int(getattr(value, "client_attempt_count", 1) or 1),
     )
 

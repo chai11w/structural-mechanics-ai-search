@@ -181,7 +181,7 @@ def call_qwen_json(
         model=model,
         call_type=call_type,
         usage_getter=lambda value: value.get("usage", {}),
-        request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
+        provider_request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
     )
     try:
         raw_content = data["choices"][0]["message"]["content"]
@@ -279,7 +279,7 @@ def call_mimo_json(
         model=model,
         call_type=call_type,
         usage_getter=lambda value: value.get("usage", {}),
-        request_id_getter=lambda value: str(value.get("id") or ""),
+        provider_request_id_getter=lambda value: str(value.get("id") or ""),
     )
     if use_responses:
         raw_content = data.get("output_text")

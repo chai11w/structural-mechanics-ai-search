@@ -27,6 +27,7 @@ from tiku_agent.fastapi_demo import (
 from tiku_agent.feedback_store import SQLiteFeedbackStore, scope_feedback_conversation
 from tiku_agent.invite_access import InviteAccess, build_invitation_config
 from tiku_agent.session_runtime import AgentBudgetExceededError, AgentRuntimeBusyError
+from tiku_shared.trace_context import current_request_id, current_trace_id
 
 
 class FakeRuntime:
@@ -248,18 +249,96 @@ class FastApiDemoTest(unittest.TestCase):
         }
         client = TestClient(create_app(runtime=runtime))
 
-        json_payload = client.post("/api/message", json={"text": "继续"}).json()
+        json_response = client.post("/api/message", json={"text": "继续"})
+        json_payload = json_response.json()
         stream = client.post("/api/message/stream", json={"text": "继续"})
         stream_events = [json.loads(line) for line in stream.text.splitlines() if line]
         stream_payload = stream_events[-1]["data"]
 
-        for payload in (json_payload, stream_payload):
+        for response, payload in (
+            (json_response, json_payload),
+            (stream, stream_payload),
+        ):
             self.assertEqual(payload["status"], "ERROR")
             self.assertEqual(payload["code"], "TOOL_FAILED")
             self.assertEqual(payload["action"], "retry_search")
-            self.assertEqual(payload["request_id"], "")
+            self.assertEqual(payload["request_id"], response.headers["X-Request-ID"])
             self.assertEqual(payload["search_id"], "")
             self.assertNotIn("PROVIDER_SECRET", json.dumps(payload, ensure_ascii=False))
+
+    def test_server_trace_is_unique_propagated_to_json_and_stream_and_not_public(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"trace_context_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+
+        class TraceCapturingRuntime(FakeRuntime):
+            def __init__(self, path: Path):
+                super().__init__(path)
+                self.trace_observations = []
+
+            def handle_text(
+                self,
+                session_id: str,
+                text: str,
+                *,
+                request_id: str = "",
+                identity_key: str = "",
+                progress=None,
+            ) -> AgentResponse:
+                self.trace_observations.append(
+                    (current_trace_id(), current_request_id(), request_id)
+                )
+                return super().handle_text(
+                    session_id,
+                    text,
+                    identity_key=identity_key,
+                    progress=progress,
+                )
+
+        runtime = TraceCapturingRuntime(image_path)
+        runtime.response_protocol = {
+            "status": "SUCCESS",
+            "layer": "tool",
+            "code": "REQUEST_SUCCEEDED",
+            "request_id": "req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        }
+        client = TestClient(create_app(runtime=runtime))
+        request_id = "req_0123456789abcdef0123456789abcdef"
+        forged_trace_id = "trace_ffffffffffffffffffffffffffffffff"
+        headers = {
+            "X-Request-ID": request_id,
+            "X-Trace-ID": forged_trace_id,
+        }
+
+        json_response = client.post(
+            "/api/message", json={"text": "你好"}, headers=headers
+        )
+        stream_response = client.post(
+            "/api/message/stream", json={"text": "继续"}, headers=headers
+        )
+        stream_events = [
+            json.loads(line) for line in stream_response.text.splitlines() if line
+        ]
+        stream_payload = stream_events[-1]["data"]
+
+        self.assertEqual(json_response.headers["X-Request-ID"], request_id)
+        self.assertEqual(stream_response.headers["X-Request-ID"], request_id)
+        self.assertEqual(json_response.json()["request_id"], request_id)
+        self.assertEqual(stream_payload["request_id"], request_id)
+        self.assertNotIn("X-Trace-ID", json_response.headers)
+        self.assertNotIn("X-Trace-ID", stream_response.headers)
+        self.assertNotIn("trace_id", json_response.text)
+        self.assertNotIn("trace_id", stream_response.text)
+
+        self.assertEqual(len(runtime.trace_observations), 2)
+        trace_ids = [item[0] for item in runtime.trace_observations]
+        self.assertTrue(all(item.startswith("trace_") for item in trace_ids))
+        self.assertEqual(len(set(trace_ids)), 2)
+        self.assertNotIn(forged_trace_id, trace_ids)
+        self.assertTrue(
+            all(item[1:] == (request_id, request_id) for item in runtime.trace_observations)
+        )
 
     def test_json_and_stream_do_not_trust_unregistered_tool_recovery_metadata(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"

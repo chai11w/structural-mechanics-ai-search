@@ -15,13 +15,20 @@ from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_log import JsonlTaskLogger
 from tiku_shared.model_costs import (
+    COST_SCHEMA_VERSION,
     ModelCostCollector,
     SQLiteModelCostLedger,
     estimate_cost,
     model_cost_scope,
+    new_run_id,
     normalize_usage,
     submit_with_model_cost_context,
     timed_model_call,
+)
+from tiku_shared.trace_context import (
+    TraceContext,
+    current_trace_id,
+    trace_context_scope,
 )
 
 
@@ -76,6 +83,176 @@ class ModelCostTest(unittest.TestCase):
         self.assertEqual(glm_5v["estimated_cost_micros"], 7200)
         self.assertEqual(glm_5v["pricing_status"], "priced")
 
+    def test_new_run_ids_are_independent_from_request_and_trace_ids(self):
+        first = new_run_id()
+        second = new_run_id()
+
+        self.assertRegex(first, r"^run_[0-9a-f]{32}$")
+        self.assertNotEqual(first, second)
+        self.assertFalse(first.startswith("req_"))
+        self.assertFalse(first.startswith("trace_"))
+
+    def test_v2_database_migrates_additively_without_rewriting_history(self):
+        directory = self.make_directory()
+        database = directory / "costs.sqlite3"
+        old_started = "2026-08-25T00:00:00+00:00"
+        with sqlite3.connect(database) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE model_cost_runs (
+                    run_id TEXT PRIMARY KEY,
+                    session_key TEXT NOT NULL,
+                    identity_key TEXT NOT NULL DEFAULT '',
+                    search_key TEXT NOT NULL,
+                    task_kind TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    call_count INTEGER NOT NULL,
+                    total_tokens INTEGER NOT NULL,
+                    estimated_cost_micros INTEGER NOT NULL,
+                    warning_codes_json TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL
+                );
+                CREATE TABLE model_cost_calls (
+                    call_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    call_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT NOT NULL,
+                    latency_ms INTEGER NOT NULL,
+                    input_tokens INTEGER NOT NULL,
+                    image_tokens INTEGER NOT NULL,
+                    cached_tokens INTEGER NOT NULL,
+                    output_tokens INTEGER NOT NULL,
+                    total_tokens INTEGER NOT NULL,
+                    attempt_count INTEGER NOT NULL,
+                    request_id TEXT NOT NULL,
+                    error_kind TEXT NOT NULL,
+                    price_version TEXT NOT NULL,
+                    pricing_status TEXT NOT NULL,
+                    estimated_cost_micros INTEGER NOT NULL,
+                    schema_version INTEGER NOT NULL
+                );
+                """
+            )
+            connection.execute(
+                "INSERT INTO model_cost_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "req_historical_run",
+                    "old-session",
+                    "old-identity",
+                    "old-search",
+                    "image",
+                    old_started,
+                    old_started,
+                    "success",
+                    1,
+                    12,
+                    900,
+                    "[]",
+                    2,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO model_cost_calls VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "old-call",
+                    "req_historical_run",
+                    1,
+                    "zhipu",
+                    "glm-4.6v",
+                    "legacy_call",
+                    "success",
+                    old_started,
+                    old_started,
+                    1,
+                    10,
+                    0,
+                    0,
+                    2,
+                    12,
+                    1,
+                    "provider-old",
+                    "",
+                    "2026-08-01",
+                    "priced",
+                    900,
+                    2,
+                ),
+            )
+
+        trace = TraceContext.create(request_id="req_new_attempt")
+        collector = ModelCostCollector(
+            run_id=new_run_id(),
+            trace_id=trace.trace_id,
+            session_key="new-session",
+            identity_key="new-identity",
+            search_key="new-search",
+            task_kind="image",
+            started_at="2026-08-25T00:01:00+00:00",
+        )
+        collector.record(
+            provider="zhipu",
+            model="glm-4.6v",
+            call_type="new_call",
+            status="success",
+            started_at="2026-08-25T00:01:00+00:00",
+            finished_at="2026-08-25T00:01:01+00:00",
+            latency_ms=1000,
+            usage={"prompt_tokens": 10, "completion_tokens": 2},
+            provider_request_id="provider-new",
+        )
+        SQLiteModelCostLedger(database).write_run(
+            collector,
+            finished_at="2026-08-25T00:01:01+00:00",
+            outcome="success",
+        )
+
+        with sqlite3.connect(database) as connection:
+            run_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(model_cost_runs)")
+            }
+            call_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(model_cost_calls)")
+            }
+            old_run = connection.execute(
+                "SELECT trace_id, schema_version FROM model_cost_runs "
+                "WHERE run_id = 'req_historical_run'"
+            ).fetchone()
+            old_call = connection.execute(
+                "SELECT trace_id, provider_request_id, request_id, schema_version "
+                "FROM model_cost_calls WHERE call_id = 'old-call'"
+            ).fetchone()
+            new_run = connection.execute(
+                "SELECT trace_id, schema_version FROM model_cost_runs WHERE run_id = ?",
+                (collector.run_id,),
+            ).fetchone()
+            new_call = connection.execute(
+                "SELECT trace_id, provider_request_id, request_id, schema_version "
+                "FROM model_cost_calls WHERE run_id = ?",
+                (collector.run_id,),
+            ).fetchone()
+
+        self.assertIn("trace_id", run_columns)
+        self.assertIn("trace_id", call_columns)
+        self.assertIn("provider_request_id", call_columns)
+        self.assertEqual(old_run, ("", 2))
+        self.assertEqual(old_call, ("", "", "provider-old", 2))
+        self.assertEqual(COST_SCHEMA_VERSION, 3)
+        self.assertEqual(new_run, (trace.trace_id, 3))
+        self.assertEqual(
+            new_call,
+            (trace.trace_id, "provider-new", "provider-new", 3),
+        )
+        report = load_report(database, days=36500)
+        self.assertEqual(report["search_count"], 2)
+
     def test_budget_sum_read_only_reprices_historical_glm_5v_calls(self):
         directory = self.make_directory()
         database = directory / "costs.sqlite3"
@@ -117,29 +294,121 @@ class ModelCostTest(unittest.TestCase):
         )
 
     def test_concurrent_calls_keep_the_parent_cost_scope(self):
-        collector = ModelCostCollector(run_id="run")
+        trace = TraceContext.create(request_id="req_thread_attempt")
 
         def provider_call():
-            return {"usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}}
+            return {
+                "trace_id": current_trace_id(),
+                "id": "provider-thread",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+            }
 
-        with model_cost_scope(collector):
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = [
-                    submit_with_model_cost_context(
-                        executor,
-                        timed_model_call,
-                        provider_call,
-                        provider="zhipu",
-                        model="glm-4.6v",
-                        call_type="zhipu_shape_rerank",
-                        usage_getter=lambda value: value["usage"],
-                    )
-                    for _ in range(2)
-                ]
-                for future in futures:
-                    future.result()
+        with trace_context_scope(trace):
+            collector = ModelCostCollector(run_id=new_run_id())
+            with model_cost_scope(collector):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = [
+                        submit_with_model_cost_context(
+                            executor,
+                            timed_model_call,
+                            provider_call,
+                            provider="zhipu",
+                            model="glm-4.6v",
+                            call_type="zhipu_shape_rerank",
+                            usage_getter=lambda value: value["usage"],
+                            provider_request_id_getter=lambda value: value["id"],
+                        )
+                        for _ in range(2)
+                    ]
+                    results = [future.result() for future in futures]
         self.assertEqual(len(collector.records()), 2)
         self.assertEqual(sum(item.total_tokens for item in collector.records()), 24)
+        self.assertTrue(all(result["trace_id"] == trace.trace_id for result in results))
+        self.assertTrue(all(item.trace_id == trace.trace_id for item in collector.records()))
+        self.assertTrue(
+            all(item.provider_request_id == "provider-thread" for item in collector.records())
+        )
+        self.assertTrue(
+            all(item.request_id == "provider-thread" for item in collector.records())
+        )
+
+    def test_legacy_request_id_getter_writes_canonical_id_and_compatibility_mirror(self):
+        collector = ModelCostCollector(run_id=new_run_id())
+        with model_cost_scope(collector):
+            timed_model_call(
+                lambda: {"id": "provider-legacy-alias", "usage": {}},
+                provider="zhipu",
+                model="glm-4.6v",
+                call_type="legacy_adapter",
+                usage_getter=lambda value: value["usage"],
+                request_id_getter=lambda value: value["id"],
+            )
+
+        record = collector.records()[0]
+        self.assertEqual(record.provider_request_id, "provider-legacy-alias")
+        self.assertEqual(record.request_id, "provider-legacy-alias")
+
+    def test_duplicate_run_id_is_rejected_without_mixing_call_rows(self):
+        directory = self.make_directory()
+        database = directory / "costs.sqlite3"
+        ledger = SQLiteModelCostLedger(database)
+        first = ModelCostCollector(run_id="run_duplicate")
+        second = ModelCostCollector(run_id="run_duplicate")
+        for collector, provider_id in ((first, "provider-first"), (second, "provider-second")):
+            collector.record(
+                provider="zhipu",
+                model="glm-4.6v",
+                call_type="duplicate_guard",
+                status="success",
+                started_at="2026-08-25T00:00:00+00:00",
+                finished_at="2026-08-25T00:00:01+00:00",
+                latency_ms=1000,
+                usage={"prompt_tokens": 10, "completion_tokens": 2},
+                provider_request_id=provider_id,
+            )
+
+        ledger.write_run(
+            first,
+            finished_at="2026-08-25T00:00:01+00:00",
+            outcome="success",
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            ledger.write_run(
+                second,
+                finished_at="2026-08-25T00:00:02+00:00",
+                outcome="error",
+            )
+
+        with sqlite3.connect(database) as connection:
+            run_count = connection.execute(
+                "SELECT COUNT(*) FROM model_cost_runs WHERE run_id = 'run_duplicate'"
+            ).fetchone()[0]
+            provider_ids = connection.execute(
+                "SELECT provider_request_id FROM model_cost_calls "
+                "WHERE run_id = 'run_duplicate'"
+            ).fetchall()
+        self.assertEqual(run_count, 1)
+        self.assertEqual(provider_ids, [("provider-first",)])
+
+    def test_provider_failure_keeps_local_trace_without_usage_or_provider_id(self):
+        trace = TraceContext.create(request_id="req_failed_attempt")
+        with trace_context_scope(trace):
+            collector = ModelCostCollector(run_id=new_run_id())
+            with model_cost_scope(collector):
+                with self.assertRaisesRegex(RuntimeError, "provider failed"):
+                    timed_model_call(
+                        lambda: (_ for _ in ()).throw(RuntimeError("provider failed")),
+                        provider="zhipu",
+                        model="glm-4.6v",
+                        call_type="failed_call",
+                        usage_getter=lambda value: value,
+                    )
+
+        record = collector.records()[0]
+        self.assertEqual(record.status, "error")
+        self.assertEqual(record.trace_id, trace.trace_id)
+        self.assertEqual(record.provider_request_id, "")
+        self.assertEqual(record.total_tokens, 0)
 
     def test_one_transaction_persists_run_calls_and_warning_codes(self):
         directory = self.make_directory()

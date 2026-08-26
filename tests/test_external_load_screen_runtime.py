@@ -15,6 +15,7 @@ from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_log import TaskLogEntry, TaskLogger
 from tiku_agent.tools import ToolResult
+from tiku_shared.trace_context import TraceContext, trace_context_scope
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -149,9 +150,18 @@ class ExternalLoadScreenRuntimeTest(unittest.TestCase):
 
         response_box = []
         finished = threading.Event()
+        trace_id = "trace_11111111111111111111111111111111"
+        request_id = "req_11111111111111111111111111111111"
 
         def run_search() -> None:
-            response_box.append(runtime.handle_image("candidate-first", self.source))
+            with trace_context_scope(TraceContext(trace_id, request_id=request_id)):
+                response_box.append(
+                    runtime.handle_image(
+                        "candidate-first",
+                        self.source,
+                        request_id=request_id,
+                    )
+                )
             finished.set()
 
         worker = threading.Thread(target=run_search)
@@ -167,6 +177,7 @@ class ExternalLoadScreenRuntimeTest(unittest.TestCase):
             worker.join(1)
 
         self.assertTrue(logger.event.wait(1))
+        self.assertEqual(logger.entries[-1].trace_id, trace_id)
         self.assertEqual(runtime.store.load("candidate-first").candidate_count, 1)
 
     def test_chapter_prompt_waits_for_no_and_is_replaced(self):
