@@ -35,6 +35,11 @@ from tiku_shared.request_protocol import (
     new_search_id,
 )
 from tiku_shared.trace_context import current_trace_id, submit_with_trace_context
+from tiku_shared.trace_events import (
+    bind_trace_event_dimensions,
+    current_trace_event_session,
+    record_trace_event,
+)
 
 
 AgentFactory = Callable[[AgentState], TikuSearchAgent]
@@ -240,6 +245,7 @@ class AgentSessionRuntime:
         clean_session_id = self._clean_session_id(session_id)
         clean_request_id = str(request_id or "").strip() or new_request_id()
         search_id = new_search_id()
+        _bind_trace_lifecycle(clean_session_id, search_id, identity_key=identity_key)
 
         def execute() -> AgentResponse:
             self.purge_expired()
@@ -305,6 +311,7 @@ class AgentSessionRuntime:
         clean_session_id = self._clean_session_id(session_id)
         clean_request_id = str(request_id or "").strip() or new_request_id()
         search_id = new_search_id()
+        _bind_trace_lifecycle(clean_session_id, search_id, identity_key=identity_key)
 
         def execute() -> AgentResponse:
             self.purge_expired()
@@ -356,6 +363,7 @@ class AgentSessionRuntime:
         clean_session_id = self._clean_session_id(session_id)
         clean_request_id = str(request_id or "").strip() or new_request_id()
         search_id = new_search_id()
+        _bind_trace_lifecycle(clean_session_id, search_id, identity_key=identity_key)
 
         def execute() -> AgentResponse:
             self.purge_expired()
@@ -413,6 +421,12 @@ class AgentSessionRuntime:
                     code="SERVICE_UNAVAILABLE",
                 ) from exc
             handoff = decision.handoff
+            record_trace_event(
+                "route_decided",
+                stage="image_routing",
+                outcome="rejected" if handoff.route == "A1" else "success",
+                safe_attributes={"route": handoff.route},
+            )
             if handoff.route == "A2":
                 if progress is not None:
                     progress("searching", "图片适合直接检索，正在识别题目信息…")
@@ -573,6 +587,14 @@ class AgentSessionRuntime:
                     response_state = agent.state
 
         assert response is not None and response_state is not None
+        record_trace_event(
+            "route_decided",
+            stage="image_routing",
+            outcome=("rejected" if response.intent == "external_load_screen" else "success"),
+            safe_attributes={
+                "route": "A1" if response.intent == "external_load_screen" else "A2"
+            },
+        )
         self._attach_response_protocol(
             response,
             state=response_state,
@@ -732,6 +754,7 @@ class AgentSessionRuntime:
         clean_request_id = str(request_id or "").strip() or new_request_id()
         current_state = self.store.load(clean_session_id)
         search_id = current_state.current_search_id if current_state is not None else ""
+        _bind_trace_lifecycle(clean_session_id, search_id, identity_key=identity_key)
         return self._admit(
             clean_session_id,
             lambda: self._run(
@@ -1119,6 +1142,26 @@ class AgentSessionRuntime:
         if not clean:
             raise ValueError("session_id is required")
         return clean
+
+
+def _bind_trace_lifecycle(
+    session_id: str,
+    search_id: str = "",
+    *,
+    identity_key: str = "",
+) -> None:
+    event_session = current_trace_event_session()
+    existing = event_session.dimensions if event_session is not None else {}
+    clean_search_id = str(search_id or "").strip()
+    dimensions = {"session_key": session_key(session_id)}
+    if clean_search_id:
+        dimensions["search_id"] = clean_search_id
+        dimensions["workflow_search_id"] = (
+            existing.get("workflow_search_id") or clean_search_id
+        )
+    if str(identity_key or "").strip():
+        dimensions["identity_key"] = str(identity_key).strip()
+    bind_trace_event_dimensions(**dimensions)
 
 
 def _task_outcome(state: AgentState, response: AgentResponse | None, error_kind: str) -> str:

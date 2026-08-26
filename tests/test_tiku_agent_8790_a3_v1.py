@@ -49,6 +49,10 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
             app = build_app(Path(temp) / "runtime", enable_triage=False)
 
             self.assertIsNotNone(app)
+            self.assertEqual(
+                app.state.trace_event_recorder.store.path.resolve(),
+                (Path(temp) / "runtime" / "trace_events.sqlite3").resolve(),
+            )
             self.assertTrue(build_runtime.call_args.kwargs["auto_prepare_all_units"])
             self.assertTrue(build_runtime.call_args.kwargs["enable_a3_intent_v1"])
             self.assertTrue(

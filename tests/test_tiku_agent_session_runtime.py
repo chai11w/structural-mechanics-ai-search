@@ -18,6 +18,11 @@ from tiku_agent.state import AgentState
 from tiku_agent.task_log import TaskLogEntry, TaskLogger
 from tiku_agent.tools import ToolResult
 from tiku_shared.trace_context import TraceContext, trace_context_scope
+from tiku_shared.trace_events import (
+    SQLiteTraceEventStore,
+    TraceEventRecorder,
+    trace_event_scope,
+)
 
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
@@ -204,6 +209,40 @@ class AgentSessionRuntimeTest(unittest.TestCase):
             self.assertRegex(run_id, r"^run_[0-9a-f]{32}$")
         self.assertEqual(len(set(run_ids)), 2)
         self.assertNotIn(request_id, run_ids)
+
+    def test_direct_a2_events_bind_search_and_workflow_before_routing(self):
+        trace_id = "trace_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        request_id = "req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        event_database = RUNTIME_DIR / f"trace_events_{uuid4().hex}.sqlite3"
+        self.addCleanup(lambda: event_database.unlink(missing_ok=True))
+        event_store = SQLiteTraceEventStore(event_database)
+        recorder = TraceEventRecorder(event_store)
+        session_id = "trace-search-session"
+        self.addCleanup(lambda: self.artifacts.clear_session(session_id))
+
+        with trace_context_scope(
+            TraceContext(trace_id, request_id=request_id)
+        ), trace_event_scope(
+            recorder,
+            trace_id=trace_id,
+            request_id=request_id,
+        ):
+            response = self.runtime.handle_image(
+                session_id,
+                self.source_image,
+                request_id=request_id,
+            )
+
+        search_id = str(response.protocol["search_id"])
+        routes = [
+            event
+            for event in event_store.events_for_trace(trace_id)
+            if event.event_type == "route_decided" and event.stage == "bank_routing"
+        ]
+        self.assertEqual(len(routes), 1)
+        self.assertEqual(routes[0].search_id, search_id)
+        self.assertEqual(routes[0].workflow_search_id, search_id)
+        self.assertEqual(routes[0].request_id, request_id)
 
     def test_cancel_clears_persisted_session(self):
         session_id = "cancel-session"

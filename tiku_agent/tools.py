@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from functools import wraps
@@ -40,6 +41,7 @@ from tiku_agent.intent_contract import CHAPTERS
 from tiku_agent.tool_result import ToolOutcome, ToolResult
 from tiku_shared.request_protocol import RequestAction
 from tiku_shared.model_costs import submit_with_model_cost_context
+from tiku_shared.trace_events import record_trace_event
 
 
 BASE = Path(__file__).resolve().parent.parent
@@ -101,11 +103,83 @@ def _named_tool(name: str):
     def decorate(function):
         @wraps(function)
         def wrapped(*args, **kwargs):
-            return function(*args, **kwargs).with_tool(name)
+            started = time.perf_counter()
+            try:
+                result = function(*args, **kwargs).with_tool(name)
+            except Exception as exc:
+                _emit_tool_finished(
+                    name,
+                    duration_ms=round((time.perf_counter() - started) * 1000),
+                    error_kind=type(exc).__name__,
+                )
+                raise
+            _emit_tool_finished(
+                name,
+                result=result,
+                duration_ms=round((time.perf_counter() - started) * 1000),
+            )
+            return result
 
         return wrapped
 
     return decorate
+
+
+def _emit_tool_finished(
+    name: str,
+    *,
+    result: ToolResult | None = None,
+    duration_ms: int,
+    error_kind: str = "",
+) -> None:
+    try:
+        if result is None:
+            record_trace_event(
+                "tool_finished",
+                stage=name,
+                outcome="error",
+                duration_ms=duration_ms,
+                safe_attributes={
+                    "tool": name,
+                    "completed": False,
+                    "error_kind": error_kind,
+                },
+            )
+            return
+        public = result.to_public_dict()
+        attributes: dict[str, Any] = {
+            "tool": name,
+            "completed": bool(public["completed"]),
+            "error_code": str(public["code"]),
+        }
+        candidate_count = _tool_candidate_count(result)
+        if candidate_count is not None:
+            attributes["candidate_count"] = candidate_count
+        record_trace_event(
+            "tool_finished",
+            stage=name,
+            outcome=str(public["status"]).lower(),
+            protocol={
+                key: public[key]
+                for key in ("status", "layer", "code", "retryable", "action")
+            },
+            duration_ms=duration_ms,
+            safe_attributes=attributes,
+        )
+    except Exception:  # noqa: BLE001 - diagnostics must remain fail-open.
+        return
+
+
+def _tool_candidate_count(result: ToolResult) -> int | None:
+    data = result.data if isinstance(result.data, dict) else {}
+    for key in ("candidates", "visible_candidates"):
+        candidates = data.get(key)
+        if isinstance(candidates, (list, tuple)):
+            return len(candidates)
+    candidate_count = data.get("candidate_count")
+    if isinstance(candidate_count, int) and not isinstance(candidate_count, bool):
+        return max(0, candidate_count)
+    return None
 
 
 @_named_tool("analyze_image")

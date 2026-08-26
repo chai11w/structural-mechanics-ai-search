@@ -32,6 +32,7 @@ from tiku_agent.tools import AgentToolConfig, rerank_candidates_tool
 from tiku_admin.auth import SQLiteInviteAccess
 from tiku_admin.control_store import SQLiteControlStore
 from tiku_shared.model_costs import SQLiteModelCostLedger
+from tiku_shared.trace_events import SQLiteTraceEventStore, TraceEventRecorder
 
 
 DEFAULT_V2_RUNTIME_DIR = BASE / ".tmp_tiku_agent_v2"
@@ -184,6 +185,9 @@ def build_app(
             lambda: int(control_store.settings()["feedback_retention_days"])
             if control_store is not None
             else 30
+        ),
+        trace_event_recorder=TraceEventRecorder(
+            SQLiteTraceEventStore(root / "trace_events.sqlite3")
         ),
     )
 

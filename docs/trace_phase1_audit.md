@@ -1,8 +1,8 @@
 # Trace Phase 1 Audit and Minimal Contract
 
-Status: Phase 1 complete after observability supplement; implementation has not started
+Status: audit plus roadmap batches 2.2 and 2.3 complete; batch 2.4 is next
 
-Date: 2026-08-25
+Date: 2026-08-26
 
 Scope: new Agent/Web on 8790, isolated 8896 acceptance, and 8795 feedback/cost reporting;
 8788 Feishu remains outside the change boundary
@@ -13,9 +13,14 @@ The goal is to make one user-visible operation reconstructable from ingress thro
 model/tool work, cost, public response, and later feedback. This phase audits the current
 identifiers and defines the minimum contract for that work.
 
-This phase does not change runtime behavior, databases, public output, retrieval/reranking,
-A2/A3 state transitions, 8788 Feishu, or model prompts. It also does not implement task
-snapshots, checkpoints, idempotency, HTTP decoupling, or pause/resume.
+`Trace` names the correlation spine, not the whole observability scope. The persisted facts also
+cover structured logs, safe error classes, estimated-cost writes, feedback occurrence and the
+final public outcome.
+
+The original audit batch did not change runtime behavior. The additive 2.2 and 2.3
+implementations described below do not change public output, retrieval/reranking, A2/A3 state
+transitions, 8788 Feishu, or model prompts. They also do not implement task snapshots,
+checkpoints, idempotency, HTTP decoupling, or pause/resume.
 
 Authoritative sources reviewed:
 
@@ -264,7 +269,7 @@ adding periodic cleanup remain known gaps rather than properties of the current 
 - Do not weaken existing feedback validation. In batch 2.4, exact `rated_response_id` ownership
   verification must close the optional-conversation bypass while old records remain readable.
 
-## Acceptance scenarios for the remaining Trace stage
+## Acceptance scenarios for the Trace stage
 
 These are required stage-wide tests, not optional illustrations. They are implemented in the
 five ordered batches in `.agents/roadmap.md`; they are not all part of the first code batch.
@@ -304,6 +309,18 @@ runs/calls. New cost records use independent `run_...` IDs and canonical `provid
 the historical provider-valued `request_id` remains a compatibility mirror and never carries
 the app request ID.
 
-The next batch is 2.3 only: add the minimal structured event stream and authoritative terminal
-event parity. Leave response/feedback ownership and bounded diagnostic queries to batches 2.4
-and 2.5; do not combine them with task snapshots, checkpoints, idempotency or pause/resume.
+Roadmap batch 2.3 is complete. `tiku_shared/trace_events.py` provides a strict privacy-bounded
+event envelope, one-terminal-per-trace SQLite store, request-owned context session and a bounded
+non-blocking writer with fail-open health counters. Middleware records ingress before
+authentication; JSON, stream, rejection, exception, cancellation and media post-processing
+paths write the public result actually delivered. A2/A3 routing and stages, model calls, tool
+results, committed cost runs and successful
+feedback persistence emit joined events without storing user/model text, paths or exception
+messages. The 8790, 8896 and demo launchers each own a store under their existing runtime root;
+none depends on 8795.
+
+Batch 2.3 records that feedback was persisted and its safe scope/rating, but it deliberately does
+not claim which authoritative server response was rated. Batch 2.4 is next: add `response_id`,
+persist the final response projection and enforce `rated_response_id` ownership. Bounded
+Codex/Agent diagnostic queries, retention and cutover remain batch 2.5; task snapshots,
+checkpoints, idempotency and pause/resume stay outside this stage.

@@ -1,12 +1,15 @@
 from pathlib import Path
 import json
+import shutil
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+from uuid import uuid4
 
 import pandas as pd
 
 import search
+from tiku_agent import tools as tools_module
 from tiku_agent.tools import (
     AgentToolConfig,
     ToolOutcome,
@@ -21,8 +24,99 @@ from tiku_agent.tools import (
     prepare_question_units_tool,
     route_bank_tool,
 )
+from tiku_shared.trace_context import TraceContext
+from tiku_shared.trace_events import (
+    SQLiteTraceEventStore,
+    TraceEventRecorder,
+    trace_event_scope,
+)
 
 class TikuAgentToolsTest(unittest.TestCase):
+    def make_directory(self) -> Path:
+        directory = Path(__file__).resolve().parents[1] / ".tmp_tests" / f"tool_events_{uuid4().hex}"
+        directory.mkdir(parents=True)
+        self.addCleanup(lambda: shutil.rmtree(directory, ignore_errors=True))
+        return directory
+
+    def test_named_tool_emits_one_protocol_projected_finished_event(self):
+        directory = self.make_directory()
+        store = SQLiteTraceEventStore(directory / "trace_events.sqlite3")
+        recorder = TraceEventRecorder(store)
+        trace = TraceContext.create(request_id="req_tool_event")
+
+        with trace_event_scope(
+            recorder,
+            trace_id=trace.trace_id,
+            request_id=trace.request_id,
+        ):
+            result = parse_candidate_action_tool(
+                "8",
+                state="WAIT_CANDIDATE_CHOICE",
+                candidate_count=7,
+            )
+
+        self.assertEqual(result.code, "CANDIDATE_RANK_OUT_OF_RANGE")
+        events = store.events_for_trace(trace.trace_id)
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event.event_type, "tool_finished")
+        self.assertEqual(event.stage, "parse_candidate_action")
+        self.assertEqual(event.outcome, "needs_input")
+        self.assertEqual(event.protocol_code, "CANDIDATE_RANK_OUT_OF_RANGE")
+        self.assertEqual(event.protocol_status, "NEEDS_INPUT")
+        self.assertEqual(event.safe_attributes["tool"], "parse_candidate_action")
+        self.assertEqual(event.safe_attributes["candidate_count"], 7)
+        self.assertFalse(event.safe_attributes["completed"])
+        self.assertGreaterEqual(event.duration_ms, 0)
+
+    def test_named_tool_exception_event_keeps_only_exception_class(self):
+        directory = self.make_directory()
+        store = SQLiteTraceEventStore(directory / "trace_events.sqlite3")
+        recorder = TraceEventRecorder(store)
+        trace = TraceContext.create(request_id="req_tool_exception")
+        sensitive_message = "failed at C:\\private\\secret-token.txt"
+
+        @tools_module._named_tool("exploding_tool")
+        def exploding_tool():
+            raise RuntimeError(sensitive_message)
+
+        with trace_event_scope(
+            recorder,
+            trace_id=trace.trace_id,
+            request_id=trace.request_id,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "failed at"):
+                exploding_tool()
+
+        events = store.events_for_trace(trace.trace_id)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].outcome, "error")
+        self.assertEqual(events[0].safe_attributes["error_kind"], "RuntimeError")
+        self.assertNotIn(sensitive_message, str(events[0].to_dict()))
+
+    def test_tool_trace_failure_does_not_change_result_or_repeat_work(self):
+        calls = 0
+        original = tools_module.parse_candidate_action_tool.__wrapped__
+
+        def counted(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        wrapped = tools_module._named_tool("parse_candidate_action")(counted)
+        with patch(
+            "tiku_agent.tools.record_trace_event",
+            side_effect=RuntimeError("trace store unavailable"),
+        ):
+            result = wrapped(
+                "1",
+                state="WAIT_CANDIDATE_CHOICE",
+                candidate_count=2,
+            )
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(result.code, "CANDIDATE_ANSWER_SELECTED")
+
     @staticmethod
     def _dimension_scan(count: int):
         names = [f"q{index:02d}.jpg" for index in range(1, count + 1)]

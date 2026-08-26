@@ -31,13 +31,18 @@ from tiku_agent.image_contracts import ImageTriageObservation
 from tiku_agent.image_triage import build_handoff
 from tiku_agent.image_triage_authority import ImageTriageDecision
 from tiku_agent.session_artifacts import SessionArtifacts
-from tiku_agent.session_runtime import AgentSessionRuntime
+from tiku_agent.session_runtime import AgentProtocolError, AgentSessionRuntime
 from tiku_agent.session_store import SQLiteSessionStore
 from tiku_shared.request_protocol import RequestProtocol
 from tiku_shared.trace_context import (
     TraceContext,
     current_trace_id,
     trace_context_scope,
+)
+from tiku_shared.trace_events import (
+    SQLiteTraceEventStore,
+    TraceEventRecorder,
+    trace_event_scope,
 )
 
 
@@ -631,6 +636,62 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(answered.intent, "select_candidate")
         self.assertEqual(self.a2.text_calls, [("full-flow-a2", "选择候选 1")])
 
+    def test_a2_route_event_precedes_child_and_child_search_is_bound_afterward(self):
+        self.runtime.image_triage_authority = FakeFlowAuthority("A2")
+        store = SQLiteTraceEventStore(self.root / "a2-route-events.sqlite3")
+        recorder = TraceEventRecorder(store)
+        trace_id = "trace_55555555555555555555555555555555"
+
+        with trace_context_scope(TraceContext(trace_id)), trace_event_scope(
+            recorder,
+            trace_id=trace_id,
+        ) as event_session:
+            self.runtime.handle_image(
+                "a2-route-events",
+                self.source,
+                identity_key="invite-route-a2",
+            )
+
+        events = store.events_for_trace(trace_id)
+        route_events = [event for event in events if event.event_type == "route_decided"]
+        self.assertEqual(len(route_events), 1)
+        route = route_events[0]
+        snapshot = self.runtime.session_snapshot("a2-route-events")
+        self.assertEqual(route.safe_attributes, {"route": "A2"})
+        self.assertEqual(route.outcome, "success")
+        self.assertEqual(route.workflow_search_id, snapshot["workflow_search_id"])
+        self.assertEqual(route.search_id, "")
+        self.assertEqual(route.unit_id, "")
+        self.assertEqual(route.identity_key, "invite-route-a2")
+        self.assertEqual(event_session.dimensions["search_id"], "search_direct_a2")
+        self.assertEqual(
+            [event.event_type for event in events],
+            ["stage_started", "route_decided", "stage_finished"],
+        )
+
+    def test_a3_route_event_keeps_parent_without_inventing_child_search(self):
+        self.runtime.image_triage_authority = FakeFlowAuthority("A3")
+        store = SQLiteTraceEventStore(self.root / "a3-route-events.sqlite3")
+        recorder = TraceEventRecorder(store)
+        trace_id = "trace_66666666666666666666666666666666"
+
+        with trace_context_scope(TraceContext(trace_id)), trace_event_scope(
+            recorder,
+            trace_id=trace_id,
+        ):
+            self.runtime.handle_image("a3-route-events", self.source)
+
+        route = next(
+            event
+            for event in store.events_for_trace(trace_id)
+            if event.event_type == "route_decided"
+        )
+        snapshot = self.runtime.session_snapshot("a3-route-events")
+        self.assertEqual(route.safe_attributes, {"route": "A3"})
+        self.assertEqual(route.workflow_search_id, snapshot["workflow_search_id"])
+        self.assertEqual(route.search_id, "")
+        self.assertEqual(route.unit_id, "")
+
     def test_full_flow_a2_web_response_does_not_open_crop_ui(self):
         self.runtime.image_triage_authority = FakeFlowAuthority("A2")
         client = TestClient(create_app(runtime=self.runtime, incoming_dir=self.root / "incoming-a2"))
@@ -679,6 +740,64 @@ class A3RuntimeTests(unittest.TestCase):
         snapshot = self.runtime.session_snapshot("direct-a2-no-load")
         self.assertEqual(snapshot["image_route"], "A1")
         self.assertEqual(snapshot["phase"], "COMPLETE")
+
+    def test_external_load_downgrade_records_only_authoritative_a1_route(self):
+        self.runtime.image_triage_authority = FakeFlowAuthority("A2")
+        self.runtime.external_load_screen = lambda _path: "no"
+        store = SQLiteTraceEventStore(self.root / "load-downgrade-events.sqlite3")
+        recorder = TraceEventRecorder(store)
+        trace_id = "trace_77777777777777777777777777777777"
+
+        with trace_context_scope(TraceContext(trace_id)), trace_event_scope(
+            recorder,
+            trace_id=trace_id,
+        ):
+            self.runtime.handle_image("load-downgrade-events", self.source)
+
+        routes = [
+            event
+            for event in store.events_for_trace(trace_id)
+            if event.event_type == "route_decided"
+        ]
+        self.assertEqual(len(routes), 1)
+        self.assertEqual(routes[0].safe_attributes, {"route": "A1"})
+        self.assertEqual(routes[0].outcome, "rejected")
+        self.assertEqual(routes[0].search_id, "")
+        self.assertEqual(self.a2.prechecked_calls, [])
+
+    def test_route_error_records_safe_kind_without_false_route_or_exception_text(self):
+        class FailingAuthority:
+            def decide_for_full_flow(self, _image_path):
+                raise RuntimeError("secret-token at C:\\private\\question.jpg")
+
+        self.runtime.image_triage_authority = FailingAuthority()
+        store = SQLiteTraceEventStore(self.root / "route-error-events.sqlite3")
+        recorder = TraceEventRecorder(store)
+        trace_id = "trace_88888888888888888888888888888888"
+
+        with self.assertRaises(AgentProtocolError), trace_context_scope(
+            TraceContext(trace_id)
+        ), trace_event_scope(recorder, trace_id=trace_id):
+            self.runtime.handle_image("route-error-events", self.source)
+
+        events = store.events_for_trace(trace_id)
+        self.assertEqual(
+            [event.event_type for event in events],
+            ["stage_started", "stage_finished"],
+        )
+        finished = events[-1]
+        self.assertEqual(finished.outcome, "error")
+        self.assertEqual(
+            finished.safe_attributes,
+            {
+                "operation": "route_image",
+                "completed": False,
+                "error_kind": "RuntimeError",
+            },
+        )
+        serialized = json.dumps([event.to_dict() for event in events])
+        self.assertNotIn("secret-token", serialized)
+        self.assertNotIn("question.jpg", serialized)
 
     def test_full_flow_a3_enters_existing_page_crop_flow(self):
         authority = FakeFlowAuthority("A3")

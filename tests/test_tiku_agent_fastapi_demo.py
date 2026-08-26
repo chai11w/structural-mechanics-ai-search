@@ -1,9 +1,12 @@
+import asyncio
 import io
 import json
 from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import tempfile
+import threading
 import time
 import unittest
 from uuid import uuid4
@@ -21,13 +24,24 @@ from tiku_agent.fastapi_demo import (
     _agent_payload,
     _public_protocol_message,
     _public_session_snapshot,
+    _stream_agent_events,
     _write_incoming_image,
     create_app,
 )
 from tiku_agent.feedback_store import SQLiteFeedbackStore, scope_feedback_conversation
 from tiku_agent.invite_access import InviteAccess, build_invitation_config
-from tiku_agent.session_runtime import AgentBudgetExceededError, AgentRuntimeBusyError
-from tiku_shared.trace_context import current_request_id, current_trace_id
+from tiku_agent.session_runtime import (
+    AgentBudgetExceededError,
+    AgentProtocolError,
+    AgentRuntimeBusyError,
+)
+from tiku_shared.trace_context import TraceContext, current_request_id, current_trace_id
+from tiku_shared.trace_events import (
+    SQLiteTraceEventStore,
+    TraceEventRecorder,
+    record_trace_event,
+    trace_event_scope,
+)
 
 
 class FakeRuntime:
@@ -116,6 +130,34 @@ class FakeRuntime:
 
 
 class FastApiDemoTest(unittest.TestCase):
+    def _terminal_for_request(self, store, request_id, *, recorder=None):
+        if recorder is not None:
+            recorder.flush()
+        else:
+            store._flush_pending()
+        connection = sqlite3.connect(store.path)
+        try:
+            trace_ids = [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT DISTINCT trace_id FROM trace_events "
+                    "WHERE request_id = ? ORDER BY trace_id",
+                    (request_id,),
+                ).fetchall()
+            ]
+        finally:
+            connection.close()
+        self.assertEqual(len(trace_ids), 1)
+        events = store.events_for_trace(trace_ids[0])
+        self.assertEqual(events[0].event_type, "request_received")
+        terminals = [
+            event
+            for event in events
+            if event.event_type in {"public_response_finalized", "request_failed"}
+        ]
+        self.assertEqual(len(terminals), 1)
+        return events, terminals[0]
+
     def test_public_session_snapshot_removes_internal_a3_state(self):
         unsafe = {
             "session_valid": True,
@@ -339,6 +381,678 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertTrue(
             all(item[1:] == (request_id, request_id) for item in runtime.trace_observations)
         )
+
+    def test_json_and_stream_write_one_joined_terminal_per_request(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "result.jpg"
+            Image.new("RGB", (4, 4), "white").save(image_path)
+            database = root / "trace_events.sqlite3"
+            store = SQLiteTraceEventStore(database)
+            recorder = TraceEventRecorder(store)
+            runtime = FakeRuntime(image_path)
+            client = TestClient(
+                create_app(runtime=runtime, trace_event_recorder=recorder)
+            )
+            shared_request_id = "req_0123456789abcdef0123456789abcdef"
+
+            json_response = client.post(
+                "/api/message",
+                json={"text": "继续"},
+                headers={"X-Request-ID": shared_request_id},
+            )
+            stream_response = client.post(
+                "/api/message/stream",
+                json={"text": "继续"},
+                headers={"X-Request-ID": shared_request_id},
+            )
+
+            self.assertEqual(json_response.status_code, 200)
+            self.assertEqual(stream_response.status_code, 200)
+            recorder.flush()
+            connection = sqlite3.connect(database)
+            try:
+                trace_ids = [
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT DISTINCT trace_id FROM trace_events "
+                        "WHERE request_id = ? ORDER BY trace_id",
+                        (shared_request_id,),
+                    ).fetchall()
+                ]
+            finally:
+                connection.close()
+
+            self.assertEqual(len(trace_ids), 2)
+            terminals = []
+            for trace_id in trace_ids:
+                events = store.events_for_trace(trace_id)
+                self.assertEqual(events[0].event_type, "request_received")
+                terminal = [
+                    event
+                    for event in events
+                    if event.event_type
+                    in {"public_response_finalized", "request_failed"}
+                ]
+                self.assertEqual(len(terminal), 1)
+                terminals.append(terminal[0])
+            self.assertEqual(
+                {event.protocol_code for event in terminals},
+                {"REQUEST_SUCCEEDED"},
+            )
+            self.assertEqual(
+                {event.safe_attributes["response_mode"] for event in terminals},
+                {"json", "stream"},
+            )
+
+    def test_authentication_rejections_write_one_safe_terminal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "result.jpg"
+            Image.new("RGB", (4, 4), "white").save(image_path)
+            config, _codes = build_invitation_config(1)
+            config_path = root / "invites.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            store = SQLiteTraceEventStore(root / "trace_events.sqlite3")
+            recorder = TraceEventRecorder(store)
+            client = TestClient(create_app(
+                runtime=FakeRuntime(image_path),
+                invite_access=InviteAccess(config_path),
+                trace_event_recorder=recorder,
+            ))
+            secret = "raw-secret-invite-code"
+            request_ids = [f"req_{value:032x}" for value in range(10, 13)]
+
+            session_gate = client.get(
+                "/api/session", headers={"X-Request-ID": request_ids[0]}
+            )
+            stream_gate = client.post(
+                "/api/message/stream",
+                json={"text": secret},
+                headers={"X-Request-ID": request_ids[1]},
+            )
+            invalid_login = client.post(
+                "/api/invite/login",
+                data={"code": secret},
+                headers={"X-Request-ID": request_ids[2]},
+            )
+
+            self.assertEqual(session_gate.status_code, 401)
+            self.assertEqual(stream_gate.status_code, 401)
+            self.assertEqual(invalid_login.status_code, 401)
+            expected = (
+                ("LOGIN_REQUIRED", "/api/session", "json"),
+                ("LOGIN_REQUIRED", "/api/message/stream", "stream"),
+                ("INVITE_INVALID", "/api/invite/login", "json"),
+            )
+            for request_id, (code, endpoint, response_mode) in zip(
+                request_ids, expected, strict=True
+            ):
+                events, terminal = self._terminal_for_request(store, request_id)
+                self.assertEqual(terminal.event_type, "public_response_finalized")
+                self.assertEqual(terminal.outcome, "needs_input")
+                self.assertEqual(terminal.protocol_status, "NEEDS_INPUT")
+                self.assertEqual(terminal.protocol_layer, "login")
+                self.assertEqual(terminal.protocol_code, code)
+                self.assertEqual(terminal.safe_attributes["endpoint"], endpoint)
+                self.assertEqual(
+                    terminal.safe_attributes["response_mode"], response_mode
+                )
+                self.assertEqual(terminal.safe_attributes["http_status"], 401)
+                self.assertNotIn(
+                    secret,
+                    json.dumps(
+                        [event.to_dict() for event in events], ensure_ascii=False
+                    ),
+                )
+
+    def test_upload_rejections_match_json_and_stream_terminals(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "result.jpg"
+            Image.new("RGB", (4, 4), "white").save(image_path)
+            store = SQLiteTraceEventStore(root / "trace_events.sqlite3")
+            recorder = TraceEventRecorder(store)
+            client = TestClient(create_app(
+                runtime=FakeRuntime(image_path),
+                trace_event_recorder=recorder,
+            ))
+            secret = "raw-secret-upload"
+            request_ids = [f"req_{value:032x}" for value in range(20, 22)]
+
+            responses = [
+                client.post(
+                    endpoint,
+                    files={"other": (f"{secret}.jpg", secret.encode(), "image/jpeg")},
+                    headers={"X-Request-ID": request_id},
+                )
+                for endpoint, request_id in zip(
+                    ("/api/image", "/api/image/stream"), request_ids, strict=True
+                )
+            ]
+
+            self.assertEqual([response.status_code for response in responses], [400, 400])
+            for request_id, endpoint, response_mode in zip(
+                request_ids,
+                ("/api/image", "/api/image/stream"),
+                ("json", "stream"),
+                strict=True,
+            ):
+                events, terminal = self._terminal_for_request(store, request_id)
+                self.assertEqual(terminal.event_type, "public_response_finalized")
+                self.assertEqual(terminal.outcome, "needs_input")
+                self.assertEqual(terminal.protocol_layer, "upload")
+                self.assertEqual(terminal.protocol_code, "UPLOAD_REQUIRED")
+                self.assertEqual(terminal.safe_attributes["endpoint"], endpoint)
+                self.assertEqual(
+                    terminal.safe_attributes["response_mode"], response_mode
+                )
+                self.assertEqual(terminal.safe_attributes["http_status"], 400)
+                self.assertNotIn(
+                    secret,
+                    json.dumps(
+                        [event.to_dict() for event in events], ensure_ascii=False
+                    ),
+                )
+
+    def test_queue_and_budget_rejections_match_json_and_stream_terminals(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "result.jpg"
+            Image.new("RGB", (4, 4), "white").save(image_path)
+            secret = "raw-secret-runtime-error"
+
+            class GuardedRuntime(FakeRuntime):
+                error = AgentRuntimeBusyError(secret)
+
+                def handle_text(self, session_id, text, *, progress=None):
+                    del session_id, text, progress
+                    raise self.error
+
+            runtime = GuardedRuntime(image_path)
+            store = SQLiteTraceEventStore(root / "trace_events.sqlite3")
+            recorder = TraceEventRecorder(store)
+            client = TestClient(create_app(
+                runtime=runtime,
+                trace_event_recorder=recorder,
+            ))
+            request_ids = [f"req_{value:032x}" for value in range(30, 34)]
+
+            busy_json = client.post(
+                "/api/message",
+                json={"text": secret},
+                headers={"X-Request-ID": request_ids[0]},
+            )
+            busy_stream = client.post(
+                "/api/message/stream",
+                json={"text": secret},
+                headers={"X-Request-ID": request_ids[1]},
+            )
+            runtime.error = AgentBudgetExceededError(secret)
+            budget_json = client.post(
+                "/api/message",
+                json={"text": secret},
+                headers={"X-Request-ID": request_ids[2]},
+            )
+            budget_stream = client.post(
+                "/api/message/stream",
+                json={"text": secret},
+                headers={"X-Request-ID": request_ids[3]},
+            )
+
+            self.assertEqual(busy_json.status_code, 429)
+            self.assertEqual(busy_stream.status_code, 200)
+            self.assertEqual(budget_json.status_code, 503)
+            self.assertEqual(budget_stream.status_code, 200)
+            expected = (
+                (
+                    "request_failed",
+                    "error",
+                    "QUEUE_FULL",
+                    "queue",
+                    "json",
+                    429,
+                    "AgentRuntimeBusyError",
+                ),
+                (
+                    "request_failed",
+                    "error",
+                    "QUEUE_FULL",
+                    "queue",
+                    "stream",
+                    200,
+                    "AgentRuntimeBusyError",
+                ),
+                (
+                    "public_response_finalized",
+                    "needs_input",
+                    "GLOBAL_DAILY_QUOTA_EXCEEDED",
+                    "quota",
+                    "json",
+                    503,
+                    "",
+                ),
+                (
+                    "public_response_finalized",
+                    "needs_input",
+                    "GLOBAL_DAILY_QUOTA_EXCEEDED",
+                    "quota",
+                    "stream",
+                    200,
+                    "",
+                ),
+            )
+            for request_id, values in zip(request_ids, expected, strict=True):
+                event_type, outcome, code, layer, mode, status, error_kind = values
+                events, terminal = self._terminal_for_request(store, request_id)
+                self.assertEqual(terminal.event_type, event_type)
+                self.assertEqual(terminal.outcome, outcome)
+                self.assertEqual(terminal.protocol_code, code)
+                self.assertEqual(terminal.protocol_layer, layer)
+                self.assertEqual(terminal.safe_attributes["response_mode"], mode)
+                self.assertEqual(terminal.safe_attributes["http_status"], status)
+                self.assertEqual(
+                    terminal.safe_attributes.get("error_kind", ""), error_kind
+                )
+                self.assertNotIn(
+                    secret,
+                    json.dumps(
+                        [event.to_dict() for event in events], ensure_ascii=False
+                    ),
+                )
+
+    def test_unhandled_json_and_stream_failures_write_safe_terminals(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "result.jpg"
+            Image.new("RGB", (4, 4), "white").save(image_path)
+            secret = "raw-secret-unhandled-message"
+
+            class FailingRuntime(FakeRuntime):
+                def handle_text(self, session_id, text, *, progress=None):
+                    del session_id, text, progress
+                    raise RuntimeError(secret)
+
+            store = SQLiteTraceEventStore(root / "trace_events.sqlite3")
+            recorder = TraceEventRecorder(store)
+            client = TestClient(
+                create_app(
+                    runtime=FailingRuntime(image_path),
+                    trace_event_recorder=recorder,
+                ),
+                raise_server_exceptions=False,
+            )
+            request_ids = [f"req_{value:032x}" for value in range(40, 42)]
+
+            with self.assertLogs("tiku_agent.fastapi_demo", level="ERROR"):
+                json_response = client.post(
+                    "/api/message",
+                    json={"text": secret},
+                    headers={"X-Request-ID": request_ids[0]},
+                )
+                stream_response = client.post(
+                    "/api/message/stream",
+                    json={"text": secret},
+                    headers={"X-Request-ID": request_ids[1]},
+                )
+
+            self.assertEqual(json_response.status_code, 500)
+            self.assertEqual(stream_response.status_code, 200)
+            self.assertNotIn(secret, json_response.text)
+            self.assertNotIn(secret, stream_response.text)
+            self.assertEqual(json_response.json()["code"], "SERVICE_UNAVAILABLE")
+            stream_events = [
+                json.loads(line) for line in stream_response.text.splitlines() if line
+            ]
+            self.assertEqual(stream_events[0]["type"], "error")
+            self.assertEqual(stream_events[0]["code"], "SERVICE_UNAVAILABLE")
+            for request_id, mode, status in zip(
+                request_ids, ("json", "stream"), (500, 200), strict=True
+            ):
+                events, terminal = self._terminal_for_request(store, request_id)
+                self.assertEqual(terminal.event_type, "request_failed")
+                self.assertEqual(terminal.outcome, "error")
+                self.assertEqual(terminal.protocol_code, "SERVICE_UNAVAILABLE")
+                self.assertEqual(terminal.safe_attributes["response_mode"], mode)
+                self.assertEqual(terminal.safe_attributes["http_status"], status)
+                self.assertEqual(
+                    terminal.safe_attributes["error_kind"], "RuntimeError"
+                )
+                self.assertNotIn(
+                    secret,
+                    json.dumps(
+                        [event.to_dict() for event in events], ensure_ascii=False
+                    ),
+                )
+
+    def test_generic_protocol_error_keeps_code_in_json_and_stream(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "result.jpg"
+            Image.new("RGB", (4, 4), "white").save(image_path)
+            secret = "raw-secret-protocol-message"
+
+            class ProtocolRuntime(FakeRuntime):
+                def handle_text(self, session_id, text, *, progress=None):
+                    del session_id, text, progress
+                    raise AgentProtocolError(secret, code="UPLOAD_PERSIST_FAILED")
+
+            store = SQLiteTraceEventStore(root / "trace_events.sqlite3")
+            recorder = TraceEventRecorder(store)
+            client = TestClient(create_app(
+                runtime=ProtocolRuntime(image_path),
+                trace_event_recorder=recorder,
+            ))
+            request_ids = [f"req_{value:032x}" for value in range(42, 44)]
+
+            json_response = client.post(
+                "/api/message",
+                json={"text": secret},
+                headers={"X-Request-ID": request_ids[0]},
+            )
+            stream_response = client.post(
+                "/api/message/stream",
+                json={"text": secret},
+                headers={"X-Request-ID": request_ids[1]},
+            )
+
+            self.assertEqual(json_response.json()["code"], "UPLOAD_PERSIST_FAILED")
+            stream_payload = json.loads(stream_response.text.splitlines()[0])
+            self.assertEqual(stream_payload["code"], "UPLOAD_PERSIST_FAILED")
+            for request_id, mode, status in zip(
+                request_ids, ("json", "stream"), (500, 200), strict=True
+            ):
+                events, terminal = self._terminal_for_request(store, request_id)
+                self.assertEqual(terminal.event_type, "request_failed")
+                self.assertEqual(terminal.protocol_code, "UPLOAD_PERSIST_FAILED")
+                self.assertEqual(terminal.safe_attributes["response_mode"], mode)
+                self.assertEqual(terminal.safe_attributes["http_status"], status)
+                self.assertEqual(
+                    terminal.safe_attributes["error_kind"], "AgentProtocolError"
+                )
+                self.assertNotIn(
+                    secret,
+                    json.dumps(
+                        [event.to_dict() for event in events], ensure_ascii=False
+                    ),
+                )
+
+    def test_serialization_failure_replaces_success_with_failure_terminal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "result.jpg"
+            Image.new("RGB", (4, 4), "white").save(image_path)
+            secret = "raw-secret-unserializable-value"
+
+            class UnserializableRuntime(FakeRuntime):
+                def handle_text(self, session_id, text, *, progress=None):
+                    del session_id, text, progress
+                    return AgentResponse(
+                        text="即将序列化。",
+                        intent="public_response",
+                        author_contact={"unsafe": {secret}},  # type: ignore[dict-item]
+                    )
+
+            store = SQLiteTraceEventStore(root / "trace_events.sqlite3")
+            recorder = TraceEventRecorder(store)
+            client = TestClient(
+                create_app(
+                    runtime=UnserializableRuntime(image_path),
+                    trace_event_recorder=recorder,
+                ),
+                raise_server_exceptions=False,
+            )
+            request_ids = [f"req_{value:032x}" for value in range(44, 46)]
+
+            with self.assertLogs("tiku_agent.fastapi_demo", level="ERROR"):
+                json_response = client.post(
+                    "/api/message",
+                    json={"text": "json"},
+                    headers={"X-Request-ID": request_ids[0]},
+                )
+                stream_response = client.post(
+                    "/api/message/stream",
+                    json={"text": "stream"},
+                    headers={"X-Request-ID": request_ids[1]},
+                )
+
+            self.assertEqual(json_response.status_code, 500)
+            self.assertEqual(json_response.json()["code"], "SERVICE_UNAVAILABLE")
+            stream_payload = json.loads(stream_response.text.splitlines()[0])
+            self.assertEqual(stream_payload["type"], "error")
+            self.assertEqual(stream_payload["code"], "SERVICE_UNAVAILABLE")
+            for request_id, mode, status in zip(
+                request_ids, ("json", "stream"), (500, 200), strict=True
+            ):
+                events, terminal = self._terminal_for_request(store, request_id)
+                self.assertEqual(terminal.event_type, "request_failed")
+                self.assertEqual(terminal.protocol_code, "SERVICE_UNAVAILABLE")
+                self.assertEqual(terminal.safe_attributes["response_mode"], mode)
+                self.assertEqual(terminal.safe_attributes["http_status"], status)
+                self.assertEqual(terminal.safe_attributes["error_kind"], "TypeError")
+                self.assertNotIn(
+                    secret,
+                    json.dumps(
+                        [event.to_dict() for event in events], ensure_ascii=False
+                    ),
+                )
+
+    def test_stream_cancellation_writes_one_safe_terminal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = SQLiteTraceEventStore(root / "trace_events.sqlite3")
+            recorder = TraceEventRecorder(store)
+            request_id = f"req_{50:032x}"
+            trace = TraceContext.create(request_id=request_id)
+            started = threading.Event()
+            release = threading.Event()
+            secret = "raw-secret-cancelled-result"
+
+            def execute(_progress):
+                started.set()
+                release.wait(timeout=2.0)
+                return {"text": secret}
+
+            async def cancel_delivery(event_session):
+                events = _stream_agent_events(
+                    execute,
+                    request_id=request_id,
+                    trace_context=trace,
+                    trace_event_session=event_session,
+                    trace_meta={
+                        "endpoint": "/api/message/stream",
+                        "response_mode": "stream",
+                        "started_perf": time.perf_counter(),
+                    },
+                )
+                pending = asyncio.create_task(events.__anext__())
+                for _ in range(100):
+                    if started.is_set():
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(started.is_set())
+                pending.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await pending
+                release.set()
+                await events.aclose()
+
+            with trace_event_scope(
+                recorder,
+                trace_id=trace.trace_id,
+                request_id=request_id,
+            ) as event_session:
+                record_trace_event(
+                    "request_received",
+                    stage="http_request",
+                    outcome="started",
+                    safe_attributes={
+                        "method": "POST",
+                        "endpoint": "/api/message/stream",
+                        "response_mode": "stream",
+                    },
+                )
+                asyncio.run(cancel_delivery(event_session))
+
+            events, terminal = self._terminal_for_request(store, request_id)
+            self.assertEqual(terminal.event_type, "request_failed")
+            self.assertEqual(terminal.stage, "stream_delivery")
+            self.assertEqual(terminal.outcome, "cancelled")
+            self.assertEqual(terminal.safe_attributes["response_mode"], "stream")
+            self.assertEqual(terminal.safe_attributes["http_status"], 499)
+            self.assertEqual(
+                terminal.safe_attributes["error_kind"], "ClientDisconnected"
+            )
+            self.assertNotIn(
+                secret,
+                json.dumps([event.to_dict() for event in events], ensure_ascii=False),
+            )
+
+    def test_stream_aclose_cancels_background_task_and_writes_terminal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = SQLiteTraceEventStore(root / "trace_events.sqlite3")
+            recorder = TraceEventRecorder(store)
+            request_id = f"req_{51:032x}"
+            trace = TraceContext.create(request_id=request_id)
+            release = threading.Event()
+
+            def execute(progress):
+                progress("searching", "正在按「4力法」搜索题目…")
+                release.wait(timeout=2.0)
+                return {"text": "should-not-be-delivered"}
+
+            async def close_delivery(event_session):
+                events = _stream_agent_events(
+                    execute,
+                    request_id=request_id,
+                    trace_context=trace,
+                    trace_event_session=event_session,
+                    trace_meta={
+                        "endpoint": "/api/message/stream",
+                        "response_mode": "stream",
+                        "started_perf": time.perf_counter(),
+                    },
+                )
+                first = json.loads(await events.__anext__())
+                self.assertEqual(first["type"], "progress")
+                try:
+                    await events.aclose()
+                finally:
+                    release.set()
+
+            with trace_event_scope(
+                recorder,
+                trace_id=trace.trace_id,
+                request_id=request_id,
+            ) as event_session:
+                record_trace_event(
+                    "request_received",
+                    stage="http_request",
+                    outcome="started",
+                    safe_attributes={
+                        "method": "POST",
+                        "endpoint": "/api/message/stream",
+                        "response_mode": "stream",
+                    },
+                )
+                asyncio.run(close_delivery(event_session))
+
+            _events, terminal = self._terminal_for_request(store, request_id)
+            self.assertEqual(terminal.event_type, "request_failed")
+            self.assertEqual(terminal.stage, "stream_delivery")
+            self.assertEqual(terminal.outcome, "cancelled")
+            self.assertEqual(terminal.safe_attributes["http_status"], 499)
+            self.assertEqual(
+                terminal.safe_attributes["error_kind"], "ClientDisconnected"
+            )
+
+    def test_terminal_reflects_media_post_processing_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            delivered = root / "answer.jpg"
+            Image.new("RGB", (4, 4), "white").save(delivered)
+            database = root / "trace_events.sqlite3"
+            store = SQLiteTraceEventStore(database)
+            recorder = TraceEventRecorder(store)
+
+            class PartialMediaRuntime(FakeRuntime):
+                def handle_text(
+                    self,
+                    session_id,
+                    text,
+                    *,
+                    request_id="",
+                    identity_key="",
+                    progress=None,
+                ):
+                    del request_id
+                    super().handle_text(
+                        session_id,
+                        text,
+                        identity_key=identity_key,
+                        progress=progress,
+                    )
+                    return AgentResponse(
+                        text="答案如下。",
+                        images=[str(delivered), str(root / "missing.jpg")],
+                        intent="select_candidate",
+                        media_kind="answer",
+                    )
+
+            response = TestClient(
+                create_app(
+                    runtime=PartialMediaRuntime(delivered),
+                    trace_event_recorder=recorder,
+                )
+            ).post("/api/message", json={"text": "继续"})
+
+            self.assertEqual(response.json()["code"], "MEDIA_ANSWERS_PARTIAL")
+            recorder.flush()
+            connection = sqlite3.connect(database)
+            try:
+                trace_id = str(
+                    connection.execute(
+                        "SELECT trace_id FROM trace_events "
+                        "WHERE event_type = 'public_response_finalized'"
+                    ).fetchone()[0]
+                )
+            finally:
+                connection.close()
+            terminal = store.events_for_trace(trace_id)[-1]
+            self.assertEqual(terminal.protocol_code, "MEDIA_ANSWERS_PARTIAL")
+            self.assertEqual(terminal.outcome, "partial")
+            self.assertEqual(terminal.safe_attributes["media_status"], "partial")
+
+    def test_trace_writer_failure_is_fail_open_and_does_not_repeat_work(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"trace_fail_open_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+
+        class BrokenStore:
+            def write(self, _event):
+                raise OSError("C:\\private\\secret database path")
+
+            def flush(self):
+                return None
+
+            def close(self):
+                return None
+
+        runtime = FakeRuntime(image_path)
+        recorder = TraceEventRecorder(BrokenStore())
+        response = TestClient(
+            create_app(runtime=runtime, trace_event_recorder=recorder)
+        ).post("/api/message", json={"text": "继续"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["text"], "我明白了。")
+        self.assertEqual(len(runtime.calls), 1)
+        health = recorder.health()
+        self.assertGreaterEqual(health["write_failures"], 2)
+        self.assertEqual(health["last_failure_kind"], "OSError")
+        self.assertNotIn("private", json.dumps(health))
 
     def test_json_and_stream_do_not_trust_unregistered_tool_recovery_metadata(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
@@ -608,7 +1322,13 @@ class FastApiDemoTest(unittest.TestCase):
         Image.new("RGB", (8, 8), "white").save(image_path)
         runtime = FakeRuntime(image_path)
         store = SQLiteFeedbackStore(test_dir / "feedback.sqlite3")
-        client = TestClient(create_app(runtime=runtime, feedback_store=store))
+        trace_store = SQLiteTraceEventStore(test_dir / "trace_events.sqlite3")
+        trace_recorder = TraceEventRecorder(trace_store)
+        client = TestClient(create_app(
+            runtime=runtime,
+            feedback_store=store,
+            trace_event_recorder=trace_recorder,
+        ))
 
         upload_bytes = io.BytesIO()
         Image.new("RGB", (8, 8), "white").save(upload_bytes, format="PNG")
@@ -651,6 +1371,35 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(len(saved.conversation), 2)
         media_name = saved.conversation[0]["images"][0]
         self.assertTrue(store.resolve_case_media(saved.feedback_id, media_name).is_file())
+        feedback_events = []
+        trace_recorder.flush()
+        connection = sqlite3.connect(trace_store.path)
+        try:
+            trace_ids = [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT DISTINCT trace_id FROM trace_events "
+                    "WHERE event_type = 'feedback_recorded'"
+                ).fetchall()
+            ]
+        finally:
+            connection.close()
+        for trace_id in trace_ids:
+            feedback_events.extend(trace_store.events_for_trace(trace_id))
+        recorded = next(
+            event for event in feedback_events if event.event_type == "feedback_recorded"
+        )
+        self.assertEqual(recorded.feedback_id, saved.feedback_id)
+        self.assertEqual(recorded.safe_attributes["rating"], "negative")
+        self.assertEqual(recorded.safe_attributes["feedback_scope"], "question")
+        self.assertEqual(
+            sum(
+                event.event_type
+                in {"public_response_finalized", "request_failed"}
+                for event in feedback_events
+            ),
+            1,
+        )
         rejected_empty = client.post("/api/feedback", json={
             "message_id": "message_case_123",
             "rating": "positive",
@@ -1131,7 +1880,9 @@ class FastApiDemoTest(unittest.TestCase):
         app = create_app(runtime=runtime)
         client = TestClient(app)
 
-        self.assertEqual(client.get("/health").json(), {"status": "ok"})
+        health = client.get("/health").json()
+        self.assertEqual(health["status"], "ok")
+        self.assertEqual(health["trace_events"]["status"], "disabled")
         self.assertEqual(client.post("/api/message", content=b"not-json").status_code, 400)
         self.assertEqual(client.post("/api/message", json=[]).status_code, 400)
         text_response = client.post("/api/message", json={"text": "就这个"})

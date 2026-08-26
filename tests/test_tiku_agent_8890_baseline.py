@@ -166,7 +166,11 @@ class Baseline8890Test(unittest.TestCase):
             path="/",
         )
 
-        self.assertEqual(mainline.get("/health").json(), validation.get("/health").json())
+        mainline_health = mainline.get("/health").json()
+        validation_health = validation.get("/health").json()
+        self.assertEqual(mainline_health["status"], validation_health["status"])
+        self.assertEqual(mainline_health["trace_events"]["status"], "ok")
+        self.assertEqual(validation_health["trace_events"]["status"], "disabled")
         self.assertEqual(mainline.get("/").text, validation.get("/").text)
         self.assertEqual(
             mainline.get("/api/session").json(),

@@ -23,6 +23,7 @@ from typing import Any, Callable, Iterator, Mapping
 from uuid import uuid4
 
 from tiku_shared.trace_context import current_trace_id, submit_with_trace_context
+from tiku_shared.trace_events import record_trace_event
 
 
 CATALOG_PATH = Path(__file__).with_name("model_price_catalog.json")
@@ -76,6 +77,7 @@ class ModelCostCollector:
     def record(
         self,
         *,
+        call_id: str = "",
         provider: str,
         model: str,
         call_type: str,
@@ -95,7 +97,7 @@ class ModelCostCollector:
         with self._lock:
             sequence = len(self._records) + 1
             record = ModelCallRecord(
-                call_id=uuid4().hex,
+                call_id=str(call_id or "").strip() or uuid4().hex,
                 sequence=sequence,
                 provider=str(provider).strip().lower(),
                 model=str(model).strip(),
@@ -144,6 +146,7 @@ def model_cost_scope(collector: ModelCostCollector) -> Iterator[ModelCostCollect
 
 def record_model_call(
     *,
+    call_id: str = "",
     provider: str,
     model: str,
     call_type: str,
@@ -161,6 +164,7 @@ def record_model_call(
     if collector is None:
         return None
     return collector.record(
+        call_id=call_id,
         provider=provider,
         model=model,
         call_type=call_type,
@@ -210,37 +214,197 @@ def timed_model_call(
         raise ValueError("provide only provider_request_id_getter")
     provider_id_getter = provider_request_id_getter or request_id_getter
 
+    collector = _ACTIVE_COLLECTOR.get()
+    run_id = str(collector.run_id or "").strip() if collector is not None else ""
+    call_id = uuid4().hex
+    clean_provider = str(provider).strip().lower()
+    clean_model = str(model).strip()
+    clean_call_type = str(call_type).strip()
     started_at = utc_now()
     started = time.perf_counter()
+    _emit_trace_event(
+        "model_call_started",
+        stage=clean_call_type,
+        outcome="started",
+        run_id=run_id,
+        call_id=call_id,
+        safe_attributes={
+            "provider": clean_provider,
+            "model": clean_model,
+            "call_type": clean_call_type,
+            "attempt_count": _safe_attempt_count(attempt_count),
+        },
+    )
     try:
         result = function()
     except Exception as exc:
-        failed_attempt_count = max(1, int(getattr(exc, "model_attempt_count", attempt_count) or 1))
-        record_model_call(
+        failed_attempt_count = _safe_attempt_count(
+            getattr(exc, "model_attempt_count", attempt_count)
+        )
+        finished_at = utc_now()
+        latency_ms = round((time.perf_counter() - started) * 1000)
+        record = record_model_call(
+            call_id=call_id,
             provider=provider,
             model=model,
             call_type=call_type,
             status="error",
             started_at=started_at,
-            finished_at=utc_now(),
-            latency_ms=round((time.perf_counter() - started) * 1000),
+            finished_at=finished_at,
+            latency_ms=latency_ms,
+            attempt_count=failed_attempt_count,
+            error_kind=type(exc).__name__,
+        )
+        _emit_model_call_finished(
+            record=record,
+            provider=clean_provider,
+            model=clean_model,
+            call_type=clean_call_type,
+            run_id=run_id,
+            call_id=call_id,
+            status="error",
+            latency_ms=latency_ms,
             attempt_count=failed_attempt_count,
             error_kind=type(exc).__name__,
         )
         raise
-    record_model_call(
-        provider=provider,
-        model=model,
-        call_type=call_type,
+    finished_at = utc_now()
+    latency_ms = round((time.perf_counter() - started) * 1000)
+    try:
+        usage = usage_getter(result)
+        successful_attempt_count = (
+            attempt_count_getter(result) if attempt_count_getter else attempt_count
+        )
+        provider_request_id = provider_id_getter(result) if provider_id_getter else ""
+        record = record_model_call(
+            call_id=call_id,
+            provider=provider,
+            model=model,
+            call_type=call_type,
+            status="success",
+            started_at=started_at,
+            finished_at=finished_at,
+            latency_ms=latency_ms,
+            usage=usage,
+            attempt_count=successful_attempt_count,
+            provider_request_id=provider_request_id,
+        )
+    except Exception as exc:
+        failed_attempt_count = _safe_attempt_count(attempt_count)
+        try:
+            failed_record = record_model_call(
+                call_id=call_id,
+                provider=provider,
+                model=model,
+                call_type=call_type,
+                status="error",
+                started_at=started_at,
+                finished_at=finished_at,
+                latency_ms=latency_ms,
+                attempt_count=failed_attempt_count,
+                error_kind=type(exc).__name__,
+            )
+        except Exception:  # noqa: BLE001 - preserve the original adapter failure.
+            failed_record = None
+        _emit_model_call_finished(
+            record=failed_record,
+            provider=clean_provider,
+            model=clean_model,
+            call_type=clean_call_type,
+            run_id=run_id,
+            call_id=call_id,
+            status="error",
+            latency_ms=latency_ms,
+            attempt_count=failed_attempt_count,
+            error_kind=type(exc).__name__,
+        )
+        raise
+    _emit_model_call_finished(
+        record=record,
+        provider=clean_provider,
+        model=clean_model,
+        call_type=clean_call_type,
+        run_id=run_id,
+        call_id=call_id,
         status="success",
-        started_at=started_at,
-        finished_at=utc_now(),
-        latency_ms=round((time.perf_counter() - started) * 1000),
-        usage=usage_getter(result),
-        attempt_count=(attempt_count_getter(result) if attempt_count_getter else attempt_count),
-        provider_request_id=provider_id_getter(result) if provider_id_getter else "",
+        latency_ms=latency_ms,
+        usage=usage,
+        attempt_count=successful_attempt_count,
+        provider_request_id=provider_request_id,
     )
     return result
+
+
+def _emit_model_call_finished(
+    *,
+    record: ModelCallRecord | None,
+    provider: str,
+    model: str,
+    call_type: str,
+    run_id: str,
+    call_id: str,
+    status: str,
+    latency_ms: int,
+    usage: Any = None,
+    attempt_count: int = 1,
+    provider_request_id: str = "",
+    error_kind: str = "",
+) -> None:
+    try:
+        if record is not None:
+            tokens = {
+                "input_tokens": record.input_tokens,
+                "image_tokens": record.image_tokens,
+                "cached_tokens": record.cached_tokens,
+                "output_tokens": record.output_tokens,
+                "total_tokens": record.total_tokens,
+            }
+            pricing_status = record.pricing_status
+            estimated_cost_micros = record.estimated_cost_micros
+            attempt_count = record.attempt_count
+            provider_request_id = record.provider_request_id
+        else:
+            tokens = normalize_usage(usage)
+            pricing = estimate_cost(provider, model, tokens)
+            pricing_status = pricing["pricing_status"]
+            estimated_cost_micros = pricing["estimated_cost_micros"]
+        attributes = {
+            "provider": provider,
+            "model": model,
+            "call_type": call_type,
+            **tokens,
+            "attempt_count": _safe_attempt_count(attempt_count),
+            "pricing_status": pricing_status,
+            "estimated_cost_micros": estimated_cost_micros,
+        }
+        if error_kind:
+            attributes["error_kind"] = error_kind
+        _emit_trace_event(
+            "model_call_finished",
+            stage=call_type,
+            outcome=status,
+            run_id=run_id,
+            call_id=call_id,
+            provider_request_id=str(provider_request_id or "").strip(),
+            duration_ms=latency_ms,
+            safe_attributes=attributes,
+        )
+    except Exception:  # noqa: BLE001 - diagnostics must remain fail-open.
+        return
+
+
+def _safe_attempt_count(value: Any) -> int:
+    try:
+        return max(1, int(value or 1))
+    except (TypeError, ValueError, OverflowError):
+        return 1
+
+
+def _emit_trace_event(event_type: str, **fields: Any) -> None:
+    try:
+        record_trace_event(event_type, **fields)
+    except Exception:  # noqa: BLE001 - diagnostics must remain fail-open.
+        return
 
 
 def normalize_usage(usage: Any) -> dict[str, int]:
@@ -347,7 +511,7 @@ class SQLiteModelCostLedger:
                 )
                 connection.executemany(
                     """
-                    INSERT OR REPLACE INTO model_cost_calls (
+                    INSERT INTO model_cost_calls (
                         call_id, run_id, sequence, provider, model, call_type,
                         status, started_at, finished_at, latency_ms, input_tokens,
                         image_tokens, cached_tokens, output_tokens, total_tokens,
@@ -370,6 +534,19 @@ class SQLiteModelCostLedger:
                         for item in records
                     ],
                 )
+        _emit_trace_event(
+            "cost_run_written",
+            stage=str(collector.task_kind or "model_cost"),
+            outcome=str(outcome or "success").strip().lower(),
+            run_id=collector.run_id,
+            safe_attributes={
+                "task_kind": str(collector.task_kind or "model_cost"),
+                "call_count": call_count,
+                "total_tokens": total_tokens,
+                "estimated_cost_micros": total_cost,
+                "warning_codes": warnings,
+            },
+        )
 
     def estimated_cost_micros_since(self, started_at: str, *, identity_key: str | None = None) -> int:
         """Return the recorded estimated cost at or after an ISO-8601 timestamp."""

@@ -29,6 +29,7 @@ from tiku_agent.image_triage_authority import ImageTriageAuthority, QwenTriageRe
 from tiku_agent.output_watchdog import OutputWatchdog
 from tiku_agent.session_artifacts import SessionArtifacts
 from tiku_shared.model_costs import SQLiteModelCostLedger
+from tiku_shared.trace_events import SQLiteTraceEventStore, TraceEventRecorder
 
 
 DEFAULT_PORT = 8896
@@ -177,6 +178,9 @@ def build_app(
         session_cookie=SESSION_COOKIE,
         output_watchdog=output_watchdog,
         feedback_store=SQLiteFeedbackStore(root / "feedback.sqlite3"),
+        trace_event_recorder=TraceEventRecorder(
+            SQLiteTraceEventStore(root / "trace_events.sqlite3")
+        ),
     )
 
 

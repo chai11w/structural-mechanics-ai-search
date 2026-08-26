@@ -50,6 +50,7 @@ from tiku_shared.trace_context import (
     current_trace_id,
     submit_with_trace_context,
 )
+from tiku_shared.trace_events import bind_trace_event_dimensions, record_trace_event
 
 
 A3_PHASE_IDLE = "IDLE"
@@ -434,6 +435,7 @@ class A3MvpRuntime:
                 workflow_search_id=workflow_search_id,
             )
             self.store.save(state)
+            self._bind_trace_state(state, identity_key=identity_key)
             return self._route_persisted_image(
                 state,
                 persisted,
@@ -461,6 +463,7 @@ class A3MvpRuntime:
                     intent="clarification",
                     protocol=RequestProtocol.from_code("UPLOAD_REQUIRED").to_dict(),
                 )
+            self._bind_trace_state(state, identity_key=identity_key)
             clean_text = str(text or "").strip()
             if (
                 state.phase == A3_PHASE_A2_ACTIVE
@@ -931,6 +934,7 @@ class A3MvpRuntime:
                     intent="stale_action",
                     protocol=RequestProtocol.from_code("STALE_ACTION").to_dict(),
                 )
+            self._bind_trace_state(state, identity_key=identity_key)
             if task_revision is not None and int(task_revision) != state.task_revision:
                 return _response(
                     "这是上一张题图的选题操作，已经失效。请使用当前题目列表。",
@@ -974,6 +978,7 @@ class A3MvpRuntime:
                     intent="stale_action",
                     protocol=RequestProtocol.from_code("STALE_ACTION").to_dict(),
                 )
+            self._bind_trace_state(state, identity_key=identity_key)
             if task_revision is not None and int(task_revision) != state.task_revision:
                 return _response(
                     "这是上一张题图的准备操作，已经失效。请使用当前题目列表。",
@@ -1178,6 +1183,7 @@ class A3MvpRuntime:
                     intent="stale_action",
                     protocol=RequestProtocol.from_code("STALE_ACTION").to_dict(),
                 )
+            self._bind_trace_state(state, identity_key=identity_key)
             if (
                 (task_revision is not None and int(task_revision) != state.task_revision)
                 or (unit_id and str(unit_id).strip() != state.selected_unit_id)
@@ -1493,6 +1499,13 @@ class A3MvpRuntime:
         progress: ProgressReporter | None,
         request_id: str,
     ) -> AgentResponse:
+        self._bind_trace_state(state, identity_key=identity_key)
+        record_trace_event(
+            "stage_started",
+            stage="image_routing",
+            outcome="started",
+            safe_attributes={"operation": "route_image"},
+        )
         if self.image_triage_authority is not None:
             if progress is not None:
                 progress("triage", "正在检查图片并决定处理路线…")
@@ -1508,6 +1521,7 @@ class A3MvpRuntime:
                 state.phase = A3_PHASE_ERROR
                 state.last_error = type(exc).__name__
                 self.store.save(state)
+                self._record_image_route_error(state, exc, identity_key=identity_key)
                 raise AgentProtocolError(
                     "图片检查暂时失败，请稍后重试。",
                     code="SERVICE_UNAVAILABLE",
@@ -1518,6 +1532,7 @@ class A3MvpRuntime:
             if state.entry_route == "A1":
                 state.phase = A3_PHASE_COMPLETE
                 self.store.save(state)
+                self._record_image_route(state, "A1", identity_key=identity_key)
                 return AgentResponse(
                     text=decision.reply or "这张图片目前不适合进入结构力学题库检索，请重新上传完整清晰的题目图。",
                     state={"phase": state.phase, "current_route": "A1"},
@@ -1545,6 +1560,11 @@ class A3MvpRuntime:
                         state.phase = A3_PHASE_ERROR
                         state.last_error = type(exc).__name__
                         self.store.save(state)
+                        self._record_image_route_error(
+                            state,
+                            exc,
+                            identity_key=identity_key,
+                        )
                         raise AgentProtocolError(
                             "外荷载筛查暂时失败，请稍后重试。",
                             code="SERVICE_UNAVAILABLE",
@@ -1554,6 +1574,7 @@ class A3MvpRuntime:
                         state.phase = A3_PHASE_COMPLETE
                         state.last_error = "external_load_not_confirmed"
                         self.store.save(state)
+                        self._record_image_route(state, "A1", identity_key=identity_key)
                         return AgentResponse(
                             text=NO_EXTERNAL_LOAD_REPLY,
                             state={"phase": state.phase, "current_route": "A1"},
@@ -1565,6 +1586,7 @@ class A3MvpRuntime:
                         )
                 state.phase = A3_PHASE_A2_ACTIVE
                 self.store.save(state)
+                self._record_image_route(state, "A2", identity_key=identity_key)
                 if progress is not None:
                     progress("searching", "图片适合直接检索，正在识别题目信息…")
                 response = self.a2_runtime.handle_prechecked_image(
@@ -1577,11 +1599,13 @@ class A3MvpRuntime:
                 child = self.a2_runtime.session_snapshot(state.session_id)
                 state.current_search_id = str(child.get("search_id") or state.current_search_id)
                 self.store.save(state)
+                self._bind_trace_state(state, identity_key=identity_key)
                 return response
 
         state.entry_route = "A3"
         state.phase = A3_PHASE_UNDERSTANDING
         self.store.save(state)
+        self._record_image_route(state, "A3", identity_key=identity_key)
         return self._understand_page(
             state,
             persisted,
@@ -1933,6 +1957,7 @@ class A3MvpRuntime:
             ):
                 state.searched_unit_ids.append(previous_unit_id)
         state.selected_unit_id = unit_id
+        self._bind_trace_state(state, identity_key=identity_key)
         auto_record = state.auto_crops.get(unit_id) or {}
         if state.auto_crop_enabled and auto_record.get("validation_status") == "auto_ready":
             crop_path = Path(str(auto_record.get("path") or ""))
@@ -2021,6 +2046,7 @@ class A3MvpRuntime:
         state: A3SessionState,
         response: AgentResponse,
     ) -> AgentResponse:
+        self._bind_trace_state(state)
         child_phase = str(response.state.get("phase") or "")
         response_media_kind = str(
             getattr(response, "media_kind", "") or ""
@@ -2237,6 +2263,69 @@ class A3MvpRuntime:
         if not preserve_artifacts:
             self.artifacts.clear_session(session_id)
         self.a2_runtime.clear(session_id, preserve_artifacts=preserve_artifacts)
+
+    def _bind_trace_state(
+        self,
+        state: A3SessionState,
+        *,
+        identity_key: str = "",
+    ) -> None:
+        child_search_id = ""
+        if state.entry_route == "A2" or state.phase == A3_PHASE_A2_ACTIVE:
+            try:
+                child = self.a2_runtime.session_snapshot(state.session_id)
+                child_search_id = str(child.get("search_id") or "").strip()
+            except Exception:  # noqa: BLE001 - observability must not affect A3.
+                child_search_id = ""
+        bind_trace_event_dimensions(
+            session_key=session_key(state.session_id),
+            workflow_search_id=state.workflow_search_id or state.current_search_id,
+        )
+        bind_trace_event_dimensions(search_id=child_search_id)
+        bind_trace_event_dimensions(unit_id=state.selected_unit_id)
+        if str(identity_key or "").strip():
+            bind_trace_event_dimensions(identity_key=str(identity_key).strip())
+
+    def _record_image_route(
+        self,
+        state: A3SessionState,
+        route: str,
+        *,
+        identity_key: str,
+    ) -> None:
+        self._bind_trace_state(state, identity_key=identity_key)
+        route_outcome = "rejected" if route == "A1" else "success"
+        record_trace_event(
+            "route_decided",
+            stage="image_routing",
+            outcome=route_outcome,
+            safe_attributes={"route": route},
+        )
+        record_trace_event(
+            "stage_finished",
+            stage="image_routing",
+            outcome="success",
+            safe_attributes={"operation": "route_image", "completed": True},
+        )
+
+    def _record_image_route_error(
+        self,
+        state: A3SessionState,
+        exc: BaseException,
+        *,
+        identity_key: str,
+    ) -> None:
+        self._bind_trace_state(state, identity_key=identity_key)
+        record_trace_event(
+            "stage_finished",
+            stage="image_routing",
+            outcome="error",
+            safe_attributes={
+                "operation": "route_image",
+                "completed": False,
+                "error_kind": type(exc).__name__,
+            },
+        )
 
     def _call_model(
         self,

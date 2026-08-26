@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from scripts.model_cost_report import load_report
@@ -30,6 +31,11 @@ from tiku_shared.trace_context import (
     current_trace_id,
     trace_context_scope,
 )
+from tiku_shared.trace_events import (
+    SQLiteTraceEventStore,
+    TraceEventRecorder,
+    trace_event_scope,
+)
 
 
 class ModelCostTest(unittest.TestCase):
@@ -38,6 +44,187 @@ class ModelCostTest(unittest.TestCase):
         directory.mkdir(parents=True)
         self.addCleanup(lambda: shutil.rmtree(directory, ignore_errors=True))
         return directory
+
+    def test_timed_model_call_emits_joined_start_and_finished_events(self):
+        directory = self.make_directory()
+        store = SQLiteTraceEventStore(directory / "trace_events.sqlite3")
+        recorder = TraceEventRecorder(store)
+        trace = TraceContext.create(request_id="req_model_event_success")
+        collector = ModelCostCollector(run_id=new_run_id())
+
+        with trace_context_scope(trace), trace_event_scope(
+            recorder,
+            trace_id=trace.trace_id,
+            request_id=trace.request_id,
+        ), model_cost_scope(collector):
+            result = timed_model_call(
+                lambda: {
+                    "id": "provider-event-success",
+                    "usage": {
+                        "input_tokens": 100,
+                        "image_tokens": 60,
+                        "cached_tokens": 10,
+                        "output_tokens": 20,
+                        "total_tokens": 120,
+                    },
+                    "attempts": 2,
+                },
+                provider="dashscope",
+                model="qwen3.7-plus",
+                call_type="qwen_image_classification",
+                usage_getter=lambda value: value["usage"],
+                provider_request_id_getter=lambda value: value["id"],
+                attempt_count_getter=lambda value: value["attempts"],
+            )
+
+        self.assertEqual(result["id"], "provider-event-success")
+        events = store.events_for_trace(trace.trace_id)
+        self.assertEqual(
+            [event.event_type for event in events],
+            ["model_call_started", "model_call_finished"],
+        )
+        record = collector.records()[0]
+        self.assertEqual(events[0].call_id, record.call_id)
+        self.assertEqual(events[1].call_id, record.call_id)
+        self.assertEqual(events[1].run_id, collector.run_id)
+        self.assertEqual(events[1].provider_request_id, "provider-event-success")
+        self.assertEqual(events[1].outcome, "success")
+        self.assertEqual(events[1].safe_attributes["attempt_count"], 2)
+        self.assertEqual(events[1].safe_attributes["total_tokens"], 120)
+        self.assertEqual(events[1].safe_attributes["pricing_status"], "priced")
+        self.assertGreaterEqual(events[1].duration_ms, 0)
+
+    def test_timed_model_call_failure_records_only_exception_class(self):
+        directory = self.make_directory()
+        store = SQLiteTraceEventStore(directory / "trace_events.sqlite3")
+        recorder = TraceEventRecorder(store)
+        trace = TraceContext.create(request_id="req_model_event_failure")
+        collector = ModelCostCollector(run_id=new_run_id())
+        sensitive_message = "provider failed at C:\\private\\secret-key.txt"
+
+        with trace_context_scope(trace), trace_event_scope(
+            recorder,
+            trace_id=trace.trace_id,
+            request_id=trace.request_id,
+        ), model_cost_scope(collector):
+            with self.assertRaisesRegex(RuntimeError, "provider failed"):
+                timed_model_call(
+                    lambda: (_ for _ in ()).throw(RuntimeError(sensitive_message)),
+                    provider="zhipu",
+                    model="glm-4.6v",
+                    call_type="zhipu_shape_rerank",
+                    usage_getter=lambda value: value,
+                )
+
+        events = store.events_for_trace(trace.trace_id)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[-1].event_type, "model_call_finished")
+        self.assertEqual(events[-1].outcome, "error")
+        self.assertEqual(events[-1].safe_attributes["error_kind"], "RuntimeError")
+        self.assertNotIn(sensitive_message, str(events[-1].to_dict()))
+        self.assertEqual(events[-1].call_id, collector.records()[0].call_id)
+
+    def test_usage_extraction_failure_still_closes_model_event(self):
+        directory = self.make_directory()
+        store = SQLiteTraceEventStore(directory / "trace_events.sqlite3")
+        recorder = TraceEventRecorder(store)
+        trace = TraceContext.create(request_id="req_model_usage_failure")
+        collector = ModelCostCollector(run_id=new_run_id())
+
+        with trace_event_scope(
+            recorder,
+            trace_id=trace.trace_id,
+            request_id=trace.request_id,
+        ), model_cost_scope(collector):
+            with self.assertRaisesRegex(ValueError, "usage unavailable"):
+                timed_model_call(
+                    lambda: {"response": "not persisted"},
+                    provider="dashscope",
+                    model="qwen3.7-plus",
+                    call_type="qwen_image_classification",
+                    usage_getter=lambda _value: (_ for _ in ()).throw(
+                        ValueError("usage unavailable in C:\\private")
+                    ),
+                )
+
+        events = store.events_for_trace(trace.trace_id)
+        self.assertEqual(
+            [event.event_type for event in events],
+            ["model_call_started", "model_call_finished"],
+        )
+        self.assertEqual(events[-1].outcome, "error")
+        self.assertEqual(events[-1].safe_attributes["error_kind"], "ValueError")
+        self.assertNotIn("C:\\private", str(events[-1].to_dict()))
+
+    def test_cost_run_event_is_emitted_only_after_successful_transaction(self):
+        directory = self.make_directory()
+        store = SQLiteTraceEventStore(directory / "trace_events.sqlite3")
+        recorder = TraceEventRecorder(store)
+        ledger = SQLiteModelCostLedger(directory / "model_costs.sqlite3")
+        trace = TraceContext.create(request_id="req_cost_run_event")
+        collector = ModelCostCollector(
+            run_id=new_run_id(),
+            trace_id=trace.trace_id,
+            task_kind="image",
+        )
+        collector.record(
+            provider="dashscope",
+            model="qwen3.7-plus",
+            call_type="qwen_image_classification",
+            status="success",
+            started_at="2026-08-26T00:00:00+00:00",
+            finished_at="2026-08-26T00:00:01+00:00",
+            latency_ms=1000,
+            usage={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+        )
+
+        with trace_event_scope(
+            recorder,
+            trace_id=trace.trace_id,
+            request_id=trace.request_id,
+        ):
+            ledger.write_run(
+                collector,
+                finished_at="2026-08-26T00:00:01+00:00",
+                outcome="success",
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                ledger.write_run(
+                    collector,
+                    finished_at="2026-08-26T00:00:02+00:00",
+                    outcome="error",
+                )
+
+        events = store.events_for_trace(trace.trace_id)
+        self.assertEqual([event.event_type for event in events], ["cost_run_written"])
+        self.assertEqual(events[0].run_id, collector.run_id)
+        self.assertEqual(events[0].safe_attributes["call_count"], 1)
+        self.assertEqual(events[0].safe_attributes["total_tokens"], 120)
+
+    def test_trace_emission_failure_does_not_repeat_or_change_model_call(self):
+        collector = ModelCostCollector(run_id=new_run_id())
+        provider_calls = 0
+
+        def provider_call():
+            nonlocal provider_calls
+            provider_calls += 1
+            return {"usage": {"input_tokens": 10, "output_tokens": 2}}
+
+        with patch(
+            "tiku_shared.model_costs.record_trace_event",
+            side_effect=RuntimeError("trace store unavailable"),
+        ), model_cost_scope(collector):
+            result = timed_model_call(
+                provider_call,
+                provider="dashscope",
+                model="qwen3.7-plus",
+                call_type="qwen_intent_decision",
+                usage_getter=lambda value: value["usage"],
+            )
+
+        self.assertEqual(provider_calls, 1)
+        self.assertEqual(result["usage"]["input_tokens"], 10)
+        self.assertEqual(len(collector.records()), 1)
 
     def test_normalizes_qwen_and_zhipu_usage_shapes(self):
         qwen = normalize_usage({
@@ -389,6 +576,51 @@ class ModelCostTest(unittest.TestCase):
             ).fetchall()
         self.assertEqual(run_count, 1)
         self.assertEqual(provider_ids, [("provider-first",)])
+
+    def test_duplicate_call_id_is_rejected_without_reparenting_existing_call(self):
+        directory = self.make_directory()
+        database = directory / "costs.sqlite3"
+        ledger = SQLiteModelCostLedger(database)
+        first = ModelCostCollector(run_id="run_first")
+        second = ModelCostCollector(run_id="run_second")
+        for collector, provider_id in ((first, "provider-first"), (second, "provider-second")):
+            collector.record(
+                call_id="call_duplicate",
+                provider="zhipu",
+                model="glm-4.6v",
+                call_type="duplicate_call_guard",
+                status="success",
+                started_at="2026-08-25T00:00:00+00:00",
+                finished_at="2026-08-25T00:00:01+00:00",
+                latency_ms=1000,
+                usage={"prompt_tokens": 10, "completion_tokens": 2},
+                provider_request_id=provider_id,
+            )
+
+        ledger.write_run(
+            first,
+            finished_at="2026-08-25T00:00:01+00:00",
+            outcome="success",
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            ledger.write_run(
+                second,
+                finished_at="2026-08-25T00:00:02+00:00",
+                outcome="error",
+            )
+
+        with sqlite3.connect(database) as connection:
+            runs = connection.execute(
+                "SELECT run_id FROM model_cost_runs ORDER BY run_id"
+            ).fetchall()
+            calls = connection.execute(
+                "SELECT call_id, run_id, provider_request_id FROM model_cost_calls"
+            ).fetchall()
+        self.assertEqual(runs, [("run_first",)])
+        self.assertEqual(
+            calls,
+            [("call_duplicate", "run_first", "provider-first")],
+        )
 
     def test_provider_failure_keeps_local_trace_without_usage_or_provider_id(self):
         trace = TraceContext.create(request_id="req_failed_attempt")

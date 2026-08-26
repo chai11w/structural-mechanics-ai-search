@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
+from contextvars import ContextVar
 from io import BytesIO
 import inspect
 import json
@@ -12,6 +13,7 @@ import logging
 import math
 import re
 import secrets
+import time
 from pathlib import Path
 from typing import Callable
 from uuid import uuid4
@@ -49,6 +51,16 @@ from tiku_shared.trace_context import (
     TraceContext,
     current_request_id,
     trace_context_scope,
+)
+from tiku_shared.trace_events import (
+    TraceEventRecorder,
+    TraceEventSession,
+    bind_trace_event_dimensions,
+    current_trace_event_session,
+    record_public_terminal,
+    record_trace_event,
+    trace_event_session_scope,
+    trace_event_scope,
 )
 from tiku_agent.tools import DEFAULT_RUNTIME_DIR
 
@@ -159,6 +171,9 @@ _PUBLIC_STATE_SENSITIVE_ID_RE = re.compile(
     re.IGNORECASE,
 )
 logger = logging.getLogger(__name__)
+_ACTIVE_PUBLIC_TRACE_META: ContextVar[dict[str, object] | None] = ContextVar(
+    "active_public_trace_meta", default=None
+)
 _PAGE = (WEB_DIR / "index.html").read_text(encoding="utf-8")
 _STYLE = (WEB_DIR / "demo.css").read_text(encoding="utf-8")
 _SCRIPT = (WEB_DIR / "demo.js").read_text(encoding="utf-8")
@@ -185,6 +200,7 @@ def create_app(
     feedback_store: SQLiteFeedbackStore | None = None,
     feedback_retention_days_provider: Callable[[], int] | None = None,
     output_watchdog: object | None = None,
+    trace_event_recorder: TraceEventRecorder | None = None,
 ) -> FastAPI:
     """Create a local-only demo app without any existing Feishu configuration."""
     session_cookie = str(session_cookie).strip()
@@ -215,6 +231,8 @@ def create_app(
                 cleanup_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await cleanup_task
+            if trace_event_recorder is not None:
+                await asyncio.to_thread(trace_event_recorder.close)
 
     app = FastAPI(
         title="结构力学搜题 Agent",
@@ -226,6 +244,7 @@ def create_app(
     feedback_store = feedback_store or SQLiteFeedbackStore(
         DEFAULT_RUNTIME_DIR / "feedback.sqlite3"
     )
+    app.state.trace_event_recorder = trace_event_recorder
     app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
 
     @app.exception_handler(HTTPException)
@@ -252,12 +271,13 @@ def create_app(
             status_code=exc.status_code,
             headers=exc.headers,
             output_watchdog=output_watchdog,
+            error_kind=type(exc).__name__,
         )
 
     @app.exception_handler(AgentRuntimeBusyError)
     async def runtime_busy(request: Request, exc: AgentRuntimeBusyError) -> JSONResponse:
         protocol = exc.bind(
-            request_id=exc.request_id or _request_id(request),
+            request_id=_request_id(request),
             search_id=exc.search_id,
         )
         return _protocol_json_response(
@@ -266,12 +286,13 @@ def create_app(
             status_code=429,
             headers={"Retry-After": "15", "Cache-Control": "no-store"},
             output_watchdog=output_watchdog,
+            error_kind=type(exc).__name__,
         )
 
     @app.exception_handler(AgentBudgetExceededError)
     async def runtime_budget(request: Request, exc: AgentBudgetExceededError) -> JSONResponse:
         protocol = exc.bind(
-            request_id=exc.request_id or _request_id(request),
+            request_id=_request_id(request),
             search_id=exc.search_id,
         )
         return _protocol_json_response(
@@ -280,12 +301,13 @@ def create_app(
             status_code=503,
             headers={"Retry-After": "3600", "Cache-Control": "no-store"},
             output_watchdog=output_watchdog,
+            error_kind=type(exc).__name__,
         )
 
     @app.exception_handler(AgentProtocolError)
     async def protocol_error(request: Request, exc: AgentProtocolError) -> JSONResponse:
         protocol = exc.bind(
-            request_id=exc.request_id or _request_id(request),
+            request_id=_request_id(request),
             search_id=exc.search_id,
         )
         return _protocol_json_response(
@@ -294,10 +316,11 @@ def create_app(
             status_code=500,
             headers={"Cache-Control": "no-store"},
             output_watchdog=output_watchdog,
+            error_kind=type(exc).__name__,
         )
 
     @app.exception_handler(Exception)
-    async def unexpected_error(request: Request, _exc: Exception) -> JSONResponse:
+    async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("unhandled public Agent request failure")
         session_id = str(request.cookies.get(session_cookie) or "").strip()
         search_id = ""
@@ -323,57 +346,117 @@ def create_app(
             status_code=500,
             headers={"Cache-Control": "no-store"},
             output_watchdog=output_watchdog,
+            error_kind=type(exc).__name__,
         )
 
     @app.middleware("http")
     async def secure_public_requests(request: Request, call_next):
         request_id = _incoming_request_id(request)
         trace_context = TraceContext.create(request_id=request_id)
+        trace_meta: dict[str, object] = {
+            "endpoint": _normalized_trace_endpoint(request.url.path),
+            "response_mode": _trace_response_mode(request.url.path),
+            "started_perf": time.perf_counter(),
+        }
         request.state.request_id = request_id
         request.state.trace_context = trace_context
-        with trace_context_scope(trace_context):
-            if _forwarded_proto(request) == "http":
-                return RedirectResponse(str(request.url.replace(scheme="https")), status_code=308)
-            if invite_access is not None:
-                cookie_value = str(request.cookies.get(invite_access.cookie_name) or "")
-                identity = invite_access.verify_cookie(cookie_value)
-                request.state.invite_identity = identity
-                public_path = (
-                    request.url.path == "/health"
-                    or request.url.path == "/invite"
-                    or request.url.path == "/api/invite/login"
-                    or request.url.path.startswith("/assets/")
-                )
-                if identity is None and not public_path:
-                    if request.url.path.startswith("/api/"):
-                        result = _protocol_json_response(
-                            "请先使用有效邀请码登录。",
-                            RequestProtocol.from_code(
-                                "LOGIN_REQUIRED", request_id=_request_id(request)
-                            ),
-                            status_code=401,
-                            headers={"Cache-Control": "no-store"},
-                            output_watchdog=output_watchdog,
-                        )
-                        result.headers["X-Request-ID"] = _request_id(request)
-                        return result
-                    target = "/invite?reason=session_expired" if cookie_value else "/invite"
-                    return RedirectResponse(target, status_code=303)
-            result = await call_next(request)
-            result.headers["Content-Security-Policy"] = (
-                "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; "
-                "script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'"
+        with trace_context_scope(trace_context), trace_event_scope(
+            trace_event_recorder,
+            trace_id=trace_context.trace_id,
+            request_id=request_id,
+        ) as event_session, _public_trace_meta_scope(trace_meta):
+            existing_session = str(request.cookies.get(session_cookie) or "").strip()
+            if existing_session:
+                bind_trace_event_dimensions(session_key=session_key(existing_session))
+            record_trace_event(
+                "request_received",
+                stage="http_request",
+                outcome="started",
+                safe_attributes={
+                    "method": request.method,
+                    "endpoint": trace_meta["endpoint"],
+                    "response_mode": trace_meta["response_mode"],
+                },
             )
-            result.headers["X-Content-Type-Options"] = "nosniff"
-            result.headers["X-Frame-Options"] = "DENY"
-            result.headers["Referrer-Policy"] = "no-referrer"
-            result.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-            if _is_secure_request(request):
-                result.headers["Strict-Transport-Security"] = "max-age=31536000"
-            if request.url.path.startswith("/api/"):
-                result.headers.setdefault("Cache-Control", "private, no-store")
-                result.headers["X-Request-ID"] = _request_id(request)
-            return result
+            try:
+                if _forwarded_proto(request) == "http":
+                    result = RedirectResponse(
+                        str(request.url.replace(scheme="https")), status_code=308
+                    )
+                    _record_generic_terminal(result.status_code)
+                    return result
+                if invite_access is not None:
+                    cookie_value = str(request.cookies.get(invite_access.cookie_name) or "")
+                    identity = invite_access.verify_cookie(cookie_value)
+                    request.state.invite_identity = identity
+                    if isinstance(identity, InviteIdentity):
+                        bind_trace_event_dimensions(identity_key=identity.invite_id)
+                    public_path = (
+                        request.url.path == "/health"
+                        or request.url.path == "/invite"
+                        or request.url.path == "/api/invite/login"
+                        or request.url.path.startswith("/assets/")
+                    )
+                    if identity is None and not public_path:
+                        if request.url.path.startswith("/api/"):
+                            result = _protocol_json_response(
+                                "请先使用有效邀请码登录。",
+                                RequestProtocol.from_code(
+                                    "LOGIN_REQUIRED", request_id=_request_id(request)
+                                ),
+                                status_code=401,
+                                headers={"Cache-Control": "no-store"},
+                                output_watchdog=output_watchdog,
+                            )
+                            result.headers["X-Request-ID"] = _request_id(request)
+                            return result
+                        target = "/invite?reason=session_expired" if cookie_value else "/invite"
+                        result = RedirectResponse(target, status_code=303)
+                        _record_generic_terminal(result.status_code)
+                        return result
+                result = await call_next(request)
+                result.headers["Content-Security-Policy"] = (
+                    "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; "
+                    "script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'"
+                )
+                result.headers["X-Content-Type-Options"] = "nosniff"
+                result.headers["X-Frame-Options"] = "DENY"
+                result.headers["Referrer-Policy"] = "no-referrer"
+                result.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+                if _is_secure_request(request):
+                    result.headers["Strict-Transport-Security"] = "max-age=31536000"
+                if request.url.path.startswith("/api/"):
+                    result.headers.setdefault("Cache-Control", "private, no-store")
+                    result.headers["X-Request-ID"] = _request_id(request)
+                if trace_meta["response_mode"] != "stream":
+                    _record_generic_terminal(result.status_code)
+                return result
+            except asyncio.CancelledError:
+                if not event_session.terminal_attempted:
+                    record_public_terminal(
+                        stage="http_request",
+                        outcome="cancelled",
+                        failed=True,
+                        duration_ms=_trace_duration_ms(),
+                        safe_attributes={
+                            "endpoint": trace_meta["endpoint"],
+                            "response_mode": trace_meta["response_mode"],
+                            "http_status": 499,
+                            "error_kind": "CancelledError",
+                        },
+                    )
+                raise
+            except BaseException as exc:
+                if not event_session.terminal_attempted:
+                    _record_protocol_terminal(
+                        RequestProtocol.from_code(
+                            "SERVICE_UNAVAILABLE",
+                            request_id=_request_id(request),
+                        ),
+                        http_status=500,
+                        error_kind=type(exc).__name__,
+                    )
+                raise
 
     @app.get("/invite", response_class=HTMLResponse)
     def invite_page(request: Request) -> Response:
@@ -402,6 +485,12 @@ def create_app(
         form = await request.form()
         identity = invite_access.authenticate_code(str(form.get("code") or ""))
         if identity is None:
+            _record_protocol_terminal(
+                RequestProtocol.from_code(
+                    "INVITE_INVALID", request_id=_request_id(request)
+                ),
+                http_status=401,
+            )
             error = '<p class="error">邀请码无效或已停用，请检查后重试。</p>'
             return HTMLResponse(
                 _INVITE_PAGE.replace("{error}", error),
@@ -571,6 +660,24 @@ def create_app(
             identity_key=identity_key,
             protocol=protocol,
         )
+        bind_trace_event_dimensions(
+            feedback_id=saved.feedback_id,
+            session_key=clean_session_key,
+            identity_key=identity_key,
+            workflow_search_id=str(snapshot.get("workflow_search_id") or search_id),
+            search_id=str(snapshot.get("search_id") or search_id),
+        )
+        record_trace_event(
+            "feedback_recorded",
+            stage="feedback_store",
+            outcome="success",
+            protocol=protocol,
+            safe_attributes={
+                "rating": saved.rating,
+                "feedback_scope": saved.feedback_scope,
+            },
+        )
+        _record_protocol_terminal(protocol, http_status=200)
         return JSONResponse({
             "ok": True,
             "feedback": {
@@ -611,6 +718,7 @@ def create_app(
             identity_key=_identity_key(request) or "local",
             protocol=protocol,
         )
+        _record_protocol_terminal(protocol, http_status=200)
         return JSONResponse({
             "ok": True,
             "message_id": message_id,
@@ -631,8 +739,25 @@ def create_app(
         return result
 
     @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
+    def health() -> dict[str, object]:
+        trace_health = (
+            trace_event_recorder.health()
+            if trace_event_recorder is not None
+            else {
+                "status": "disabled",
+                "written": 0,
+                "dropped": 0,
+                "write_failures": 0,
+                "validation_rejections": 0,
+                "duplicate_terminals": 0,
+                "pending": 0,
+                "queue_capacity": 0,
+                "accepting": False,
+                "last_failure_kind": "",
+                "last_failure_at": "",
+            }
+        )
+        return {"status": "ok", "trace_events": trace_health}
 
     @app.get("/api/session")
     def session(request: Request) -> JSONResponse:
@@ -727,6 +852,8 @@ def create_app(
                 request_id=request_id,
                 search_id=str(runtime.session_snapshot(session_id).get("search_id") or ""),
                 trace_context=trace_context,
+                trace_event_session=current_trace_event_session(),
+                trace_meta=_current_public_trace_meta(),
             ),
             media_type="application/x-ndjson",
         )
@@ -819,6 +946,8 @@ def create_app(
                 execute,
                 request_id=request_id,
                 trace_context=trace_context,
+                trace_event_session=current_trace_event_session(),
+                trace_meta=_current_public_trace_meta(),
             ),
             media_type="application/x-ndjson",
         )
@@ -929,6 +1058,8 @@ def create_app(
                     request_id=request_id,
                     search_id=str(runtime.session_snapshot(session_id).get("search_id") or ""),
                     trace_context=trace_context,
+                    trace_event_session=current_trace_event_session(),
+                    trace_meta=_current_public_trace_meta(),
                 ),
                 media_type="application/x-ndjson",
             )
@@ -981,6 +1112,8 @@ def create_app(
                     request_id=request_id,
                     search_id=str(runtime.session_snapshot(session_id).get("search_id") or ""),
                     trace_context=trace_context,
+                    trace_event_session=current_trace_event_session(),
+                    trace_meta=_current_public_trace_meta(),
                 ),
                 media_type="application/x-ndjson",
             )
@@ -1045,6 +1178,8 @@ def create_app(
                     request_id=request_id,
                     search_id=str(runtime.session_snapshot(session_id).get("search_id") or ""),
                     trace_context=trace_context,
+                    trace_event_session=current_trace_event_session(),
+                    trace_meta=_current_public_trace_meta(),
                 ),
                 media_type="application/x-ndjson",
             )
@@ -1083,6 +1218,113 @@ def create_app(
     return app
 
 
+@contextmanager
+def _public_trace_meta_scope(meta: dict[str, object]):
+    token = _ACTIVE_PUBLIC_TRACE_META.set(meta)
+    try:
+        yield meta
+    finally:
+        _ACTIVE_PUBLIC_TRACE_META.reset(token)
+
+
+def _current_public_trace_meta() -> dict[str, object]:
+    return dict(_ACTIVE_PUBLIC_TRACE_META.get() or {})
+
+
+def _normalized_trace_endpoint(path: object) -> str:
+    clean = str(path or "/").split("?", 1)[0]
+    for prefix, template in (
+        ("/api/media/", "/api/media/:id"),
+        ("/api/upload/", "/api/upload/:id"),
+        ("/api/a3/crop/", "/api/a3/crop/:unit_id"),
+        ("/api/feedback/", "/api/feedback/:id"),
+        ("/assets/", "/assets/:id"),
+    ):
+        if clean.startswith(prefix):
+            return template
+    return clean if re.fullmatch(r"/[A-Za-z0-9_/:.-]{0,127}", clean) else "/unknown"
+
+
+def _trace_response_mode(path: object) -> str:
+    clean = str(path or "")
+    if clean.endswith("/stream"):
+        return "stream"
+    return "json" if clean.startswith("/api/") or clean == "/health" else "html"
+
+
+def _trace_duration_ms() -> int:
+    started = _current_public_trace_meta().get("started_perf")
+    return max(0, round((time.perf_counter() - float(started)) * 1000)) if started else 0
+
+
+def _protocol_event_outcome(protocol: RequestProtocol) -> str:
+    return {
+        RequestStatus.SUCCESS: "success",
+        RequestStatus.NO_MATCH: "no_match",
+        RequestStatus.NEEDS_INPUT: "needs_input",
+        RequestStatus.PARTIAL: "partial",
+        RequestStatus.ERROR: "error",
+    }[protocol.status]
+
+
+def _record_protocol_terminal(
+    protocol: RequestProtocol,
+    *,
+    http_status: int,
+    error_kind: str = "ProtocolFailure",
+    extra_attributes: Mapping[str, object] | None = None,
+) -> None:
+    meta = _current_public_trace_meta()
+    attributes: dict[str, object] = {
+        "endpoint": str(meta.get("endpoint") or "/unknown"),
+        "response_mode": str(meta.get("response_mode") or "json"),
+        "http_status": int(http_status),
+    }
+    if protocol.status is RequestStatus.ERROR:
+        attributes["error_kind"] = error_kind
+    else:
+        attributes.update(dict(extra_attributes or {}))
+    dimensions = {
+        key: value
+        for key, value in {
+            "request_id": protocol.request_id,
+            "search_id": protocol.search_id,
+        }.items()
+        if value
+    }
+    record_public_terminal(
+        stage="public_response",
+        outcome=_protocol_event_outcome(protocol),
+        failed=protocol.status is RequestStatus.ERROR,
+        protocol=protocol,
+        duration_ms=_trace_duration_ms(),
+        safe_attributes=attributes,
+        **dimensions,
+    )
+
+
+def _record_generic_terminal(http_status: int) -> None:
+    session = current_trace_event_session()
+    if session is None or session.terminal_attempted:
+        return
+    meta = _current_public_trace_meta()
+    failed = int(http_status) >= 400
+    attributes: dict[str, object] = {
+        "endpoint": str(meta.get("endpoint") or "/unknown"),
+        "response_mode": str(meta.get("response_mode") or "html"),
+        "http_status": int(http_status),
+    }
+    if failed:
+        attributes["error_kind"] = "HttpFailure" if int(http_status) >= 500 else "HttpRejection"
+    record_public_terminal(
+        stage="http_response",
+        outcome="error" if int(http_status) >= 500 else "rejected" if failed else "success",
+        failed=failed,
+        duration_ms=_trace_duration_ms(),
+        safe_attributes=attributes,
+    )
+
+
 def _incoming_request_id(request: Request) -> str:
     value = str(request.headers.get("x-request-id") or "").strip()
     if re.fullmatch(r"req_[A-Fa-f0-9]{32}", value):
@@ -1108,6 +1350,7 @@ def _protocol_json_response(
     status_code: int,
     headers: dict[str, str] | None = None,
     output_watchdog: object | None = None,
+    error_kind: str = "ProtocolFailure",
 ) -> JSONResponse:
     protocol = _public_response_protocol(protocol)
     message = _public_protocol_message(protocol)
@@ -1119,6 +1362,11 @@ def _protocol_json_response(
         media_status="",
         endpoint="http_error",
         session_id="",
+    )
+    _record_protocol_terminal(
+        protocol,
+        http_status=status_code,
+        error_kind=error_kind,
     )
     return JSONResponse(
         {"detail": message, **protocol.to_dict()},
@@ -1258,7 +1506,9 @@ def _event_kind_for_layer(layer: RequestLayer) -> str:
 
 def _session_id(request: Request, *, cookie_name: str = SESSION_COOKIE) -> str:
     value = str(request.cookies.get(cookie_name) or "").strip()
-    return value or secrets.token_urlsafe(24)
+    resolved = value or secrets.token_urlsafe(24)
+    bind_trace_event_dimensions(session_key=session_key(resolved))
+    return resolved
 
 
 def _identity_key(request: Request) -> str:
@@ -1456,20 +1706,20 @@ def _agent_json(
     secure_cookie: bool = False,
     cookie_name: str = SESSION_COOKIE,
 ) -> JSONResponse:
-    result = JSONResponse(
-        _agent_payload(
-            response,
-            runtime,
-            session_id,
-            uploaded_image=uploaded_image,
-        )
+    payload = _agent_payload(
+        response,
+        runtime,
+        session_id,
+        uploaded_image=uploaded_image,
     )
+    result = JSONResponse(payload)
     _set_session_cookie(
         result,
         session_id,
         secure_cookie=secure_cookie,
         cookie_name=cookie_name,
     )
+    _record_agent_payload_terminal(payload)
     return result
 
 
@@ -1581,7 +1831,7 @@ def _agent_payload(
                 "retry_search" if snapshot.get("has_active_image") is True else "new_chat"
             ),
         }
-    return {
+    payload: dict[str, object] = {
         "text": text,
         "images": image_urls,
         "media": media,
@@ -1594,6 +1844,51 @@ def _agent_payload(
         "failure": failure,
         **protocol.to_dict(),
     }
+    dimensions: dict[str, str] = {
+        "session_key": session_key(session_id),
+    }
+    for key, value in (
+        ("workflow_search_id", media_snapshot.get("workflow_search_id")),
+        ("search_id", protocol.search_id or media_snapshot.get("search_id")),
+    ):
+        clean = str(value or "").strip()
+        if clean:
+            dimensions[key] = clean
+    raw_a3 = media_snapshot.get("a3")
+    if isinstance(raw_a3, Mapping):
+        selected = raw_a3.get("selected_unit")
+        if isinstance(selected, Mapping) and str(selected.get("unit_id") or "").strip():
+            dimensions["unit_id"] = str(selected["unit_id"]).strip()
+    bind_trace_event_dimensions(**dimensions)
+
+    return payload
+
+
+def _record_agent_payload_terminal(payload: Mapping[str, object]) -> None:
+    protocol = RequestProtocol.from_dict(dict(payload))
+    images = payload.get("images")
+    terminal_attributes: dict[str, object] = {
+        "intent": str(payload.get("intent") or "public_response"),
+        "image_count": len(images) if isinstance(images, list) else 0,
+        "text_length": len(str(payload.get("text") or "")),
+    }
+    media = payload.get("media")
+    if isinstance(media, Mapping) and str(media.get("status") or "").strip():
+        terminal_attributes["media_status"] = str(media["status"]).strip()
+    snapshot = payload.get("session")
+    if isinstance(snapshot, Mapping):
+        candidate_count = snapshot.get("candidate_count")
+        if type(candidate_count) is int:
+            terminal_attributes["candidate_count"] = candidate_count
+        a3_snapshot = snapshot.get("a3")
+        if isinstance(a3_snapshot, Mapping) and isinstance(a3_snapshot.get("units"), list):
+            terminal_attributes["unit_count"] = len(a3_snapshot["units"])
+    _record_protocol_terminal(
+        protocol,
+        http_status=200,
+        error_kind="BusinessProtocolError",
+        extra_attributes=terminal_attributes,
+    )
 
 
 def _persist_response_media(
@@ -1977,34 +2272,54 @@ async def _stream_agent_events(
     request_id: str = "",
     search_id: str = "",
     trace_context: TraceContext,
+    trace_event_session: TraceEventSession | None = None,
+    trace_meta: Mapping[str, object] | None = None,
 ):
     loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    def serialized_event(event: Mapping[str, object]) -> str:
+        return json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
 
     def progress(stage: str, message: str) -> None:
         loop.call_soon_threadsafe(
             queue.put_nowait,
-            _public_progress_event(stage, message),
+            serialized_event(_public_progress_event(stage, message)),
         )
 
     async def run() -> None:
-        with trace_context_scope(trace_context):
+        event_scope = (
+            trace_event_session_scope(trace_event_session)
+            if trace_event_session is not None
+            else suppress()
+        )
+        with trace_context_scope(trace_context), event_scope, _public_trace_meta_scope(
+            dict(trace_meta or {})
+        ):
             try:
                 payload = await asyncio.to_thread(execute, progress)
-                await queue.put({"type": "result", "data": payload})
-            except (AgentRuntimeBusyError, AgentBudgetExceededError) as exc:
+                line = serialized_event({"type": "result", "data": payload})
+                _record_agent_payload_terminal(payload)
+                await queue.put(line)
+            except AgentProtocolError as exc:
                 protocol = _public_response_protocol(
                     exc.bind(
-                        request_id=exc.request_id or request_id or new_request_id(),
-                        search_id=exc.search_id or search_id,
+                        request_id=request_id or exc.request_id or new_request_id(),
+                        search_id=search_id or exc.search_id,
                     )
                 )
-                await queue.put({
+                line = serialized_event({
                     "type": "error",
                     "message": _public_protocol_message(protocol),
                     **protocol.to_dict(),
                 })
-            except Exception:  # noqa: BLE001 - keep internal failures out of the public stream.
+                _record_protocol_terminal(
+                    protocol,
+                    http_status=200,
+                    error_kind=type(exc).__name__,
+                )
+                await queue.put(line)
+            except Exception as exc:  # noqa: BLE001 - keep internal failures out of the public stream.
                 logger.exception("streamed Agent request failed")
                 protocol = _public_response_protocol(
                     RequestProtocol.from_code(
@@ -2013,21 +2328,61 @@ async def _stream_agent_events(
                         search_id=search_id,
                     )
                 )
-                await queue.put({
+                line = serialized_event({
                     "type": "error",
                     "message": "服务端处理失败，请稍后重试。",
                     **protocol.to_dict(),
                 })
+                _record_protocol_terminal(
+                    protocol,
+                    http_status=200,
+                    error_kind=type(exc).__name__,
+                )
+                await queue.put(line)
             finally:
                 await queue.put(None)
 
     task = asyncio.create_task(run())
-    while True:
-        event = await queue.get()
-        if event is None:
-            break
-        yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
-    await task
+
+    def record_cancelled() -> None:
+        event_scope = (
+            trace_event_session_scope(trace_event_session)
+            if trace_event_session is not None
+            else suppress()
+        )
+        with trace_context_scope(trace_context), event_scope, _public_trace_meta_scope(
+            dict(trace_meta or {})
+        ):
+            session = current_trace_event_session()
+            if session is None or not session.terminal_attempted:
+                record_public_terminal(
+                    stage="stream_delivery",
+                    outcome="cancelled",
+                    failed=True,
+                    duration_ms=_trace_duration_ms(),
+                    safe_attributes={
+                        "endpoint": str((trace_meta or {}).get("endpoint") or "/unknown"),
+                        "response_mode": "stream",
+                        "http_status": 499,
+                        "error_kind": "ClientDisconnected",
+                    },
+                )
+
+    try:
+        while True:
+            event = await queue.get()
+            if event is None:
+                break
+            yield event
+        await task
+    except (asyncio.CancelledError, GeneratorExit):
+        record_cancelled()
+        raise
+    finally:
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 def _public_progress_event(stage: object, message: object) -> dict[str, str]:

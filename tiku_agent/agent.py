@@ -65,6 +65,7 @@ from tiku_shared.chapter_catalog import (
     parse_chapter_scope,
     resolve_image_scope,
 )
+from tiku_shared.trace_events import record_trace_event
 
 
 _CLARIFICATION_PROTOCOL_CODES = {
@@ -746,6 +747,13 @@ class TikuSearchAgent:
                 return stopped
             route = str(routed.data.get("route") or "")
             self.state.set_route(route)
+            record_trace_event(
+                "route_decided",
+                stage="bank_routing",
+                outcome="success",
+                search_id=self.state.current_search_id,
+                safe_attributes={"route": route},
+            )
 
             structured = self.tools.classify_structure(
                 self.state.active_image_path or None,
@@ -846,6 +854,13 @@ class TikuSearchAgent:
             return stopped
         route = str(routed.data.get("route") or "")
         self.state.set_route(route)
+        record_trace_event(
+            "route_decided",
+            stage="bank_routing",
+            outcome="success",
+            search_id=self.state.current_search_id,
+            safe_attributes={"route": route},
+        )
 
         structured = self.tools.classify_structure(
             self.state.active_image_path or None,

@@ -8,6 +8,7 @@ from scripts.run_tiku_agent_8896 import (
     DEFAULT_PORT,
     DEFAULT_RUNTIME_DIR,
     SESSION_COOKIE,
+    build_app,
     build_argument_parser,
     build_runtime,
 )
@@ -86,6 +87,17 @@ class TikuAgent8896FlowTest(unittest.TestCase):
             self.assertEqual(
                 runtime.cost_ledger.path.resolve(),
                 (root / "model_costs.sqlite3").resolve(),
+            )
+
+    def test_trace_store_is_owned_by_the_8896_runtime_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "runtime"
+            runtime = build_runtime(root, enable_triage=False)
+            app = build_app(root, runtime=runtime, enable_triage=False)
+
+            self.assertEqual(
+                app.state.trace_event_recorder.store.path.resolve(),
+                (root / "trace_events.sqlite3").resolve(),
             )
 
     def test_launcher_can_disable_or_inject_the_triage_authority(self):

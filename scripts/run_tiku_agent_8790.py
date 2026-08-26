@@ -19,6 +19,7 @@ from tiku_agent.fastapi_demo import SESSION_COOKIE, create_app
 from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.invite_access import InviteAccess
 from tiku_agent.output_watchdog import OutputWatchdog
+from tiku_shared.trace_events import SQLiteTraceEventStore, TraceEventRecorder
 
 
 DEFAULT_PORT = 8790
@@ -75,6 +76,9 @@ def build_app(
             else InviteAccess(invite_config) if invite_config else None
         ),
         feedback_store=SQLiteFeedbackStore(root / "feedback.sqlite3"),
+        trace_event_recorder=TraceEventRecorder(
+            SQLiteTraceEventStore(root / "trace_events.sqlite3")
+        ),
     )
 
 
