@@ -1,6 +1,6 @@
 # Trace Phase 1 可观测性现状盘点
 
-状态：2.1 实施前审计快照保留为基线；2.2 Trace Context、2.3 结构化事件/终态和 2.4 权威响应/反馈绑定已完成，2.5 诊断查询/保留/切换为 NEXT
+状态：2.1 实施前审计快照保留为基线；2.2 Trace Context、2.3 结构化事件/终态、2.4 权威响应/反馈绑定和 2.5 只读诊断/独立保留维护均已完成验收
 
 日期：2026-08-27
 
@@ -37,7 +37,7 @@
 
 1. 2.1 基线发现八套独立记录；2.3/2.4 又加了运行根独立的 Trace Store 和 Response Store。
    物理记录仍分散，但现在已有 `trace_id → response_id → rated_response_id/feedback_id` 的权威连接，
-   下一步不是把所有文件强并成一个库，而是用 2.5 的只读查询层统一读取。
+   2.5 没有把所有文件强并成一个库，而是由独立只读查询层统一读取。
 2. 8790 当前任务摘要写在 `a2/task_logs.jsonl`，不是根目录旧的
    `task_logs.jsonl`；当前共享费用写根目录 `model_costs.sqlite3`，不是旧的
    `a2/model_costs.sqlite3`。仅凭文件名很容易读错数据源。
@@ -48,8 +48,9 @@
 5. 可评分回复现在先写 `responses.sqlite3` 的白名单投影，再返回服务端 `response_id`。反馈 schema
    v8 强制 `rated_response_id` 和 conversation，并校验 identity、session、有效期和目标
    message/response 一致性；旧 v7 行保持未绑定、只读兼容。
-6. 路由、A3/A2、工具、模型、费用、最终公共结果和反馈现在能按 trace/response 权威串起；尚缺的是
-   Codex/Agent 可直接使用的“摘要 → 时间线 → 按需证据”查询入口。8795 不是这些数据的所有者。
+6. 路由、A3/A2、工具、模型、费用、最终公共结果和反馈现在能按 trace/response 权威串起；
+   `scripts/tiku_diagnostics.py` 提供了 Codex/Agent 可直接使用的“摘要 → 时间线 → 按需证据”只读入口。
+   8795 仍不是这些数据的所有者或运行依赖。
 
 ## 运行根目录与职责
 
@@ -207,7 +208,39 @@ Trace Store 独立于 8795，后者不是数据所有者或运行依赖。
 目标一致性均由服务端校验，协议与父子任务字段取自 response row。旧 v7 反馈迁移后
 `rated_response_id=''`，仅作历史只读兼容。8795 可以展示该绑定，但不是 Response Store 所有者。
 
-### 11. 非当前生产主链日志
+### 11. 2.5 只读诊断与独立保留维护
+
+- `scripts/tiku_diagnostics.py` 与业务服务解耦；SQLite 强制 `mode=ro` 和
+  `PRAGMA query_only=ON`，8790/8896 启动代码不导入诊断层。WAL 活库只读取两轮独立
+  `db + wal` 临时副本，逐文件存在性和 SHA-256 完全一致且 `quick_check` 通过后才采用；
+  不以 `immutable=1` 读取 live 库。该机制不持有 writer 锁，保证采用副本结构可读并显著降低
+  跨代组合风险，但不承诺绝对线性化或一定读到最新提交；需要该保证时必须增加 writer 协作锁
+  或改用受控 SQLite backup 协议。
+- 查询只接受 trace、response、feedback 或隐私安全的稳定 `identity_key`；拒绝
+  `TIKU-...` 邀请码明文。identity 查询必须提供不超过 7 天的时间窗，结果最多 100 条，
+  最终诊断包最多 2 MiB。
+- 读侧模式为 `authoritative-only / authoritative-first / legacy-only`。默认
+  `authoritative-first` 只改变诊断 CLI：有权威 trace anchor 时精确费用/任务证据缺失只报告
+  断链，不返回旧时间窗记录；只有无权威 anchor 时才回退旧链。8790 业务请求不依赖该模式。
+- 每条证据标明来源、关联方式和完整性；内部关联上限与用户输出上限分离，达到内部硬上限时
+  显式报告截断。`--compare-legacy` 固定比较权威链与真实旧 search/time 兼容链，分类为
+  `match / authoritative_only / legacy_only / conflict / evidence_missing`。
+- JSONL 按打开时长度和累计字节双重硬截断，单行使用有界读取；运行中继续追加或出现超长行时
+  不越界追读，并把来源标为 `partial`、显式报告 gap。
+- `scripts/tiku_retention.py` 是独立维护入口，默认只生成计划。普通输出只公开数量、截止时间、
+  相对文件、预计逻辑空间、计划哈希和排除项；apply 计划必须保存在仓库外，并以精确哈希、
+  `--confirm-runtime-stopped`、仓库外备份和候选漂移校验再次确认。未来 `as_of` 只能生成
+  不可保存、不可 apply 的 `report_only` 预测；write/load/apply 都会独立拒绝未来时间。
+- apply 会在任何备份、媒体删除或数据库写入前拒绝重复的 response、feedback 或 page-error
+  候选主键，避免文件系统删除在数据库事务回滚后留下不可逆的部分清理。
+- SQLite 先在线备份并做完整性检查，媒体逐文件核对哈希。多库不是全局事务；中途失败保留
+  备份和 `failure.json`，必须人工处置。费用账本、反馈评分/审核/旧 v7 元数据以及 8795
+  control/admin audit 永不纳入该清理。
+- response 过期行、反馈案例证据和 A3 page error 有批准策略；trace、task JSONL、output
+  watchdog 与 service logs 暂无批准策略，只报告 `policy_missing`。当前未安装周期调度，
+  也尚未执行真实 apply。
+
+### 12. 非当前生产主链日志
 
 `triage_shadow.jsonl`、`a3_decomposition.jsonl`、`a3_region_map.jsonl`、评测 records 和旧飞书
 章节失败日志属于影子、试验或 8788 路径。除非对应启动入口明确装配，不能与 8790/8896
@@ -215,7 +248,9 @@ Trace Store 独立于 8795，后者不是数据所有者或运行依赖。
 
 ## 活跃数据与历史残留
 
-启动代码与 2026-08-25 文件元信息共同证明：
+运行状态复核（2026-08-27）：2.4 启用门已精确重启并保持 8790、8896 在线；8788 保持原进程，
+8794 无监听，本轮没有触碰二者。2.5 诊断修复不涉及启动代码，因此没有再次重启服务。
+启动代码、当前装配与运行文件共同证明：
 
 | 路径 | 判断 | 理由 |
 | --- | --- | --- |
@@ -235,7 +270,7 @@ Trace Store 独立于 8795，后者不是数据所有者或运行依赖。
 | 8896 根 `trace_events.sqlite3`、`responses.sqlite3` | 当前代码装配 | 与 8790 隔离的 2.3/2.4 store；response 按需创建 |
 | 8896 `a2/session.db` | 当前活跃状态库 | 当前子 A2 session store |
 | 8896 `a2/model_costs.sqlite3` | 历史残留 | 当前 A2 写根共享费用库 |
-| 8896 `feedback.sqlite3` | 按需创建、当前尚不存在 | 入口已装配 feedback store，但没有写入就不会创建数据库 |
+| 8896 `feedback.sqlite3` | 当前活跃 v8 验收数据 | 2.4 主线启用门的无费用反馈烟测已创建并验证 `rated_response_id` 精确绑定 |
 | 8896 `service_logs` 当前 stdout/stderr、status/PID | 当前服务文件 | 当前看门狗重定向/维护 |
 | 8896 `service_logs/manual_restart.*`、`diagnostics/` | 手工/试验残留 | 当前服务装配不引用 |
 | 8790/8896 `output_watchdog.jsonl` | 当前活跃 | 当前启动默认启用，元信息与近期请求一致 |
@@ -254,13 +289,13 @@ Trace Store 独立于 8795，后者不是数据所有者或运行依赖。
 | 反馈关联费用 | 8795 详情页读取 8790 根费用库和 A2 历史费用库 | 启发式 join，不是 trace/FK |
 | 模型费用汇总 | 8795 总览、用户用量和反馈详情 | 读取根费用库及 A2 历史库；不可读时可能显示不完整/零值 |
 | 管理审计 | 8795 设置页“最近操作” | 只覆盖部分控制面操作，不含登录和反馈管理 |
-| A2 task、A3 page error、stdout/stderr、输出观察 | 只能由运维直接查看文件/SQLite | 8795 不聚合这些数据，没有一页式请求时间线 |
-| Trace/Response | 各运行根 `trace_events.sqlite3`、`responses.sqlite3` | 已有权威 join；2.5 尚未提供稳定的 Codex/Agent 查询 CLI，8795 也不是数据所有者 |
+| A2 task、A3 page error、stdout/stderr、输出观察 | 8795 不聚合；结构化数据现由诊断 CLI 只读聚合 | 非结构化 stdout/stderr 仍只作运维旁证，不进入诊断包 |
+| Trace/Response/反馈/费用/任务/A3 错误 | `scripts/tiku_diagnostics.py` 只读诊断包 | 新链优先、旧链回退；每条证据显示来源、关联方式和完整性，8795 不是数据所有者 |
 | 看门狗状态 | 各 runtime root 的 status/PID 文件 | 只看进程代次，不看业务请求 |
 
-所以目前“用户反馈对应哪版服务端回复”已经由 `rated_response_id` 权威确定，也能回到原响应
-trace；但“前面发生了什么错误、哪次模型调用收费”仍缺一个稳定、有界的一站式查询入口。
-这正是 2.5 的工作，不能把 8795 当前页面误当成长期诊断架构。
+所以“用户反馈对应哪版服务端回复”已经由 `rated_response_id` 权威确定，也能回到原响应
+trace；“前面发生了什么错误、哪次模型调用收费”由 2.5 的稳定、有界、只读诊断入口统一回答。
+8795 当前页面仍只是独立管理消费者，不是长期诊断架构。
 
 ## 公共结果与错误词表
 
@@ -427,16 +462,19 @@ legacy binding；不会根据旧客户端字段伪造 response 归属。
 
 - 文件复制与 SQLite upsert 不在同一事务；更新时先删旧目录，中途失败可能丢旧证据或留下孤儿文件；
 - 只限制 JSON 请求大小和单条图片数量，没有总媒体字节上限或内容去重，重复引用大文件会放大磁盘占用；
-- 8790 写案例与 8795 清理/删除运行在两个进程，现有 Python `Lock` 不能提供跨进程互斥。
+- 8795 管理删除仍可能与 8790 写入并发，现有 Python `Lock` 不能提供跨进程互斥；独立维护
+  apply 因此要求操作者明确确认目标运行服务已停止。
 
 ### 证据过期
 
-- store 支持由 provider 提供 1～365 天保留期；但当前 8790 和 8896 启动均未传
-  `feedback_retention_days_provider`，新案例实际固定使用默认 30 天，8795 控制库设置没有接到
-  两个 Web 写入路径；
-- 过期清理会删除 case 媒体、清空 conversation，并保留评分元数据和 `case_purged_at`；
-- 当前只有 8795 FastAPI lifespan 启动时调用 `purge_expired_cases()`，没有周期任务；若 8795
-  长期不重启，已过期证据可能继续留盘超过设定日期。
+- 8790 在 `control_db` 模式下，每次保存反馈时动态读取控制库
+  `feedback_retention_days`；未使用控制库时回退 30 天。8896 未装配 provider，继续使用
+  30 天默认值；
+- 过期维护会删除 case 媒体、清空 conversation，并保留评分、审核、旧 v7 元数据和
+  `case_purged_at`；
+- 8795 已移除 lifespan 启动自动 `purge_expired_cases()`。当前没有服务启动钩子或周期任务
+  自动清理；过期证据只能由独立 `scripts/tiku_retention.py` 维护流程处理。该入口默认只生成
+  计划，本轮尚未执行真实 apply。
 
 ### 8795 查询和费用关联
 
@@ -493,9 +531,13 @@ fail-open 跳过，后台可能显示不完整或零费用。
     旧回复反馈、writer 失败、重复事件抑制、协议词表/emitter/浏览器一致性和隐私白名单。
 
 其中 1～7 的 trace/response 主链及第 10 项 optional-conversation 漏洞已在 2.2～2.4 完成；
-`rated_response_id`、owner/expiry、目标 message 一致性和旧 v7 兼容均有定向回归。第 8～9 项的
-统一保留/周期清理，以及把这些物理 store 变成稳定的 Codex/Agent 有界查询入口，属于 2.5。
-8795 最多是该入口未来的只读消费者，不是完成门或数据所有者。
+`rated_response_id`、owner/expiry、目标 message 一致性和旧 v7 兼容均有定向回归。2.5 的
+稳定、有界、只读诊断入口和独立保留维护已通过 117 项相关测试与 943 项全仓测试。8896 live
+对照确认新链使用 `trace_exact`、旧证据缺失显式归类为 `evidence_missing`，且查询前后源文件
+哈希、大小和时间戳不变；8790/8896 dry-run 均为零候选、零问题并各报告 7 项
+`policy_missing`。2.4 的 JSON/stream/反馈绑定无费用烟测已确认模型调用和估算费用增量为零。
+当前仍未安装周期调度，也未执行真实 apply；这两项不属于本次验收动作。8795 最多是该入口
+未来的只读消费者，不是完成门或数据所有者。
 
 ## 本阶段完成门槛
 

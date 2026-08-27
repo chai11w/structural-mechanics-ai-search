@@ -76,6 +76,11 @@ def build_app(
             else InviteAccess(invite_config) if invite_config else None
         ),
         feedback_store=SQLiteFeedbackStore(root / "feedback.sqlite3"),
+        feedback_retention_days_provider=(
+            (lambda: int(control_store.settings()["feedback_retention_days"]))
+            if control_store is not None
+            else None
+        ),
         trace_event_recorder=TraceEventRecorder(
             SQLiteTraceEventStore(root / "trace_events.sqlite3")
         ),

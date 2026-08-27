@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-
-from render_dimension_bank_diff import build_differences, canonical, classify
+from scripts.render_dimension_bank_diff import build_differences, canonical, classify
 
 
 class DimensionBankDiffTests(unittest.TestCase):

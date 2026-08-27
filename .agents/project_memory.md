@@ -6,7 +6,7 @@
 - 端口隔离：8788 飞书、8790 生产、8794 Agent、8795 后台；8891 分流，8896 验收，8897 回退。
 - 8790 读取 8795 控制库认证；A1/A2/A3 与子 A2 统一计费并按题汇总流程/反馈。旧有界并发队列未恢复。
 - 新 Agent/Web 统一输出和媒体边界已实现、回归并在 8790/8896 运行：公共出口白名单投影，候选原子交付，答案区分 0/部分/全部，媒体失败可重发；8788 不变。
-- 观测主阶段 2.1～2.4 已完成并通过主线启用门：8790/8896 精确重启后，无费用协议烟测确认权威 `response_id` 落库及反馈绑定闭环；下一步 2.5 Codex/Agent 诊断查询、保留与切换待用户确认分步方案。
+- 观测主阶段 2.1～2.5 已完成：8790/8896 主线启用门、无费用协议烟测、只读 live 对照、两运行根 retention dry-run 及全仓回归均通过；8788/8794 未触碰。
 - live 题库覆盖 `2静定结构`～`8影响线`；字母库仍窄。
 
 ## Implemented
@@ -21,6 +21,8 @@
 - 五态公共协议只输出注册 code/白名单字段，隐藏异常、路径、模型 reason 和凭据；候选原子交付，答案区分 0/部分/全部，同题重试沿用 `search_id`。
 - 2.3 的运行根 `trace_events.sqlite3` 采用严格白名单、每 trace 唯一终态和有界异步写入，健康计数暴露失败；JSON/stream/媒体一致且不依赖 8795。
 - 2.4 的运行根 `responses.sqlite3` 在公开前生成 `resp_<32hex>`，仅存协议、父子 ID、阶段、计数、耗时等白名单投影；覆盖 JSON/stream/A3/A2/可评分错误。同 trace 同投影幂等，冲突/写失败 fail-closed；反馈写入/删除按 response 所有权，回归已通过。
+- 2.5 提供独立只读诊断库/CLI：按 trace、response、feedback 或隐私安全的稳定 `identity_key` 有界查询，新链优先、旧链回退并标注来源/关联/完整性；WAL 用双副本内容哈希和 `quick_check` 验收，JSONL 按打开时长度有界读取。
+- 独立 retention 命令默认 dry-run；apply 需仓库外计划/备份、精确哈希、停机确认和漂移校验。未来时间仅可 report-only；费用账本、反馈元数据和管理员审计永不清理。
 
 ## Not Implemented
 
@@ -30,7 +32,7 @@
 - 桁架高度几何计算未实现；模型只抄录明确标注。
 - 视觉重排评分和“候选超过 5 个后二次位置复筛”待真实样本验证；现有样本不能外推到所有章节/结构。
 - 工具错误的模型润色与薄看门狗未接入；先观察结构化固定文案的真实样本，不因功能可做就默认需要实现。
-- 2.5 的有界诊断查询、周期保留清理和新旧切换尚未实现；任务快照、阶段结果、执行幂等和 HTTP 解耦也未实现，暂停/继续仍延后。
+- retention 尚未安装周期调度，也未执行真实 apply；trace、task JSONL、output/watchdog 和 service logs 仍只有 `policy_missing` 报告。任务快照、阶段结果、执行幂等和 HTTP 解耦也未实现，暂停/继续仍延后。
 
 ## Architecture Rules
 
@@ -57,7 +59,8 @@
 - Qwen 冷调用有长尾，需继续观察 8790/8896 限流；8788 暂不切换。
 - 飞书旧入口仍可能把顶层异常文字直接回复给个人用户；这是本阶段明确接受的内部入口风险，新 Agent 的公共输出保护不会覆盖它。
 - 2026-07-29 曾有旧 API 密钥出现在进程命令行；旧进程已终止，用户暂不轮换。
-- 2.3 事件写入为 fail-open，健康计数可显示丢失但不能补记；反馈目标已按 `response_id` 权威绑定，但 8795 的反馈到费用展示仍是 search/time 兼容 join。Response Store 有过期判定但尚无周期物理清理；反馈动态保留期和周期清理仍需在 2.5 核对。
+- 2.3 事件写入为 fail-open，健康计数可显示丢失但不能补记；反馈目标已按 `response_id` 权威绑定，但 8795 的反馈到费用展示仍是 search/time 兼容 join。独立诊断 CLI 可显示该旧链的不完整性；保留维护仍需人工生成计划并确认执行。
+- live WAL 双副本哈希与 `quick_check` 不持有 writer 锁，只保证所采用副本结构可读并降低跨代风险，不是绝对线性化快照；若要求必读最新提交，需 writer 协作锁或受控 backup 协议。
 
 ## Do Not Do
 
@@ -72,8 +75,8 @@
 
 ## Next Best Step
 
-1. 等用户确认 2.5 分步方案后，先实现稳定的本地只读查询契约/CLI；不把 8795 当数据所有者，也不提前混入任务状态机工作。
-2. 2.5 按“有界诊断查询 → 保留清理 → 新旧对照与可回退切换”小步推进，每步独立验证后再进入下一步。
+1. 先观察 2.5 诊断包的真实排障价值；任何 retention apply 仍须单独 plan → confirm → backup → execute，不因本阶段完成自动运行。
+2. 进入“统一任务状态快照”前先审查契约和范围，继续与阶段结果、执行幂等及暂停/继续分批处理。
 3. 保留 8896、8897 和 `--disable-auto-crop`，继续观察真实媒体交付与复杂题页。
 
 ## Important Commands
@@ -81,5 +84,7 @@
 - `python -m unittest discover -s tests -p 'test_*.py'`
 - `powershell -ExecutionPolicy Bypass -File scripts/tiku_agent_watchdog_8790.ps1`
 - `python scripts/run_tiku_agent_8790.py --help`
+- `python scripts/tiku_diagnostics.py --help`
+- `python scripts/tiku_retention.py --help`
 - `python scripts/search_by_loads.py --help`
 - `python search.py --help`

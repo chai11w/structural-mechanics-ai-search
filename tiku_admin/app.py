@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from contextlib import asynccontextmanager
 import json
 from pathlib import Path
 from threading import Lock
@@ -61,17 +60,11 @@ def create_admin_app(
     auth = AdminSessionAuth(control_store)
     limiter = _LoginLimiter()
 
-    @asynccontextmanager
-    async def lifespan(_app: FastAPI):
-        feedback_store.purge_expired_cases()
-        yield
-
     app = FastAPI(
         title="力答管理后台",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
-        lifespan=lifespan,
     )
     app.mount("/assets", StaticFiles(directory=WEB_DIR), name="admin-assets")
 
