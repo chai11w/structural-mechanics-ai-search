@@ -275,6 +275,12 @@ PROTOCOL_REASONS: dict[str, ProtocolReason] = {
     "INVITE_INVALID": ProtocolReason(
         RequestStatus.NEEDS_INPUT, RequestLayer.LOGIN, False, RequestAction.RELOGIN
     ),
+    "LOGIN_REQUEST_INVALID": ProtocolReason(
+        RequestStatus.NEEDS_INPUT, RequestLayer.LOGIN, False, RequestAction.RELOGIN
+    ),
+    "LOGIN_RATE_LIMITED": ProtocolReason(
+        RequestStatus.ERROR, RequestLayer.LOGIN, True, RequestAction.RETRY_REQUEST
+    ),
     "LOGIN_EXPIRED": ProtocolReason(
         RequestStatus.NEEDS_INPUT, RequestLayer.LOGIN, False, RequestAction.RELOGIN
     ),

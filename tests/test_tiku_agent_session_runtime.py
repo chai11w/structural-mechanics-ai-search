@@ -11,6 +11,7 @@ from tiku_agent.session_runtime import (
     AgentBudgetExceededError,
     AgentRuntimeBusyError,
     AgentSessionRuntime,
+    _ExecutionCancelled,
     _ExecutionGate,
 )
 from tiku_agent.session_store import SQLiteSessionStore
@@ -411,6 +412,467 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         first.join(1)
         second.join(1)
         self.assertEqual(completed, ["second"])
+
+    def test_execution_gate_releases_waiting_slot_when_progress_callback_fails(self):
+        gate = _ExecutionGate(max_concurrent=1, max_queued=1, wait_seconds=1)
+        active = threading.Event()
+        release = threading.Event()
+        queued = threading.Event()
+        completed = []
+
+        def first_task():
+            with gate.enter():
+                active.set()
+                release.wait(1)
+
+        first = threading.Thread(target=first_task)
+        first.start()
+        self.assertTrue(active.wait(1))
+
+        def fail_progress(_stage, _message):
+            raise RuntimeError("progress failed")
+
+        with self.assertRaisesRegex(RuntimeError, "progress failed"):
+            with gate.enter(fail_progress):
+                pass
+
+        def second_task():
+            with gate.enter(
+                lambda stage, _message: queued.set() if stage == "queued" else None
+            ):
+                completed.append("second")
+
+        second = threading.Thread(target=second_task)
+        second.start()
+        self.assertTrue(queued.wait(1))
+        release.set()
+        first.join(1)
+        second.join(1)
+        self.assertEqual(completed, ["second"])
+
+    def test_execution_gate_is_fifo_and_new_arrivals_cannot_barge(self):
+        gate = _ExecutionGate(max_concurrent=1, max_queued=3, wait_seconds=2)
+        active = threading.Event()
+        release = threading.Event()
+        queued = {name: threading.Event() for name in ("second", "third", "barger")}
+        order = []
+        errors = []
+
+        def first_task():
+            with gate.enter():
+                active.set()
+                release.wait(2)
+
+        def queued_task(name):
+            try:
+                with gate.enter(
+                    lambda stage, _message: (
+                        queued[name].set() if stage == "queued" else None
+                    )
+                ):
+                    order.append(name)
+            except Exception as exc:  # pragma: no cover - assertion reports details.
+                errors.append(exc)
+
+        first = threading.Thread(target=first_task)
+        first.start()
+        self.assertTrue(active.wait(1))
+        waiters = []
+        for name in ("second", "third", "barger"):
+            thread = threading.Thread(target=queued_task, args=(name,))
+            waiters.append(thread)
+            thread.start()
+            self.assertTrue(queued[name].wait(1))
+
+        release.set()
+        first.join(2)
+        for thread in waiters:
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(order, ["second", "third", "barger"])
+
+    def test_execution_gate_prevents_arrival_from_barging_during_slot_handoff(self):
+        class DelayedWakeCondition(threading.Condition):
+            def __init__(self):
+                super().__init__()
+                self.waiter_released_lock = threading.Event()
+                self.resume_waiter = threading.Event()
+                self.delayed_once = False
+
+            def wait(self, timeout=None):
+                notified = super().wait(timeout)
+                if (
+                    threading.current_thread().name == "oldest-gate-waiter"
+                    and notified
+                    and not self.delayed_once
+                ):
+                    self.delayed_once = True
+                    self.release()
+                    try:
+                        self.waiter_released_lock.set()
+                        if not self.resume_waiter.wait(2):
+                            raise TimeoutError("oldest waiter was not resumed")
+                    finally:
+                        self.acquire()
+                return notified
+
+        gate = _ExecutionGate(max_concurrent=1, max_queued=2, wait_seconds=2)
+        controlled_condition = DelayedWakeCondition()
+        gate._condition = controlled_condition
+        active = threading.Event()
+        release = threading.Event()
+        oldest_queued = threading.Event()
+        arrival_queued = threading.Event()
+        order = []
+        errors = []
+
+        def holder_task():
+            with gate.enter():
+                active.set()
+                release.wait(2)
+
+        def oldest_task():
+            try:
+                with gate.enter(
+                    lambda stage, _message: (
+                        oldest_queued.set() if stage == "queued" else None
+                    )
+                ):
+                    order.append("oldest")
+            except Exception as exc:  # pragma: no cover - assertion reports details.
+                errors.append(exc)
+
+        def arrival_task():
+            try:
+                with gate.enter(
+                    lambda stage, _message: (
+                        arrival_queued.set() if stage == "queued" else None
+                    )
+                ):
+                    order.append("arrival")
+            except Exception as exc:  # pragma: no cover - assertion reports details.
+                errors.append(exc)
+
+        holder = threading.Thread(target=holder_task)
+        oldest = threading.Thread(target=oldest_task, name="oldest-gate-waiter")
+        holder.start()
+        self.assertTrue(active.wait(1))
+        oldest.start()
+        self.assertTrue(oldest_queued.wait(1))
+        release.set()
+        self.assertTrue(controlled_condition.waiter_released_lock.wait(1))
+
+        arrival = threading.Thread(target=arrival_task)
+        arrival.start()
+        self.assertTrue(arrival_queued.wait(1))
+        self.assertEqual(order, [])
+        controlled_condition.resume_waiter.set()
+
+        for thread in (holder, oldest, arrival):
+            thread.join(3)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(order, ["oldest", "arrival"])
+
+    def test_execution_gate_cancelled_waiter_withdraws_before_execution(self):
+        gate = _ExecutionGate(max_concurrent=1, max_queued=1, wait_seconds=2)
+        active = threading.Event()
+        release = threading.Event()
+        queued = threading.Event()
+        cancelled = threading.Event()
+        withdrawn = threading.Event()
+        business_calls = []
+        errors = []
+
+        def first_task():
+            with gate.enter():
+                active.set()
+                release.wait(2)
+
+        def cancelled_task():
+            try:
+                with gate.enter(
+                    lambda stage, _message: queued.set() if stage == "queued" else None,
+                    cancelled=cancelled.is_set,
+                ):
+                    business_calls.append("cancelled request ran")
+            except _ExecutionCancelled:
+                withdrawn.set()
+            except Exception as exc:  # pragma: no cover - assertion reports details.
+                errors.append(exc)
+
+        first = threading.Thread(target=first_task)
+        waiter = threading.Thread(target=cancelled_task)
+        first.start()
+        self.assertTrue(active.wait(1))
+        waiter.start()
+        self.assertTrue(queued.wait(1))
+        cancelled.set()
+        self.assertTrue(withdrawn.wait(1))
+        self.assertEqual(business_calls, [])
+
+        replacement_ran = threading.Event()
+
+        def replacement_task():
+            with gate.enter():
+                replacement_ran.set()
+
+        replacement = threading.Thread(target=replacement_task)
+        replacement.start()
+        release.set()
+        first.join(2)
+        waiter.join(2)
+        replacement.join(2)
+        self.assertEqual(errors, [])
+        self.assertTrue(replacement_ran.is_set())
+
+    def test_execution_gate_cancelled_by_dequeued_callback_releases_permit_and_session(self):
+        gate = _ExecutionGate(max_concurrent=1, max_queued=1, wait_seconds=2)
+        active = threading.Event()
+        release = threading.Event()
+        queued = threading.Event()
+        cancelled = threading.Event()
+        withdrawn = threading.Event()
+        business_calls = []
+        errors = []
+        session_key = "dequeue-cancel-session"
+
+        def first_task():
+            with gate.enter(session_key="active-dequeue-session"):
+                active.set()
+                release.wait(2)
+
+        def progress(stage, _message):
+            if stage == "queued":
+                queued.set()
+            elif stage == "dequeued":
+                cancelled.set()
+
+        def cancelled_task():
+            try:
+                with gate.enter(
+                    progress,
+                    session_key=session_key,
+                    cancelled=cancelled.is_set,
+                ):
+                    business_calls.append("cancelled request ran")
+            except _ExecutionCancelled:
+                withdrawn.set()
+            except Exception as exc:  # pragma: no cover - assertion reports details.
+                errors.append(exc)
+
+        first = threading.Thread(target=first_task)
+        waiter = threading.Thread(target=cancelled_task)
+        first.start()
+        self.assertTrue(active.wait(1))
+        waiter.start()
+        self.assertTrue(queued.wait(1))
+        release.set()
+        self.assertTrue(withdrawn.wait(1))
+        first.join(2)
+        waiter.join(2)
+        self.assertEqual(errors, [])
+        self.assertEqual(business_calls, [])
+
+        replacement_ran = threading.Event()
+        with gate.enter(session_key=session_key):
+            replacement_ran.set()
+        self.assertTrue(replacement_ran.is_set())
+
+    def test_same_session_waiter_does_not_consume_global_runtime_permit(self):
+        first_session = "same-session-permit-a"
+        first_started = threading.Event()
+        release_first = threading.Event()
+        release_other = threading.Event()
+        same_queued = threading.Event()
+        same_second_started = threading.Event()
+        other_started = threading.Event()
+        calls_lock = threading.Lock()
+        session_calls = {}
+        errors = []
+
+        class BlockingAgent:
+            def __init__(self, state):
+                self.state = state
+                self.progress_reporter = None
+
+            def handle_text(self, _text):
+                with calls_lock:
+                    call_number = session_calls.get(self.state.session_id, 0) + 1
+                    session_calls[self.state.session_id] = call_number
+                if self.state.session_id == first_session:
+                    if call_number == 1:
+                        first_started.set()
+                        if not release_first.wait(3):
+                            raise TimeoutError("first same-session call was not released")
+                    else:
+                        same_second_started.set()
+                else:
+                    other_started.set()
+                    if not release_other.wait(3):
+                        raise TimeoutError("other-session call was not released")
+                return AgentResponse(text="ok", intent="chat")
+
+        runtime = AgentSessionRuntime(
+            self.store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            agent_factory=BlockingAgent,
+            max_concurrent_tasks=2,
+            max_queued_tasks=1,
+            queue_wait_seconds=2,
+        )
+        first_lock = runtime._session_locks[
+            hash(first_session) % len(runtime._session_locks)
+        ]
+        other_session = ""
+        for index in range(1000):
+            candidate = f"other-session-permit-{index}"
+            candidate_lock = runtime._session_locks[
+                hash(candidate) % len(runtime._session_locks)
+            ]
+            if candidate_lock is not first_lock:
+                other_session = candidate
+                break
+        self.assertTrue(other_session)
+
+        def run(session_id, *, progress=None):
+            try:
+                runtime.handle_text(session_id, "你好", progress=progress)
+            except Exception as exc:  # pragma: no cover - assertion reports details.
+                errors.append(exc)
+
+        first = threading.Thread(target=run, args=(first_session,))
+        same_second = threading.Thread(
+            target=run,
+            args=(first_session,),
+            kwargs={
+                "progress": lambda stage, _message: (
+                    same_queued.set() if stage == "queued" else None
+                )
+            },
+        )
+        other = threading.Thread(target=run, args=(other_session,))
+        first.start()
+        self.assertTrue(first_started.wait(1))
+        same_second.start()
+        self.assertTrue(same_queued.wait(1))
+        other.start()
+        self.assertTrue(other_started.wait(1))
+        self.assertFalse(same_second_started.is_set())
+        with self.assertRaises(AgentRuntimeBusyError) as raised:
+            runtime.handle_text("overflow-session-permit", "你好")
+        self.assertEqual(raised.exception.code, "QUEUE_FULL")
+
+        release_first.set()
+        self.assertTrue(same_second_started.wait(1))
+        release_other.set()
+        for thread in (first, same_second, other):
+            thread.join(3)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(same_second_started.is_set())
+
+    def test_distinct_sessions_sharing_lock_stripe_do_not_consume_extra_permit(self):
+        first_started = threading.Event()
+        collision_started = threading.Event()
+        other_started = threading.Event()
+        release_first = threading.Event()
+        release_other = threading.Event()
+        collision_queued = threading.Event()
+        errors = []
+
+        class BlockingAgent:
+            def __init__(self, state):
+                self.state = state
+                self.progress_reporter = None
+
+            def handle_text(self, _text):
+                if self.state.session_id == first_session:
+                    first_started.set()
+                    if not release_first.wait(3):
+                        raise TimeoutError("first stripe call was not released")
+                elif self.state.session_id == collision_session:
+                    collision_started.set()
+                elif self.state.session_id == other_session:
+                    other_started.set()
+                    if not release_other.wait(3):
+                        raise TimeoutError("other stripe call was not released")
+                return AgentResponse(text="ok", intent="chat")
+
+        runtime = AgentSessionRuntime(
+            self.store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            agent_factory=BlockingAgent,
+            max_concurrent_tasks=2,
+            max_queued_tasks=1,
+            queue_wait_seconds=2,
+        )
+        sessions_by_lock = {}
+        first_session = ""
+        collision_session = ""
+        shared_lock = None
+        for index in range(len(runtime._session_locks) + 1):
+            candidate = f"stripe-collision-session-{index}"
+            candidate_lock = runtime._session_locks[
+                hash(candidate) % len(runtime._session_locks)
+            ]
+            previous = sessions_by_lock.get(id(candidate_lock))
+            if previous is not None:
+                first_session = previous
+                collision_session = candidate
+                shared_lock = candidate_lock
+                break
+            sessions_by_lock[id(candidate_lock)] = candidate
+        self.assertTrue(first_session)
+        self.assertTrue(collision_session)
+        self.assertIsNotNone(shared_lock)
+
+        other_session = ""
+        for index in range(1000):
+            candidate = f"stripe-distinct-session-{index}"
+            candidate_lock = runtime._session_locks[
+                hash(candidate) % len(runtime._session_locks)
+            ]
+            if candidate_lock is not shared_lock:
+                other_session = candidate
+                break
+        self.assertTrue(other_session)
+
+        def run(session_id, *, progress=None):
+            try:
+                runtime.handle_text(session_id, "你好", progress=progress)
+            except Exception as exc:  # pragma: no cover - assertion reports details.
+                errors.append(exc)
+
+        first = threading.Thread(target=run, args=(first_session,))
+        collision = threading.Thread(
+            target=run,
+            args=(collision_session,),
+            kwargs={
+                "progress": lambda stage, _message: (
+                    collision_queued.set() if stage == "queued" else None
+                )
+            },
+        )
+        other = threading.Thread(target=run, args=(other_session,))
+        first.start()
+        self.assertTrue(first_started.wait(1))
+        collision.start()
+        self.assertTrue(collision_queued.wait(1))
+        other.start()
+        self.assertTrue(other_started.wait(1))
+        self.assertFalse(collision_started.is_set())
+
+        release_first.set()
+        self.assertTrue(collision_started.wait(1))
+        release_other.set()
+        for thread in (first, collision, other):
+            thread.join(3)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
 
     def test_daily_budget_blocks_before_running_agent(self):
         class SpentLedger:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -123,54 +124,137 @@ class AgentBudgetExceededError(AgentProtocolError):
         super().__init__(message, code=code)
 
 
+class _ExecutionCancelled(RuntimeError):
+    """A queued request was withdrawn before business execution began."""
+
+
+def _progress_cancellation_probe(
+    progress: ProgressReporter | None,
+) -> Callable[[], bool] | None:
+    probe = getattr(progress, "cancelled", None)
+    return probe if callable(probe) else None
+
+
 class _ExecutionGate:
     def __init__(self, max_concurrent: int, max_queued: int, wait_seconds: float) -> None:
         self.max_concurrent = max(0, int(max_concurrent or 0))
         self.max_queued = max(0, int(max_queued or 0))
         self.wait_seconds = max(0.0, float(wait_seconds or 0.0))
         self._active = 0
-        self._waiting = 0
+        self._active_session_keys: set[object] = set()
+        self._waiters: deque[tuple[object, object | None]] = deque()
         self._condition = threading.Condition()
 
+    @staticmethod
+    def _is_cancelled(cancelled: Callable[[], bool] | None) -> bool:
+        return bool(cancelled is not None and cancelled())
+
+    def _session_is_available(self, session_key: object | None) -> bool:
+        return session_key is None or session_key not in self._active_session_keys
+
+    def _first_eligible_waiter(self) -> tuple[object, object | None] | None:
+        for waiter in self._waiters:
+            if self._session_is_available(waiter[1]):
+                return waiter
+        return None
+
+    def _admit(self, session_key: object | None) -> None:
+        self._active += 1
+        if session_key is not None:
+            self._active_session_keys.add(session_key)
+
+    def _withdraw(self, waiter: tuple[object, object | None]) -> None:
+        try:
+            self._waiters.remove(waiter)
+        except ValueError:
+            return
+        self._condition.notify_all()
+
     @contextmanager
-    def enter(self, progress: ProgressReporter | None = None):
+    def enter(
+        self,
+        progress: ProgressReporter | None = None,
+        *,
+        session_key: object | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ):
         if self.max_concurrent <= 0:
             yield
             return
 
         queued = False
+        admitted = False
+        waiter: tuple[object, object | None] | None = None
+        cancellation_probe = cancelled or _progress_cancellation_probe(progress)
         with self._condition:
-            if self._active >= self.max_concurrent:
-                if self._waiting >= self.max_queued:
+            if self._is_cancelled(cancellation_probe):
+                raise _ExecutionCancelled()
+
+            earlier_eligible = self._first_eligible_waiter()
+            if (
+                self._active < self.max_concurrent
+                and self._session_is_available(session_key)
+                and earlier_eligible is None
+            ):
+                self._admit(session_key)
+                admitted = True
+            else:
+                if len(self._waiters) >= self.max_queued:
                     raise AgentRuntimeBusyError(
                         "当前请求较多，请稍后再试。", code="QUEUE_FULL"
                     )
                 queued = True
-                self._waiting += 1
-                if progress is not None:
-                    progress("queued", "前面有任务正在处理，已进入队列…")
-                deadline = time.monotonic() + self.wait_seconds
+                waiter = (object(), session_key)
+                self._waiters.append(waiter)
                 try:
-                    while self._active >= self.max_concurrent:
+                    if progress is not None:
+                        progress("queued", "前面有任务正在处理，已进入队列…")
+                    deadline = time.monotonic() + self.wait_seconds
+                    while True:
+                        if self._is_cancelled(cancellation_probe):
+                            self._withdraw(waiter)
+                            raise _ExecutionCancelled()
+                        if (
+                            self._active < self.max_concurrent
+                            and self._session_is_available(session_key)
+                            and self._first_eligible_waiter() is waiter
+                        ):
+                            self._waiters.remove(waiter)
+                            self._admit(session_key)
+                            admitted = True
+                            break
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
+                            self._withdraw(waiter)
                             raise AgentRuntimeBusyError(
                                 "排队等待超时，请稍后重新提交。",
                                 code="QUEUE_TIMEOUT",
                             )
-                        self._condition.wait(remaining)
-                finally:
-                    self._waiting -= 1
-            self._active += 1
+                        self._condition.wait(
+                            min(remaining, 0.05)
+                            if cancellation_probe is not None
+                            else remaining
+                        )
+                except Exception:
+                    if not admitted:
+                        self._withdraw(waiter)
+                    raise
 
         try:
+            if self._is_cancelled(cancellation_probe):
+                raise _ExecutionCancelled()
             if queued and progress is not None:
                 progress("dequeued", "轮到你的题目了，正在开始处理…")
+            if self._is_cancelled(cancellation_probe):
+                raise _ExecutionCancelled()
             yield
         finally:
-            with self._condition:
-                self._active -= 1
-                self._condition.notify_all()
+            if admitted:
+                with self._condition:
+                    self._active -= 1
+                    if session_key is not None:
+                        self._active_session_keys.remove(session_key)
+                    self._condition.notify_all()
 
 
 class AgentSessionRuntime:
@@ -1002,9 +1086,9 @@ class AgentSessionRuntime:
     ) -> AgentResponse:
         started_at = datetime.now(UTC)
         started = time.perf_counter()
+        lock = self._session_locks[hash(session_id) % len(self._session_locks)]
         try:
-            with self._execution_gate.enter(progress):
-                lock = self._session_locks[hash(session_id) % len(self._session_locks)]
+            with self._execution_gate.enter(progress, session_key=lock):
                 with lock:
                     try:
                         self._await_background_image_work(session_id)

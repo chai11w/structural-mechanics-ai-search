@@ -2026,7 +2026,7 @@ async function sendTextValue(value, displayValue = value, actionContext = null) 
       if (!pending) pending = addMessage({ message: event.message, variant: 'pending' }, false);
       else updatePendingMessage(pending, event.message);
       setStatus('working', event.message);
-    }, '', { renewTimeoutOnProgress: autoPrepareRetry });
+    }, '', { renewTimeoutOnProgress: true });
     if (operation !== operationVersion) return;
     pending?.remove();
     if (data.intent === 'a3_session_reset') {

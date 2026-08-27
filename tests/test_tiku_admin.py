@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -9,6 +10,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import sys
+import threading
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -72,6 +74,139 @@ class TikuAdminTest(unittest.TestCase):
         self.assertEqual(access.authenticate_code(new_code).invite_id, invitation.invite_id)
         self.assertEqual(self.control.reveal_invitation_code(invitation.invite_id), new_code)
 
+    def test_admin_login_rate_limit_is_per_client_and_returns_retry_after(self):
+        self.control.initialize_admin("a-secure-admin-password")
+        feedback = SQLiteFeedbackStore(self.root / "login-feedback.sqlite3")
+        reporter = AdminReporter(
+            control_store=self.control,
+            cost_databases=(),
+            feedback_store=feedback,
+        )
+        client = TestClient(
+            create_admin_app(
+                control_store=self.control,
+                reporter=reporter,
+                feedback_store=feedback,
+            )
+        )
+        blocked_ip = {"cf-connecting-ip": "203.0.113.10"}
+        malformed = client.post(
+            "/api/admin/login",
+            headers={**blocked_ip, "content-type": "application/json"},
+            content=b"{",
+        )
+        self.assertEqual(malformed.status_code, 400)
+        for _ in range(5):
+            response = client.post(
+                "/api/admin/login",
+                headers=blocked_ip,
+                json={"password": "wrong-password"},
+            )
+            self.assertEqual(response.status_code, 401)
+        blocked = client.post(
+            "/api/admin/login",
+            headers=blocked_ip,
+            json={"password": "wrong-password"},
+        )
+        self.assertEqual(blocked.status_code, 429)
+        self.assertGreater(int(blocked.headers["retry-after"]), 0)
+        self.assertEqual(blocked.headers["cache-control"], "no-store")
+
+        allowed_ip = {"cf-connecting-ip": "203.0.113.11"}
+        allowed = client.post(
+            "/api/admin/login",
+            headers=allowed_ip,
+            json={"password": "a-secure-admin-password"},
+        )
+        self.assertEqual(allowed.status_code, 200)
+
+        reset_ip = {"cf-connecting-ip": "203.0.113.12"}
+        for _ in range(4):
+            self.assertEqual(
+                client.post(
+                    "/api/admin/login",
+                    headers=reset_ip,
+                    json={"password": "wrong-password"},
+                ).status_code,
+                401,
+            )
+        self.assertEqual(
+            client.post(
+                "/api/admin/login",
+                headers=reset_ip,
+                json={"password": "a-secure-admin-password"},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            client.post(
+                "/api/admin/login",
+                headers=reset_ip,
+                json={"password": "wrong-password"},
+            ).status_code,
+            401,
+        )
+
+    def test_admin_login_rate_limit_reserves_concurrent_attempts(self):
+        self.control.initialize_admin("a-secure-admin-password")
+        feedback = SQLiteFeedbackStore(self.root / "concurrent-login-feedback.sqlite3")
+        reporter = AdminReporter(
+            control_store=self.control,
+            cost_databases=(),
+            feedback_store=feedback,
+        )
+        client = TestClient(
+            create_admin_app(
+                control_store=self.control,
+                reporter=reporter,
+                feedback_store=feedback,
+            )
+        )
+        attempts = 5
+        barrier = threading.Barrier(attempts + 1)
+        release = threading.Event()
+        headers = {"cf-connecting-ip": "203.0.113.20"}
+
+        def verify_after_release(_password: str) -> bool:
+            barrier.wait(timeout=10)
+            if not release.wait(timeout=10):
+                raise TimeoutError("concurrent login test was not released")
+            return False
+
+        pool = ThreadPoolExecutor(max_workers=attempts)
+        futures = []
+        try:
+            with patch.object(
+                self.control,
+                "verify_admin_password",
+                side_effect=verify_after_release,
+            ) as verify:
+                futures = [
+                    pool.submit(
+                        client.post,
+                        "/api/admin/login",
+                        headers=headers,
+                        json={"password": "wrong-password"},
+                    )
+                    for _ in range(attempts)
+                ]
+                barrier.wait(timeout=10)
+                blocked = client.post(
+                    "/api/admin/login",
+                    headers=headers,
+                    json={"password": "wrong-password"},
+                )
+                self.assertEqual(blocked.status_code, 429)
+                self.assertEqual(verify.call_count, attempts)
+                release.set()
+                self.assertEqual(
+                    [future.result(timeout=10).status_code for future in futures],
+                    [401] * attempts,
+                )
+        finally:
+            release.set()
+            pool.shutdown(wait=True)
+
     def test_invitation_vault_binds_ciphertext_to_invitation_and_key(self):
         invitation, code = self.control.create_invitation(label="加密邀请码")
         other_vault = InvitationCodeVault.load_or_create(self.root / "other.key")
@@ -120,10 +255,31 @@ class TikuAdminTest(unittest.TestCase):
         self.assertIn('<option value="">全部章节</option>${chapterOptions}', script)
         self.assertNotIn('for="filter-tag">反馈原因</label>', script)
         self.assertIn("显示已归档", script)
-        self.assertIn("流程耗时", script)
-        self.assertIn("关联费用", script)
-        self.assertIn("整页识别处理流程", script)
-        self.assertIn("单题检索处理流程", script)
+        self.assertIn("页面侧候选等待", script)
+        self.assertIn("估算关联费用", script)
+        self.assertIn("整页识别关联模型记录", script)
+        self.assertIn("单题检索关联模型记录", script)
+        self.assertIn("反馈上下文", script)
+        self.assertIn("服务端回复已核对", script)
+        self.assertIn("按检索标识和时间范围估算关联", script)
+        self.assertIn("重试或记录缺失时可能不完整", script)
+        self.assertGreaterEqual(script.count("重试或记录缺失时可能不完整"), 2)
+        self.assertIn("无法可靠判断回复时间时截至反馈提交", script)
+        self.assertIn("未关联到记录", script)
+        self.assertIn("模型记录结束", script)
+        self.assertIn("最近成功登录（无今日模型记录）", script)
+        self.assertIn("模型记录开始", script)
+        self.assertIn("本页上传/相关输入至首批候选", script)
+        self.assertIn("仍为估算", script)
+        self.assertIn("次模型请求（含重试）", script)
+        self.assertIn("条调用记录（共", script)
+        self.assertIn("已记录模型请求", script)
+        self.assertIn("由独立保留维护流程清理", script)
+        self.assertNotIn("PAGE RECOGNITION TRACE", script)
+        self.assertNotIn("ONE QUESTION TRACE", script)
+        self.assertNotIn("<dt>流程耗时</dt>", script)
+        self.assertNotIn("完整对话</h2>", script)
+        self.assertNotIn("自动清理。", script)
         self.assertIn("取消归档", script)
         self.assertIn("永久删除反馈", script)
         self.assertIn('data-feedback-action="delete"', script)
@@ -486,7 +642,8 @@ class TikuAdminTest(unittest.TestCase):
         with sqlite3.connect(store.path) as connection:
             connection.execute(
                 "UPDATE message_feedback SET conversation_json = ?, "
-                "feedback_scope = '', schema_version = 6 WHERE feedback_id = ?",
+                "feedback_scope = '', rated_response_id = '', "
+                "schema_version = 8 WHERE feedback_id = ?",
                 (json.dumps(polluted, ensure_ascii=False), saved.feedback_id),
             )
 
@@ -497,12 +654,15 @@ class TikuAdminTest(unittest.TestCase):
         )
         detail = reporter.feedback_detail(saved.feedback_number)
         self.assertEqual(detail["feedback_scope"], "page")
+        self.assertTrue(detail["legacy_response_binding"])
         self.assertEqual(len(detail["conversation"]), 2)
         self.assertEqual(detail["conversation"][0]["message"], "当前整页")
         self.assertTrue(detail["conversation"][1]["a3_overlay"].endswith("/overlay.jpg"))
         summary = reporter.feedback_list()["items"][0]
         self.assertEqual(summary["feedback_scope"], "page")
+        self.assertTrue(summary["legacy_response_binding"])
         self.assertTrue(summary["preview_image"].endswith("/current.jpg"))
+        self.assertFalse(summary["cost"]["has_records"])
 
     def test_feedback_detail_combines_a3_workflow_and_a2_question_costs(self):
         self.control.initialize_admin("a-secure-admin-password")
@@ -559,6 +719,7 @@ class TikuAdminTest(unittest.TestCase):
             finished_at=started_at,
             latency_ms=700,
             usage={"input_tokens": 1000, "output_tokens": 100},
+            attempt_count=3,
         )
         SQLiteModelCostLedger(question_db).write_run(
             question, finished_at=started_at, outcome="success"
@@ -618,8 +779,11 @@ class TikuAdminTest(unittest.TestCase):
         detail = reporter.feedback_detail(saved.feedback_id)
 
         self.assertEqual(detail["cost"]["estimated_cost_micros"], 10_000)
+        self.assertTrue(detail["cost"]["has_records"])
         self.assertEqual(detail["cost"]["route"], "A3")
         self.assertTrue(detail["cost"]["historical_reprice_applied"])
+        self.assertFalse(detail["legacy_response_binding"])
+        self.assertEqual(detail["cost"]["model_call_count"], 5)
         self.assertEqual(
             [step["key"] for step in detail["cost"]["flow"]],
             ["a3_auto_crop_grounding", "a3_intent", "image"],
@@ -627,10 +791,18 @@ class TikuAdminTest(unittest.TestCase):
         intent_step = detail["cost"]["flow"][1]
         self.assertEqual(intent_step["title"], "A3 意图理解")
         self.assertEqual(intent_step["calls"][0]["label"], "Qwen A3 意图判断")
+        question_step = detail["cost"]["flow"][2]
+        self.assertEqual(question_step["model_call_count"], 3)
+        self.assertEqual(question_step["calls"][0]["attempt_count"], 3)
         self.assertEqual(
             {item["model"] for item in detail["cost"]["models"]},
             {"glm-5v-turbo", "qwen3.7-plus"},
         )
+        qwen_summary = next(
+            item for item in detail["cost"]["models"]
+            if item["model"] == "qwen3.7-plus"
+        )
+        self.assertEqual(qwen_summary["call_count"], 4)
         self.assertEqual(detail["feedback_scope"], "question")
 
         target_created_at = datetime.fromisoformat(started_at) + timedelta(seconds=2)
@@ -777,6 +949,47 @@ class TikuAdminTest(unittest.TestCase):
         self.assertEqual(by_invite[second.invite_id]["today_page_searches"], 1)
         self.assertEqual(by_invite[second.invite_id]["today_question_searches"], 1)
 
+    def test_invitation_delete_fails_closed_when_one_cost_database_is_unreadable(self):
+        self.control.initialize_admin("a-secure-admin-password")
+        invitation, _code = self.control.create_invitation(label="删除保护用户")
+        self.control.set_invitation_status(invitation.invite_id, "archived")
+        readable_costs = self.root / "model_costs.sqlite3"
+        unreadable_costs = self.root / "a2" / "model_costs.sqlite3"
+        self._create_cost_schema(readable_costs)
+        unreadable_costs.parent.mkdir(parents=True)
+        unreadable_costs.write_bytes(b"not-a-sqlite-database")
+        feedback = SQLiteFeedbackStore(self.root / "feedback.sqlite3")
+        reporter = AdminReporter(
+            control_store=self.control,
+            cost_databases=(readable_costs, unreadable_costs),
+            feedback_store=feedback,
+        )
+        self.assertEqual(
+            reporter.invitation_delete_blockers(invitation.invite_id)["cost_runs"],
+            -1,
+        )
+        client = TestClient(
+            create_admin_app(
+                control_store=self.control,
+                reporter=reporter,
+                feedback_store=feedback,
+            )
+        )
+        login = client.post(
+            "/api/admin/login",
+            json={"password": "a-secure-admin-password"},
+        )
+        self.assertEqual(login.status_code, 200)
+        csrf = client.get("/api/admin/session").json()["csrf_token"]
+
+        blocked = client.delete(
+            f"/api/admin/invitations/{invitation.invite_id}",
+            headers={"x-csrf-token": csrf},
+        )
+
+        self.assertEqual(blocked.status_code, 409)
+        self.assertIsNotNone(self.control.get_invitation(invitation.invite_id))
+
     def test_admin_http_flow_covers_setup_invites_overview_feedback_and_settings(self):
         feedback = SQLiteFeedbackStore(self.root / "feedback.sqlite3")
         costs = self.root / "model_costs.sqlite3"
@@ -888,6 +1101,7 @@ class TikuAdminTest(unittest.TestCase):
             r"^FB-\d{8}-[0-9A-F]{10}$",
         )
         self.assertEqual(filtered.json()["items"][0]["cost"]["estimated_cost_cny"], "1.25")
+        self.assertTrue(filtered.json()["items"][0]["cost"]["has_records"])
         self.assertEqual(
             client.get("/api/admin/feedback", params={"chapter": "不存在"}).json()["total"],
             0,

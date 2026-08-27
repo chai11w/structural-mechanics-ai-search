@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
 import json
 from pathlib import Path
-from threading import Lock
-import time
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
@@ -20,34 +17,16 @@ from tiku_agent.feedback_store import (
     SQLiteFeedbackStore,
     scope_feedback_conversation,
 )
+from tiku_shared.http_security import (
+    FailureRateLimiter,
+    RequestBodyError,
+    read_bounded_body,
+    validated_client_key,
+)
 
 
 WEB_DIR = Path(__file__).with_name("web")
 MAX_ADMIN_REQUEST_BYTES = 128 * 1024
-
-
-class _LoginLimiter:
-    def __init__(self, *, attempts: int = 5, window_seconds: int = 600) -> None:
-        self.attempts = attempts
-        self.window_seconds = window_seconds
-        self._entries: dict[str, deque[float]] = defaultdict(deque)
-        self._lock = Lock()
-
-    def allow(self, key: str) -> bool:
-        cutoff = time.monotonic() - self.window_seconds
-        with self._lock:
-            queue = self._entries[str(key)]
-            while queue and queue[0] < cutoff:
-                queue.popleft()
-            return len(queue) < self.attempts
-
-    def failure(self, key: str) -> None:
-        with self._lock:
-            self._entries[str(key)].append(time.monotonic())
-
-    def success(self, key: str) -> None:
-        with self._lock:
-            self._entries.pop(str(key), None)
 
 
 def create_admin_app(
@@ -58,7 +37,7 @@ def create_admin_app(
     allow_local_setup: bool = True,
 ) -> FastAPI:
     auth = AdminSessionAuth(control_store)
-    limiter = _LoginLimiter()
+    limiter = FailureRateLimiter(attempts=5, window_seconds=600, max_keys=4096)
 
     app = FastAPI(
         title="力答管理后台",
@@ -138,14 +117,30 @@ def create_admin_app(
     @app.post("/api/admin/login")
     async def login(request: Request) -> Response:
         client_key = _client_key(request)
-        if not limiter.allow(client_key):
-            raise HTTPException(status_code=429, detail="登录尝试过多，请稍后再试。")
-        payload = await _json_body(request, max_bytes=4096)
-        if not control_store.verify_admin_password(str(payload.get("password") or "")):
-            limiter.failure(client_key)
-            raise HTTPException(status_code=401, detail="管理员密码错误。")
-        limiter.success(client_key)
-        return _login_response(auth, request)
+        reservation, retry_after = limiter.reserve_attempt(client_key)
+        if reservation is None:
+            return JSONResponse(
+                {"detail": "登录尝试过多，请稍后再试。"},
+                status_code=429,
+                headers={
+                    "Retry-After": str(retry_after),
+                    "Cache-Control": "no-store",
+                },
+            )
+        settled = False
+        try:
+            payload = await _json_body(request, max_bytes=4096)
+            if not control_store.verify_admin_password(str(payload.get("password") or "")):
+                limiter.complete_failure(reservation)
+                settled = True
+                raise HTTPException(status_code=401, detail="管理员密码错误。")
+            result = _login_response(auth, request)
+            limiter.complete_success(reservation)
+            settled = True
+            return result
+        finally:
+            if not settled:
+                limiter.cancel_attempt(reservation)
 
     @app.post("/api/admin/logout")
     def logout(request: Request) -> Response:
@@ -440,14 +435,9 @@ def create_admin_app(
 
 async def _json_body(request: Request, *, max_bytes: int = MAX_ADMIN_REQUEST_BYTES) -> dict[str, object]:
     try:
-        content_length = int(request.headers.get("content-length") or 0)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="invalid content length") from exc
-    if content_length > max_bytes:
-        raise HTTPException(status_code=413, detail="request is too large")
-    body = await request.body()
-    if len(body) > max_bytes:
-        raise HTTPException(status_code=413, detail="request is too large")
+        body = await read_bounded_body(request, max_bytes=max_bytes)
+    except RequestBodyError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     try:
         payload = json.loads(body or b"{}")
     except json.JSONDecodeError as exc:
@@ -476,8 +466,10 @@ def _session(request: Request) -> AdminSession | None:
 
 
 def _client_key(request: Request) -> str:
-    forwarded = str(request.headers.get("cf-connecting-ip") or "").strip()
-    return forwarded or (request.client.host if request.client else "unknown")
+    return validated_client_key(
+        str(request.headers.get("cf-connecting-ip") or ""),
+        request.client.host if request.client else "unknown",
+    )
 
 
 def _has_value(value: object) -> bool:

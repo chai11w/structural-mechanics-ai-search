@@ -15,6 +15,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "watchdog_process_guard.ps1")
+
+if ($Port -ne 8790) {
+    throw "This watchdog is restricted to port 8790."
+}
 
 $ProjectDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $RuntimeDir) {
@@ -46,6 +51,28 @@ if ($InviteConfig -and -not (Test-Path -LiteralPath $InviteConfig -PathType Leaf
 if ($ControlDb -and -not (Test-Path -LiteralPath $ControlDb -PathType Leaf)) {
     throw "Administrator control database not found: $ControlDb"
 }
+$ExpectedPythonPath = Resolve-WatchdogExecutablePath -Executable $PythonExe
+$BotArguments = @(
+    "scripts\run_tiku_agent_8790.py",
+    "--host", "127.0.0.1",
+    "--port", "$Port",
+    "--runtime-dir", "$RuntimeDir",
+    "--max-concurrent-tasks", "$MaxConcurrentTasks",
+    "--max-queued-tasks", "$MaxQueuedTasks",
+    "--queue-wait-seconds", "$QueueWaitSeconds"
+)
+if ($InviteConfig) {
+    $BotArguments += @("--invite-config", "$InviteConfig")
+}
+if ($ControlDb) {
+    $BotArguments += @("--control-db", "$ControlDb")
+}
+if ($DisableAutoCrop) {
+    $BotArguments += "--disable-auto-crop"
+}
+if ($DisableOutputWatchdog) {
+    $BotArguments += "--disable-output-watchdog"
+}
 $LogDir = $RuntimeDir
 $StatusFile = Join-Path $LogDir "watchdog_8790.status"
 $WatchdogPidFile = Join-Path $LogDir "watchdog_8790.pid"
@@ -70,78 +97,144 @@ function Test-Health {
     }
 }
 
-function Stop-PortProcess {
-    $processIds = @()
-    $processIds += Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue |
-        Where-Object { $_.State -eq "Listen" } |
-        Select-Object -ExpandProperty OwningProcess -Unique
-
-    $netstatPattern = "^\s*TCP\s+\S+:$Port\s+\S+\s+LISTENING\s+(\d+)\s*$"
-    $processIds += netstat -ano |
-        ForEach-Object {
-            $match = [regex]::Match($_, $netstatPattern)
-            if ($match.Success) { [int]$match.Groups[1].Value }
-        }
-
-    $processIds = $processIds | Where-Object { $_ -and $_ -ne 0 } | Sort-Object -Unique
-    foreach ($processId in $processIds) {
-        Write-Status "Stopping process on port ${Port}: PID $processId"
-        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
-    }
-}
-
 function Start-Bot {
-    $arguments = @(
-        "scripts\run_tiku_agent_8790.py",
-        "--host", "127.0.0.1",
-        "--port", "$Port",
-        "--runtime-dir", "$RuntimeDir"
-    )
-    if ($InviteConfig) {
-        $arguments += @("--invite-config", "$InviteConfig")
-    }
-    if ($ControlDb) {
-        $arguments += @("--control-db", "$ControlDb")
-    }
-    if ($DisableAutoCrop) {
-        $arguments += "--disable-auto-crop"
-    }
-    if ($DisableOutputWatchdog) {
-        $arguments += "--disable-output-watchdog"
-    }
     $process = Start-Process $PythonExe `
-        -ArgumentList $arguments `
+        -ArgumentList $BotArguments `
         -WorkingDirectory $ProjectDir `
         -RedirectStandardOutput $BotOutLog `
         -RedirectStandardError $BotErrLog `
         -WindowStyle Hidden `
         -PassThru
-    Set-Content -LiteralPath $BotPidFile -Value $process.Id -Encoding ASCII
-    Write-Status "Started 8790 tiku agent: PID $($process.Id)"
+    Write-Status "Launched 8790 tiku agent candidate: PID $($process.Id)"
     return $process
 }
 
-Set-Content -LiteralPath $WatchdogPidFile -Value $PID -Encoding ASCII
-Set-Content -LiteralPath $StatusFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Watchdog started. Project=$ProjectDir Port=$Port RuntimeDir=$RuntimeDir" -Encoding UTF8
-foreach ($path in @($BotOutLog, $BotErrLog)) {
-    if (-not (Test-Path -LiteralPath $path)) { New-Item -ItemType File -Path $path -Force | Out-Null }
+function Test-BotProcess {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    return Test-WatchdogProcessMatch `
+        -ProcessId $ProcessId `
+        -Port $Port `
+        -ExpectedExecutablePath $ExpectedPythonPath `
+        -ExpectedArguments $BotArguments
 }
 
-$botProcess = $null
+function Test-BotLaunch {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    return Test-WatchdogLaunchIdentity `
+        -ProcessId $ProcessId `
+        -ExpectedExecutablePath $ExpectedPythonPath `
+        -ExpectedArguments $BotArguments
+}
 
-while ($true) {
-    if (-not $botProcess -or $botProcess.HasExited -or -not (Test-Health)) {
-        if ($botProcess -and -not $botProcess.HasExited) {
-            Stop-Process -Id $botProcess.Id -Force -ErrorAction SilentlyContinue
-        }
-        Write-Status "Health check failed; restarting 8790 agent."
-        Stop-PortProcess
-        Start-Sleep -Seconds 2
-        $botProcess = Start-Bot
-        Start-Sleep -Seconds 4
-        if (Test-Health) {
-            Write-Status "Health check passed."
-        }
+function Get-ManagedBotProcess {
+    return Get-WatchdogManagedProcess `
+        -Port $Port `
+        -ExpectedExecutablePath $ExpectedPythonPath `
+        -ExpectedArguments $BotArguments
+}
+
+$watchdogMutex = $null
+$ownsWatchdogPidFile = $false
+try {
+    $watchdogMutex = Enter-WatchdogInstanceLock -Port $Port
+    Assert-WatchdogPidFileAvailable `
+        -Path $WatchdogPidFile `
+        -OwnerProcessId $PID
+    $botProcess = Get-ManagedBotProcess
+    Set-Content -LiteralPath $WatchdogPidFile -Value $PID -Encoding ASCII
+    $ownsWatchdogPidFile = $true
+    Set-Content -LiteralPath $StatusFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Watchdog started. Project=$ProjectDir Port=$Port RuntimeDir=$RuntimeDir" -Encoding UTF8
+    foreach ($path in @($BotOutLog, $BotErrLog)) {
+        if (-not (Test-Path -LiteralPath $path)) { New-Item -ItemType File -Path $path -Force | Out-Null }
     }
-    Start-Sleep -Seconds 20
+
+    if ($botProcess -and (Test-Health)) {
+        if ($botProcess.HasExited -or -not (Test-BotProcess -ProcessId $botProcess.Id)) {
+            throw "Existing 8790 process lost verified port ownership before PID update. PID file was not changed."
+        }
+        Set-Content -LiteralPath $BotPidFile -Value $botProcess.Id -Encoding ASCII
+        Write-Status "Adopted validated existing 8790 process: PID $($botProcess.Id)"
+    }
+
+    while ($true) {
+        $healthy = Test-Health
+        if ($healthy) {
+            if (-not $botProcess -or $botProcess.HasExited) {
+                $botProcess = Get-ManagedBotProcess
+            }
+            if (-not $botProcess -or -not (Test-BotProcess -ProcessId $botProcess.Id)) {
+                throw "Healthy service on port $Port is not the validated 8790 process."
+            }
+            $recordedPid = if (Test-Path -LiteralPath $BotPidFile) {
+                ([string](Get-Content -LiteralPath $BotPidFile -Raw)).Trim()
+            } else {
+                ""
+            }
+            if ($recordedPid -ne [string]$botProcess.Id) {
+                Set-Content -LiteralPath $BotPidFile -Value $botProcess.Id -Encoding ASCII
+            }
+        } else {
+            if (-not $botProcess -or $botProcess.HasExited) {
+                $botProcess = Get-ManagedBotProcess
+            }
+            if ($botProcess -and -not $botProcess.HasExited) {
+                if (-not (Test-BotProcess -ProcessId $botProcess.Id)) {
+                    throw "Refusing to stop unverified PID $($botProcess.Id) for 8790."
+                }
+                Write-Status "Health check failed; stopping validated 8790 process PID $($botProcess.Id)."
+                Stop-Process -InputObject $botProcess -Force -ErrorAction Stop
+                Wait-Process -InputObject $botProcess -Timeout 5 -ErrorAction SilentlyContinue
+                $botProcess = $null
+            }
+            $remainingOwners = @(Get-WatchdogListeningProcessIds -Port $Port)
+            if ($remainingOwners.Count -gt 0) {
+                throw "Refusing to start 8790 while an unverified process still owns port $Port."
+            }
+            Write-Status "Health check failed; restarting 8790 agent."
+            $candidate = Start-Bot
+            $startupState = Wait-WatchdogProcessReady `
+                -Process $candidate `
+                -TimeoutSeconds 30 `
+                -HealthProbe { Test-Health } `
+                -FullMatchProbe { Test-BotProcess -ProcessId $candidate.Id } `
+                -LaunchIdentityProbe { Test-BotLaunch -ProcessId $candidate.Id }
+            switch ($startupState) {
+                "ready" {
+                    if ($candidate.HasExited -or -not (Test-BotProcess -ProcessId $candidate.Id)) {
+                        throw "Candidate PID $($candidate.Id) lost verified port ownership before PID update. PID file was not changed."
+                    }
+                    Set-Content -LiteralPath $BotPidFile -Value $candidate.Id -Encoding ASCII
+                    $botProcess = $candidate
+                    Write-Status "Health check passed."
+                }
+                "exited" {
+                    Write-Status "Candidate PID $($candidate.Id) exited before validation; PID file was not changed."
+                    $botProcess = $null
+                }
+                "timeout_verified" {
+                    if ($candidate.HasExited -or -not (Test-BotLaunch -ProcessId $candidate.Id)) {
+                        throw "Candidate PID $($candidate.Id) changed identity after startup timeout; refusing cleanup. PID file was not changed."
+                    }
+                    Write-Status "Candidate PID $($candidate.Id) timed out before becoming healthy; stopping verified launch candidate."
+                    Stop-Process -InputObject $candidate -Force -ErrorAction Stop
+                    Wait-Process -InputObject $candidate -Timeout 5 -ErrorAction SilentlyContinue
+                    $botProcess = $null
+                }
+                "timeout_unverified" {
+                    throw "Candidate PID $($candidate.Id) timed out and could not be verified; refusing cleanup. PID file was not changed."
+                }
+                default {
+                    throw "Unexpected 8790 startup state: $startupState. PID file was not changed."
+                }
+            }
+        }
+        Start-Sleep -Seconds 20
+    }
+} finally {
+    if ($ownsWatchdogPidFile) {
+        Remove-WatchdogPidFileIfOwned -Path $WatchdogPidFile -OwnerProcessId $PID
+    }
+    if ($watchdogMutex) {
+        Exit-WatchdogInstanceLock -Mutex $watchdogMutex
+    }
 }

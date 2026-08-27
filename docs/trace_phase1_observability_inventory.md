@@ -47,7 +47,8 @@
    计数已进入健康状态，但不会反向补记旧 sink。
 5. 可评分回复现在先写 `responses.sqlite3` 的白名单投影，再返回服务端 `response_id`。反馈 schema
    v8 强制 `rated_response_id` 和 conversation，并校验 identity、session、有效期和目标
-   message/response 一致性；旧 v7 行保持未绑定、只读兼容。
+   message/response 一致性；迁移前旧记录保持未绑定、只读兼容。加法迁移会统一推进记录的
+   `schema_version`，因此历史兼容身份以空 `rated_response_id` 判断，不以版本号判断。
 6. 路由、A3/A2、工具、模型、费用、最终公共结果和反馈现在能按 trace/response 权威串起；
    `scripts/tiku_diagnostics.py` 提供了 Codex/Agent 可直接使用的“摘要 → 时间线 → 按需证据”只读入口。
    8795 仍不是这些数据的所有者或运行依赖。
@@ -157,7 +158,7 @@
 | --- | --- |
 | 生成器 | 对应 `tiku_*_watchdog_*.ps1` 的 `Write-Status` |
 | 状态文件 | 8790 根 `watchdog_8790.status`；8896/8795 各自 `service_logs/watchdog_*.status` |
-| PID 文件 | 8790 根 `watchdog_8790.pid`、`tiku_8790.pid`；8896 `service_logs/watchdog_8896.pid`、`tiku_8896.pid`；8795 只有 `service_logs/tiku_admin_8795.pid` |
+| PID 文件 | 8790 根 `watchdog_8790.pid`、`tiku_8790.pid`；8896 `service_logs/watchdog_8896.pid`、`tiku_8896.pid`；8795 `service_logs/watchdog_8795.pid`、`tiku_admin_8795.pid` |
 | 内容 | 看门狗启动、目标进程启动、健康通过、健康失败、端口进程停止/重启 |
 | 频率 | 8790/8896/8795 均每 20 秒检查健康，但只在状态变化/启动时写行 |
 | 保留 | 看门狗启动时 `Set-Content` 覆盖旧状态，随后 `Add-Content`；只保留本次看门狗生命周期 |
@@ -205,8 +206,9 @@ Trace Store 独立于 8795，后者不是数据所有者或运行依赖。
 | 一致性 | 同 trace 同投影幂等；同 trace 不同投影冲突；投影无法落盘时不暴露未绑定的可评分成功；stream 结果公开前断开会回滚或删除尚未公开的 response row |
 
 反馈 schema v8 以唯一 `rated_response_id` 绑定 response；identity/session/有效期和 conversation
-目标一致性均由服务端校验，协议与父子任务字段取自 response row。旧 v7 反馈迁移后
-`rated_response_id=''`，仅作历史只读兼容。8795 可以展示该绑定，但不是 Response Store 所有者。
+目标一致性均由服务端校验，协议与父子任务字段取自 response row。迁移前旧反馈会随表结构迁移
+推进到当前 `schema_version`，但仍保留 `rated_response_id=''`，仅作历史只读兼容。8795 以绑定
+是否为空区分“服务端回复已核对”和“历史反馈兼容绑定”，不是 Response Store 所有者。
 
 ### 11. 2.5 只读诊断与独立保留维护
 
@@ -234,7 +236,7 @@ Trace Store 独立于 8795，后者不是数据所有者或运行依赖。
 - apply 会在任何备份、媒体删除或数据库写入前拒绝重复的 response、feedback 或 page-error
   候选主键，避免文件系统删除在数据库事务回滚后留下不可逆的部分清理。
 - SQLite 先在线备份并做完整性检查，媒体逐文件核对哈希。多库不是全局事务；中途失败保留
-  备份和 `failure.json`，必须人工处置。费用账本、反馈评分/审核/旧 v7 元数据以及 8795
+  备份和 `failure.json`，必须人工处置。费用账本、反馈评分/审核/历史兼容元数据以及 8795
   control/admin audit 永不纳入该清理。
 - response 过期行、反馈案例证据和 A3 page error 有批准策略；trace、task JSONL、output
   watchdog 与 service logs 暂无批准策略，只报告 `policy_missing`。当前未安装周期调度，
@@ -299,20 +301,20 @@ trace；“前面发生了什么错误、哪次模型调用收费”由 2.5 的�
 
 ## 公共结果与错误词表
 
-`PROTOCOL_REASONS` 当前共 100 个注册码：
+`PROTOCOL_REASONS` 当前共 102 个注册码：
 
 | 状态 | 数量 | 含义 |
 | --- | ---: | --- |
 | `SUCCESS` | 19 | 请求或阶段成功 |
 | `NO_MATCH` | 8 | 正常完成但未找到结果 |
-| `NEEDS_INPUT` | 37 | 需要补充、重新登录、改章节或重试输入 |
+| `NEEDS_INPUT` | 38 | 需要补充、重新登录、改章节或重试输入 |
 | `PARTIAL` | 13 | 有结果但部分能力降级/不完整 |
-| `ERROR` | 23 | 当前请求失败 |
+| `ERROR` | 24 | 当前请求失败 |
 
-按注册协议层统计为：tool 65、session 12、upload 5、media 5、login 3、quota 3、
+按注册协议层统计为：tool 65、session 12、upload 5、media 5、login 5、quota 3、
 feedback 3、queue 2、network 2。这个分布描述词表，不代表生产 emitter 覆盖率。
 
-23 个注册 `ERROR` 码按层分组：
+24 个注册 `ERROR` 码按层分组：
 
 | 层 | 数量 | 注册码 |
 | --- | ---: | --- |
@@ -322,6 +324,7 @@ feedback 3、queue 2、network 2。这个分布描述词表，不代表生产 em
 | network | 2 | `NETWORK_UNAVAILABLE`、`REQUEST_TIMEOUT` |
 | media | 2 | `MEDIA_NOT_FOUND`、`MEDIA_ANSWERS_UNAVAILABLE` |
 | feedback | 1 | `FEEDBACK_SAVE_FAILED` |
+| login | 1 | `LOGIN_RATE_LIMITED` |
 
 这只是公共词表。源码中注册或渲染了某个码，不足以证明当前生产路径一定会发出它。例如
 反馈 SQLite 的非 `ValueError` 保存异常目前会落到全局未捕获异常处理，而不是明确构造
@@ -332,8 +335,9 @@ feedback 3、queue 2、network 2。这个分布描述词表，不代表生产 em
 
 - `FEEDBACK_SAVE_FAILED`、`LOGIN_EXPIRED`、`MEDIA_PERSIST_FAILED`、
   `MULTI_DETECTION_FAILED`、`SESSION_EXPIRED` 虽已注册，但未找到清晰的当前生产 emitter；
-- `INVITE_INVALID` 在 `_http_error_protocol` 有 401 映射，但当前邀请码无效路径直接返回 HTML，
-  未找到实际产生该结构化协议码的路径；
+- `LOGIN_REQUEST_INVALID`、`INVITE_INVALID` 和 `LOGIN_RATE_LIMITED` 的邀请码表单拒绝都返回
+  HTML，当前入口会同时写入
+  对应的安全 terminal 协议事件；登录输入和客户端 IP 不进入 trace；
 - 服务端会直接返回未注册于 `PROTOCOL_REASONS` 的 `FEEDBACK_RECORDED`、
   `FEEDBACK_REMOVED`、`SESSION_RESET`；
 - 浏览器还会本地构造未注册的 `RESPONSE_INVALID`，并使用不在服务端 `RequestAction` 枚举中的
@@ -351,7 +355,7 @@ feedback 3、queue 2、network 2。这个分布描述词表，不代表生产 em
 | HTTP JSON/字段/上传校验 | `_http_error_protocol` 按路径、状态和少量 detail 映射 | 安全固定文案和五态协议 | 有 session 且非 login 时写一条边界任务摘要；同时进输出观察 | 54 个 `HTTPException` 抛出点被折叠为少量码；无 session/login 不进任务摘要 |
 | 未登录 API | `LOGIN_REQUIRED` | 401 结构化 JSON | 进输出观察，不进任务摘要 | 没有用户 session，无法关联业务任务 |
 | 未登录页面 | 不生成结构化协议 | 跳转登录页 | 不进 output watchdog/task log，只有服务访问/stdio 旁证 | 与 API 认证出口不同 |
-| 无效邀请码表单 | 当前直接返回 HTML 401 | 登录页错误提示 | 不进 output watchdog/task log，只有服务访问/stdio 旁证 | `INVITE_INVALID` 映射存在但实际 emitter 不明确 |
+| 格式错误/无效/限速邀请码表单 | `LOGIN_REQUEST_INVALID` / `INVITE_INVALID` / `LOGIN_RATE_LIMITED` | 登录页 HTML 错误提示；限速响应带 `Retry-After` | 写安全 terminal event，不进 output watchdog/task log | 进程内失败计数重启后清空，仍需 Cloudflare 边缘规则 |
 | A2 队列与额度 | `_admit` 捕获 `AgentProtocolError` 子类并绑定 request/search | 429/503 固定文案 | `_admit` 写任务摘要 | 只记录最终阻断，不记录排队开始/等待过程 |
 | 纯 A3 额度 | Web/A3 边界直接执行额度检查 | 固定额度文案 | 同步公共错误可进输出观察 | 通常不进入 A2 task log，也没有排队/等待事件 |
 | A2 上传持久化 | 转 `UPLOAD_PERSIST_FAILED` | 固定重传文案 | `_admit` 写任务摘要 | 包装后通常只剩协议错误，原始文件系统异常不保留 |
@@ -447,8 +451,9 @@ response/消息再次评分只更新原记录，不能改绑。删除反馈也�
 
 2026-08-25 的只读元信息基线显示：当时 8790 数据库为 schema v7、共 5 行，案例目录 5 个、媒体文件
 22 个（约 2.53 MB）；只有 2/5 行同时具备 request/search/workflow 关联字段。未读取反馈正文或
-媒体内容。v8 代码首次打开旧库时加法迁移，历史行保持 `rated_response_id=''`，后台明确标为
-legacy binding；不会根据旧客户端字段伪造 response 归属。
+媒体内容。v8 代码首次打开旧库时加法迁移并统一推进 `schema_version`；历史行仍保持
+`rated_response_id=''`，后台明确标为 legacy binding，不会根据旧客户端字段伪造 response
+归属。版本号表示当前可读结构，不证明某条历史反馈已有服务端 response 绑定。
 
 ### 对话和媒体证据
 
@@ -470,7 +475,7 @@ legacy binding；不会根据旧客户端字段伪造 response 归属。
 - 8790 在 `control_db` 模式下，每次保存反馈时动态读取控制库
   `feedback_retention_days`；未使用控制库时回退 30 天。8896 未装配 provider，继续使用
   30 天默认值；
-- 过期维护会删除 case 媒体、清空 conversation，并保留评分、审核、旧 v7 元数据和
+- 过期维护会删除 case 媒体、清空 conversation，并保留评分、审核、历史兼容元数据和
   `case_purged_at`；
 - 8795 已移除 lifespan 启动自动 `purge_expired_cases()`。当前没有服务启动钩子或周期任务
   自动清理；过期证据只能由独立 `scripts/tiku_retention.py` 维护流程处理。该入口默认只生成
@@ -480,7 +485,8 @@ legacy binding；不会根据旧客户端字段伪造 response 归属。
 
 8795 直接读取 8790 feedback DB/cases，并同时查询根共享费用库和 A2 历史费用库：
 
-- v8 反馈列表/详情展示 `rated_response_id`，旧 v7 行明确标记为 legacy binding；
+- v8 新写反馈展示非空 `rated_response_id`；迁移前旧记录即使版本号已推进，只要绑定为空仍明确
+  标记为 legacy binding；
 
 - page 反馈用 `workflow_search_id` 找费用；
 - question 反馈用 `search_key` 和 `workflow_search_id`；
@@ -531,7 +537,7 @@ fail-open 跳过，后台可能显示不完整或零费用。
     旧回复反馈、writer 失败、重复事件抑制、协议词表/emitter/浏览器一致性和隐私白名单。
 
 其中 1～7 的 trace/response 主链及第 10 项 optional-conversation 漏洞已在 2.2～2.4 完成；
-`rated_response_id`、owner/expiry、目标 message 一致性和旧 v7 兼容均有定向回归。2.5 的
+`rated_response_id`、owner/expiry、目标 message 一致性和迁移前旧记录兼容均有定向回归。2.5 的
 稳定、有界、只读诊断入口和独立保留维护已通过 117 项相关测试与 943 项全仓测试。8896 live
 对照确认新链使用 `trace_exact`、旧证据缺失显式归类为 `evidence_missing`，且查询前后源文件
 哈希、大小和时间戳不变；8790/8896 dry-run 均为零候选、零问题并各报告 7 项

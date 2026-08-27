@@ -69,7 +69,7 @@ It therefore cannot be the authoritative internal join key. Existing `request_id
 | `task_revision` | Monotonic session workflow revision | Stale-action checks, media and feedback scoping | A version/concurrency field, not a trace ID |
 | `candidate_generation` | One candidate-list generation | Stale candidate and media-delivery guards | A version/concurrency field, not a trace ID |
 | `message_id` | Browser creates one for a rendered chat item | Feedback UI target and browser history | Secondary UI identity; feedback requires its target message to carry the same server `response_id` |
-| `feedback_id` | Feedback store creates one per response-bound record | Feedback administration and case media | Stable feedback identity; schema v8 stores unique `rated_response_id`, while migrated v7 rows remain unbound |
+| `feedback_id` | Feedback store creates one per response-bound record | Feedback administration and case media | Stable feedback identity; new v8 writes store unique `rated_response_id`, while migrated pre-v8 rows remain unbound even though additive migration advances their `schema_version` |
 | `session_key` | Server hashes the session ID | Logs, costs and feedback | Private join dimension; feedback hashing alone does not prove current session validity or response ownership |
 | `identity_key` | Stable invitation identity | Budget, costs, feedback and administration | Private identity dimension; never log invite plaintext |
 
@@ -116,7 +116,7 @@ Feedback schema v8 requires both `rated_response_id` and `conversation`. The ser
 identity, session, response expiry, target-message presence and exact message/response ID match,
 then derives protocol and parent/child lifecycle fields from the stored response rather than
 client history or the latest session snapshot. Cross-user, cross-session and message/response
-rebinding fail closed. Existing v7 feedback remains readable with an empty response binding and
+rebinding fail closed. Migrated pre-v8 feedback remains readable with an empty response binding and
 cannot be silently upgraded to a fabricated authority.
 
 Remaining gap: administrative cost display still joins feedback to cost runs using identity,
@@ -326,8 +326,9 @@ before result exposure roll back an in-flight write or remove the still-private 
 Feedback schema v8 requires `rated_response_id`; `/api/feedback` also requires conversation and
 an exact target `message_id`/`response_id` match. The server validates identity, session and
 expiry against the response row and copies protocol/lifecycle facts from that row. Feedback
-updates cannot rebind either response or message, deletes use response ownership, and old v7
-rows remain readable but intentionally unbound. The stored response projection excludes user
+updates cannot rebind either response or message, deletes use response ownership, and migrated
+pre-v8 rows remain readable but intentionally unbound. Their empty `rated_response_id`, not the
+post-migration version number, is the compatibility marker. The stored response projection excludes user
 and assistant text, prompts, local paths and URLs.
 
 Bounded Codex/Agent diagnostic queries, periodic retention maintenance and old/new cutover are

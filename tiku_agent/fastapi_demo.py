@@ -19,6 +19,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable
+from urllib.parse import parse_qs
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -38,6 +39,7 @@ from tiku_agent.session_runtime import (
     AgentProtocolError,
     AgentRuntimeBusyError,
     AgentSessionRuntime,
+    _ExecutionCancelled,
 )
 from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.tool_result import is_public_tool_code
@@ -77,6 +79,12 @@ from tiku_shared.trace_events import (
     trace_event_scope,
 )
 from tiku_agent.tools import DEFAULT_RUNTIME_DIR
+from tiku_shared.http_security import (
+    FailureRateLimiter,
+    RequestBodyError,
+    read_bounded_body,
+    validated_client_key,
+)
 
 
 SESSION_COOKIE = "tiku_agent_session"
@@ -109,6 +117,8 @@ FEEDBACK_TAGS = {
 _PUBLIC_PROTOCOL_MESSAGES = {
     "LOGIN_REQUIRED": "请先使用有效邀请码登录。",
     "INVITE_INVALID": "邀请码无效或已停用，请检查后重试。",
+    "LOGIN_REQUEST_INVALID": "登录请求无效，请刷新页面后重试。",
+    "LOGIN_RATE_LIMITED": "登录尝试过多，请稍后再试。",
     "LOGIN_EXPIRED": "登录状态已失效，请重新登录。",
     "MESSAGE_INVALID": "请求内容无效，请重新提交。",
     "STALE_ACTION": "这个操作已经失效，请使用当前页面中的操作。",
@@ -287,9 +297,30 @@ def create_app(
     response_store = response_store or SQLiteResponseStore(
         feedback_store.path.with_name("responses.sqlite3")
     )
+    invite_login_limiter = FailureRateLimiter(
+        attempts=10,
+        window_seconds=600,
+        max_keys=4096,
+    )
     app.state.response_store = response_store
     app.state.trace_event_recorder = trace_event_recorder
     app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
+
+    def invite_login_rejection(
+        message: str,
+        protocol: RequestProtocol,
+        *,
+        status_code: int,
+        headers: Mapping[str, str] | None = None,
+    ) -> HTMLResponse:
+        _record_protocol_terminal(protocol, http_status=status_code)
+        response_headers = {"Cache-Control": "no-store", **dict(headers or {})}
+        error = f'<p class="error">{message}</p>'
+        return HTMLResponse(
+            _INVITE_PAGE.replace("{error}", error),
+            status_code=status_code,
+            headers=response_headers,
+        )
 
     def request_protocol_response(
         request: Request,
@@ -359,6 +390,19 @@ def create_app(
             snapshot = _safe_runtime_snapshot(runtime, session_id)
             search_id = str(snapshot.get("search_id") or "")
         protocol = _http_error_protocol(request, exc, search_id=search_id)
+        if request.url.path == "/api/invite/login":
+            if exc.status_code == 413:
+                message = "登录请求过大，请刷新页面后重试。"
+            elif exc.status_code >= 500:
+                message = "邀请码登录暂不可用，请稍后再试。"
+            else:
+                message = "登录请求无效，请刷新页面后重试。"
+            return invite_login_rejection(
+                message,
+                protocol,
+                status_code=exc.status_code,
+                headers=exc.headers,
+            )
         if session_id and protocol.layer is not RequestLayer.LOGIN:
             _record_protocol_event(
                 runtime,
@@ -600,37 +644,79 @@ def create_app(
     async def invite_login(request: Request) -> Response:
         if invite_access is None:
             raise HTTPException(status_code=404, detail="invitation access is disabled")
-        try:
-            content_length = int(request.headers.get("content-length") or 0)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="invalid content length") from exc
-        if content_length > 4096:
-            raise HTTPException(status_code=413, detail="invitation request is too large")
-        form = await request.form()
-        identity = invite_access.authenticate_code(str(form.get("code") or ""))
-        if identity is None:
-            _record_protocol_terminal(
-                RequestProtocol.from_code(
-                    "INVITE_INVALID", request_id=_request_id(request)
-                ),
-                http_status=401,
-            )
-            error = '<p class="error">邀请码无效或已停用，请检查后重试。</p>'
-            return HTMLResponse(
-                _INVITE_PAGE.replace("{error}", error),
-                status_code=401,
-                headers={"Cache-Control": "no-store"},
-            )
-        result = RedirectResponse("/", status_code=303)
-        result.set_cookie(
-            invite_access.cookie_name,
-            invite_access.issue_cookie(identity),
-            max_age=invite_access.auth_max_age_seconds,
-            httponly=True,
-            secure=_is_secure_request(request),
-            samesite="lax",
+        client_key = validated_client_key(
+            str(request.headers.get("cf-connecting-ip") or ""),
+            request.client.host if request.client else "unknown",
         )
-        return result
+        reservation, retry_after = invite_login_limiter.reserve_attempt(client_key)
+        if reservation is None:
+            protocol = RequestProtocol.from_code(
+                "LOGIN_RATE_LIMITED", request_id=_request_id(request)
+            )
+            return invite_login_rejection(
+                "登录尝试过多，请稍后再试。",
+                protocol,
+                status_code=429,
+                headers={
+                    "Retry-After": str(retry_after),
+                },
+            )
+        reservation_completed = False
+        try:
+            try:
+                body = await read_bounded_body(request, max_bytes=4096)
+            except RequestBodyError as exc:
+                detail = (
+                    "invitation request is too large"
+                    if exc.status_code == 413
+                    else exc.detail
+                )
+                raise HTTPException(status_code=exc.status_code, detail=detail) from exc
+            content_type = str(request.headers.get("content-type") or "").split(";", 1)[0]
+            if content_type.strip().lower() != "application/x-www-form-urlencoded":
+                raise HTTPException(
+                    status_code=415,
+                    detail="invitation request must use form encoding",
+                )
+            try:
+                form = parse_qs(
+                    body.decode("utf-8"),
+                    keep_blank_values=True,
+                    max_num_fields=8,
+                )
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail="invalid invitation request",
+                ) from exc
+            identity = invite_access.authenticate_code(
+                str((form.get("code") or [""])[0])
+            )
+            if identity is None:
+                invite_login_limiter.complete_failure(reservation)
+                reservation_completed = True
+                return invite_login_rejection(
+                    "邀请码无效或已停用，请检查后重试。",
+                    RequestProtocol.from_code(
+                        "INVITE_INVALID", request_id=_request_id(request)
+                    ),
+                    status_code=401,
+                )
+            result = RedirectResponse("/", status_code=303)
+            result.set_cookie(
+                invite_access.cookie_name,
+                invite_access.issue_cookie(identity),
+                max_age=invite_access.auth_max_age_seconds,
+                httponly=True,
+                secure=_is_secure_request(request),
+                samesite="lax",
+            )
+            invite_login_limiter.complete_success(reservation)
+            reservation_completed = True
+            return result
+        finally:
+            if not reservation_completed:
+                invite_login_limiter.cancel_attempt(reservation)
 
     @app.post("/api/invite/logout")
     def invite_logout(request: Request) -> Response:
@@ -1458,9 +1544,11 @@ def _normalized_trace_endpoint(path: object) -> str:
 
 
 def _trace_response_mode(path: object) -> str:
-    clean = str(path or "")
+    clean = str(path or "").split("?", 1)[0]
     if clean.endswith("/stream"):
         return "stream"
+    if clean == "/api/invite/login":
+        return "html"
     return "json" if clean.startswith("/api/") or clean == "/health" else "html"
 
 
@@ -1726,7 +1814,14 @@ def _http_error_protocol(
     path = request.url.path
     detail = str(exc.detail or "").lower()
     if path.startswith("/api/invite/"):
-        code = "INVITE_INVALID" if exc.status_code == 401 else "LOGIN_REQUIRED"
+        if exc.status_code == 401:
+            code = "INVITE_INVALID"
+        elif exc.status_code == 429:
+            code = "LOGIN_RATE_LIMITED"
+        elif exc.status_code >= 500:
+            code = "SERVICE_UNAVAILABLE"
+        else:
+            code = "LOGIN_REQUEST_INVALID"
     elif path.startswith("/api/feedback"):
         code = "FEEDBACK_TOO_LARGE" if exc.status_code == 413 else "FEEDBACK_INVALID"
     elif path.startswith("/api/image"):
@@ -2876,6 +2971,11 @@ async def _stream_agent_events(
             ),
         )
 
+    # asyncio.to_thread cannot stop work that is already waiting in a worker
+    # thread. Carry this thread-safe probe with the existing progress callable
+    # so the runtime gate can withdraw the ticket before business execution.
+    progress.cancelled = delivery_cancelled.is_set  # type: ignore[attr-defined]
+
     def error_snapshot(attached: object = None) -> Mapping[str, object]:
         if isinstance(attached, Mapping) and attached:
             return attached
@@ -3030,6 +3130,8 @@ async def _stream_agent_events(
                         ),
                     )
                 )
+            except _ExecutionCancelled as exc:
+                raise asyncio.CancelledError() from exc
             except AgentProtocolError as exc:
                 snapshot = error_snapshot(exc.response_snapshot)
                 protocol = _public_response_protocol(

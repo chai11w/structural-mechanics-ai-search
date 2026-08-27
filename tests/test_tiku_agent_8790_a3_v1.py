@@ -21,9 +21,46 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
         self.assertTrue(defaults.enable_triage)
         self.assertTrue(defaults.enable_auto_crop)
         self.assertTrue(defaults.enable_output_watchdog)
+        self.assertEqual(defaults.max_concurrent_tasks, 1)
+        self.assertEqual(defaults.max_queued_tasks, 2)
+        self.assertEqual(defaults.queue_wait_seconds, 55.0)
         self.assertFalse(
             build_argument_parser().parse_args(["--disable-output-watchdog"]).enable_output_watchdog
         )
+
+        custom = build_argument_parser().parse_args([
+            "--max-concurrent-tasks", "3",
+            "--max-queued-tasks", "4",
+            "--queue-wait-seconds", "66",
+        ])
+        self.assertEqual(custom.max_concurrent_tasks, 3)
+        self.assertEqual(custom.max_queued_tasks, 4)
+        self.assertEqual(custom.queue_wait_seconds, 66.0)
+
+        self.assertEqual(
+            build_argument_parser().parse_args(["--max-queued-tasks", "0"]).max_queued_tasks,
+            0,
+        )
+        for arguments in (
+            ["--max-concurrent-tasks", "0"],
+            ["--max-queued-tasks", "-1"],
+            ["--queue-wait-seconds", "0"],
+            ["--queue-wait-seconds", "nan"],
+            ["--queue-wait-seconds", "inf"],
+        ):
+            with self.assertRaises(SystemExit):
+                build_argument_parser().parse_args(arguments)
+
+    def test_production_builder_rejects_queue_settings_that_disable_protection(self):
+        with self.assertRaisesRegex(ValueError, "max_concurrent_tasks"):
+            build_app(Path("unused"), max_concurrent_tasks=0)
+        with self.assertRaisesRegex(ValueError, "max_queued_tasks"):
+            build_app(Path("unused"), max_queued_tasks=-1)
+        with self.assertRaisesRegex(ValueError, "queue_wait_seconds"):
+            build_app(Path("unused"), queue_wait_seconds=0)
+        for invalid in (float("nan"), float("inf")):
+            with self.assertRaisesRegex(ValueError, "queue_wait_seconds"):
+                build_app(Path("unused"), queue_wait_seconds=invalid)
 
     def test_control_database_protects_the_a3_app(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -46,7 +83,13 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
         ) as build_runtime:
             build_runtime.return_value = object()
 
-            app = build_app(Path(temp) / "runtime", enable_triage=False)
+            app = build_app(
+                Path(temp) / "runtime",
+                enable_triage=False,
+                max_concurrent_tasks=3,
+                max_queued_tasks=4,
+                queue_wait_seconds=66,
+            )
 
             self.assertIsNotNone(app)
             self.assertEqual(
@@ -67,6 +110,9 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
             self.assertTrue(
                 build_runtime.call_args.kwargs["preserve_a2_artifacts_on_cancel"]
             )
+            self.assertEqual(build_runtime.call_args.kwargs["max_concurrent_tasks"], 3)
+            self.assertEqual(build_runtime.call_args.kwargs["max_queued_tasks"], 4)
+            self.assertEqual(build_runtime.call_args.kwargs["queue_wait_seconds"], 66)
 
 
 if __name__ == "__main__":

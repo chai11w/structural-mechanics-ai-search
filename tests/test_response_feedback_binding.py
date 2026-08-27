@@ -460,17 +460,25 @@ class ResponseFeedbackBindingTest(unittest.TestCase):
         app, _response_store, _feedback_store = self.make_app()
         client = TestClient(app)
 
-        responses = (
+        json_responses = (
             client.get("/api/session"),
             client.post("/api/reset"),
             client.post("/api/feedback", json={}),
             client.get("/api/media/missing.jpg"),
             client.get("/api/upload/missing.jpg"),
-            client.post("/api/invite/login", data={"code": "invalid"}),
         )
 
-        for response in responses:
+        for response in json_responses:
             self.assertNotIn("response_id", response.json(), response.text)
+
+        invite_login = client.post(
+            "/api/invite/login", data={"code": "invalid"}
+        )
+        self.assertTrue(
+            invite_login.headers["content-type"].startswith("text/html"),
+            invite_login.headers["content-type"],
+        )
+        self.assertNotIn("response_id", invite_login.text)
 
     def test_feedback_without_verified_conversation_target_is_rejected(self):
         app, _response_store, _feedback_store = self.make_app()

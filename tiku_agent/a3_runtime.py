@@ -38,7 +38,12 @@ from tiku_agent.a3_models import (
 from tiku_agent.agent import AgentResponse
 from tiku_agent.image_triage_authority import NO_EXTERNAL_LOAD_REPLY
 from tiku_agent.session_artifacts import SessionArtifacts, session_key
-from tiku_agent.session_runtime import AgentProtocolError, AgentSessionRuntime, ProgressReporter
+from tiku_agent.session_runtime import (
+    AgentProtocolError,
+    AgentSessionRuntime,
+    ProgressReporter,
+    _ExecutionGate,
+)
 from tiku_shared.model_costs import (
     ModelCostCollector,
     SQLiteModelCostLedger,
@@ -127,7 +132,7 @@ def _merge_a3_projection(
 
 
 def _capture_a3_response_snapshot(method: Callable[..., AgentResponse]):
-    """Keep the response-time state while the per-session A3 lock is held."""
+    """Bound public work and keep response-time state under the session lock."""
 
     @wraps(method)
     def wrapped(
@@ -137,46 +142,66 @@ def _capture_a3_response_snapshot(method: Callable[..., AgentResponse]):
         **kwargs: Any,
     ) -> AgentResponse:
         clean = _clean_session_id(session_id)
-        with runtime._lock(clean):
-            try:
-                response = method(runtime, clean, *args, **kwargs)
-            except Exception as exc:
+        progress = kwargs.get("progress")
+        error_snapshot_captured = False
+        session_lock = runtime._lock(clean)
+        try:
+            with runtime._execution_gate.enter(progress, session_key=session_lock):
+                with session_lock:
+                    try:
+                        response = method(runtime, clean, *args, **kwargs)
+                        response.response_snapshot = dict(runtime.session_snapshot(clean))
+                        response.response_projection_snapshot = _merge_a3_projection(
+                            response.response_snapshot,
+                            response.response_projection_snapshot,
+                        )
+                        response.response_media_snapshot_captured = True
+                        try:
+                            response.uploaded_image_path = runtime.current_image_path(clean)
+                            raw_a3 = response.response_snapshot.get("a3")
+                            selected = (
+                                raw_a3.get("selected_unit")
+                                if isinstance(raw_a3, Mapping)
+                                else None
+                            )
+                            selected_unit_id = (
+                                str(selected.get("unit_id") or "").strip()
+                                if isinstance(selected, Mapping)
+                                else ""
+                            )
+                            if (
+                                isinstance(raw_a3, Mapping)
+                                and raw_a3.get("phase") == A3_PHASE_A2_ACTIVE
+                                and selected_unit_id
+                            ):
+                                response.submitted_crop_path = runtime.current_crop_path(
+                                    clean, selected_unit_id
+                                )
+                            if response.intent == "a3_units_prepared":
+                                response.feedback_overlay_path = (
+                                    runtime.current_auto_crop_overlay_path(clean)
+                                )
+                        except Exception:  # noqa: BLE001 - do not replace the business reply.
+                            pass
+                        return response
+                    except Exception as exc:
+                        try:
+                            setattr(
+                                exc,
+                                "response_snapshot",
+                                dict(runtime.session_snapshot(clean)),
+                            )
+                            error_snapshot_captured = True
+                        except Exception:  # noqa: BLE001 - never mask the original failure.
+                            pass
+                        raise
+        except Exception as exc:
+            if not error_snapshot_captured:
                 try:
-                    setattr(exc, "response_snapshot", runtime.session_snapshot(clean))
+                    setattr(exc, "response_snapshot", dict(runtime.session_snapshot(clean)))
                 except Exception:  # noqa: BLE001 - never mask the original failure.
                     pass
-                raise
-            else:
-                response.response_snapshot = dict(runtime.session_snapshot(clean))
-                response.response_projection_snapshot = _merge_a3_projection(
-                    response.response_snapshot,
-                    response.response_projection_snapshot,
-                )
-                response.response_media_snapshot_captured = True
-                try:
-                    response.uploaded_image_path = runtime.current_image_path(clean)
-                    raw_a3 = response.response_snapshot.get("a3")
-                    selected = raw_a3.get("selected_unit") if isinstance(raw_a3, Mapping) else None
-                    selected_unit_id = (
-                        str(selected.get("unit_id") or "").strip()
-                        if isinstance(selected, Mapping)
-                        else ""
-                    )
-                    if (
-                        isinstance(raw_a3, Mapping)
-                        and raw_a3.get("phase") == A3_PHASE_A2_ACTIVE
-                        and selected_unit_id
-                    ):
-                        response.submitted_crop_path = runtime.current_crop_path(
-                            clean, selected_unit_id
-                        )
-                    if response.intent == "a3_units_prepared":
-                        response.feedback_overlay_path = (
-                            runtime.current_auto_crop_overlay_path(clean)
-                        )
-                except Exception:  # noqa: BLE001 - do not replace the business reply.
-                    pass
-                return response
+            raise
 
     return wrapped
 _A3_MEDIA_RETRY_TEXTS = frozenset({"重试", "再试一次", "重新发送", "再发一次"})
@@ -476,6 +501,9 @@ class A3MvpRuntime:
         cost_ledger: SQLiteModelCostLedger | None = None,
         intent_engine: A3IntentEngineV1 | None = None,
         enable_three_scope_cancel_clarification: bool = False,
+        max_concurrent_tasks: int = 0,
+        max_queued_tasks: int = 0,
+        queue_wait_seconds: float = 90.0,
     ) -> None:
         self.store = store
         self.artifacts = artifacts
@@ -494,6 +522,11 @@ class A3MvpRuntime:
         self.intent_engine = intent_engine
         self.enable_three_scope_cancel_clarification = bool(
             enable_three_scope_cancel_clarification
+        )
+        self._execution_gate = _ExecutionGate(
+            max_concurrent_tasks,
+            max_queued_tasks,
+            queue_wait_seconds,
         )
         self._locks = tuple(threading.RLock() for _ in range(64))
 

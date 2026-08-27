@@ -31,12 +31,16 @@ from tiku_agent.fastapi_demo import (
 )
 from tiku_agent.feedback_store import SQLiteFeedbackStore, scope_feedback_conversation
 from tiku_agent.invite_access import InviteAccess, build_invitation_config
-from tiku_agent.session_artifacts import session_key
+from tiku_agent.session_artifacts import SessionArtifacts, session_key
 from tiku_agent.session_runtime import (
     AgentBudgetExceededError,
     AgentProtocolError,
     AgentRuntimeBusyError,
+    AgentSessionRuntime,
+    _ExecutionCancelled,
+    _ExecutionGate,
 )
+from tiku_agent.session_store import SQLiteSessionStore
 from tiku_shared.response_store import ResponseProjection, SQLiteResponseStore
 from tiku_shared.trace_context import TraceContext, current_request_id, current_trace_id
 from tiku_shared.trace_events import (
@@ -486,7 +490,7 @@ class FastApiDemoTest(unittest.TestCase):
             expected = (
                 ("LOGIN_REQUIRED", "/api/session", "json"),
                 ("LOGIN_REQUIRED", "/api/message/stream", "stream"),
-                ("INVITE_INVALID", "/api/invite/login", "json"),
+                ("INVITE_INVALID", "/api/invite/login", "html"),
             )
             for request_id, (code, endpoint, response_mode) in zip(
                 request_ids, expected, strict=True
@@ -969,6 +973,173 @@ class FastApiDemoTest(unittest.TestCase):
             self.assertEqual(
                 terminal.safe_attributes["error_kind"], "ClientDisconnected"
             )
+
+    def test_stream_aclose_withdraws_queued_ticket_before_business_execution(self):
+        gate = _ExecutionGate(max_concurrent=1, max_queued=1, wait_seconds=2)
+        active = threading.Event()
+        release = threading.Event()
+        withdrawn = threading.Event()
+        stages = []
+        state_writes = []
+        cost_writes = []
+        task_logs = []
+
+        def first_task():
+            with gate.enter(session_key="active-session"):
+                active.set()
+                release.wait(2)
+
+        first = threading.Thread(target=first_task)
+        first.start()
+        self.assertTrue(active.wait(1))
+
+        def execute(progress):
+            def tracked_progress(stage, message):
+                stages.append(stage)
+                progress(stage, message)
+
+            tracked_progress.cancelled = progress.cancelled
+            try:
+                with gate.enter(
+                    tracked_progress,
+                    session_key="cancelled-session",
+                ):
+                    state_writes.append("state")
+                    cost_writes.append("cost")
+                    task_logs.append("task")
+                    return {"text": "must not run"}
+            except _ExecutionCancelled:
+                withdrawn.set()
+                raise
+
+        async def close_after_queued_progress():
+            events = _stream_agent_events(
+                execute,
+                request_id=f"req_{57:032x}",
+                trace_context=TraceContext.create(
+                    request_id=f"req_{57:032x}"
+                ),
+            )
+            queued = json.loads(await events.__anext__())
+            self.assertEqual(queued["type"], "progress")
+            self.assertEqual(queued["stage"], "queued")
+            await events.aclose()
+            self.assertTrue(await asyncio.to_thread(withdrawn.wait, 1))
+
+        try:
+            asyncio.run(close_after_queued_progress())
+        finally:
+            release.set()
+            first.join(2)
+        self.assertFalse(first.is_alive())
+        self.assertEqual(stages, ["queued"])
+        self.assertEqual(state_writes, [])
+        self.assertEqual(cost_writes, [])
+        self.assertEqual(task_logs, [])
+
+    def test_stream_cancellation_withdraws_production_runtime_without_state_or_logs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = SQLiteSessionStore(root / "sessions.sqlite3")
+            artifacts = SessionArtifacts(root / "session-artifacts")
+            active_session = "stream-cancel-active-session"
+            cancelled_session = "stream-cancel-queued-session"
+            active_started = threading.Event()
+            cancelled_business_started = threading.Event()
+            release_active = threading.Event()
+            task_entries = []
+            cost_runs = []
+            first_errors = []
+
+            class RecordingLogger:
+                def write(self, entry):
+                    task_entries.append(entry)
+
+            class RecordingLedger:
+                def write_run(self, collector, *, finished_at, outcome):
+                    del finished_at, outcome
+                    cost_runs.append(collector)
+
+            class BlockingAgent:
+                def __init__(self, state):
+                    self.state = state
+                    self.progress_reporter = None
+
+                def handle_text(self, _text):
+                    if self.state.session_id == active_session:
+                        active_started.set()
+                        if not release_active.wait(3):
+                            raise TimeoutError("active stream test call was not released")
+                    else:
+                        cancelled_business_started.set()
+                    return AgentResponse(text="ok", intent="chat")
+
+            runtime = AgentSessionRuntime(
+                store,
+                artifacts=artifacts,
+                task_logger=RecordingLogger(),
+                cost_ledger=RecordingLedger(),
+                agent_factory=BlockingAgent,
+                max_concurrent_tasks=1,
+                max_queued_tasks=1,
+                queue_wait_seconds=2,
+            )
+
+            def run_active():
+                try:
+                    runtime.handle_text(active_session, "active")
+                except Exception as exc:  # pragma: no cover - assertion reports details.
+                    first_errors.append(exc)
+
+            first = threading.Thread(target=run_active)
+            first.start()
+            self.assertTrue(active_started.wait(1))
+
+            def execute(progress):
+                response = runtime.handle_text(
+                    cancelled_session,
+                    "queued",
+                    progress=progress,
+                )
+                return {"text": response.text}
+
+            async def close_after_queued_progress():
+                request_id = f"req_{58:032x}"
+                events = _stream_agent_events(
+                    execute,
+                    request_id=request_id,
+                    trace_context=TraceContext.create(request_id=request_id),
+                )
+                queued = json.loads(await events.__anext__())
+                self.assertEqual(queued["type"], "progress")
+                self.assertEqual(queued["stage"], "queued")
+                await events.aclose()
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    with runtime._execution_gate._condition:
+                        if not runtime._execution_gate._waiters:
+                            return
+                    await asyncio.sleep(0.01)
+                self.fail("cancelled runtime ticket was not withdrawn")
+
+            try:
+                asyncio.run(close_after_queued_progress())
+            finally:
+                release_active.set()
+                first.join(3)
+            self.assertFalse(first.is_alive())
+            self.assertEqual(first_errors, [])
+            self.assertFalse(cancelled_business_started.is_set())
+            self.assertIsNone(store.load(cancelled_session))
+            self.assertEqual(
+                [
+                    entry
+                    for entry in task_entries
+                    if entry.session_key == session_key(cancelled_session)
+                ],
+                [],
+            )
+            self.assertEqual(len(cost_runs), 1)
 
     def test_stream_aclose_after_queued_result_discards_unexposed_response(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1996,6 +2167,197 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertNotIn("点赞", expired_page.text)
         self.assertNotIn("点踩", expired_page.text)
 
+    def test_invitation_login_rate_limit_is_bounded_per_client(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        test_dir = runtime_dir / f"invite_rate_{uuid4().hex}"
+        test_dir.mkdir(parents=True)
+        self.addCleanup(lambda: shutil.rmtree(test_dir, ignore_errors=True))
+        image_path = test_dir / "image.jpg"
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        config, codes = build_invitation_config(1)
+        config_path = test_dir / "invites.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        access = InviteAccess(config_path)
+        trace_database = test_dir / "trace_events.sqlite3"
+        trace_store = SQLiteTraceEventStore(trace_database)
+        trace_recorder = TraceEventRecorder(trace_store)
+        client = TestClient(
+            create_app(
+                runtime=FakeRuntime(image_path),
+                invite_access=access,
+                feedback_store=SQLiteFeedbackStore(test_dir / "feedback.sqlite3"),
+                trace_event_recorder=trace_recorder,
+            )
+        )
+        malformed_secret = "raw-login-request-secret"
+        malformed_request_id = "req_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        malformed = client.post(
+            "/api/invite/login",
+            headers={
+                "content-type": "application/x-www-form-urlencoded",
+                "x-request-id": malformed_request_id,
+            },
+            content=b"\xff",
+        )
+        self.assertEqual(malformed.status_code, 400)
+        self.assertTrue(malformed.headers["content-type"].startswith("text/html"))
+        self.assertIn("登录请求无效", malformed.text)
+
+        oversized_request_id = "req_cccccccccccccccccccccccccccccccc"
+        oversized = client.post(
+            "/api/invite/login",
+            headers={
+                "content-type": "application/x-www-form-urlencoded",
+                "x-request-id": oversized_request_id,
+            },
+            content=(f"code={malformed_secret}".encode("utf-8") + b"x" * 4097),
+        )
+        self.assertEqual(oversized.status_code, 413)
+        self.assertTrue(oversized.headers["content-type"].startswith("text/html"))
+        self.assertIn("登录请求过大", oversized.text)
+
+        unsupported_request_id = "req_dddddddddddddddddddddddddddddddd"
+        unsupported = client.post(
+            "/api/invite/login",
+            headers={
+                "content-type": "text/plain",
+                "x-request-id": unsupported_request_id,
+            },
+            content=f"code={malformed_secret}".encode("utf-8"),
+        )
+        self.assertEqual(unsupported.status_code, 415)
+        self.assertTrue(unsupported.headers["content-type"].startswith("text/html"))
+        self.assertIn("登录请求无效", unsupported.text)
+        unsupported_multipart = client.post(
+            "/api/invite/login",
+            files={"code": (None, "wrong")},
+        )
+        self.assertEqual(unsupported_multipart.status_code, 415)
+        self.assertTrue(
+            unsupported_multipart.headers["content-type"].startswith("text/html")
+        )
+
+        attempts = 10
+        barrier = threading.Barrier(attempts + 1)
+        release = threading.Event()
+        concurrent_headers = {"cf-connecting-ip": "203.0.113.30"}
+        concurrent_results = [None] * attempts
+        concurrent_errors = []
+
+        def authenticate_after_release(_code: str):
+            barrier.wait(timeout=10)
+            if not release.wait(timeout=10):
+                raise TimeoutError("concurrent invitation login test was not released")
+            return None
+
+        def concurrent_login(index: int) -> None:
+            try:
+                concurrent_results[index] = client.post(
+                    "/api/invite/login",
+                    headers=concurrent_headers,
+                    data={"code": "wrong"},
+                ).status_code
+            except Exception as exc:  # pragma: no cover - assertion reports the failure.
+                concurrent_errors.append(exc)
+
+        concurrent_threads = [
+            threading.Thread(target=concurrent_login, args=(index,))
+            for index in range(attempts)
+        ]
+        try:
+            with patch.object(
+                access,
+                "authenticate_code",
+                side_effect=authenticate_after_release,
+            ) as authenticate:
+                for thread in concurrent_threads:
+                    thread.start()
+                barrier.wait(timeout=10)
+                concurrent_blocked = client.post(
+                    "/api/invite/login",
+                    headers=concurrent_headers,
+                    data={"code": "wrong"},
+                )
+                self.assertEqual(concurrent_blocked.status_code, 429)
+                self.assertEqual(authenticate.call_count, attempts)
+                release.set()
+                for thread in concurrent_threads:
+                    thread.join(timeout=10)
+        finally:
+            release.set()
+            for thread in concurrent_threads:
+                thread.join(timeout=10)
+        self.assertTrue(all(not thread.is_alive() for thread in concurrent_threads))
+        self.assertEqual(concurrent_errors, [])
+        self.assertEqual(concurrent_results, [401] * attempts)
+
+        blocked_ip = {"cf-connecting-ip": "203.0.113.20"}
+        for _ in range(10):
+            response = client.post(
+                "/api/invite/login",
+                headers=blocked_ip,
+                data={"code": "wrong"},
+            )
+            self.assertEqual(response.status_code, 401)
+        blocked_request_id = "req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        blocked = client.post(
+            "/api/invite/login",
+            headers={**blocked_ip, "x-request-id": blocked_request_id},
+            data={"code": "wrong"},
+        )
+        self.assertEqual(blocked.status_code, 429)
+        self.assertIn("登录尝试过多", blocked.text)
+        self.assertGreater(int(blocked.headers["retry-after"]), 0)
+        self.assertEqual(blocked.headers["cache-control"], "no-store")
+
+        rejection_events = []
+        for request_id, http_status in (
+            (malformed_request_id, 400),
+            (oversized_request_id, 413),
+            (unsupported_request_id, 415),
+        ):
+            events, terminal = self._terminal_for_request(
+                trace_store,
+                request_id,
+                recorder=trace_recorder,
+            )
+            rejection_events.extend(events)
+            self.assertEqual(terminal.protocol_status, "NEEDS_INPUT")
+            self.assertEqual(terminal.protocol_layer, "login")
+            self.assertEqual(terminal.protocol_code, "LOGIN_REQUEST_INVALID")
+            self.assertEqual(terminal.safe_attributes["response_mode"], "html")
+            self.assertEqual(terminal.safe_attributes["http_status"], http_status)
+
+        trace_recorder.flush()
+        with sqlite3.connect(trace_database) as connection:
+            trace_id = str(connection.execute(
+                "SELECT trace_id FROM trace_events WHERE request_id = ? LIMIT 1",
+                (blocked_request_id,),
+            ).fetchone()[0])
+        blocked_events = trace_store.events_for_trace(trace_id)
+        terminals = [
+            event for event in blocked_events
+            if event.event_type in {"public_response_finalized", "request_failed"}
+        ]
+        self.assertEqual(len(terminals), 1)
+        self.assertEqual(terminals[0].protocol_code, "LOGIN_RATE_LIMITED")
+        self.assertEqual(terminals[0].safe_attributes["response_mode"], "html")
+        safe_trace = json.dumps(
+            [event.to_dict() for event in [*rejection_events, *blocked_events]],
+            ensure_ascii=False,
+        )
+        self.assertNotIn("203.0.113.20", safe_trace)
+        self.assertNotIn("wrong", safe_trace)
+        self.assertNotIn(malformed_secret, safe_trace)
+
+        allowed = client.post(
+            "/api/invite/login",
+            headers={"cf-connecting-ip": "203.0.113.21"},
+            data={"code": codes[0][1]},
+            follow_redirects=False,
+        )
+        self.assertEqual(allowed.status_code, 303)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for JavaScript syntax validation")
     def test_javascript_has_valid_syntax(self):
         result = subprocess.run(
@@ -2042,7 +2404,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260822-feedback-v1"', 'src="/assets/demo.js?v=20260826-response-binding-v1"',
+            'href="/assets/demo.css?v=20260822-feedback-v1"', 'src="/assets/demo.js?v=20260827-queue-timeout-v1"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',

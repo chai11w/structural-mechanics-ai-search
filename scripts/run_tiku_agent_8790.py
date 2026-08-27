@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -26,6 +27,41 @@ DEFAULT_PORT = 8790
 DEFAULT_RUNTIME_DIR = BASE / ".tmp_tiku_agent_v2_prod_8790"
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
+
+
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be zero or greater")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be finite and greater than zero")
+    return parsed
+
+
+def _validate_queue_settings(
+    max_concurrent_tasks: int,
+    max_queued_tasks: int,
+    queue_wait_seconds: float,
+) -> None:
+    if int(max_concurrent_tasks) <= 0:
+        raise ValueError("max_concurrent_tasks must be greater than zero")
+    if int(max_queued_tasks) < 0:
+        raise ValueError("max_queued_tasks must be zero or greater")
+    wait_seconds = float(queue_wait_seconds)
+    if not math.isfinite(wait_seconds) or wait_seconds <= 0:
+        raise ValueError("queue_wait_seconds must be finite and greater than zero")
+
+
 def build_app(
     runtime_dir: str | Path = DEFAULT_RUNTIME_DIR,
     *,
@@ -38,7 +74,15 @@ def build_app(
     triage_timeout_seconds: float = 120.0,
     reply_timeout_seconds: float = 60.0,
     enable_output_watchdog: bool = True,
+    max_concurrent_tasks: int = 1,
+    max_queued_tasks: int = 2,
+    queue_wait_seconds: float = 55.0,
 ):
+    _validate_queue_settings(
+        max_concurrent_tasks,
+        max_queued_tasks,
+        queue_wait_seconds,
+    )
     root = Path(runtime_dir).resolve()
     if control_db is not None and invite_config is not None:
         raise ValueError("use either control_db or invite_config, not both")
@@ -66,6 +110,9 @@ def build_app(
             enable_author_contact_fallback=True,
             enable_three_scope_cancel_clarification=True,
             preserve_a2_artifacts_on_cancel=True,
+            max_concurrent_tasks=max_concurrent_tasks,
+            max_queued_tasks=max_queued_tasks,
+            queue_wait_seconds=queue_wait_seconds,
         ),
         incoming_dir=root / "incoming",
         session_cookie=SESSION_COOKIE,
@@ -100,6 +147,24 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grounding-timeout-seconds", type=float, default=180.0)
     parser.add_argument("--triage-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--reply-timeout-seconds", type=float, default=60.0)
+    parser.add_argument(
+        "--max-concurrent-tasks",
+        type=_positive_int,
+        default=1,
+        help="Maximum active production tasks (default: 1)",
+    )
+    parser.add_argument(
+        "--max-queued-tasks",
+        type=_nonnegative_int,
+        default=2,
+        help="Maximum waiting production tasks (default: 2)",
+    )
+    parser.add_argument(
+        "--queue-wait-seconds",
+        type=_positive_float,
+        default=55.0,
+        help="Maximum queue wait before returning busy (default: 55)",
+    )
     parser.add_argument(
         "--disable-output-watchdog",
         dest="enable_output_watchdog",
@@ -140,6 +205,9 @@ def main() -> int:
             triage_timeout_seconds=args.triage_timeout_seconds,
             reply_timeout_seconds=args.reply_timeout_seconds,
             enable_output_watchdog=args.enable_output_watchdog,
+            max_concurrent_tasks=args.max_concurrent_tasks,
+            max_queued_tasks=args.max_queued_tasks,
+            queue_wait_seconds=args.queue_wait_seconds,
         ),
         host=args.host,
         port=args.port,

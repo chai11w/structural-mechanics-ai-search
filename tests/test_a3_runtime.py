@@ -31,7 +31,11 @@ from tiku_agent.image_contracts import ImageTriageObservation
 from tiku_agent.image_triage import build_handoff
 from tiku_agent.image_triage_authority import ImageTriageDecision
 from tiku_agent.session_artifacts import SessionArtifacts
-from tiku_agent.session_runtime import AgentProtocolError, AgentSessionRuntime
+from tiku_agent.session_runtime import (
+    AgentProtocolError,
+    AgentRuntimeBusyError,
+    AgentSessionRuntime,
+)
 from tiku_agent.session_store import SQLiteSessionStore
 from tiku_shared.request_protocol import RequestProtocol
 from tiku_shared.trace_context import (
@@ -109,6 +113,21 @@ class FakeObserver:
 class FakeSingleObserver:
     def observe(self, _image_path: Path):
         return parse_a3_page_understanding(_single_page_payload())
+
+
+class BlockingObserver:
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+
+    def observe(self, _image_path: Path):
+        self.calls += 1
+        if self.calls == 1:
+            self.started.set()
+            if not self.release.wait(timeout=5):
+                raise TimeoutError("test observer was not released")
+        return parse_a3_page_understanding(_page_payload())
 
 
 class FakeVerifier:
@@ -393,6 +412,355 @@ class A3RuntimeTests(unittest.TestCase):
             page_observer=FakeObserver(),
             crop_verifier=self.verifier,
             unit_analyzer=self.analyzer,
+        )
+
+    def test_parent_execution_gate_bounds_a3_model_work(self):
+        observer = BlockingObserver()
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "gate-a3.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "gate-sessions"),
+            a2_runtime=self.a2,
+            page_observer=observer,
+            crop_verifier=self.verifier,
+            max_concurrent_tasks=1,
+            max_queued_tasks=1,
+            queue_wait_seconds=2,
+        )
+        queued = threading.Event()
+        progress_stages = []
+        outcomes = {}
+
+        def run_first():
+            try:
+                outcomes["first"] = runtime.handle_image("gate-first", self.source)
+            except Exception as exc:  # pragma: no cover - assertion reports the failure.
+                outcomes["first_error"] = exc
+
+        def run_second():
+            try:
+                def report(kind, _message):
+                    progress_stages.append(kind)
+                    if kind == "queued":
+                        queued.set()
+
+                outcomes["second"] = runtime.handle_image(
+                    "gate-second",
+                    self.source,
+                    progress=report,
+                )
+            except Exception as exc:  # pragma: no cover - assertion reports the failure.
+                outcomes["second_error"] = exc
+
+        first = threading.Thread(target=run_first)
+        second = threading.Thread(target=run_second)
+        first.start()
+        self.assertTrue(observer.started.wait(timeout=2))
+        second.start()
+        self.assertTrue(queued.wait(timeout=2))
+
+        with self.assertRaises(AgentRuntimeBusyError) as raised:
+            runtime.handle_image("gate-third", self.source)
+        self.assertEqual(raised.exception.code, "QUEUE_FULL")
+        self.assertFalse(raised.exception.response_snapshot["session_valid"])
+        self.assertEqual(raised.exception.response_snapshot["phase"], "IDLE")
+        self.assertEqual(observer.calls, 1)
+
+        observer.release.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertNotIn("first_error", outcomes)
+        self.assertNotIn("second_error", outcomes)
+        self.assertIn("first", outcomes)
+        self.assertIn("second", outcomes)
+        self.assertEqual(observer.calls, 2)
+        self.assertEqual(progress_stages[:2], ["queued", "dequeued"])
+
+    def test_parent_execution_gate_times_out_with_snapshot_before_model_work(self):
+        observer = BlockingObserver()
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "gate-timeout.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "gate-timeout-sessions"),
+            a2_runtime=self.a2,
+            page_observer=observer,
+            crop_verifier=self.verifier,
+            max_concurrent_tasks=1,
+            max_queued_tasks=1,
+            queue_wait_seconds=0.05,
+        )
+        first_error = []
+
+        def run_first():
+            try:
+                runtime.handle_image("gate-timeout-first", self.source)
+            except Exception as exc:  # pragma: no cover - assertion reports the failure.
+                first_error.append(exc)
+
+        first = threading.Thread(target=run_first)
+        first.start()
+        self.assertTrue(observer.started.wait(timeout=2))
+        stages = []
+        with self.assertRaises(AgentRuntimeBusyError) as raised:
+            runtime.handle_image(
+                "gate-timeout-second",
+                self.source,
+                progress=lambda kind, _message: stages.append(kind),
+            )
+        self.assertEqual(raised.exception.code, "QUEUE_TIMEOUT")
+        self.assertFalse(raised.exception.response_snapshot["session_valid"])
+        self.assertEqual(raised.exception.response_snapshot["phase"], "IDLE")
+        self.assertEqual(stages, ["queued"])
+        self.assertEqual(observer.calls, 1)
+
+        observer.release.set()
+        first.join(timeout=5)
+        self.assertFalse(first.is_alive())
+        self.assertEqual(first_error, [])
+
+    def test_parent_execution_gate_also_bounds_direct_a2_routing(self):
+        class BlockingA2Runtime(FakeA2Runtime):
+            def __init__(self):
+                super().__init__()
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def handle_prechecked_image(self, session_id, image_path, **kwargs):
+                self.started.set()
+                if not self.release.wait(timeout=5):
+                    raise TimeoutError("test A2 runtime was not released")
+                return super().handle_prechecked_image(session_id, image_path, **kwargs)
+
+        a2 = BlockingA2Runtime()
+        authority = FakeFlowAuthority("A2")
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "gate-a2.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "gate-a2-sessions"),
+            a2_runtime=a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            image_triage_authority=authority,
+            max_concurrent_tasks=1,
+            max_queued_tasks=0,
+            queue_wait_seconds=1,
+        )
+        first_error = []
+
+        def run_first():
+            try:
+                runtime.handle_image("gate-a2-first", self.source)
+            except Exception as exc:  # pragma: no cover - assertion reports the failure.
+                first_error.append(exc)
+
+        first = threading.Thread(target=run_first)
+        first.start()
+        self.assertTrue(a2.started.wait(timeout=2))
+        with self.assertRaises(AgentRuntimeBusyError) as raised:
+            runtime.handle_image("gate-a2-second", self.source)
+        self.assertEqual(raised.exception.code, "QUEUE_FULL")
+        self.assertEqual(authority.calls, 1)
+
+        a2.release.set()
+        first.join(timeout=5)
+        self.assertFalse(first.is_alive())
+        self.assertEqual(first_error, [])
+
+    def test_same_a3_session_waiter_does_not_consume_global_runtime_permit(self):
+        class TwoBlockingObserver:
+            def __init__(self):
+                self.calls = 0
+                self.calls_lock = threading.Lock()
+                self.first_started = threading.Event()
+                self.other_started = threading.Event()
+                self.same_second_started = threading.Event()
+                self.release_first = threading.Event()
+                self.release_other = threading.Event()
+
+            def observe(self, _image_path):
+                with self.calls_lock:
+                    self.calls += 1
+                    call_number = self.calls
+                if call_number == 1:
+                    self.first_started.set()
+                    if not self.release_first.wait(3):
+                        raise TimeoutError("first A3 call was not released")
+                elif call_number == 2:
+                    self.other_started.set()
+                    if not self.release_other.wait(3):
+                        raise TimeoutError("other-session A3 call was not released")
+                else:
+                    self.same_second_started.set()
+                return parse_a3_page_understanding(_page_payload())
+
+        observer = TwoBlockingObserver()
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "same-session-gate-a3.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "same-session-gate-sessions"),
+            a2_runtime=self.a2,
+            page_observer=observer,
+            crop_verifier=self.verifier,
+            max_concurrent_tasks=2,
+            max_queued_tasks=1,
+            queue_wait_seconds=2,
+        )
+        first_session = "same-a3-session"
+        first_lock = runtime._lock(first_session)
+        other_session = next(
+            candidate
+            for index in range(1000)
+            if (candidate := f"other-a3-session-{index}")
+            and runtime._lock(candidate) is not first_lock
+        )
+        same_queued = threading.Event()
+        outcomes = {}
+
+        def run(name, session_id, *, progress=None):
+            try:
+                outcomes[name] = runtime.handle_image(
+                    session_id,
+                    self.source,
+                    progress=progress,
+                )
+            except Exception as exc:  # pragma: no cover - assertion reports details.
+                outcomes[f"{name}_error"] = exc
+
+        first = threading.Thread(target=run, args=("first", first_session))
+        same_second = threading.Thread(
+            target=run,
+            args=("same_second", first_session),
+            kwargs={
+                "progress": lambda stage, _message: (
+                    same_queued.set() if stage == "queued" else None
+                )
+            },
+        )
+        other = threading.Thread(target=run, args=("other", other_session))
+        first.start()
+        self.assertTrue(observer.first_started.wait(1))
+        same_second.start()
+        self.assertTrue(same_queued.wait(1))
+        other.start()
+        self.assertTrue(observer.other_started.wait(1))
+        self.assertEqual(observer.calls, 2)
+        with self.assertRaises(AgentRuntimeBusyError) as raised:
+            runtime.handle_image("overflow-a3-session", self.source)
+        self.assertEqual(raised.exception.code, "QUEUE_FULL")
+
+        observer.release_first.set()
+        self.assertTrue(observer.same_second_started.wait(1))
+        observer.release_other.set()
+        first.join(3)
+        same_second.join(3)
+        other.join(3)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(same_second.is_alive())
+        self.assertFalse(other.is_alive())
+        self.assertNotIn("first_error", outcomes)
+        self.assertNotIn("same_second_error", outcomes)
+        self.assertNotIn("other_error", outcomes)
+        self.assertIn("other", outcomes)
+        self.assertEqual(observer.calls, 3)
+
+    def test_business_error_snapshot_is_frozen_before_same_session_queue_advances(self):
+        class FirstFailingA2Runtime(FakeA2Runtime):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+                self.first_started = threading.Event()
+                self.release_first = threading.Event()
+                self.second_started = threading.Event()
+
+            def handle_prechecked_image(self, session_id, image_path, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    self.first_started.set()
+                    if not self.release_first.wait(timeout=5):
+                        raise TimeoutError("first direct A2 request was not released")
+                    raise AgentProtocolError(
+                        "first direct A2 request failed",
+                        code="SERVICE_UNAVAILABLE",
+                    )
+                self.second_started.set()
+                return super().handle_prechecked_image(session_id, image_path, **kwargs)
+
+        a2 = FirstFailingA2Runtime()
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "snapshot-race.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "snapshot-race-sessions"),
+            a2_runtime=a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            image_triage_authority=FakeFlowAuthority("A2"),
+            max_concurrent_tasks=1,
+            max_queued_tasks=1,
+            queue_wait_seconds=2,
+        )
+        original_snapshot = runtime.session_snapshot
+
+        def observed_snapshot(session_id):
+            session_lock = runtime._lock(session_id)
+            acquired = []
+
+            def probe_lock():
+                locked = session_lock.acquire(timeout=0.05)
+                acquired.append(locked)
+                if locked:
+                    session_lock.release()
+
+            probe = threading.Thread(target=probe_lock)
+            probe.start()
+            probe.join(timeout=1)
+            self.assertFalse(probe.is_alive())
+            lock_is_held = acquired == [False]
+            if not lock_is_held:
+                self.assertTrue(a2.second_started.wait(timeout=2))
+            return original_snapshot(session_id)
+
+        runtime.session_snapshot = observed_snapshot
+        session_id = "snapshot-race-session"
+        outcomes = {}
+        queued = threading.Event()
+
+        def run_first():
+            try:
+                outcomes["first"] = runtime.handle_image(session_id, self.source)
+            except Exception as exc:  # pragma: no cover - assertion reports the failure.
+                outcomes["first_error"] = exc
+
+        def run_second():
+            try:
+                outcomes["second"] = runtime.handle_image(
+                    session_id,
+                    self.source,
+                    progress=lambda stage, _message: (
+                        queued.set() if stage == "queued" else None
+                    ),
+                )
+            except Exception as exc:  # pragma: no cover - assertion reports the failure.
+                outcomes["second_error"] = exc
+
+        first = threading.Thread(target=run_first)
+        second = threading.Thread(target=run_second)
+        first.start()
+        self.assertTrue(a2.first_started.wait(timeout=2))
+        first_workflow_search_id = runtime.store.load(session_id).workflow_search_id
+        second.start()
+        self.assertTrue(queued.wait(timeout=2))
+        a2.release_first.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertIn("first_error", outcomes)
+        self.assertNotIn("second_error", outcomes)
+        self.assertEqual(
+            outcomes["first_error"].response_snapshot["workflow_search_id"],
+            first_workflow_search_id,
+        )
+        self.assertNotEqual(
+            outcomes["second"].response_snapshot["workflow_search_id"],
+            first_workflow_search_id,
         )
 
     def test_a3_cost_runs_keep_identity_and_workflow_search_id(self):

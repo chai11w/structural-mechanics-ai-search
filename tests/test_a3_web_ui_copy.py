@@ -34,12 +34,21 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn("openA3Sheet();", self.script)
         self.assertIn("A3_AUTO_PREPARE_IDLE_TIMEOUT_MS = 210000", self.script)
         self.assertIn("renewTimeoutOnProgress: autoPrepareAll", self.script)
-        self.assertIn("renewTimeoutOnProgress: autoPrepareRetry", self.script)
+        self.assertIn("renewTimeoutOnProgress: true", self.script)
         self.assertGreaterEqual(self.script.count("maybeOpenAutoPreparedA3Sheet(response)"), 3)
         self.assertIn("await sessionBootstrap", self.script)
         self.assertIn("sessionBootstrap = repairUploadedImageHistory()", self.script)
         self.assertIn(".lightbox { position: fixed; z-index: 120", self.style)
         self.assertIn(".a3-sheet-backdrop, .a3-example-backdrop { position: fixed; z-index: 80", self.style)
+
+    def test_text_stream_renews_timeout_for_queue_and_processing_progress(self):
+        text_body = self.script[
+            self.script.index("async function sendTextValue"):
+            self.script.index("async function sendText()")
+        ]
+
+        self.assertIn("requestStream('/api/message/stream'", text_body)
+        self.assertIn("renewTimeoutOnProgress: true", text_body)
 
     def test_manual_fallback_keeps_available_page_overlay(self):
         manual_body = self.script[

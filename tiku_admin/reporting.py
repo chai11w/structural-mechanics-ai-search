@@ -230,8 +230,11 @@ class AdminReporter:
     def invitation_delete_blockers(self, invite_id: str) -> dict[str, int]:
         cost_runs = 0
         readable = False
+        incomplete = False
         for path in self.cost_databases:
             if not path.is_file():
+                if path.exists():
+                    incomplete = True
                 continue
             try:
                 with sqlite3.connect(path) as connection:
@@ -241,9 +244,12 @@ class AdminReporter:
                     ).fetchone()[0])
                     readable = True
             except sqlite3.Error:
-                continue
+                incomplete = True
         return {
-            "cost_runs": cost_runs if readable else -1,
+            # Unknown must remain truthy because the caller uses this value as
+            # a permanent-delete guard. One readable database must not hide a
+            # corrupt or schema-incompatible sibling database.
+            "cost_runs": cost_runs if readable and not incomplete else -1,
             "feedback": self.feedback_store.count_for_identity(invite_id),
         }
 
@@ -516,6 +522,7 @@ def _cost_summary(
     if repriced:
         warnings = sorted({*warnings, "HISTORICAL_PRICE_RECALCULATED"})
     result: dict[str, object] = {
+        "has_records": True,
         "estimated_cost_micros": cost,
         "estimated_cost_cny": micros_to_cny(cost),
         "model_call_count": sum(int(run["call_count"] or 0) for run in runs),
@@ -769,6 +776,7 @@ def _empty_search_cost(
     image_route: str = "",
 ) -> dict[str, object]:
     result: dict[str, object] = {
+        "has_records": False,
         "estimated_cost_micros": 0,
         "estimated_cost_cny": "0.00",
         "model_call_count": 0,
