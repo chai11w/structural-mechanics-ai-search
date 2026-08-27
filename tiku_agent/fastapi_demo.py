@@ -1018,32 +1018,48 @@ def create_app(
         if not text:
             raise HTTPException(status_code=400, detail="text is required")
         session_id = _session_id(request, cookie_name=session_cookie)
-        stale = _validate_action_context(
-            runtime,
-            session_id,
-            payload.get("action_context"),
-            request_id=_request_id(request),
-        )
-        if stale is not None:
+        request_id = _request_id(request)
+        identity_key = _identity_key(request)
+        secure_cookie = _is_secure_request(request)
+
+        def execute() -> Response:
+            stale = _validate_action_context(
+                runtime,
+                session_id,
+                payload.get("action_context"),
+                request_id=request_id,
+            )
+            if stale is not None:
+                return _agent_json(
+                    stale,
+                    runtime,
+                    session_id,
+                    response_store=response_store,
+                    identity_key=identity_key or "local",
+                    secure_cookie=secure_cookie,
+                    cookie_name=session_cookie,
+                )
+            response = _handle_text(
+                runtime,
+                session_id,
+                text,
+                request_id=request_id,
+                identity_key=identity_key,
+            )
             return _agent_json(
-                stale,
+                response,
                 runtime,
                 session_id,
                 response_store=response_store,
-                identity_key=_identity_key(request) or "local",
-                secure_cookie=_is_secure_request(request),
+                identity_key=identity_key or "local",
+                secure_cookie=secure_cookie,
                 cookie_name=session_cookie,
             )
-        response = _handle_text(runtime, session_id, text, request=request)
-        return _agent_json(
-            response,
-            runtime,
-            session_id,
-            response_store=response_store,
-            identity_key=_identity_key(request) or "local",
-            secure_cookie=_is_secure_request(request),
-            cookie_name=session_cookie,
-        )
+
+        # The JSON compatibility endpoint runs the same synchronous model and
+        # search pipeline as the streaming endpoint. Keep it off the ASGI event
+        # loop so /health remains responsive during a long provider call.
+        return await asyncio.to_thread(execute)
 
     @app.post("/api/message/stream")
     async def message_stream(request: Request) -> StreamingResponse:
@@ -1141,31 +1157,44 @@ def create_app(
     async def image(request: Request) -> Response:
         content, filename, content_type = await _read_image_upload(request)
         session_id = _session_id(request, cookie_name=session_cookie)
+        request_id = _request_id(request)
+        identity_key = _identity_key(request)
+        secure_cookie = _is_secure_request(request)
         incoming = _write_incoming_image(
             content,
             filename,
             content_type,
             incoming_dir=incoming_dir,
         )
-        try:
-            response = _handle_image(runtime, session_id, incoming, request=request)
-            uploaded_image = (
-                response.uploaded_image_path
-                if response.response_media_snapshot_captured
-                else runtime.current_image_path(session_id)
+
+        def execute() -> Response:
+            try:
+                response = _handle_image(
+                    runtime,
+                    session_id,
+                    incoming,
+                    request_id=request_id,
+                    identity_key=identity_key,
+                )
+                uploaded_image = (
+                    response.uploaded_image_path
+                    if response.response_media_snapshot_captured
+                    else runtime.current_image_path(session_id)
+                )
+            finally:
+                incoming.unlink(missing_ok=True)
+            return _agent_json(
+                response,
+                runtime,
+                session_id,
+                uploaded_image=uploaded_image,
+                response_store=response_store,
+                identity_key=identity_key or "local",
+                secure_cookie=secure_cookie,
+                cookie_name=session_cookie,
             )
-        finally:
-            incoming.unlink(missing_ok=True)
-        return _agent_json(
-            response,
-            runtime,
-            session_id,
-            uploaded_image=uploaded_image,
-            response_store=response_store,
-            identity_key=_identity_key(request) or "local",
-            secure_cookie=_is_secure_request(request),
-            cookie_name=session_cookie,
-        )
+
+        return await asyncio.to_thread(execute)
 
     @app.post("/api/image/stream")
     async def image_stream(request: Request) -> StreamingResponse:

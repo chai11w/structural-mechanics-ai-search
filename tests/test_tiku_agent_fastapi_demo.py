@@ -2601,6 +2601,99 @@ class FastApiDemoTest(unittest.TestCase):
         )
         self.assertEqual(oversized.status_code, 413)
 
+    def test_json_model_endpoints_keep_health_responsive_while_runtime_is_busy(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        media_path = runtime_dir / f"demo_health_busy_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: media_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(media_path)
+
+        class BlockingRuntime(FakeRuntime):
+            def __init__(self, image_path: Path):
+                super().__init__(image_path)
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def _block(self) -> None:
+                self.started.set()
+                self.release.wait(timeout=3)
+
+            def handle_text(
+                self,
+                session_id: str,
+                text: str,
+                *,
+                identity_key="",
+                progress=None,
+            ) -> AgentResponse:
+                self._block()
+                return super().handle_text(
+                    session_id,
+                    text,
+                    identity_key=identity_key,
+                    progress=progress,
+                )
+
+            def handle_image(
+                self,
+                session_id: str,
+                image_path: Path,
+                *,
+                identity_key="",
+                progress=None,
+            ) -> AgentResponse:
+                self._block()
+                return super().handle_image(
+                    session_id,
+                    image_path,
+                    identity_key=identity_key,
+                    progress=progress,
+                )
+
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (4, 4), "white").save(image_bytes, format="JPEG")
+        cases = (
+            ("message", lambda client: client.post("/api/message", json={"text": "继续"})),
+            (
+                "image",
+                lambda client: client.post(
+                    "/api/image",
+                    content=image_bytes.getvalue(),
+                    headers={"x-filename": "question.jpg"},
+                ),
+            ),
+        )
+
+        for name, send in cases:
+            with self.subTest(endpoint=name):
+                runtime = BlockingRuntime(media_path)
+                responses = []
+                errors = []
+                with TestClient(create_app(runtime=runtime)) as client:
+
+                    def run_request() -> None:
+                        try:
+                            responses.append(send(client))
+                        except Exception as exc:  # pragma: no cover - assertion reports it.
+                            errors.append(exc)
+
+                    worker = threading.Thread(target=run_request, daemon=True)
+                    worker.start()
+                    self.assertTrue(runtime.started.wait(timeout=1))
+                    timer = threading.Timer(1.5, runtime.release.set)
+                    timer.start()
+                    started = time.perf_counter()
+                    health = client.get("/health")
+                    elapsed = time.perf_counter() - started
+                    runtime.release.set()
+                    timer.cancel()
+                    worker.join(timeout=3)
+
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(health.status_code, 200)
+                self.assertLess(elapsed, 0.75)
+                self.assertEqual(responses[0].status_code, 200)
+
     def test_health_text_cookie_image_upload_and_session_bound_media(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
         media_path = runtime_dir / f"demo_test_result_{uuid4().hex}.jpg"
