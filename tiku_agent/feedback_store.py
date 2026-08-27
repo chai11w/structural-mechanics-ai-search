@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 from threading import Lock
@@ -13,8 +14,10 @@ from typing import Callable, Sequence
 from uuid import uuid4
 
 
-FEEDBACK_SCHEMA_VERSION = 7
+FEEDBACK_SCHEMA_VERSION = 8
 FEEDBACK_SCOPES = frozenset({"page", "question"})
+FEEDBACK_RESPONSE_ID_RE = re.compile(r"^resp_[0-9a-f]{32}$")
+FEEDBACK_INTENT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,95}$")
 _PAGE_FEEDBACK_INTENTS = frozenset({
     "a3_page_error",
     "a3_page_ready",
@@ -28,6 +31,7 @@ class MessageFeedback:
     feedback_id: str
     feedback_number: str
     message_id: str
+    rated_response_id: str
     identity_key: str
     session_key: str
     rating: str
@@ -46,6 +50,7 @@ class MessageFeedback:
     chapter: str
     image_route: str
     workflow_search_id: str
+    intent: str
     feedback_scope: str
     conversation: tuple[dict[str, object], ...]
     review_status: str
@@ -169,6 +174,7 @@ class SQLiteFeedbackStore:
         task_revision: int,
         phase: str,
         candidate_count: int,
+        rated_response_id: str,
         search_duration_ms: int = 0,
         search_key: str = "",
         request_id: str = "",
@@ -179,26 +185,50 @@ class SQLiteFeedbackStore:
         chapter: str = "",
         image_route: str = "",
         workflow_search_id: str = "",
+        intent: str = "",
         conversation: list[dict[str, object]] | None = None,
         media_resolver: Callable[[str], Path | None] | None = None,
         retention_days: int = 30,
     ) -> MessageFeedback:
         now = datetime.now(UTC).isoformat()
+        clean_rated_response_id = str(rated_response_id or "").strip()
+        if not FEEDBACK_RESPONSE_ID_RE.fullmatch(clean_rated_response_id):
+            raise ValueError("invalid rated response id")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
             with sqlite3.connect(self.path) as connection:
                 connection.row_factory = sqlite3.Row
                 _create_schema(connection)
-                existing = connection.execute(
-                    """
-                    SELECT feedback_id, feedback_number, created_at, conversation_json,
+                base_select = """
+                    SELECT feedback_id, feedback_number, message_id, rated_response_id,
+                           identity_key, session_key, created_at, conversation_json,
                            case_expires_at, case_purged_at, review_status, admin_note,
                            archived_at
                     FROM message_feedback
-                    WHERE identity_key = ? AND session_key = ? AND message_id = ?
-                    """,
+                """
+                existing = connection.execute(
+                    base_select + " WHERE rated_response_id = ?",
+                    (clean_rated_response_id,),
+                ).fetchone()
+                if existing is not None and (
+                    str(existing["identity_key"]) != str(identity_key)
+                    or str(existing["session_key"]) != str(session_key)
+                ):
+                    raise ValueError("rated response is already bound")
+                if existing is not None and str(existing["message_id"]) != message_id:
+                    raise ValueError("rated response message id mismatch")
+                message_binding = connection.execute(
+                    base_select
+                    + " WHERE identity_key = ? AND session_key = ? AND message_id = ?",
                     (identity_key, session_key, message_id),
                 ).fetchone()
+                if message_binding is not None and str(
+                    message_binding["rated_response_id"]
+                ) != clean_rated_response_id:
+                    raise ValueError("message id is already bound")
+                stored_message_id = (
+                    str(existing["message_id"]) if existing is not None else message_id
+                )
                 feedback_id = str(existing["feedback_id"]) if existing else uuid4().hex
                 created_at = str(existing["created_at"]) if existing else now
                 feedback_number = (
@@ -216,7 +246,7 @@ class SQLiteFeedbackStore:
                     sanitized = self._capture_conversation(
                         feedback_id,
                         conversation,
-                        target_message_id=message_id,
+                        target_message_id=stored_message_id,
                         media_resolver=media_resolver,
                     )
                     conversation_json = json.dumps(
@@ -230,24 +260,37 @@ class SQLiteFeedbackStore:
                     if str(image_route).strip().upper() in {"A1", "A2", "A3"}
                     else ""
                 )
+                clean_intent = str(intent or "").strip()
+                if clean_intent and not FEEDBACK_INTENT_RE.fullmatch(clean_intent):
+                    raise ValueError("invalid response intent")
                 stored_conversation = _conversation_from_json(conversation_json)
+                # New HTTP feedback supplies the server-owned response intent.
+                # Keep the sanitized conversation fallback for direct/legacy
+                # store callers that predate the authoritative intent field.
+                scope_target = (
+                    {"intent": clean_intent}
+                    if clean_intent
+                    else _target_feedback_message(stored_conversation, stored_message_id)
+                )
                 feedback_scope = classify_feedback_scope(
-                    _target_feedback_message(stored_conversation, message_id),
+                    scope_target,
                     image_route=clean_image_route,
                 )
                 connection.execute(
                     """
                     INSERT INTO message_feedback (
-                        feedback_id, feedback_number, message_id, identity_key, session_key, rating,
+                        feedback_id, feedback_number, message_id, rated_response_id,
+                        identity_key, session_key, rating,
                         tags_json, detail, task_revision, phase, candidate_count,
                         search_duration_ms, search_key, request_id, search_id,
-                        status, layer, code, chapter, image_route, workflow_search_id,
+                        status, layer, code, chapter, image_route, workflow_search_id, intent,
                         feedback_scope,
                         conversation_json,
                         review_status, admin_note, archived_at,
                         case_expires_at, case_purged_at, created_at, updated_at, schema_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(identity_key, session_key, message_id) DO UPDATE SET
+                        rated_response_id = excluded.rated_response_id,
                         rating = excluded.rating,
                         tags_json = excluded.tags_json,
                         detail = excluded.detail,
@@ -264,6 +307,7 @@ class SQLiteFeedbackStore:
                         chapter = excluded.chapter,
                         image_route = excluded.image_route,
                         workflow_search_id = excluded.workflow_search_id,
+                        intent = excluded.intent,
                         feedback_scope = excluded.feedback_scope,
                         conversation_json = excluded.conversation_json,
                         case_expires_at = excluded.case_expires_at,
@@ -274,7 +318,8 @@ class SQLiteFeedbackStore:
                     (
                         feedback_id,
                         feedback_number,
-                        message_id,
+                        stored_message_id,
+                        clean_rated_response_id,
                         identity_key,
                         session_key,
                         rating,
@@ -293,6 +338,7 @@ class SQLiteFeedbackStore:
                         str(chapter).strip()[:80],
                         clean_image_route,
                         str(workflow_search_id or search_id or search_key).strip(),
+                        clean_intent,
                         feedback_scope,
                         conversation_json,
                         review_status,
@@ -308,7 +354,8 @@ class SQLiteFeedbackStore:
         return MessageFeedback(
             feedback_id=feedback_id,
             feedback_number=feedback_number,
-            message_id=message_id,
+            message_id=stored_message_id,
+            rated_response_id=clean_rated_response_id,
             identity_key=identity_key,
             session_key=session_key,
             rating=rating,
@@ -327,6 +374,7 @@ class SQLiteFeedbackStore:
             chapter=str(chapter).strip()[:80],
             image_route=clean_image_route,
             workflow_search_id=str(workflow_search_id or search_id or search_key).strip(),
+            intent=clean_intent,
             feedback_scope=feedback_scope,
             conversation=tuple(stored_conversation),
             review_status=review_status,
@@ -354,6 +402,7 @@ class SQLiteFeedbackStore:
     def query_feedback(
         self,
         *,
+        rated_response_id: str = "",
         rating: str = "",
         feedback_scope: str = "",
         identity_key: str = "",
@@ -374,6 +423,7 @@ class SQLiteFeedbackStore:
         clauses: list[str] = []
         parameters: list[object] = []
         for column, value in (
+            ("rated_response_id", rated_response_id),
             ("rating", rating),
             ("feedback_scope", feedback_scope),
             ("identity_key", identity_key),
@@ -571,36 +621,40 @@ class SQLiteFeedbackStore:
                 purged += 1
         return purged
 
-    def delete(
+    def delete_by_response(
         self,
         *,
-        message_id: str,
+        rated_response_id: str,
         identity_key: str,
         session_key: str,
     ) -> bool:
+        """Delete only a response-bound row; legacy feedback remains read-only."""
+
+        clean_response_id = str(rated_response_id or "").strip()
+        if not FEEDBACK_RESPONSE_ID_RE.fullmatch(clean_response_id):
+            raise ValueError("invalid rated response id")
         if not self.path.is_file():
             return False
         feedback_id = ""
-        with self._lock:
-            with sqlite3.connect(self.path) as connection:
-                connection.row_factory = sqlite3.Row
-                _create_schema(connection)
-                row = connection.execute(
-                    """
-                    SELECT feedback_id FROM message_feedback
-                    WHERE identity_key = ? AND session_key = ? AND message_id = ?
-                    """,
-                    (identity_key, session_key, message_id),
-                ).fetchone()
-                feedback_id = str(row["feedback_id"]) if row else ""
-                cursor = connection.execute(
-                    """
-                    DELETE FROM message_feedback
-                    WHERE identity_key = ? AND session_key = ? AND message_id = ?
-                    """,
-                    (identity_key, session_key, message_id),
-                )
-                removed = cursor.rowcount > 0
+        with self._lock, sqlite3.connect(self.path) as connection:
+            connection.row_factory = sqlite3.Row
+            _create_schema(connection)
+            row = connection.execute(
+                """
+                SELECT feedback_id FROM message_feedback
+                WHERE rated_response_id = ? AND identity_key = ? AND session_key = ?
+                """,
+                (clean_response_id, identity_key, session_key),
+            ).fetchone()
+            feedback_id = str(row["feedback_id"]) if row else ""
+            cursor = connection.execute(
+                """
+                DELETE FROM message_feedback
+                WHERE rated_response_id = ? AND identity_key = ? AND session_key = ?
+                """,
+                (clean_response_id, identity_key, session_key),
+            )
+            removed = cursor.rowcount > 0
         if removed and feedback_id:
             self._clear_case(feedback_id)
         return removed
@@ -683,6 +737,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             feedback_id TEXT PRIMARY KEY,
             feedback_number TEXT NOT NULL UNIQUE,
             message_id TEXT NOT NULL,
+            rated_response_id TEXT NOT NULL DEFAULT '',
             identity_key TEXT NOT NULL,
             session_key TEXT NOT NULL,
             rating TEXT NOT NULL,
@@ -701,6 +756,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             chapter TEXT NOT NULL DEFAULT '',
             image_route TEXT NOT NULL DEFAULT '',
             workflow_search_id TEXT NOT NULL DEFAULT '',
+            intent TEXT NOT NULL DEFAULT '',
             feedback_scope TEXT NOT NULL DEFAULT 'question',
             conversation_json TEXT NOT NULL DEFAULT '[]',
             review_status TEXT NOT NULL DEFAULT 'pending',
@@ -720,6 +776,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
     }
     migrations = {
         "feedback_number": "TEXT NOT NULL DEFAULT ''",
+        "rated_response_id": "TEXT NOT NULL DEFAULT ''",
         "search_duration_ms": "INTEGER NOT NULL DEFAULT 0",
         "search_key": "TEXT NOT NULL DEFAULT ''",
         "request_id": "TEXT NOT NULL DEFAULT ''",
@@ -730,6 +787,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         "chapter": "TEXT NOT NULL DEFAULT ''",
         "image_route": "TEXT NOT NULL DEFAULT ''",
         "workflow_search_id": "TEXT NOT NULL DEFAULT ''",
+        "intent": "TEXT NOT NULL DEFAULT ''",
         "feedback_scope": "TEXT NOT NULL DEFAULT ''",
         "conversation_json": "TEXT NOT NULL DEFAULT '[]'",
         "review_status": "TEXT NOT NULL DEFAULT 'pending'",
@@ -775,6 +833,10 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         "ON message_feedback(feedback_number)"
     )
     connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_rated_response "
+        "ON message_feedback(rated_response_id) WHERE rated_response_id != ''"
+    )
+    connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_feedback_identity_updated "
         "ON message_feedback(identity_key, updated_at)"
     )
@@ -801,6 +863,7 @@ def _feedback_from_row(row: sqlite3.Row) -> MessageFeedback:
         feedback_id=str(row["feedback_id"]),
         feedback_number=str(row["feedback_number"]),
         message_id=str(row["message_id"]),
+        rated_response_id=str(row["rated_response_id"]),
         identity_key=str(row["identity_key"]),
         session_key=str(row["session_key"]),
         rating=str(row["rating"]),
@@ -819,6 +882,7 @@ def _feedback_from_row(row: sqlite3.Row) -> MessageFeedback:
         chapter=str(row["chapter"]),
         image_route=str(row["image_route"]),
         workflow_search_id=str(row["workflow_search_id"] or row["search_id"] or row["search_key"]),
+        intent=str(row["intent"]),
         feedback_scope=(
             str(row["feedback_scope"])
             if str(row["feedback_scope"]) in FEEDBACK_SCOPES

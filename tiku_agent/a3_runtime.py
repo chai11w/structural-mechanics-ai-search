@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import wraps
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -88,6 +89,96 @@ A3_CROP_REVIEW_MESSAGES = {
 }
 A3_CROP_REVIEW_CODES = frozenset(A3_CROP_REVIEW_MESSAGES)
 _A3_PAGE_ERROR_RETENTION = timedelta(days=30)
+
+
+def _merge_a3_projection(
+    public_snapshot: Mapping[str, object],
+    existing_projection: object,
+) -> dict[str, object]:
+    """Combine the A3 parent identity with any nested A2 response details."""
+
+    projection = (
+        dict(existing_projection)
+        if isinstance(existing_projection, Mapping)
+        else {}
+    )
+
+    # These fields describe the page/workflow that owns the child response.
+    # They must come from the outer A3 state even when A2 finalized first.
+    for key in (
+        "session_valid",
+        "has_active_image",
+        "task_revision",
+        "phase",
+        "workflow_search_id",
+        "image_route",
+        "a3",
+    ):
+        if key in public_snapshot:
+            projection[key] = public_snapshot[key]
+
+    # Keep child search metadata when it exists; page-level snapshots may have
+    # intentionally reset these values after the child has completed.
+    for key in ("search_id", "chapter", "candidate_count", "candidate_generation"):
+        if key not in projection or projection[key] in (None, "", 0):
+            if key in public_snapshot:
+                projection[key] = public_snapshot[key]
+    return projection
+
+
+def _capture_a3_response_snapshot(method: Callable[..., AgentResponse]):
+    """Keep the response-time state while the per-session A3 lock is held."""
+
+    @wraps(method)
+    def wrapped(
+        runtime: "A3MvpRuntime",
+        session_id: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> AgentResponse:
+        clean = _clean_session_id(session_id)
+        with runtime._lock(clean):
+            try:
+                response = method(runtime, clean, *args, **kwargs)
+            except Exception as exc:
+                try:
+                    setattr(exc, "response_snapshot", runtime.session_snapshot(clean))
+                except Exception:  # noqa: BLE001 - never mask the original failure.
+                    pass
+                raise
+            else:
+                response.response_snapshot = dict(runtime.session_snapshot(clean))
+                response.response_projection_snapshot = _merge_a3_projection(
+                    response.response_snapshot,
+                    response.response_projection_snapshot,
+                )
+                response.response_media_snapshot_captured = True
+                try:
+                    response.uploaded_image_path = runtime.current_image_path(clean)
+                    raw_a3 = response.response_snapshot.get("a3")
+                    selected = raw_a3.get("selected_unit") if isinstance(raw_a3, Mapping) else None
+                    selected_unit_id = (
+                        str(selected.get("unit_id") or "").strip()
+                        if isinstance(selected, Mapping)
+                        else ""
+                    )
+                    if (
+                        isinstance(raw_a3, Mapping)
+                        and raw_a3.get("phase") == A3_PHASE_A2_ACTIVE
+                        and selected_unit_id
+                    ):
+                        response.submitted_crop_path = runtime.current_crop_path(
+                            clean, selected_unit_id
+                        )
+                    if response.intent == "a3_units_prepared":
+                        response.feedback_overlay_path = (
+                            runtime.current_auto_crop_overlay_path(clean)
+                        )
+                except Exception:  # noqa: BLE001 - do not replace the business reply.
+                    pass
+                return response
+
+    return wrapped
 _A3_MEDIA_RETRY_TEXTS = frozenset({"重试", "再试一次", "重新发送", "再发一次"})
 _CHINESE_ORDINALS = {
     "一": 1,
@@ -406,6 +497,7 @@ class A3MvpRuntime:
         )
         self._locks = tuple(threading.RLock() for _ in range(64))
 
+    @_capture_a3_response_snapshot
     def handle_image(
         self,
         session_id: str,
@@ -444,6 +536,7 @@ class A3MvpRuntime:
                 request_id=request_id,
             )
 
+    @_capture_a3_response_snapshot
     def handle_text(
         self,
         session_id: str,
@@ -915,6 +1008,7 @@ class A3MvpRuntime:
         options.append("continue_current")
         return options
 
+    @_capture_a3_response_snapshot
     def select_unit(
         self,
         session_id: str,
@@ -950,6 +1044,7 @@ class A3MvpRuntime:
                 request_id=request_id,
             )
 
+    @_capture_a3_response_snapshot
     def prepare_units(
         self,
         session_id: str,
@@ -1162,6 +1257,7 @@ class A3MvpRuntime:
             "error_type": "" if load_status == "yes" else "external_load_not_confirmed",
         }
 
+    @_capture_a3_response_snapshot
     def handle_crop(
         self,
         session_id: str,
@@ -1431,6 +1527,7 @@ class A3MvpRuntime:
         expected_task_revision: int = 0,
         expected_candidate_generation: str = "",
         kind: str = "answer",
+        snapshot_target: dict[str, object] | None = None,
     ) -> bool:
         """Keep the active A3 unit reopenable when response media was not delivered."""
 
@@ -1463,6 +1560,8 @@ class A3MvpRuntime:
                 else "answer_media_delivery_failed"
             )
             self.store.save(state)
+            if snapshot_target is not None:
+                snapshot_target.update(self.session_snapshot(clean))
             return True
 
     def resolve_media(self, session_id: str, filename: str) -> Path | None:
@@ -2047,6 +2146,20 @@ class A3MvpRuntime:
         response: AgentResponse,
     ) -> AgentResponse:
         self._bind_trace_state(state)
+        child_snapshot = dict(self.a2_runtime.session_snapshot(state.session_id))
+        child_snapshot["session_valid"] = True
+        child_snapshot["has_active_image"] = bool(state.source_page_path)
+        child_snapshot["image_route"] = "A3"
+        child_snapshot["workflow_search_id"] = (
+            state.workflow_search_id or state.current_search_id
+        )
+
+        def bind_response_snapshot() -> None:
+            child_snapshot["phase"] = state.phase
+            child_snapshot["task_revision"] = state.task_revision
+            child_snapshot["a3"] = self._a3_snapshot(state)
+            response.response_projection_snapshot = dict(child_snapshot)
+
         child_phase = str(response.state.get("phase") or "")
         response_media_kind = str(
             getattr(response, "media_kind", "") or ""
@@ -2077,6 +2190,7 @@ class A3MvpRuntime:
                 else "好，已停止这道题。这张图里没有其他待处理题目。"
             )
             self.store.save(state)
+            bind_response_snapshot()
             return response
         if child_phase != "ANSWERED":
             state.phase = A3_PHASE_A2_ACTIVE
@@ -2103,6 +2217,7 @@ class A3MvpRuntime:
                     else f"我从题库里找到了与「{display_label}」相似的 {candidate_count} 道题，已按相似度排序。"
                 ) + notice
             self.store.save(state)
+            bind_response_snapshot()
             return response
         selected = state.unit(state.selected_unit_id) or {}
         display_label = str(selected.get("display_label") or "").strip()
@@ -2122,6 +2237,7 @@ class A3MvpRuntime:
             state.phase = A3_PHASE_COMPLETE
             response.text = response.text.rstrip() + "这张图里的可处理题目已经全部完成。"
         self.store.save(state)
+        bind_response_snapshot()
         return response
 
     def _crop_source(self, state: A3SessionState, bounds: dict[str, float]) -> Path:

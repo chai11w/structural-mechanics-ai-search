@@ -1,6 +1,7 @@
 from pathlib import Path
 import shutil
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -16,6 +17,7 @@ from scripts.run_tiku_agent_8794 import (
 from tiku_agent.agent import AgentResponse
 from tiku_agent.fastapi_demo import SESSION_COOKIE as MAINLINE_SESSION_COOKIE, create_app
 from tiku_agent.state import AgentState
+from tiku_shared.response_store import is_valid_response_id
 
 
 class RecordingRuntime:
@@ -144,6 +146,31 @@ class Candidate8794BaselineTest(unittest.TestCase):
         self.assertIs(runtime.external_load_screen, screen)
         self.assertEqual(runtime.external_load_timeout_seconds, 15.0)
 
+    def test_app_keeps_feedback_and_response_stores_under_candidate_root(self):
+        root = Path(__file__).resolve().parents[1] / f".tmp_test_8794_{uuid4().hex}"
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        runtime = RecordingRuntime()
+
+        with patch("scripts.run_tiku_agent_8794.create_app") as create_app_mock:
+            build_8794_app(root, runtime=runtime)
+
+        kwargs = create_app_mock.call_args.kwargs
+        feedback_store = kwargs["feedback_store"]
+        self.assertEqual(
+            feedback_store.path.resolve(),
+            (root / "feedback.sqlite3").resolve(),
+        )
+        self.assertEqual(
+            feedback_store.cases_root,
+            (root / "feedback_cases").resolve(),
+        )
+
+        app = build_8794_app(root, runtime=runtime)
+        self.assertEqual(
+            app.state.response_store.path.resolve(),
+            (root / "responses.sqlite3").resolve(),
+        )
+
     def test_candidate_http_behavior_matches_mainline_with_separate_cookie(self):
         mainline_runtime = RecordingRuntime()
         candidate_runtime = RecordingRuntime()
@@ -161,6 +188,11 @@ class Candidate8794BaselineTest(unittest.TestCase):
         candidate_message = candidate.post("/api/message", json={"text": "4"}).json()
         self.assertTrue(mainline_message.pop("request_id").startswith("req_"))
         self.assertTrue(candidate_message.pop("request_id").startswith("req_"))
+        mainline_response_id = mainline_message.pop("response_id")
+        candidate_response_id = candidate_message.pop("response_id")
+        self.assertTrue(is_valid_response_id(mainline_response_id))
+        self.assertTrue(is_valid_response_id(candidate_response_id))
+        self.assertNotEqual(mainline_response_id, candidate_response_id)
         self.assertEqual(mainline_message, candidate_message)
         self.assertEqual(mainline_runtime.calls, candidate_runtime.calls)
         mainline_cookie_names = {cookie.name for cookie in mainline.cookies.jar}

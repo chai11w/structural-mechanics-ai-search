@@ -97,6 +97,7 @@ class AgentProtocolError(RuntimeError):
         self.code = code
         self.request_id = ""
         self.search_id = ""
+        self.response_snapshot: dict[str, object] = {}
 
     def bind(self, *, request_id: str, search_id: str = "") -> RequestProtocol:
         self.request_id = request_id
@@ -1005,11 +1006,37 @@ class AgentSessionRuntime:
             with self._execution_gate.enter(progress):
                 lock = self._session_locks[hash(session_id) % len(self._session_locks)]
                 with lock:
-                    self._await_background_image_work(session_id)
-                    self._check_daily_budget(identity_key)
-                    return execute()
+                    try:
+                        self._await_background_image_work(session_id)
+                        self._check_daily_budget(identity_key)
+                        response = execute()
+                    except Exception as exc:
+                        try:
+                            setattr(exc, "response_snapshot", self.session_snapshot(session_id))
+                        except Exception:  # noqa: BLE001 - never mask the original failure.
+                            pass
+                        raise
+                    else:
+                        response.response_snapshot = self.session_snapshot(session_id)
+                        response.response_projection_snapshot = dict(
+                            response.response_snapshot
+                        )
+                        response.response_media_snapshot_captured = True
+                        try:
+                            response.uploaded_image_path = self.current_image_path(session_id)
+                        except Exception:  # noqa: BLE001 - response metadata is best effort.
+                            response.uploaded_image_path = None
+                        return response
         except AgentProtocolError as exc:
-            protocol = exc.bind(request_id=request_id, search_id=search_id)
+            if not exc.response_snapshot:
+                try:
+                    exc.response_snapshot = self.session_snapshot(session_id)
+                except Exception:  # noqa: BLE001 - preserve the admission failure.
+                    pass
+            response_search_id = str(
+                exc.response_snapshot.get("search_id") or search_id
+            ).strip()
+            protocol = exc.bind(request_id=request_id, search_id=response_search_id)
             state = self.store.load(session_id) or AgentState(session_id=session_id)
             self._write_task_log(
                 task_id=request_id,

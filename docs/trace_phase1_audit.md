@@ -1,8 +1,8 @@
 # Trace Phase 1 Audit and Minimal Contract
 
-Status: audit plus roadmap batches 2.2 and 2.3 complete; batch 2.4 is next
+Status: audit plus roadmap batches 2.2, 2.3 and 2.4 complete; batch 2.5 is next
 
-Date: 2026-08-26
+Date: 2026-08-27
 
 Scope: new Agent/Web on 8790, isolated 8896 acceptance, and 8795 feedback/cost reporting;
 8788 Feishu remains outside the change boundary
@@ -17,10 +17,12 @@ identifiers and defines the minimum contract for that work.
 cover structured logs, safe error classes, estimated-cost writes, feedback occurrence and the
 final public outcome.
 
-The original audit batch did not change runtime behavior. The additive 2.2 and 2.3
-implementations described below do not change public output, retrieval/reranking, A2/A3 state
-transitions, 8788 Feishu, or model prompts. They also do not implement task snapshots,
-checkpoints, idempotency, HTTP decoupling, or pause/resume.
+The original audit batch did not change runtime behavior. The additive 2.2, 2.3 and 2.4
+implementations described below do not change user-facing business wording, retrieval/reranking,
+A2/A3 state transitions, 8788 Feishu, or model prompts. Batch 2.4 additively exposes public
+`response_id` metadata and hardens the feedback request contract; it does not change the search
+result itself. These batches also do not implement task snapshots, checkpoints, execution
+idempotency, HTTP decoupling, or pause/resume.
 
 Authoritative sources reviewed:
 
@@ -31,7 +33,8 @@ Authoritative sources reviewed:
 - `tiku_agent/a3_runtime.py` for A3 workflow/unit/child-search state and page error records;
 - `tiku_shared/request_protocol.py` and `tiku_shared/model_costs.py` for protocol, run and call
   schemas;
-- `tiku_agent/feedback_store.py` and `tiku_admin/reporting.py` for feedback/cost joins;
+- `tiku_shared/response_store.py`, `tiku_agent/feedback_store.py` and
+  `tiku_admin/reporting.py` for authoritative responses, feedback binding and cost joins;
 - focused request-protocol, runtime, A3, cost, FastAPI and administrator tests.
 
 The detailed log/error/feedback generation and storage matrix is maintained in
@@ -40,7 +43,8 @@ minimal contract in this file must be read together with that verified current-s
 
 ## Decision
 
-Add a server-authoritative `trace_id`; do not relabel the current `request_id` as the trace.
+Use server-authoritative `trace_id` and `response_id`; do not relabel the current `request_id`
+or browser `message_id` as either authority.
 
 The current `request_id` is useful public correlation metadata, but it is supplied by the
 browser when valid and the same field name is also used for a model provider's request ID.
@@ -53,18 +57,19 @@ It therefore cannot be the authoritative internal join key. Existing `request_id
 | --- | --- | --- | --- |
 | HTTP `request_id` | Browser normally creates `req_<32 hex>` for one HTTP attempt; the server validates it or generates a replacement | Response protocol, `X-Request-ID`, A2 task log, streamed errors | Caller-controlled correlation ID, not an authoritative trace |
 | Protocol `request_id` | A2 and most HTTP boundary paths copy the HTTP ID; pure A3 may generate another value or omit it | Public result/error and feedback payload | Not reliably equal to `X-Request-ID`; same spelling as the provider ID below |
+| `response_id` | Server creates `resp_<32 hex>` after final media/protocol projection and before exposing a rateable reply | JSON/stream response, browser history, `responses.sqlite3`, trace terminal and feedback binding | Authoritative identity for one finalized safe public projection; one projection per trace |
 | Model-call `request_id` | Provider response `request_id` or `id` | `model_cost_calls.request_id` | Semantically a provider request ID, not the HTTP request ID |
 | `search_id` | A2 creates one for a new image search; text/candidate/answer turns retain it | Agent state, protocol, task log, cost `search_key`, feedback | Correct question-search identity, but not a request/turn identity |
 | `workflow_search_id` | A3 creates one for the uploaded page and retains it across child questions | A3 state, feedback and page-cost reporting | Correct A3 parent identity; direct A2 compatibility needs an explicit rule |
 | A3 `current_search_id` | Starts as the page workflow ID; an A2-routed page can replace it with a child search ID | A3 state and some error/cost paths | The name can mean parent or child depending on route and time |
 | `unit_id` | Qwen/GLM page contract; unique only inside one A3 page understanding | Selection, crop, media guard and completion state | Must be joined as `(workflow_search_id, unit_id)`, never globally |
 | Cost `run_id` | One `ModelCostCollector` flush | `model_cost_runs` and `model_cost_calls` | A2 often reuses HTTP `request_id`; A3 creates a fresh value with the `req_` generator |
-| Cost `call_id` | One locally recorded provider call | `model_cost_calls` primary key | Stable local call identity; currently has no trace field |
+| Cost `call_id` | One locally recorded provider call | `model_cost_calls` primary key and trace event | Stable local call identity; new rows carry explicit trace/run correlation |
 | `task_id` | One completed A2/API-boundary log entry | JSONL task log primary correlation field | Usually equals HTTP `request_id`; A3 parent model stages have no equivalent task event |
 | `task_revision` | Monotonic session workflow revision | Stale-action checks, media and feedback scoping | A version/concurrency field, not a trace ID |
 | `candidate_generation` | One candidate-list generation | Stale candidate and media-delivery guards | A version/concurrency field, not a trace ID |
-| `message_id` | Browser creates one for a rendered chat item | Feedback target and browser history | The server has no authoritative response row behind it |
-| `feedback_id` | Feedback store creates one per unique identity/session/message | Feedback administration and case media | Stable feedback identity; rated response linkage is currently client-mediated |
+| `message_id` | Browser creates one for a rendered chat item | Feedback UI target and browser history | Secondary UI identity; feedback requires its target message to carry the same server `response_id` |
+| `feedback_id` | Feedback store creates one per response-bound record | Feedback administration and case media | Stable feedback identity; schema v8 stores unique `rated_response_id`, while migrated v7 rows remain unbound |
 | `session_key` | Server hashes the session ID | Logs, costs and feedback | Private join dimension; feedback hashing alone does not prove current session validity or response ownership |
 | `identity_key` | Stable invitation identity | Budget, costs, feedback and administration | Private identity dimension; never log invite plaintext |
 
@@ -75,73 +80,62 @@ different concepts even when historical rows happen to contain the same string.
 
 ### HTTP and public protocol
 
-The browser sends `X-Request-ID`; middleware validates the exact `req_<32 hex>` format and
-stores it on the request. HTTP and A2 handlers normally propagate that value into the public
-protocol. Pure A3 responses are inconsistent: `_response()` creates a separate request ID and
-some direct `AgentResponse.from_code` paths omit it, while the FastAPI payload adapter does not
-replace it with the HTTP header value. Thus an A3 payload request ID may differ from
-`X-Request-ID` or be empty. Even where propagation works, a client can deliberately reuse a
-valid value, so it is not an authoritative database key.
+The browser sends `X-Request-ID`; middleware validates the exact `req_<32 hex>` format and also
+creates an independent server-owned `trace_id`. Existing protocol request IDs remain public
+compatibility metadata and pure A3 values may still differ from the ingress header, but routing,
+cost, response and feedback joins no longer depend on that equality.
 
 ### A2 task, tool and cost flow
 
-A2 creates a new `search_id` for a new uploaded image and retains it for later text turns.
-The runtime normally writes one structured task-log entry per turn and one cost run; an internal
-exception may also produce a second API-boundary entry for the same request. The task log has
-the public request/search IDs and safe protocol outcome. The cost run uses the HTTP request
-ID as `run_id`, while provider calls store the provider response ID in a field also named
-`request_id`.
-
-Gap: task logs, cost runs and calls can be joined only by conventions that are not represented
-in one schema. Provider failures often have no provider request ID. There is no explicit
-`trace_id` on any of these records.
+A2 creates a new `search_id` for a new uploaded image and retains it for later turns. New task
+logs, cost runs and provider calls carry the same server trace; new runs use independent
+`run_...` IDs and provider values use canonical `provider_request_id` (with the historical
+column retained only as a compatibility mirror). Provider failures still have a local
+trace/run/call even when no provider ID or usage is returned. Physical records remain separate,
+so a bounded query layer is still needed.
 
 ### A3 parent and child flow
 
-A3 creates a stable `workflow_search_id` for the uploaded page. Page-understanding, crop and
-validation calls write separate cost runs using that workflow ID as `search_key`. Each chosen
-unit enters A2, which creates a child `search_id`; the public snapshot exposes the child search
-ID and separately retains the workflow ID.
-
-Gaps:
-
-- A3 model runs create independent `run_id` values and do not retain the HTTP request ID.
-- Pure A3 public responses do not reliably retain the ingress request ID; payload and header
-  correlation can diverge before any trace implementation exists.
-- A3 has bounded page-error records but no unified task/stage event stream.
-- `current_search_id` is route-dependent and must not be the canonical parent-child field.
-- `unit_id` is not persisted on model cost runs, so per-unit validation costs cannot always be
-  joined without timing and task-kind inference.
+A3 retains a stable `workflow_search_id`; selected questions receive child `search_id` values
+and units are identified by `(workflow_search_id, unit_id)`. The ingress trace now propagates
+through parent stages, synchronous A2 handoff, model-cost runs/calls and the structured stage
+event stream. `current_search_id` remains a compatibility field with route-dependent meaning and
+must not replace explicit parent/child dimensions. Historical rows without the new dimensions
+still require compatibility fallbacks.
 
 ### Public response and feedback
 
-The server returns safe protocol metadata. The browser creates `message_id`, copies the
-response request/search IDs into history, and later submits those values with feedback. The
-feedback store validates their format. Only when `conversation` is submitted does it verify the
-target is present and crop evidence to that message; omitting conversation currently bypasses
-target binding.
+For every rateable Agent/Web reply, the server now persists a privacy-bounded projection in the
+runtime-local `responses.sqlite3` after media post-processing and before public delivery. It then
+returns the generated `response_id`; the browser stores it with its own `message_id`. The record
+contains protocol and lifecycle identifiers, phase/revision, bounded counts, route, response
+mode and duration, but no question/reply text, prompt, path or URL. Re-finalizing the same trace
+with the same projection is idempotent; a different projection is rejected.
 
-Gaps:
+Feedback schema v8 requires both `rated_response_id` and `conversation`. The service verifies
+identity, session, response expiry, target-message presence and exact message/response ID match,
+then derives protocol and parent/child lifecycle fields from the stored response rather than
+client history or the latest session snapshot. Cross-user, cross-session and message/response
+rebinding fail closed. Existing v7 feedback remains readable with an empty response binding and
+cannot be silently upgraded to a fabricated authority.
 
-- There is no server-authored `response_id` for the exact public response revision.
-- Feedback correlation fields come back from the client rather than from an authoritative
-  server response record.
-- Administrative cost lookup joins feedback to runs using identity, search keys and a time
-  cutoff. This is a reasonable compatibility fallback, not an exact trace join.
+Remaining gap: administrative cost display still joins feedback to cost runs using identity,
+search keys and a time cutoff. This compatibility fallback is not the bounded diagnostic query
+path planned for batch 2.5.
 
-### Priority of gaps
+### Priority and status of gaps
 
-| Priority | Gap | Why it comes first |
+| Status | Gap | Why it comes first |
 | --- | --- | --- |
-| P0 | No server-authoritative trace root | Other joins cannot have one stable owner |
-| P0 | App and provider `request_id` meanings collide | A schema migration could silently join unrelated IDs |
-| P0 | A3 parent stages do not carry the ingress request | The most expensive path cannot be reconstructed exactly |
-| P1 | No server response identity | Feedback cannot bind authoritatively to the rated output |
+| DONE 2.2 | No server-authoritative trace root | Other joins cannot have one stable owner |
+| DONE 2.2 | App and provider `request_id` meanings collide | A schema migration could silently join unrelated IDs |
+| DONE 2.2 | A3 parent stages do not carry the ingress request | The most expensive path cannot be reconstructed exactly |
+| DONE 2.4 | Server response identity was absent | Feedback could not bind authoritatively until this closed |
 | P1 | No explicit A3 workflow/unit fields on every relevant event/run | Multi-question attribution still needs inference |
-| P1 | Task log, model cost, page errors and feedback are separate contracts | Operators must manually correlate stores |
-| P1 | Observability writers can fail or drop records silently | Missing evidence is currently indistinguishable from an event that never occurred |
-| P1 | Feedback retention provider is not wired and cleanup runs only when 8795 starts | New cases use fixed 30-day expiry and that per-row deadline is not continuously enforced |
-| P2 | Admin reporting uses search/time fallback joins | Correct enough for current summaries, insufficient for incident reconstruction |
+| NEXT 2.5 | Task log, model cost, page errors, response and feedback remain separate physical stores | Operators still need a bounded query layer instead of manual correlation |
+| PARTIAL 2.3 | Observability writers can fail or drop records | Trace writer failures are counted, but historical sinks still have silent-loss paths |
+| NEXT 2.5 | Response/feedback retention and cleanup are not fully periodic | Expiry is enforced for new feedback ownership, but expired rows/evidence still need lifecycle maintenance |
+| NEXT 2.5 | Admin reporting uses search/time fallback joins | Correct enough for current summaries, insufficient for incident reconstruction |
 
 ## Minimal Trace Contract V1
 
@@ -160,10 +154,11 @@ Gaps:
 | `call_id` | Existing locally generated value | One provider call record |
 | `provider_request_id` | Opaque provider value | Provider-side correlation only; replaces the semantic use of `model_cost_calls.request_id` in the next additive schema |
 | `feedback_id` | Existing server-generated value | One saved feedback record |
-| `rated_response_id` | New batch-2.4 `response_id`, returned to the client and supplied back with feedback | Verified by the server as the exact owned response; never inferred from latest session state |
+| `rated_response_id` | Implemented batch-2.4 `response_id`, returned to the client and supplied back with feedback | Verified by the server as the exact owned response; never inferred from latest session state |
 
 `trace_id` is internal operational metadata in V1. Public APIs continue to expose `request_id`
-and `search_id`; exposing trace IDs to users is not required to obtain reliable internal joins.
+and `search_id`, and rateable replies now expose `response_id`; exposing trace IDs to users is
+not required to obtain reliable internal joins.
 
 ### Event envelope
 
@@ -259,15 +254,16 @@ adding periodic cleanup remain known gaps rather than properties of the current 
 - Keep the five-state public protocol unchanged in the trace propagation stage; separately add
   contract tests for registered reasons, production emitters and browser-local reasons/actions.
 - Do not change A2/A3 routing, chapter boundaries, retrieval order, candidate ranking, answer
-  delivery, budget checks, or feedback evidence content. Target ownership hardening is isolated
-  to roadmap batch 2.4 and must retain old records read-only.
-- 8790 and 8896 use independent trace stores under their existing runtime roots. Do not share
-  runtime state with 8788, 8794 or 8795. The primary consumer is a stable local diagnostic
-  query layer for Codex/Agent; 8795 may optionally receive read-only access as a temporary UI
-  adapter, but it is not the trace owner or a runtime dependency.
+  delivery, budget checks, or feedback evidence content. Batch 2.4 isolated target-ownership
+  hardening from those behaviors and retains old records read-only.
+- 8790 and 8896 use independent trace and response stores under their existing runtime roots.
+  Do not share runtime state with 8788, 8794 or 8795. The primary consumer is a stable local
+  diagnostic query layer for Codex/Agent; 8795 may optionally receive read-only access as a
+  temporary UI adapter, but it is not the trace/response owner or a runtime dependency.
 - Trace writes are local and fail-open. No external observability service is introduced in V1.
-- Do not weaken existing feedback validation. In batch 2.4, exact `rated_response_id` ownership
-  verification must close the optional-conversation bypass while old records remain readable.
+- Do not weaken feedback validation. Batch 2.4 closed the optional-conversation bypass with
+  exact `rated_response_id`, identity/session ownership and target-message equality checks while
+  keeping old unbound records readable.
 
 ## Acceptance scenarios for the Trace stage
 
@@ -319,8 +315,22 @@ feedback persistence emit joined events without storing user/model text, paths o
 messages. The 8790, 8896 and demo launchers each own a store under their existing runtime root;
 none depends on 8795.
 
-Batch 2.3 records that feedback was persisted and its safe scope/rating, but it deliberately does
-not claim which authoritative server response was rated. Batch 2.4 is next: add `response_id`,
-persist the final response projection and enforce `rated_response_id` ownership. Bounded
-Codex/Agent diagnostic queries, retention and cutover remain batch 2.5; task snapshots,
-checkpoints, idempotency and pause/resume stay outside this stage.
+Roadmap batch 2.4 is complete. `tiku_shared/response_store.py` persists one server-authored,
+privacy-bounded response projection per trace in runtime-local `responses.sqlite3`. JSON and
+stream results, A3 parent replies, A2 child replies and targetable server errors receive
+`resp_<32 hex>` only after their final safe protocol/media projection is known. The response row
+is joined to the terminal trace event, and identical re-finalization is idempotent while a
+conflicting projection fails closed. Stream persistence runs outside the event loop; disconnects
+before result exposure roll back an in-flight write or remove the still-private committed row.
+
+Feedback schema v8 requires `rated_response_id`; `/api/feedback` also requires conversation and
+an exact target `message_id`/`response_id` match. The server validates identity, session and
+expiry against the response row and copies protocol/lifecycle facts from that row. Feedback
+updates cannot rebind either response or message, deletes use response ownership, and old v7
+rows remain readable but intentionally unbound. The stored response projection excludes user
+and assistant text, prompts, local paths and URLs.
+
+Bounded Codex/Agent diagnostic queries, periodic retention maintenance and old/new cutover are
+now batch 2.5 (`NEXT`). 8795 remains only an optional read-only adapter, never the trace/response
+data owner or a runtime dependency. Task snapshots, checkpoints, execution idempotency and
+pause/resume stay outside this stage.

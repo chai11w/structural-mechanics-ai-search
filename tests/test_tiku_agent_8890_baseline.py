@@ -18,6 +18,7 @@ from scripts.run_tiku_agent_demo import build_app as build_8790_app
 from tiku_agent.agent import AgentResponse
 from tiku_agent.fastapi_demo import SESSION_COOKIE as MAINLINE_SESSION_COOKIE
 from tiku_agent.state import AgentState
+from tiku_shared.response_store import is_valid_response_id
 
 
 class RecordingRuntime:
@@ -182,6 +183,11 @@ class Baseline8890Test(unittest.TestCase):
         ).json()
         self.assertTrue(mainline_message.pop("request_id").startswith("req_"))
         self.assertTrue(validation_message.pop("request_id").startswith("req_"))
+        mainline_response_id = mainline_message.pop("response_id")
+        validation_response_id = validation_message.pop("response_id")
+        self.assertTrue(is_valid_response_id(mainline_response_id))
+        self.assertTrue(is_valid_response_id(validation_response_id))
+        self.assertNotEqual(mainline_response_id, validation_response_id)
         self.assertEqual(mainline_message, validation_message)
         self.assertEqual(mainline_runtime.calls, validation_runtime.calls)
 

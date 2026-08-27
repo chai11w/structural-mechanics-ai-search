@@ -6,6 +6,8 @@ import asyncio
 from collections.abc import Mapping
 from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
+from dataclasses import dataclass
+from functools import partial
 from io import BytesIO
 import inspect
 import json
@@ -13,6 +15,7 @@ import logging
 import math
 import re
 import secrets
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -47,9 +50,20 @@ from tiku_shared.request_protocol import (
     RequestStatus,
     new_request_id,
 )
+from tiku_shared.response_store import (
+    ResponseFinalizationCancelled,
+    ResponseOwnershipError,
+    ResponseProjection,
+    ResponseRecord,
+    ResponseStoreError,
+    ResponseValidationError,
+    SQLiteResponseStore,
+    is_valid_response_id,
+)
 from tiku_shared.trace_context import (
     TraceContext,
     current_request_id,
+    current_trace_id,
     trace_context_scope,
 )
 from tiku_shared.trace_events import (
@@ -148,6 +162,31 @@ _PUBLIC_PROGRESS_AUTO_DONE_RE = re.compile(
     r"^已完成 ([1-9][0-9]{0,2})/([1-9][0-9]{0,2}) 张自动裁图校验…$"
 )
 
+
+@dataclass(frozen=True)
+class _AuthoritativeResponseDraft:
+    snapshot: dict[str, object]
+    workflow_search_id: str
+    search_id: str
+    unit_id: str
+    image_route: str
+    intent: str
+
+
+@dataclass(frozen=True)
+class _QueuedStreamEvent:
+    body: str
+    response_record: ResponseRecord | None = None
+    terminal_recorder: Callable[[], None] | None = None
+
+
+class _AgentPayload(dict[str, object]):
+    """Public payload with server-only finalization data kept off the wire."""
+
+    def __init__(self, values: Mapping[str, object]) -> None:
+        super().__init__(values)
+        self.authoritative_draft: _AuthoritativeResponseDraft | None = None
+
 _PUBLIC_STATE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$")
 _PUBLIC_STATE_PHASE_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 _PUBLIC_STATE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -198,6 +237,7 @@ def create_app(
     cleanup_interval_seconds: float = 300.0,
     invite_access: InviteAccess | None = None,
     feedback_store: SQLiteFeedbackStore | None = None,
+    response_store: SQLiteResponseStore | None = None,
     feedback_retention_days_provider: Callable[[], int] | None = None,
     output_watchdog: object | None = None,
     trace_event_recorder: TraceEventRecorder | None = None,
@@ -244,17 +284,80 @@ def create_app(
     feedback_store = feedback_store or SQLiteFeedbackStore(
         DEFAULT_RUNTIME_DIR / "feedback.sqlite3"
     )
+    response_store = response_store or SQLiteResponseStore(
+        feedback_store.path.with_name("responses.sqlite3")
+    )
+    app.state.response_store = response_store
     app.state.trace_event_recorder = trace_event_recorder
     app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
+
+    def request_protocol_response(
+        request: Request,
+        detail: str,
+        protocol: RequestProtocol,
+        *,
+        status_code: int,
+        headers: dict[str, str] | None = None,
+        error_kind: str = "ProtocolFailure",
+        response_snapshot: object = None,
+        persist_authoritative: bool = True,
+    ) -> JSONResponse:
+        targetable = _is_authoritative_reply_path(request.url.path)
+        if invite_access is not None and not isinstance(
+            getattr(request.state, "invite_identity", None), InviteIdentity
+        ):
+            targetable = False
+        session_id = str(
+            getattr(request.state, "session_id", "")
+            or request.cookies.get(session_cookie)
+            or ""
+        ).strip()
+        if targetable and not session_id:
+            session_id = _session_id(request, cookie_name=session_cookie)
+        snapshot = response_snapshot if isinstance(response_snapshot, Mapping) else {}
+        if targetable and session_id and not snapshot:
+            snapshot = _safe_runtime_snapshot(runtime, session_id)
+        result = _protocol_json_response(
+            detail,
+            protocol,
+            status_code=status_code,
+            headers=headers,
+            output_watchdog=output_watchdog,
+            error_kind=error_kind,
+            response_store=(
+                response_store
+                if persist_authoritative and targetable and session_id
+                else None
+            ),
+            identity_key=_identity_key(request) or "local",
+            session_id=session_id,
+            response_mode=_trace_response_mode(request.url.path),
+            response_snapshot=snapshot,
+            trace_id=_request_trace_context(request).trace_id,
+        )
+        if session_id and not request.cookies.get(session_cookie):
+            _set_session_cookie(
+                result,
+                session_id,
+                secure_cookie=_is_secure_request(request),
+                cookie_name=session_cookie,
+            )
+        return result
 
     @app.exception_handler(HTTPException)
     async def public_http_error(request: Request, exc: HTTPException) -> Response:
         if not request.url.path.startswith("/api/"):
             return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
-        session_id = str(request.cookies.get(session_cookie) or "").strip()
+        session_id = str(
+            getattr(request.state, "session_id", "")
+            or request.cookies.get(session_cookie)
+            or ""
+        ).strip()
         search_id = ""
+        snapshot: Mapping[str, object] = {}
         if session_id:
-            search_id = str(runtime.session_snapshot(session_id).get("search_id") or "")
+            snapshot = _safe_runtime_snapshot(runtime, session_id)
+            search_id = str(snapshot.get("search_id") or "")
         protocol = _http_error_protocol(request, exc, search_id=search_id)
         if session_id and protocol.layer is not RequestLayer.LOGIN:
             _record_protocol_event(
@@ -265,67 +368,86 @@ def create_app(
                 protocol=protocol,
                 error_kind="HTTPException",
             )
-        return _protocol_json_response(
+        return request_protocol_response(
+            request,
             str(exc.detail),
             protocol,
             status_code=exc.status_code,
             headers=exc.headers,
-            output_watchdog=output_watchdog,
             error_kind=type(exc).__name__,
+            response_snapshot=snapshot,
         )
 
     @app.exception_handler(AgentRuntimeBusyError)
     async def runtime_busy(request: Request, exc: AgentRuntimeBusyError) -> JSONResponse:
+        response_search_id = str(
+            exc.response_snapshot.get("search_id") or exc.search_id
+        ).strip()
         protocol = exc.bind(
             request_id=_request_id(request),
-            search_id=exc.search_id,
+            search_id=response_search_id,
         )
-        return _protocol_json_response(
+        return request_protocol_response(
+            request,
             str(exc),
             protocol,
             status_code=429,
             headers={"Retry-After": "15", "Cache-Control": "no-store"},
-            output_watchdog=output_watchdog,
             error_kind=type(exc).__name__,
+            response_snapshot=exc.response_snapshot,
         )
 
     @app.exception_handler(AgentBudgetExceededError)
     async def runtime_budget(request: Request, exc: AgentBudgetExceededError) -> JSONResponse:
+        response_search_id = str(
+            exc.response_snapshot.get("search_id") or exc.search_id
+        ).strip()
         protocol = exc.bind(
             request_id=_request_id(request),
-            search_id=exc.search_id,
+            search_id=response_search_id,
         )
-        return _protocol_json_response(
+        return request_protocol_response(
+            request,
             str(exc),
             protocol,
             status_code=503,
             headers={"Retry-After": "3600", "Cache-Control": "no-store"},
-            output_watchdog=output_watchdog,
             error_kind=type(exc).__name__,
+            response_snapshot=exc.response_snapshot,
         )
 
     @app.exception_handler(AgentProtocolError)
     async def protocol_error(request: Request, exc: AgentProtocolError) -> JSONResponse:
+        response_search_id = str(
+            exc.response_snapshot.get("search_id") or exc.search_id
+        ).strip()
         protocol = exc.bind(
             request_id=_request_id(request),
-            search_id=exc.search_id,
+            search_id=response_search_id,
         )
-        return _protocol_json_response(
+        return request_protocol_response(
+            request,
             str(exc),
             protocol,
             status_code=500,
             headers={"Cache-Control": "no-store"},
-            output_watchdog=output_watchdog,
             error_kind=type(exc).__name__,
+            response_snapshot=exc.response_snapshot,
         )
 
     @app.exception_handler(Exception)
     async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("unhandled public Agent request failure")
-        session_id = str(request.cookies.get(session_cookie) or "").strip()
-        search_id = ""
-        if session_id:
-            search_id = str(runtime.session_snapshot(session_id).get("search_id") or "")
+        session_id = str(
+            getattr(request.state, "session_id", "")
+            or request.cookies.get(session_cookie)
+            or ""
+        ).strip()
+        response_snapshot = getattr(exc, "response_snapshot", None)
+        snapshot = response_snapshot if isinstance(response_snapshot, Mapping) else {}
+        if session_id and not snapshot:
+            snapshot = _safe_runtime_snapshot(runtime, session_id)
+        search_id = str(snapshot.get("search_id") or "").strip()
         protocol = RequestProtocol.from_code(
             "SERVICE_UNAVAILABLE",
             request_id=_request_id(request),
@@ -340,13 +462,15 @@ def create_app(
                 protocol=protocol,
                 error_kind="UnhandledException",
             )
-        return _protocol_json_response(
+        return request_protocol_response(
+            request,
             "服务端处理失败，请稍后重试。",
             protocol,
             status_code=500,
             headers={"Cache-Control": "no-store"},
-            output_watchdog=output_watchdog,
             error_kind=type(exc).__name__,
+            response_snapshot=snapshot,
+            persist_authoritative=not isinstance(exc, ResponseStoreError),
         )
 
     @app.middleware("http")
@@ -399,14 +523,14 @@ def create_app(
                     )
                     if identity is None and not public_path:
                         if request.url.path.startswith("/api/"):
-                            result = _protocol_json_response(
+                            result = request_protocol_response(
+                                request,
                                 "请先使用有效邀请码登录。",
                                 RequestProtocol.from_code(
                                     "LOGIN_REQUIRED", request_id=_request_id(request)
                                 ),
                                 status_code=401,
                                 headers={"Cache-Control": "no-store"},
-                                output_watchdog=output_watchdog,
                             )
                             result.headers["X-Request-ID"] = _request_id(request)
                             return result
@@ -540,18 +664,17 @@ def create_app(
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="json object is required")
         message_id = str(payload.get("message_id") or "").strip()
+        rated_response_id = str(payload.get("rated_response_id") or "").strip()
         rating = str(payload.get("rating") or "").strip().lower()
         raw_tags = payload.get("tags")
         detail = str(payload.get("detail") or "").strip()
         conversation = payload.get("conversation")
-        try:
-            search_duration_ms = int(payload.get("search_duration_ms") or 0)
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail="invalid search duration") from exc
-        if not 0 <= search_duration_ms <= 86_400_000:
-            raise HTTPException(status_code=400, detail="invalid search duration")
         if not FEEDBACK_MESSAGE_ID_RE.fullmatch(message_id):
             raise HTTPException(status_code=400, detail="invalid message id")
+        if not rated_response_id:
+            raise HTTPException(status_code=400, detail="rated response id is required")
+        if not is_valid_response_id(rated_response_id):
+            raise HTTPException(status_code=400, detail="invalid rated response id")
         if rating not in FEEDBACK_TAGS:
             raise HTTPException(status_code=400, detail="invalid rating")
         if not isinstance(raw_tags, list) or len(raw_tags) > 8:
@@ -561,79 +684,79 @@ def create_app(
             raise HTTPException(status_code=400, detail="invalid feedback tag")
         if len(detail) > 300:
             raise HTTPException(status_code=400, detail="feedback detail is too long")
-        if conversation is not None and not isinstance(conversation, list):
-            raise HTTPException(status_code=400, detail="invalid feedback conversation")
-        target_message = _feedback_target_message(conversation, message_id)
-        if conversation is not None and not target_message:
+        if conversation is None:
             raise HTTPException(status_code=400, detail="feedback target is missing")
+        if not isinstance(conversation, list):
+            raise HTTPException(status_code=400, detail="invalid feedback conversation")
         session_id = str(request.cookies.get(session_cookie) or "").strip()
         if not session_id:
             raise HTTPException(status_code=400, detail="session is required")
-        snapshot = runtime.session_snapshot(session_id)
         identity_key = _identity_key(request) or "local"
-        try:
-            target_revision = int(
-                target_message.get("taskRevision")
-                or target_message.get("task_revision")
-                or 0
-            )
-        except (TypeError, ValueError):
-            target_revision = 0
-        revision = max(0, target_revision or int(snapshot.get("task_revision") or 0))
-        try:
-            target_candidate_count = int(
-                target_message.get("candidateCount")
-                if "candidateCount" in target_message
-                else target_message.get("candidate_count", snapshot.get("candidate_count") or 0)
-            )
-        except (TypeError, ValueError):
-            target_candidate_count = int(snapshot.get("candidate_count") or 0)
         clean_session_key = session_key(session_id)
-        search_id = str(
-            payload.get("search_id")
-            or snapshot.get("search_id")
-            or (f"{clean_session_key}:{revision}" if revision > 0 else "")
+        try:
+            rated_response = response_store.require_owned(
+                rated_response_id,
+                identity_key=identity_key,
+                session_key=clean_session_key,
+            )
+        except ResponseValidationError as exc:
+            raise HTTPException(status_code=400, detail="invalid rated response id") from exc
+        except ResponseOwnershipError as exc:
+            raise HTTPException(status_code=404, detail="rated response not found") from exc
+        target_message = _feedback_target_message(conversation, message_id)
+        if not target_message:
+            raise HTTPException(status_code=400, detail="feedback target is missing")
+        conversation_response_id = str(
+            target_message.get("responseId")
+            or target_message.get("response_id")
+            or ""
         ).strip()
+        if conversation_response_id != rated_response_id:
+            raise HTTPException(
+                status_code=400,
+                detail="feedback target response does not match",
+            )
         try:
             rated_protocol = RequestProtocol(
-                status=(
-                    payload.get("status")
-                    or ("ERROR" if snapshot.get("phase") == "ERROR" else "SUCCESS")
-                ),
-                layer=payload.get("layer") or "tool",
-                code=payload.get("code") or (
-                    "AGENT_FAILED"
-                    if snapshot.get("phase") == "ERROR"
-                    else "REQUEST_SUCCEEDED"
-                ),
-                retryable=bool(payload.get("retryable")),
-                action=payload.get("action") or "",
-                request_id=payload.get("request_id") or "",
-                search_id=search_id,
+                status=rated_response.status,
+                layer=rated_response.layer,
+                code=rated_response.code,
+                retryable=rated_response.retryable,
+                action=rated_response.action,
+                request_id=rated_response.request_id,
+                search_id=rated_response.search_id,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail="invalid feedback protocol") from exc
+            raise HTTPException(status_code=500, detail="stored response protocol is invalid") from exc
+        search_key = rated_response.search_id or rated_response.workflow_search_id
+        search_duration_ms = _feedback_search_duration_ms(
+            conversation,
+            message_id,
+            task_revision=rated_response.task_revision,
+        )
         try:
             saved = feedback_store.upsert(
                 message_id=message_id,
+                rated_response_id=rated_response.response_id,
                 identity_key=identity_key,
                 session_key=clean_session_key,
                 rating=rating,
                 tags=tags,
                 detail=detail,
-                task_revision=revision,
-                phase=str(snapshot.get("phase") or ""),
-                candidate_count=max(0, target_candidate_count),
+                task_revision=rated_response.task_revision,
+                phase=rated_response.phase,
+                candidate_count=rated_response.candidate_count,
                 search_duration_ms=search_duration_ms,
-                search_key=search_id,
+                search_key=search_key,
                 request_id=rated_protocol.request_id,
                 search_id=rated_protocol.search_id,
                 status=rated_protocol.status.value,
                 layer=rated_protocol.layer.value,
                 code=rated_protocol.code,
-                chapter=str(snapshot.get("chapter") or ""),
-                image_route=str(snapshot.get("image_route") or ""),
-                workflow_search_id=str(snapshot.get("workflow_search_id") or search_id),
+                chapter=rated_response.chapter,
+                image_route=rated_response.image_route,
+                workflow_search_id=rated_response.workflow_search_id,
+                intent=rated_response.intent,
                 conversation=conversation,
                 media_resolver=lambda url: _resolve_feedback_media(
                     runtime, session_id, url
@@ -651,7 +774,7 @@ def create_app(
             layer=RequestLayer.FEEDBACK,
             code="FEEDBACK_RECORDED",
             request_id=_request_id(request),
-            search_id=str(snapshot.get("search_id") or ""),
+            search_id=rated_response.search_id,
         )
         _record_protocol_event(
             runtime,
@@ -664,8 +787,9 @@ def create_app(
             feedback_id=saved.feedback_id,
             session_key=clean_session_key,
             identity_key=identity_key,
-            workflow_search_id=str(snapshot.get("workflow_search_id") or search_id),
-            search_id=str(snapshot.get("search_id") or search_id),
+            workflow_search_id=rated_response.workflow_search_id,
+            search_id=rated_response.search_id,
+            rated_response_id=rated_response.response_id,
         )
         record_trace_event(
             "feedback_recorded",
@@ -682,6 +806,7 @@ def create_app(
             "ok": True,
             "feedback": {
                 "message_id": saved.message_id,
+                "rated_response_id": saved.rated_response_id,
                 "rating": saved.rating,
                 "tags": list(saved.tags),
                 "feedback_scope": saved.feedback_scope,
@@ -690,38 +815,57 @@ def create_app(
             **protocol.to_dict(),
         })
 
-    @app.delete("/api/feedback/{message_id}")
-    def delete_feedback(message_id: str, request: Request) -> JSONResponse:
-        message_id = str(message_id or "").strip()
-        if not FEEDBACK_MESSAGE_ID_RE.fullmatch(message_id):
-            raise HTTPException(status_code=400, detail="invalid message id")
+    @app.delete("/api/feedback/{rated_response_id}")
+    def delete_feedback(rated_response_id: str, request: Request) -> JSONResponse:
+        rated_response_id = str(rated_response_id or "").strip()
+        if not is_valid_response_id(rated_response_id):
+            raise HTTPException(status_code=400, detail="invalid rated response id")
         session_id = str(request.cookies.get(session_cookie) or "").strip()
         if not session_id:
             raise HTTPException(status_code=400, detail="session is required")
-        removed = feedback_store.delete(
-            message_id=message_id,
-            identity_key=_identity_key(request) or "local",
-            session_key=session_key(session_id),
+        identity_key = _identity_key(request) or "local"
+        clean_session_key = session_key(session_id)
+        try:
+            rated_response = response_store.get_owned(
+                rated_response_id,
+                identity_key=identity_key,
+                session_key=clean_session_key,
+                include_expired=True,
+            )
+        except ResponseValidationError as exc:
+            raise HTTPException(status_code=400, detail="invalid rated response id") from exc
+        if rated_response is None:
+            raise HTTPException(status_code=404, detail="rated response not found")
+        removed = feedback_store.delete_by_response(
+            rated_response_id=rated_response.response_id,
+            identity_key=identity_key,
+            session_key=clean_session_key,
         )
-        snapshot = runtime.session_snapshot(session_id)
         protocol = RequestProtocol(
             status=RequestStatus.SUCCESS,
             layer=RequestLayer.FEEDBACK,
             code="FEEDBACK_REMOVED",
             request_id=_request_id(request),
-            search_id=str(snapshot.get("search_id") or ""),
+            search_id=rated_response.search_id,
         )
         _record_protocol_event(
             runtime,
             session_id,
             kind="feedback",
-            identity_key=_identity_key(request) or "local",
+            identity_key=identity_key,
             protocol=protocol,
+        )
+        bind_trace_event_dimensions(
+            rated_response_id=rated_response.response_id,
+            session_key=clean_session_key,
+            identity_key=identity_key,
+            workflow_search_id=rated_response.workflow_search_id,
+            search_id=rated_response.search_id,
         )
         _record_protocol_terminal(protocol, http_status=200)
         return JSONResponse({
             "ok": True,
-            "message_id": message_id,
+            "rated_response_id": rated_response.response_id,
             "removed": removed,
             **protocol.to_dict(),
         })
@@ -799,6 +943,8 @@ def create_app(
                 stale,
                 runtime,
                 session_id,
+                response_store=response_store,
+                identity_key=_identity_key(request) or "local",
                 secure_cookie=_is_secure_request(request),
                 cookie_name=session_cookie,
             )
@@ -807,6 +953,8 @@ def create_app(
             response,
             runtime,
             session_id,
+            response_store=response_store,
+            identity_key=_identity_key(request) or "local",
             secure_cookie=_is_secure_request(request),
             cookie_name=session_cookie,
         )
@@ -835,7 +983,15 @@ def create_app(
                 request_id=request_id,
             )
             if stale is not None:
-                return _agent_payload(stale, runtime, session_id)
+                return _agent_payload(
+                    stale,
+                    runtime,
+                    session_id,
+                    response_store=response_store,
+                    identity_key=identity_key or "local",
+                    response_mode="stream",
+                    defer_authoritative=True,
+                )
             response = _handle_text(
                 runtime,
                 session_id,
@@ -844,7 +1000,15 @@ def create_app(
                 identity_key=identity_key,
                 progress=progress,
             )
-            return _agent_payload(response, runtime, session_id)
+            return _agent_payload(
+                response,
+                runtime,
+                session_id,
+                response_store=response_store,
+                identity_key=identity_key or "local",
+                response_mode="stream",
+                defer_authoritative=True,
+            )
 
         result = StreamingResponse(
             _stream_agent_events(
@@ -854,6 +1018,10 @@ def create_app(
                 trace_context=trace_context,
                 trace_event_session=current_trace_event_session(),
                 trace_meta=_current_public_trace_meta(),
+                runtime=runtime,
+                response_store=response_store,
+                session_id=session_id,
+                identity_key=identity_key or "local",
             ),
             media_type="application/x-ndjson",
         )
@@ -895,7 +1063,11 @@ def create_app(
         )
         try:
             response = _handle_image(runtime, session_id, incoming, request=request)
-            uploaded_image = runtime.current_image_path(session_id)
+            uploaded_image = (
+                response.uploaded_image_path
+                if response.response_media_snapshot_captured
+                else runtime.current_image_path(session_id)
+            )
         finally:
             incoming.unlink(missing_ok=True)
         return _agent_json(
@@ -903,6 +1075,8 @@ def create_app(
             runtime,
             session_id,
             uploaded_image=uploaded_image,
+            response_store=response_store,
+            identity_key=_identity_key(request) or "local",
             secure_cookie=_is_secure_request(request),
             cookie_name=session_cookie,
         )
@@ -931,12 +1105,20 @@ def create_app(
                     identity_key=identity_key,
                     progress=progress,
                 )
-                uploaded_image = runtime.current_image_path(session_id)
+                uploaded_image = (
+                    response.uploaded_image_path
+                    if response.response_media_snapshot_captured
+                    else runtime.current_image_path(session_id)
+                )
                 return _agent_payload(
                     response,
                     runtime,
                     session_id,
                     uploaded_image=uploaded_image,
+                    response_store=response_store,
+                    identity_key=identity_key or "local",
+                    response_mode="stream",
+                    defer_authoritative=True,
                 )
             finally:
                 incoming.unlink(missing_ok=True)
@@ -948,6 +1130,10 @@ def create_app(
                 trace_context=trace_context,
                 trace_event_session=current_trace_event_session(),
                 trace_meta=_current_public_trace_meta(),
+                runtime=runtime,
+                response_store=response_store,
+                session_id=session_id,
+                identity_key=identity_key or "local",
             ),
             media_type="application/x-ndjson",
         )
@@ -993,16 +1179,25 @@ def create_app(
             except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail="task_revision is required") from exc
             session_id = _session_id(request, cookie_name=session_cookie)
+            identity_key = _identity_key(request)
+            kwargs: dict[str, object] = {
+                "task_revision": task_revision,
+                "request_id": _request_id(request),
+            }
+            if identity_key:
+                kwargs["identity_key"] = identity_key
             response = runtime.select_unit(  # type: ignore[attr-defined]
                 session_id,
                 unit_id,
-                task_revision=task_revision,
-                request_id=_request_id(request),
+                **kwargs,
             )
             return _agent_json(
                 response,
                 runtime,
                 session_id,
+                submitted_crop=response.submitted_crop_path,
+                response_store=response_store,
+                identity_key=_identity_key(request) or "local",
                 secure_cookie=_is_secure_request(request),
                 cookie_name=session_cookie,
             )
@@ -1040,16 +1235,15 @@ def create_app(
                     unit_id,
                     **kwargs,
                 )
-                submitted_crop = (
-                    runtime.current_crop_path(session_id, unit_id)  # type: ignore[attr-defined]
-                    if runtime.session_snapshot(session_id).get("a3", {}).get("phase") == "A2_ACTIVE"
-                    else None
-                )
                 return _agent_payload(
                     response,
                     runtime,
                     session_id,
-                    submitted_crop=submitted_crop,
+                    submitted_crop=response.submitted_crop_path,
+                    response_store=response_store,
+                    identity_key=identity_key or "local",
+                    response_mode="stream",
+                    defer_authoritative=True,
                 )
 
             result = StreamingResponse(
@@ -1060,6 +1254,10 @@ def create_app(
                     trace_context=trace_context,
                     trace_event_session=current_trace_event_session(),
                     trace_meta=_current_public_trace_meta(),
+                    runtime=runtime,
+                    response_store=response_store,
+                    session_id=session_id,
+                    identity_key=identity_key or "local",
                 ),
                 media_type="application/x-ndjson",
             )
@@ -1104,7 +1302,15 @@ def create_app(
                     unit_ids,
                     **kwargs,
                 )
-                return _agent_payload(response, runtime, session_id)
+                return _agent_payload(
+                    response,
+                    runtime,
+                    session_id,
+                    response_store=response_store,
+                    identity_key=identity_key or "local",
+                    response_mode="stream",
+                    defer_authoritative=True,
+                )
 
             result = StreamingResponse(
                 _stream_agent_events(
@@ -1114,6 +1320,10 @@ def create_app(
                     trace_context=trace_context,
                     trace_event_session=current_trace_event_session(),
                     trace_meta=_current_public_trace_meta(),
+                    runtime=runtime,
+                    response_store=response_store,
+                    session_id=session_id,
+                    identity_key=identity_key or "local",
                 ),
                 media_type="application/x-ndjson",
             )
@@ -1159,17 +1369,15 @@ def create_app(
                     task_revision=task_revision,
                     **kwargs,
                 )
-                a3_snapshot = runtime.session_snapshot(session_id).get("a3") or {}
-                submitted_crop = (
-                    runtime.current_crop_path(session_id, unit_id)  # type: ignore[attr-defined]
-                    if a3_snapshot.get("phase") == "A2_ACTIVE"
-                    else None
-                )
                 return _agent_payload(
                     response,
                     runtime,
                     session_id,
-                    submitted_crop=submitted_crop,
+                    submitted_crop=response.submitted_crop_path,
+                    response_store=response_store,
+                    identity_key=identity_key or "local",
+                    response_mode="stream",
+                    defer_authoritative=True,
                 )
 
             result = StreamingResponse(
@@ -1180,6 +1388,10 @@ def create_app(
                     trace_context=trace_context,
                     trace_event_session=current_trace_event_session(),
                     trace_meta=_current_public_trace_meta(),
+                    runtime=runtime,
+                    response_store=response_store,
+                    session_id=session_id,
+                    identity_key=identity_key or "local",
                 ),
                 media_type="application/x-ndjson",
             )
@@ -1250,6 +1462,19 @@ def _trace_response_mode(path: object) -> str:
     if clean.endswith("/stream"):
         return "stream"
     return "json" if clean.startswith("/api/") or clean == "/health" else "html"
+
+
+def _is_authoritative_reply_path(path: object) -> bool:
+    return str(path or "").split("?", 1)[0] in {
+        "/api/message",
+        "/api/message/stream",
+        "/api/image",
+        "/api/image/stream",
+        "/api/a3/select",
+        "/api/a3/select/stream",
+        "/api/a3/prepare/stream",
+        "/api/a3/crop/stream",
+    }
 
 
 def _trace_duration_ms() -> int:
@@ -1351,6 +1576,12 @@ def _protocol_json_response(
     headers: dict[str, str] | None = None,
     output_watchdog: object | None = None,
     error_kind: str = "ProtocolFailure",
+    response_store: SQLiteResponseStore | None = None,
+    identity_key: str = "local",
+    session_id: str = "",
+    response_mode: str = "json",
+    response_snapshot: Mapping[str, object] | None = None,
+    trace_id: str = "",
 ) -> JSONResponse:
     protocol = _public_response_protocol(protocol)
     message = _public_protocol_message(protocol)
@@ -1363,13 +1594,41 @@ def _protocol_json_response(
         endpoint="http_error",
         session_id="",
     )
+    payload: dict[str, object] = {"detail": message, **protocol.to_dict()}
+    if response_store is not None and session_id:
+        snapshot = response_snapshot if isinstance(response_snapshot, Mapping) else {}
+        raw_a3 = snapshot.get("a3") if isinstance(snapshot, Mapping) else None
+        selected = raw_a3.get("selected_unit") if isinstance(raw_a3, Mapping) else None
+        intent = (
+            "a3_page_error"
+            if str(snapshot.get("image_route") or "").strip().upper() == "A3"
+            and not (
+                isinstance(selected, Mapping)
+                and str(selected.get("unit_id") or "").strip()
+            )
+            else "request_error"
+        )
+        try:
+            _finalize_authoritative_response(
+                payload,
+                response_store=response_store,
+                identity_key=identity_key,
+                session_id=session_id,
+                response_mode=response_mode,
+                snapshot=snapshot,
+                intent=intent,
+                stream_event_type="",
+                trace_id=trace_id,
+            )
+        except Exception:  # noqa: BLE001 - preserve the original safe failure.
+            logger.exception("authoritative error response persistence failed")
     _record_protocol_terminal(
         protocol,
         http_status=status_code,
         error_kind=error_kind,
     )
     return JSONResponse(
-        {"detail": message, **protocol.to_dict()},
+        payload,
         status_code=status_code,
         headers=headers,
     )
@@ -1505,8 +1764,10 @@ def _event_kind_for_layer(layer: RequestLayer) -> str:
 
 
 def _session_id(request: Request, *, cookie_name: str = SESSION_COOKIE) -> str:
+    cached = str(getattr(request.state, "session_id", "") or "").strip()
     value = str(request.cookies.get(cookie_name) or "").strip()
-    resolved = value or secrets.token_urlsafe(24)
+    resolved = cached or value or secrets.token_urlsafe(24)
+    request.state.session_id = resolved
     bind_trace_event_dimensions(session_key=session_key(resolved))
     return resolved
 
@@ -1546,6 +1807,91 @@ def _feedback_target_message(
         if raw_id == clean_target:
             return raw
     return {}
+
+
+def _feedback_search_duration_ms(
+    conversation: object,
+    message_id: str,
+    *,
+    task_revision: int,
+) -> int:
+    """Rebuild upload-to-first-candidate latency from the bounded UI timeline."""
+
+    if not isinstance(conversation, list):
+        return 0
+    target_index = -1
+    for index in range(len(conversation) - 1, -1, -1):
+        raw = conversation[index]
+        if not isinstance(raw, Mapping):
+            continue
+        item_id = str(raw.get("messageId") or raw.get("message_id") or "").strip()
+        if item_id == message_id:
+            target_index = index
+            break
+    if target_index < 0:
+        return 0
+
+    revision = max(0, int(task_revision))
+    visible = conversation[: target_index + 1]
+
+    def item_revision(item: Mapping[str, object]) -> int:
+        try:
+            return max(
+                0,
+                int(item.get("taskRevision") or item.get("task_revision") or 0),
+            )
+        except (TypeError, ValueError):
+            return 0
+
+    def is_user(item: Mapping[str, object]) -> bool:
+        return bool(item.get("me")) or str(item.get("role") or "").lower() == "user"
+
+    matching_users = [
+        item
+        for item in visible
+        if isinstance(item, Mapping)
+        and is_user(item)
+        and item_revision(item) == revision
+    ]
+    if not matching_users:
+        return 0
+    upload = next(
+        (
+            item
+            for item in reversed(matching_users)
+            if isinstance(item.get("images"), list) and bool(item.get("images"))
+        ),
+        matching_users[-1],
+    )
+    candidate = next(
+        (
+            item
+            for item in visible
+            if isinstance(item, Mapping)
+            and not is_user(item)
+            and item_revision(item) == revision
+            and _bounded_feedback_int(item.get("candidateCount") or item.get("candidate_count"))
+            > 0
+        ),
+        None,
+    )
+    if candidate is None:
+        return 0
+    started_at = _bounded_feedback_int(
+        upload.get("createdAt") or upload.get("created_at")
+    )
+    finished_at = _bounded_feedback_int(
+        candidate.get("createdAt") or candidate.get("created_at")
+    )
+    duration = finished_at - started_at
+    return duration if 0 <= duration <= 86_400_000 and started_at > 0 else 0
+
+
+def _bounded_feedback_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _handle_text(
@@ -1605,7 +1951,10 @@ def _record_protocol_event(
 ) -> None:
     recorder = getattr(runtime, "record_protocol_event", None)
     if callable(recorder):
-        recorder(session_id, **kwargs)
+        try:
+            recorder(session_id, **kwargs)
+        except Exception:  # noqa: BLE001 - observability must not replace the public reply.
+            logger.warning("runtime protocol event recording failed")
 
 
 def _forwarded_proto(request: Request) -> str:
@@ -1703,6 +2052,9 @@ def _agent_json(
     session_id: str,
     *,
     uploaded_image: Path | None = None,
+    submitted_crop: Path | None = None,
+    response_store: SQLiteResponseStore | None = None,
+    identity_key: str = "local",
     secure_cookie: bool = False,
     cookie_name: str = SESSION_COOKIE,
 ) -> JSONResponse:
@@ -1711,6 +2063,10 @@ def _agent_json(
         runtime,
         session_id,
         uploaded_image=uploaded_image,
+        submitted_crop=submitted_crop,
+        response_store=response_store,
+        identity_key=identity_key,
+        response_mode="json",
     )
     result = JSONResponse(payload)
     _set_session_cookie(
@@ -1730,11 +2086,32 @@ def _agent_payload(
     *,
     uploaded_image: Path | None = None,
     submitted_crop: Path | None = None,
+    response_store: SQLiteResponseStore | None = None,
+    identity_key: str = "local",
+    response_mode: str = "json",
+    defer_authoritative: bool = False,
 ) -> dict[str, object]:
-    media_snapshot = runtime.session_snapshot(session_id)
+    attached_public_snapshot = (
+        dict(response.response_snapshot)
+        if isinstance(response.response_snapshot, Mapping)
+        and response.response_snapshot
+        else {}
+    )
+    attached_projection_snapshot = (
+        dict(response.response_projection_snapshot)
+        if isinstance(response.response_projection_snapshot, Mapping)
+        and response.response_projection_snapshot
+        else attached_public_snapshot
+    )
+    live_snapshot: Mapping[str, object] = {}
+    if not attached_public_snapshot or not attached_projection_snapshot:
+        live_snapshot = runtime.session_snapshot(session_id)
+    public_snapshot_source = attached_public_snapshot or live_snapshot
+    media_snapshot = attached_projection_snapshot or public_snapshot_source
     media_guard = _media_delivery_guard(response, media_snapshot)
     image_urls, media = _persist_response_media(response, runtime, session_id)
     text = response.text
+    media_failure_snapshot: dict[str, object] = {}
     if media and media.get("status") in {
         "unavailable",
         "partial",
@@ -1751,6 +2128,7 @@ def _agent_payload(
                         "expected_candidate_generation"
                     ],
                     kind=str(media.get("kind") or "answer"),
+                    snapshot_target=media_failure_snapshot,
                 )
             except Exception:  # noqa: BLE001 - delivery state must not break the reply.
                 logger.warning("failed to reopen A3 unit after media failure")
@@ -1760,12 +2138,19 @@ def _agent_payload(
         persisted_crop = _persist_public_media(runtime, session_id, submitted_crop)
         if persisted_crop is not None:
             submitted_crop_url = f"/api/media/{persisted_crop.name}"
-    snapshot = _public_session_snapshot(runtime.session_snapshot(session_id))
+    snapshot = _public_session_snapshot(
+        media_failure_snapshot or public_snapshot_source
+    )
     feedback_images: list[dict[str, str]] = []
     if response.intent == "a3_units_prepared":
         try:
-            overlay_resolver = getattr(runtime, "current_auto_crop_overlay_path", None)
-            overlay_path = overlay_resolver(session_id) if callable(overlay_resolver) else None
+            if response.response_media_snapshot_captured:
+                overlay_path = response.feedback_overlay_path
+            else:
+                overlay_resolver = getattr(runtime, "current_auto_crop_overlay_path", None)
+                overlay_path = (
+                    overlay_resolver(session_id) if callable(overlay_resolver) else None
+                )
             if overlay_path is not None and Path(overlay_path).is_file():
                 persisted_overlay = _persist_public_media(
                     runtime, session_id, Path(overlay_path)
@@ -1831,7 +2216,7 @@ def _agent_payload(
                 "retry_search" if snapshot.get("has_active_image") is True else "new_chat"
             ),
         }
-    payload: dict[str, object] = {
+    payload = _AgentPayload({
         "text": text,
         "images": image_urls,
         "media": media,
@@ -1843,28 +2228,212 @@ def _agent_payload(
         "session": snapshot,
         "failure": failure,
         **protocol.to_dict(),
-    }
+    })
+    image_route = str(media_snapshot.get("image_route") or "").strip().upper()
+    if image_route not in {"A1", "A2", "A3"}:
+        image_route = ""
+    workflow_search_id = str(
+        media_snapshot.get("workflow_search_id") or ""
+    ).strip()
+    response_search_id = str(
+        protocol.search_id or media_snapshot.get("search_id") or ""
+    ).strip()
+    if image_route == "A2" and not workflow_search_id:
+        workflow_search_id = response_search_id
+    if (
+        image_route in {"A1", "A3"}
+        and workflow_search_id
+        and response_search_id == workflow_search_id
+    ):
+        response_search_id = ""
+    unit_id = str(media_guard.get("expected_unit_id") or "").strip()
+    if not unit_id:
+        raw_a3 = media_snapshot.get("a3")
+        if isinstance(raw_a3, Mapping):
+            selected = raw_a3.get("selected_unit")
+            if isinstance(selected, Mapping):
+                unit_id = str(selected.get("unit_id") or "").strip()
     dimensions: dict[str, str] = {
         "session_key": session_key(session_id),
+        "identity_key": str(identity_key or "local").strip(),
     }
     for key, value in (
-        ("workflow_search_id", media_snapshot.get("workflow_search_id")),
-        ("search_id", protocol.search_id or media_snapshot.get("search_id")),
+        ("workflow_search_id", workflow_search_id),
+        ("search_id", response_search_id),
+        ("unit_id", unit_id),
     ):
         clean = str(value or "").strip()
         if clean:
             dimensions[key] = clean
-    raw_a3 = media_snapshot.get("a3")
-    if isinstance(raw_a3, Mapping):
-        selected = raw_a3.get("selected_unit")
-        if isinstance(selected, Mapping) and str(selected.get("unit_id") or "").strip():
-            dimensions["unit_id"] = str(selected["unit_id"]).strip()
+
+    finalization_snapshot = dict(media_failure_snapshot or media_snapshot)
+    payload.authoritative_draft = _AuthoritativeResponseDraft(
+        snapshot=finalization_snapshot,
+        workflow_search_id=workflow_search_id,
+        search_id=response_search_id,
+        unit_id=unit_id,
+        image_route=image_route,
+        intent=str(payload.get("intent") or "public_response"),
+    )
+    if response_store is not None and not defer_authoritative:
+        try:
+            record = _finalize_authoritative_response(
+                payload,
+                response_store=response_store,
+                identity_key=identity_key,
+                session_id=session_id,
+                response_mode=response_mode,
+                snapshot=payload.authoritative_draft.snapshot,
+                workflow_search_id=payload.authoritative_draft.workflow_search_id,
+                search_id=payload.authoritative_draft.search_id,
+                unit_id=payload.authoritative_draft.unit_id,
+                image_route=payload.authoritative_draft.image_route,
+                intent=payload.authoritative_draft.intent,
+            )
+        except Exception as exc:
+            try:
+                setattr(exc, "response_snapshot", dict(finalization_snapshot))
+            except Exception:  # noqa: BLE001 - preserve the persistence failure.
+                pass
+            raise
+        dimensions["response_id"] = record.response_id
     bind_trace_event_dimensions(**dimensions)
 
     return payload
 
 
+def _finalize_authoritative_response(
+    payload: dict[str, object],
+    *,
+    response_store: SQLiteResponseStore,
+    identity_key: str,
+    session_id: str,
+    response_mode: str,
+    snapshot: Mapping[str, object] | None = None,
+    workflow_search_id: str | None = None,
+    search_id: str | None = None,
+    unit_id: str | None = None,
+    image_route: str | None = None,
+    intent: str = "",
+    stream_event_type: str | None = None,
+    trace_id: str = "",
+    cancelled: Callable[[], bool] | None = None,
+    bind_dimensions: bool = True,
+):
+    """Commit the exact safe payload before exposing its response identity."""
+
+    raw_snapshot = snapshot if isinstance(snapshot, Mapping) else {}
+    public_snapshot = _public_session_snapshot(raw_snapshot)
+    protocol = RequestProtocol.from_dict(payload)
+    resolved_route = (
+        str(
+            image_route
+            if image_route is not None
+            else raw_snapshot.get("image_route") or ""
+        )
+        .strip()
+        .upper()
+    )
+    if resolved_route not in {"A1", "A2", "A3"}:
+        resolved_route = ""
+    resolved_workflow = str(
+        workflow_search_id
+        if workflow_search_id is not None
+        else raw_snapshot.get("workflow_search_id") or ""
+    ).strip()
+    resolved_search = str(
+        search_id
+        if search_id is not None
+        else protocol.search_id or raw_snapshot.get("search_id") or ""
+    ).strip()
+    if resolved_route == "A2" and not resolved_workflow:
+        resolved_workflow = resolved_search
+    if (
+        resolved_route in {"A1", "A3"}
+        and resolved_workflow
+        and resolved_search == resolved_workflow
+    ):
+        resolved_search = ""
+    resolved_unit = str(unit_id or "").strip() if unit_id is not None else ""
+    if unit_id is None:
+        raw_a3 = raw_snapshot.get("a3")
+        if isinstance(raw_a3, Mapping):
+            selected = raw_a3.get("selected_unit")
+            if isinstance(selected, Mapping):
+                resolved_unit = str(selected.get("unit_id") or "").strip()
+    resolved_intent = str(intent or payload.get("intent") or "public_response").strip()
+    if not resolved_intent:
+        resolved_intent = "public_response"
+    resolved_event_type = (
+        "result" if stream_event_type is None and response_mode == "stream"
+        else str(stream_event_type or "")
+    )
+    delivery_envelope: object = payload
+    if resolved_event_type == "result":
+        delivery_envelope = {"type": "result", "data": payload}
+    elif resolved_event_type == "error":
+        delivery_envelope = {"type": "error", **payload}
+    json.dumps(
+        delivery_envelope,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    )
+    images = payload.get("images")
+    media_payload = payload.get("media")
+    media_status = (
+        str(media_payload.get("status") or "").strip()
+        if isinstance(media_payload, Mapping)
+        else ""
+    )
+    text = payload.get("text") or payload.get("detail") or payload.get("message") or ""
+    projection = ResponseProjection(
+            trace_id=str(trace_id or current_trace_id()).strip(),
+            identity_key=str(identity_key or "local").strip(),
+            session_key=session_key(session_id),
+            request_id=protocol.request_id,
+            status=protocol.status.value,
+            layer=protocol.layer.value,
+            code=protocol.code,
+            retryable=protocol.retryable,
+            action=protocol.action.value,
+            workflow_search_id=resolved_workflow,
+            search_id=resolved_search,
+            unit_id=resolved_unit,
+            phase=str(public_snapshot.get("phase") or "IDLE"),
+            task_revision=int(public_snapshot.get("task_revision") or 0),
+            candidate_count=int(public_snapshot.get("candidate_count") or 0),
+            chapter=str(public_snapshot.get("chapter") or "").strip(),
+            image_route=resolved_route,
+            intent=resolved_intent,
+            response_mode=response_mode,
+            media_status=media_status,
+            image_count=len(images) if isinstance(images, list) else 0,
+            text_length=len(str(text)),
+            duration_ms=_trace_duration_ms(),
+    )
+    record = (
+        response_store.finalize(projection, cancelled=cancelled)
+        if cancelled is not None
+        else response_store.finalize(projection)
+    )
+    payload["response_id"] = record.response_id
+    if bind_dimensions:
+        bind_trace_event_dimensions(
+            response_id=record.response_id,
+            identity_key=record.identity_key,
+            session_key=record.session_key,
+            workflow_search_id=record.workflow_search_id,
+            search_id=record.search_id,
+            unit_id=record.unit_id,
+        )
+    return record
+
+
 def _record_agent_payload_terminal(payload: Mapping[str, object]) -> None:
+    response_id = str(payload.get("response_id") or "").strip()
+    if response_id:
+        bind_trace_event_dimensions(response_id=response_id)
     protocol = RequestProtocol.from_dict(dict(payload))
     images = payload.get("images")
     terminal_attributes: dict[str, object] = {
@@ -2067,6 +2636,18 @@ def _public_session_snapshot(value: object) -> dict[str, object]:
     # An explicit null clears stale A3 state when a later upload routes to A1/A2.
     result["a3"] = a3
     return result
+
+
+def _safe_runtime_snapshot(
+    runtime: AgentSessionRuntime,
+    session_id: str,
+) -> Mapping[str, object]:
+    try:
+        snapshot = runtime.session_snapshot(session_id)
+    except Exception:  # noqa: BLE001 - error rendering must preserve the original failure.
+        logger.warning("runtime session snapshot unavailable during error handling")
+        return {}
+    return snapshot if isinstance(snapshot, Mapping) else {}
 
 
 def _public_a3_snapshot(value: object) -> dict[str, object] | None:
@@ -2274,9 +2855,15 @@ async def _stream_agent_events(
     trace_context: TraceContext,
     trace_event_session: TraceEventSession | None = None,
     trace_meta: Mapping[str, object] | None = None,
+    runtime: AgentSessionRuntime | None = None,
+    response_store: SQLiteResponseStore | None = None,
+    session_id: str = "",
+    identity_key: str = "local",
 ):
     loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    queue: asyncio.Queue[_QueuedStreamEvent | None] = asyncio.Queue()
+    delivery_cancelled = threading.Event()
+    unexposed_responses: dict[str, ResponseRecord] = {}
 
     def serialized_event(event: Mapping[str, object]) -> str:
         return json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -2284,8 +2871,126 @@ async def _stream_agent_events(
     def progress(stage: str, message: str) -> None:
         loop.call_soon_threadsafe(
             queue.put_nowait,
-            serialized_event(_public_progress_event(stage, message)),
+            _QueuedStreamEvent(
+                serialized_event(_public_progress_event(stage, message))
+            ),
         )
+
+    def error_snapshot(attached: object = None) -> Mapping[str, object]:
+        if isinstance(attached, Mapping) and attached:
+            return attached
+        if runtime is None or not session_id:
+            return {}
+        return _safe_runtime_snapshot(runtime, session_id)
+
+    async def finalize_stream_response(
+        payload: dict[str, object],
+        **kwargs: object,
+    ) -> ResponseRecord | None:
+        if response_store is None or not session_id:
+            return None
+        commit_task = asyncio.create_task(
+            asyncio.to_thread(
+                _finalize_authoritative_response,
+                payload,
+                response_store=response_store,
+                identity_key=identity_key,
+                session_id=session_id,
+                response_mode="stream",
+                trace_id=trace_context.trace_id,
+                cancelled=delivery_cancelled.is_set,
+                bind_dimensions=False,
+                **kwargs,
+            )
+        )
+
+        async def discard_committed(record: object) -> None:
+            response_id = str(getattr(record, "response_id", "") or "")
+            try:
+                await asyncio.to_thread(
+                    response_store.discard_unexposed,
+                    response_id,
+                    trace_id=trace_context.trace_id,
+                )
+            except Exception:  # noqa: BLE001 - cancellation remains authoritative.
+                logger.exception("unexposed stream response cleanup failed")
+            finally:
+                unexposed_responses.pop(response_id, None)
+                payload.pop("response_id", None)
+
+        try:
+            record = await asyncio.shield(commit_task)
+        except asyncio.CancelledError:
+            delivery_cancelled.set()
+            record = None
+            try:
+                record = await commit_task
+            except Exception:
+                pass
+            if record is not None:
+                await discard_committed(record)
+            raise
+        except ResponseFinalizationCancelled as exc:
+            raise asyncio.CancelledError() from exc
+        if delivery_cancelled.is_set():
+            await discard_committed(record)
+            raise asyncio.CancelledError()
+        unexposed_responses[record.response_id] = record
+        return record
+
+    async def finalize_error_event(
+        payload: dict[str, object],
+        *,
+        snapshot: Mapping[str, object],
+        persist_authoritative: bool = True,
+    ) -> ResponseRecord | None:
+        if not persist_authoritative or response_store is None or not session_id:
+            return None
+        raw_a3 = snapshot.get("a3") if isinstance(snapshot, Mapping) else None
+        selected = raw_a3.get("selected_unit") if isinstance(raw_a3, Mapping) else None
+        intent = (
+            "a3_page_error"
+            if str(snapshot.get("image_route") or "").strip().upper() == "A3"
+            and not (
+                isinstance(selected, Mapping)
+                and str(selected.get("unit_id") or "").strip()
+            )
+            else "request_error"
+        )
+        try:
+            return await finalize_stream_response(
+                payload,
+                snapshot=snapshot,
+                intent=intent,
+                stream_event_type="error",
+            )
+        except Exception:  # noqa: BLE001 - preserve the original safe failure.
+            logger.exception("authoritative stream error persistence failed")
+            return None
+
+    def expose_stream_event(event: _QueuedStreamEvent) -> None:
+        event_scope = (
+            trace_event_session_scope(trace_event_session)
+            if trace_event_session is not None
+            else suppress()
+        )
+        with trace_context_scope(trace_context), event_scope, _public_trace_meta_scope(
+            dict(trace_meta or {})
+        ):
+            record = event.response_record
+            if record is not None:
+                bind_trace_event_dimensions(
+                    response_id=record.response_id,
+                    identity_key=record.identity_key,
+                    session_key=record.session_key,
+                    workflow_search_id=record.workflow_search_id,
+                    search_id=record.search_id,
+                    unit_id=record.unit_id,
+                )
+            if event.terminal_recorder is not None:
+                event.terminal_recorder()
+        if event.response_record is not None:
+            unexposed_responses.pop(event.response_record.response_id, None)
 
     async def run() -> None:
         event_scope = (
@@ -2298,47 +3003,100 @@ async def _stream_agent_events(
         ):
             try:
                 payload = await asyncio.to_thread(execute, progress)
+                response_record = None
+                draft = getattr(payload, "authoritative_draft", None)
+                if (
+                    response_store is not None
+                    and not str(payload.get("response_id") or "").strip()
+                    and isinstance(draft, _AuthoritativeResponseDraft)
+                ):
+                    response_record = await finalize_stream_response(
+                        payload,
+                        snapshot=draft.snapshot,
+                        workflow_search_id=draft.workflow_search_id,
+                        search_id=draft.search_id,
+                        unit_id=draft.unit_id,
+                        image_route=draft.image_route,
+                        intent=draft.intent,
+                    )
                 line = serialized_event({"type": "result", "data": payload})
-                _record_agent_payload_terminal(payload)
-                await queue.put(line)
+                await queue.put(
+                    _QueuedStreamEvent(
+                        line,
+                        response_record=response_record,
+                        terminal_recorder=partial(
+                            _record_agent_payload_terminal,
+                            payload,
+                        ),
+                    )
+                )
             except AgentProtocolError as exc:
+                snapshot = error_snapshot(exc.response_snapshot)
                 protocol = _public_response_protocol(
                     exc.bind(
                         request_id=request_id or exc.request_id or new_request_id(),
-                        search_id=search_id or exc.search_id,
+                        search_id=str(
+                            snapshot.get("search_id") or exc.search_id or search_id
+                        ).strip(),
                     )
                 )
-                line = serialized_event({
+                error_payload: dict[str, object] = {
                     "type": "error",
                     "message": _public_protocol_message(protocol),
                     **protocol.to_dict(),
-                })
-                _record_protocol_terminal(
-                    protocol,
-                    http_status=200,
-                    error_kind=type(exc).__name__,
+                }
+                response_record = await finalize_error_event(
+                    error_payload,
+                    snapshot=snapshot,
                 )
-                await queue.put(line)
+                line = serialized_event(error_payload)
+                error_kind = type(exc).__name__
+                await queue.put(
+                    _QueuedStreamEvent(
+                        line,
+                        response_record=response_record,
+                        terminal_recorder=partial(
+                            _record_protocol_terminal,
+                            protocol,
+                            http_status=200,
+                            error_kind=error_kind,
+                        ),
+                    )
+                )
             except Exception as exc:  # noqa: BLE001 - keep internal failures out of the public stream.
                 logger.exception("streamed Agent request failed")
+                snapshot = error_snapshot(getattr(exc, "response_snapshot", None))
                 protocol = _public_response_protocol(
                     RequestProtocol.from_code(
                         "SERVICE_UNAVAILABLE",
                         request_id=request_id or new_request_id(),
-                        search_id=search_id,
+                        search_id=str(snapshot.get("search_id") or search_id).strip(),
                     )
                 )
-                line = serialized_event({
+                error_payload = {
                     "type": "error",
                     "message": "服务端处理失败，请稍后重试。",
                     **protocol.to_dict(),
-                })
-                _record_protocol_terminal(
-                    protocol,
-                    http_status=200,
-                    error_kind=type(exc).__name__,
+                }
+                response_record = await finalize_error_event(
+                    error_payload,
+                    snapshot=snapshot,
+                    persist_authoritative=not isinstance(exc, ResponseStoreError),
                 )
-                await queue.put(line)
+                line = serialized_event(error_payload)
+                error_kind = type(exc).__name__
+                await queue.put(
+                    _QueuedStreamEvent(
+                        line,
+                        response_record=response_record,
+                        terminal_recorder=partial(
+                            _record_protocol_terminal,
+                            protocol,
+                            http_status=200,
+                            error_kind=error_kind,
+                        ),
+                    )
+                )
             finally:
                 await queue.put(None)
 
@@ -2373,16 +3131,30 @@ async def _stream_agent_events(
             event = await queue.get()
             if event is None:
                 break
-            yield event
+            expose_stream_event(event)
+            yield event.body
         await task
     except (asyncio.CancelledError, GeneratorExit):
+        delivery_cancelled.set()
         record_cancelled()
         raise
     finally:
         if not task.done():
+            delivery_cancelled.set()
             task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+        for record in tuple(unexposed_responses.values()):
+            try:
+                await asyncio.to_thread(
+                    response_store.discard_unexposed,
+                    record.response_id,
+                    trace_id=trace_context.trace_id,
+                )
+            except Exception:  # noqa: BLE001 - cancellation remains authoritative.
+                logger.exception("unexposed queued stream response cleanup failed")
+            finally:
+                unexposed_responses.pop(record.response_id, None)
 
 
 def _public_progress_event(stage: object, message: object) -> dict[str, str]:

@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -30,11 +31,13 @@ from tiku_agent.fastapi_demo import (
 )
 from tiku_agent.feedback_store import SQLiteFeedbackStore, scope_feedback_conversation
 from tiku_agent.invite_access import InviteAccess, build_invitation_config
+from tiku_agent.session_artifacts import session_key
 from tiku_agent.session_runtime import (
     AgentBudgetExceededError,
     AgentProtocolError,
     AgentRuntimeBusyError,
 )
+from tiku_shared.response_store import ResponseProjection, SQLiteResponseStore
 from tiku_shared.trace_context import TraceContext, current_request_id, current_trace_id
 from tiku_shared.trace_events import (
     SQLiteTraceEventStore,
@@ -967,6 +970,290 @@ class FastApiDemoTest(unittest.TestCase):
                 terminal.safe_attributes["error_kind"], "ClientDisconnected"
             )
 
+    def test_stream_aclose_after_queued_result_discards_unexposed_response(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            trace_store = SQLiteTraceEventStore(root / "trace_events.sqlite3")
+            recorder = TraceEventRecorder(trace_store)
+            response_store = SQLiteResponseStore(root / "responses.sqlite3")
+            runtime = FakeRuntime(root / "unused.jpg")
+            request_id = f"req_{55:032x}"
+            trace = TraceContext.create(request_id=request_id)
+            session_id = "queued-result-cancel-session"
+            terminal_queued = threading.Event()
+            original_queue_type = asyncio.Queue
+
+            class SignallingQueue(original_queue_type):
+                async def put(self, item):
+                    await super().put(item)
+                    if getattr(item, "terminal_recorder", None) is not None:
+                        terminal_queued.set()
+
+            def execute(progress):
+                progress("searching", "正在按「4力法」搜索题目…")
+                return _agent_payload(
+                    AgentResponse(
+                        text="queued result must not become authoritative",
+                        intent="public_response",
+                    ),
+                    runtime,
+                    session_id,
+                    response_store=response_store,
+                    response_mode="stream",
+                    defer_authoritative=True,
+                )
+
+            async def close_after_result_is_queued(event_session):
+                events = _stream_agent_events(
+                    execute,
+                    request_id=request_id,
+                    trace_context=trace,
+                    trace_event_session=event_session,
+                    trace_meta={
+                        "endpoint": "/api/message/stream",
+                        "response_mode": "stream",
+                        "started_perf": time.perf_counter(),
+                    },
+                    response_store=response_store,
+                    runtime=runtime,
+                    session_id=session_id,
+                )
+                first = json.loads(await events.__anext__())
+                self.assertEqual(first["type"], "progress")
+                for _ in range(100):
+                    if terminal_queued.is_set():
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(terminal_queued.is_set())
+                self.assertIsNotNone(response_store.get_by_trace(trace.trace_id))
+                await events.aclose()
+
+            with trace_event_scope(
+                recorder,
+                trace_id=trace.trace_id,
+                request_id=request_id,
+            ) as event_session:
+                record_trace_event(
+                    "request_received",
+                    stage="http_request",
+                    outcome="started",
+                    safe_attributes={
+                        "method": "POST",
+                        "endpoint": "/api/message/stream",
+                        "response_mode": "stream",
+                    },
+                )
+                with patch(
+                    "tiku_agent.fastapi_demo.asyncio.Queue",
+                    SignallingQueue,
+                ):
+                    asyncio.run(close_after_result_is_queued(event_session))
+
+            self.assertIsNone(response_store.get_by_trace(trace.trace_id))
+            events, terminal = self._terminal_for_request(
+                trace_store,
+                request_id,
+                recorder=recorder,
+            )
+            self.assertEqual(terminal.event_type, "request_failed")
+            self.assertEqual(terminal.stage, "stream_delivery")
+            self.assertEqual(terminal.outcome, "cancelled")
+            self.assertTrue(all(not event.response_id for event in events))
+
+    def test_stream_cancellation_does_not_finalize_late_response(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime = FakeRuntime(root / "unused.jpg")
+            response_store = SQLiteResponseStore(root / "responses.sqlite3")
+            request_id = f"req_{52:032x}"
+            trace = TraceContext.create(request_id=request_id)
+            session_id = "cancelled-response-session"
+            started = threading.Event()
+            release = threading.Event()
+            finished = threading.Event()
+
+            def execute(_progress):
+                started.set()
+                release.wait(timeout=2.0)
+                try:
+                    return _agent_payload(
+                        AgentResponse(
+                            text="late response must not become authoritative",
+                            intent="public_response",
+                        ),
+                        runtime,
+                        session_id,
+                        response_store=response_store,
+                        response_mode="stream",
+                        defer_authoritative=True,
+                    )
+                finally:
+                    finished.set()
+
+            async def cancel_delivery():
+                events = _stream_agent_events(
+                    execute,
+                    request_id=request_id,
+                    trace_context=trace,
+                    response_store=response_store,
+                    runtime=runtime,
+                    session_id=session_id,
+                )
+                pending = asyncio.create_task(events.__anext__())
+                for _ in range(100):
+                    if started.is_set():
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(started.is_set())
+                pending.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await pending
+                release.set()
+                await events.aclose()
+
+            asyncio.run(cancel_delivery())
+            self.assertTrue(finished.wait(timeout=2.0))
+            self.assertIsNone(response_store.get_by_trace(trace.trace_id))
+
+    def test_stream_cancellation_during_database_lock_rolls_back_response(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "responses.sqlite3"
+            path.touch()
+            SQLiteResponseStore(path).get_by_trace(
+                f"trace_{'f' * 32}"
+            )
+            finalize_started = threading.Event()
+            finalize_finished = threading.Event()
+
+            class SignallingResponseStore(SQLiteResponseStore):
+                def finalize(self, projection, *, cancelled=None):
+                    finalize_started.set()
+                    try:
+                        return super().finalize(
+                            projection,
+                            cancelled=cancelled,
+                        )
+                    finally:
+                        finalize_finished.set()
+
+            response_store = SignallingResponseStore(
+                path,
+                sqlite_timeout_seconds=2.0,
+            )
+            runtime = FakeRuntime(root / "unused.jpg")
+            request_id = f"req_{53:032x}"
+            trace = TraceContext.create(request_id=request_id)
+            session_id = "database-lock-cancel-session"
+            blocker = sqlite3.connect(path)
+            blocker.execute("BEGIN EXCLUSIVE")
+
+            def execute(_progress):
+                return _agent_payload(
+                    AgentResponse(
+                        text="locked response must be rolled back",
+                        intent="public_response",
+                    ),
+                    runtime,
+                    session_id,
+                    response_store=response_store,
+                    response_mode="stream",
+                    defer_authoritative=True,
+                )
+
+            async def cancel_while_locked():
+                events = _stream_agent_events(
+                    execute,
+                    request_id=request_id,
+                    trace_context=trace,
+                    response_store=response_store,
+                    runtime=runtime,
+                    session_id=session_id,
+                )
+                pending = asyncio.create_task(events.__anext__())
+                for _ in range(100):
+                    if finalize_started.is_set():
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(finalize_started.is_set())
+                pending.cancel()
+                await asyncio.sleep(0)
+                blocker.rollback()
+                with self.assertRaises(asyncio.CancelledError):
+                    await pending
+                await events.aclose()
+
+            try:
+                asyncio.run(cancel_while_locked())
+            finally:
+                blocker.rollback()
+                blocker.close()
+            self.assertTrue(finalize_finished.wait(timeout=2.0))
+            self.assertIsNone(response_store.get_by_trace(trace.trace_id))
+
+    def test_stream_cancellation_after_commit_discards_unexposed_response(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            committed = threading.Event()
+            release = threading.Event()
+
+            class PausingResponseStore(SQLiteResponseStore):
+                def finalize(self, projection, *, cancelled=None):
+                    record = super().finalize(
+                        projection,
+                        cancelled=cancelled,
+                    )
+                    committed.set()
+                    release.wait(timeout=2.0)
+                    return record
+
+            response_store = PausingResponseStore(root / "responses.sqlite3")
+            runtime = FakeRuntime(root / "unused.jpg")
+            request_id = f"req_{54:032x}"
+            trace = TraceContext.create(request_id=request_id)
+            session_id = "post-commit-cancel-session"
+
+            def execute(_progress):
+                return _agent_payload(
+                    AgentResponse(
+                        text="committed but not exposed response",
+                        intent="public_response",
+                    ),
+                    runtime,
+                    session_id,
+                    response_store=response_store,
+                    response_mode="stream",
+                    defer_authoritative=True,
+                )
+
+            async def cancel_before_exposure():
+                events = _stream_agent_events(
+                    execute,
+                    request_id=request_id,
+                    trace_context=trace,
+                    response_store=response_store,
+                    runtime=runtime,
+                    session_id=session_id,
+                )
+                pending = asyncio.create_task(events.__anext__())
+                for _ in range(100):
+                    if committed.is_set():
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(committed.is_set())
+                pending.cancel()
+                await asyncio.sleep(0)
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await pending
+                await events.aclose()
+
+            try:
+                asyncio.run(cancel_before_exposure())
+            finally:
+                release.set()
+            self.assertIsNone(response_store.get_by_trace(trace.trace_id))
+
     def test_terminal_reflects_media_post_processing_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1324,11 +1611,12 @@ class FastApiDemoTest(unittest.TestCase):
         store = SQLiteFeedbackStore(test_dir / "feedback.sqlite3")
         trace_store = SQLiteTraceEventStore(test_dir / "trace_events.sqlite3")
         trace_recorder = TraceEventRecorder(trace_store)
-        client = TestClient(create_app(
+        app = create_app(
             runtime=runtime,
             feedback_store=store,
             trace_event_recorder=trace_recorder,
-        ))
+        )
+        client = TestClient(app)
 
         upload_bytes = io.BytesIO()
         Image.new("RGB", (8, 8), "white").save(upload_bytes, format="PNG")
@@ -1338,8 +1626,12 @@ class FastApiDemoTest(unittest.TestCase):
         )
         self.assertEqual(uploaded.status_code, 200)
         uploaded_url = uploaded.json()["uploaded_image"]
+        rated_response_id = uploaded.json()["response_id"]
+        rated_record = app.state.response_store.get(rated_response_id)
+        self.assertIsNotNone(rated_record)
         response = client.post("/api/feedback", json={
             "message_id": "message_case_123",
+            "rated_response_id": rated_response_id,
             "rating": "negative",
             "tags": ["not_found"],
             "detail": "没有合适候选",
@@ -1356,6 +1648,7 @@ class FastApiDemoTest(unittest.TestCase):
                     "me": False,
                     "message": "我正在帮你找。",
                     "messageId": "message_case_123",
+                    "responseId": rated_response_id,
                     "createdAt": 2000,
                 },
             ],
@@ -1365,8 +1658,11 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(response.json()["feedback"]["feedback_scope"], "question")
         saved = store.list_feedback()[0]
         self.assertEqual(saved.feedback_scope, "question")
-        self.assertEqual(saved.search_key, f"{saved.session_key}:1")
-        self.assertEqual(saved.search_duration_ms, 1450)
+        self.assertEqual(
+            saved.search_key,
+            rated_record.search_id or rated_record.workflow_search_id,
+        )
+        self.assertEqual(saved.search_duration_ms, 0)
         self.assertRegex(saved.feedback_number, r"^FB-\d{8}-[0-9A-F]{10}$")
         self.assertEqual(len(saved.conversation), 2)
         media_name = saved.conversation[0]["images"][0]
@@ -1390,6 +1686,7 @@ class FastApiDemoTest(unittest.TestCase):
             event for event in feedback_events if event.event_type == "feedback_recorded"
         )
         self.assertEqual(recorded.feedback_id, saved.feedback_id)
+        self.assertEqual(recorded.rated_response_id, rated_response_id)
         self.assertEqual(recorded.safe_attributes["rating"], "negative")
         self.assertEqual(recorded.safe_attributes["feedback_scope"], "question")
         self.assertEqual(
@@ -1402,6 +1699,7 @@ class FastApiDemoTest(unittest.TestCase):
         )
         rejected_empty = client.post("/api/feedback", json={
             "message_id": "message_case_123",
+            "rated_response_id": rated_response_id,
             "rating": "positive",
             "tags": ["found_answer"],
             "detail": "",
@@ -1419,7 +1717,12 @@ class FastApiDemoTest(unittest.TestCase):
         Image.new("RGB", (12, 8), "white").save(image_path)
         runtime = FakeRuntime(image_path)
         store = SQLiteFeedbackStore(test_dir / "feedback.sqlite3")
-        client = TestClient(create_app(runtime=runtime, feedback_store=store))
+        response_store = SQLiteResponseStore(test_dir / "responses.sqlite3")
+        client = TestClient(create_app(
+            runtime=runtime,
+            feedback_store=store,
+            response_store=response_store,
+        ))
 
         upload_bytes = io.BytesIO()
         Image.new("RGB", (12, 8), "white").save(upload_bytes, format="PNG")
@@ -1430,6 +1733,24 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(uploaded.status_code, 200)
         uploaded_url = uploaded.json()["uploaded_image"]
         session_id = client.cookies.get(SESSION_COOKIE)
+        rated_response = response_store.finalize(ResponseProjection(
+            trace_id=f"trace_{uuid4().hex}",
+            identity_key="local",
+            session_key=session_key(session_id),
+            request_id=f"req_{uuid4().hex}",
+            status="SUCCESS",
+            layer="tool",
+            code="REQUEST_SUCCEEDED",
+            workflow_search_id="search_workflow_page_two",
+            search_id="search_page_two",
+            unit_id="g1-u2",
+            phase="WAIT_UNIT_SELECTION",
+            task_revision=2,
+            candidate_count=9,
+            chapter="4力法",
+            image_route="A3",
+            intent="a3_units_prepared",
+        ))
         runtime.snapshot.update({
             "task_revision": 99,
             "candidate_count": 99,
@@ -1446,6 +1767,7 @@ class FastApiDemoTest(unittest.TestCase):
         target_id = "message_page_two"
         response = client.post("/api/feedback", json={
             "message_id": target_id,
+            "rated_response_id": rated_response.response_id,
             "rating": "positive",
             "tags": ["found_answer"],
             "detail": "框选清楚",
@@ -1458,6 +1780,7 @@ class FastApiDemoTest(unittest.TestCase):
                     "me": False,
                     "message": "已准备 9 道题：9 道可以直接检索。请选择一道继续。",
                     "messageId": target_id,
+                    "responseId": rated_response.response_id,
                     "taskRevision": 2,
                     "candidateCount": 9,
                     "intent": "a3_units_prepared",
@@ -1489,7 +1812,7 @@ class FastApiDemoTest(unittest.TestCase):
                 "SELECT schema_version FROM message_feedback WHERE feedback_id = ?",
                 (saved.feedback_id,),
             ).fetchone()[0]
-        self.assertEqual(schema_version, 7)
+        self.assertEqual(schema_version, 8)
 
     def test_feedback_scope_does_not_cross_task_revision_without_current_upload(self):
         target_id = "message_current_revision"
@@ -1538,13 +1861,21 @@ class FastApiDemoTest(unittest.TestCase):
         Image.new("RGB", (4, 4), "white").save(image_path)
         store = SQLiteFeedbackStore(test_dir / "feedback.sqlite3")
         client = TestClient(create_app(runtime=FakeRuntime(image_path), feedback_store=store))
-        client.get("/")
+        response = client.post("/api/message", json={"text": "请帮我搜题"})
+        self.assertEqual(response.status_code, 200, response.text)
+        rated_response_id = response.json()["response_id"]
 
         first = client.post("/api/feedback", json={
             "message_id": "message_12345678",
+            "rated_response_id": rated_response_id,
             "rating": "positive",
             "tags": ["found_answer", "fast"],
             "detail": "很快找到了",
+            "conversation": [{
+                "me": False,
+                "messageId": "message_12345678",
+                "responseId": rated_response_id,
+            }],
         })
         self.assertEqual(first.status_code, 200)
         saved = store.list_feedback()
@@ -1555,9 +1886,15 @@ class FastApiDemoTest(unittest.TestCase):
 
         updated = client.post("/api/feedback", json={
             "message_id": "message_12345678",
+            "rated_response_id": rated_response_id,
             "rating": "negative",
             "tags": ["ranking_issue"],
             "detail": "正确题在后面",
+            "conversation": [{
+                "me": False,
+                "messageId": "message_12345678",
+                "responseId": rated_response_id,
+            }],
         })
         self.assertEqual(updated.status_code, 200)
         saved = store.list_feedback()
@@ -1567,20 +1904,20 @@ class FastApiDemoTest(unittest.TestCase):
 
         outsider = TestClient(create_app(runtime=FakeRuntime(image_path), feedback_store=store))
         outsider.get("/")
-        not_removed = outsider.delete("/api/feedback/message_12345678")
-        self.assertEqual(not_removed.status_code, 200)
-        self.assertFalse(not_removed.json()["removed"])
+        not_removed = outsider.delete(f"/api/feedback/{rated_response_id}")
+        self.assertEqual(not_removed.status_code, 404)
         self.assertEqual(len(store.list_feedback()), 1)
 
-        removed = client.delete("/api/feedback/message_12345678")
+        removed = client.delete(f"/api/feedback/{rated_response_id}")
         self.assertEqual(removed.status_code, 200)
         self.assertTrue(removed.json()["removed"])
         self.assertEqual(store.list_feedback(), [])
-        self.assertFalse(client.delete("/api/feedback/message_12345678").json()["removed"])
+        self.assertFalse(client.delete(f"/api/feedback/{rated_response_id}").json()["removed"])
         self.assertEqual(client.delete("/api/feedback/bad").status_code, 400)
         self.assertEqual(
             client.post("/api/feedback", json={
                 "message_id": "message_abcdefgh",
+                "rated_response_id": rated_response_id,
                 "rating": "positive",
                 "tags": ["wrong_answer"],
                 "detail": "",
@@ -1636,9 +1973,15 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(runtime.last_identity, codes[0][0])
         feedback = client.post("/api/feedback", json={
             "message_id": "invite_message_01",
+            "rated_response_id": response.json()["response_id"],
             "rating": "positive",
             "tags": ["clear_reply"],
             "detail": "",
+            "conversation": [{
+                "me": False,
+                "messageId": "invite_message_01",
+                "responseId": response.json()["response_id"],
+            }],
         })
         self.assertEqual(feedback.status_code, 200)
         self.assertEqual(feedback_store.list_feedback()[0].identity_key, codes[0][0])
@@ -1664,6 +2007,24 @@ class FastApiDemoTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_stream_result_stops_timeout_and_does_not_wait_for_eof(self):
+        stream_block = _SCRIPT.split("async function requestStream(", 1)[1].split(
+            "function responseItem(", 1
+        )[0]
+        result_start = stream_block.index("if (event.type === 'result') {")
+        result_end = stream_block.index(
+            "if (event.type === 'error')",
+            result_start,
+        )
+        result_branch = stream_block[result_start:result_end]
+
+        clear_index = result_branch.index("clearTimeout(timer);")
+        cancel_index = result_branch.index("await reader.cancel()")
+        return_index = result_branch.index("return terminalResult;")
+        self.assertLess(clear_index, cancel_index)
+        self.assertLess(cancel_index, return_index)
+        self.assertNotIn("await reader.read()", result_branch)
+
     def test_page_assets_cover_interview_demo_interactions(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
         image_path = runtime_dir / f"demo_asset_{uuid4().hex}.jpg"
@@ -1681,7 +2042,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260822-feedback-v1"', 'src="/assets/demo.js?v=20260823-public-session-v1"',
+            'href="/assets/demo.css?v=20260822-feedback-v1"', 'src="/assets/demo.js?v=20260826-response-binding-v1"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -1719,11 +2080,15 @@ class FastApiDemoTest(unittest.TestCase):
             "function syncVisualViewport()", "window.visualViewport?.addEventListener('resize', syncVisualViewport",
             "window.visualViewport?.addEventListener('scroll', syncVisualViewport", "syncVisualViewport();",
             "function createMessageActions", "function openFeedback", "request('/api/feedback'",
-            "if (target < 0) return [];", "normalizeFeedbackImages(item.feedbackImages)",
+            "if (target < 0) return null;", "normalizeFeedbackImages(item.feedbackImages)",
             "feedbackImages: normalizeFeedbackImages(data.feedback_images)",
             "function cancelFeedback", "method: 'DELETE'", "syncFeedbackButtons(context.article, '')",
             "['found_answer', '找到了正确答案']", "['not_found', '没找到正确题']",
-            "const feedbackEligible = !item.me && item.variant !== 'pending'",
+            "const feedbackEligible = !item.me && item.variant !== 'pending' && Boolean(item.responseId)",
+            "responseId: String(data.response_id || '')",
+            "responseId: String(source.response_id || source.responseId || '')",
+            "rated_response_id: context.item.responseId",
+            "if (conversation) payload.conversation = conversation",
             "function createRecoveryActions", "登录状态已失效，请重新登录。",
             "这次请求没有处理成功，请直接重试；如果仍然失败，请点踩并补充说明。",
             "if (now - activityAt >= HISTORY_TTL_MS)", "showSessionExpiredNotice();",
@@ -1739,7 +2104,6 @@ class FastApiDemoTest(unittest.TestCase):
             "protocol.status === 'PARTIAL' ? 'partial' : ''",
             "function setResponseStatus(data)", "headers.set('x-request-id', requestId)",
             "isPersistentImage(data.submitted_crop)", "我提交了裁剪后的题图。",
-            "search_id: context.item.searchId || sessionContext.search_id || ''",
         ):
             self.assertIn(expected, _SCRIPT)
         self.assertNotIn(
@@ -1756,6 +2120,10 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertNotIn("题图处理中", _SCRIPT)
         self.assertNotIn("题图正在上传", _SCRIPT)
         self.assertNotIn("正在上传并识别题干", _SCRIPT)
+        self.assertNotIn(
+            "search_id: context.item.searchId || sessionContext.search_id || ''",
+            _SCRIPT,
+        )
         restore_body = _SCRIPT[_SCRIPT.index("function restoreHistory()"):_SCRIPT.index("async function repairUploadedImageHistory()")]
         self.assertIn("historyLastActivityAt = activityAt", restore_body)
         self.assertNotIn("refreshActivity: true", restore_body)

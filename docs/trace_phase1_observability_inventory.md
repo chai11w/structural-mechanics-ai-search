@@ -1,8 +1,8 @@
 # Trace Phase 1 可观测性现状盘点
 
-状态：2.1 实施前审计快照（保留作为基线）；2.2 Trace Context 与 2.3 结构化事件/终态已完成
+状态：2.1 实施前审计快照保留为基线；2.2 Trace Context、2.3 结构化事件/终态和 2.4 权威响应/反馈绑定已完成，2.5 诊断查询/保留/切换为 NEXT
 
-日期：2026-08-25
+日期：2026-08-27
 
 范围：8790 新 Agent/Web、8896 验收入口，以及 8795 反馈管理/费用只读查询；8788 个人飞书入口不纳入改造
 
@@ -23,8 +23,10 @@
 - `tiku_shared/model_costs.py`：模型 run/call 与费用；
 - `tiku_agent/fastapi_demo.py`、`tiku_agent/output_watchdog.py`：HTTP、流式、媒体、
   公共输出观察与异常漏斗；
+- `tiku_shared/trace_events.py`、`tiku_shared/response_store.py`：结构化事件、终态和
+  权威响应投影；
 - `tiku_agent/demo_web/demo.js`、`tiku_agent/feedback_store.py`、
-  `tiku_admin/reporting.py`：反馈提交、存储、证据过期和费用关联；
+  `tiku_admin/reporting.py`：反馈提交、权威绑定、证据过期和费用关联；
 - 相关协议、运行时、A3、FastAPI、输出观察、费用和后台测试。
 
 静态代码可以证明错误出口和落盘规则，但不能穷举第三方库、操作系统、SQLite、网络和
@@ -33,27 +35,29 @@
 
 ## 核心结论
 
-1. 当前不是一套日志，而是八套独立记录：A2 任务 JSONL、模型费用 SQLite、A3 页面错误
-   SQLite、公共输出观察 JSONL、进程 stdout/stderr、看门狗状态、反馈，以及 8795 管理审计。
+1. 2.1 基线发现八套独立记录；2.3/2.4 又加了运行根独立的 Trace Store 和 Response Store。
+   物理记录仍分散，但现在已有 `trace_id → response_id → rated_response_id/feedback_id` 的权威连接，
+   下一步不是把所有文件强并成一个库，而是用 2.5 的只读查询层统一读取。
 2. 8790 当前任务摘要写在 `a2/task_logs.jsonl`，不是根目录旧的
    `task_logs.jsonl`；当前共享费用写根目录 `model_costs.sqlite3`，不是旧的
    `a2/model_costs.sqlite3`。仅凭文件名很容易读错数据源。
 3. 公共协议注册 100 个结果码，其中 23 个状态为 `ERROR`；但“注册”不等于当前每个
    码都有生产发出点，用户可见失败也可能是 `NEEDS_INPUT`、`NO_MATCH` 或 `PARTIAL`。
-4. 有些异常会产生两条任务记录，有些只进 stderr，有些观测/费用/日志写入失败会被
-   fail-open 静默吞掉，因此当前既存在重复也存在盲区。
-5. 反馈数据库和证据位置明确，但目标 `message_id`、对话和被评分协议来自浏览器；
-   服务端没有权威的最终响应记录，所以还不能精确证明“这条反馈对应服务器发出的哪一版回复”。
-6. 当前存储没有统一 `trace_id`，不能用一个键无歧义地串起路由、A3/A2、工具、模型、
-   费用、公共回复和反馈。
+4. 历史 sink 仍可能重复或静默丢失；新 Trace writer 的 dropped/validation/write/duplicate-terminal
+   计数已进入健康状态，但不会反向补记旧 sink。
+5. 可评分回复现在先写 `responses.sqlite3` 的白名单投影，再返回服务端 `response_id`。反馈 schema
+   v8 强制 `rated_response_id` 和 conversation，并校验 identity、session、有效期和目标
+   message/response 一致性；旧 v7 行保持未绑定、只读兼容。
+6. 路由、A3/A2、工具、模型、费用、最终公共结果和反馈现在能按 trace/response 权威串起；尚缺的是
+   Codex/Agent 可直接使用的“摘要 → 时间线 → 按需证据”查询入口。8795 不是这些数据的所有者。
 
 ## 运行根目录与职责
 
 | 名称 | 默认路径 | 职责 |
 | --- | --- | --- |
-| 8790 root | `.tmp_tiku_agent_v2_prod_8790` | 生产 A3 父流程、共享费用、反馈、输出观察和服务日志 |
+| 8790 root | `.tmp_tiku_agent_v2_prod_8790` | 生产 A3 父流程、共享费用、trace、response、反馈、输出观察和服务日志 |
 | 8790 A2 root | `.tmp_tiku_agent_v2_prod_8790/a2` | 当前子题 A2 会话、题图/媒体和任务摘要 |
-| 8896 root | `.tmp_tiku_agent_a3_mvp_8896` | 隔离验收 A3、共享费用和输出观察 |
+| 8896 root | `.tmp_tiku_agent_a3_mvp_8896` | 隔离验收 A3、共享费用、trace、response 和输出观察 |
 | 8896 A2 root | `.tmp_tiku_agent_a3_mvp_8896/a2` | 8896 子题 A2 会话与任务摘要 |
 | 8795 root | `.tmp_tiku_admin_8795` | 控制库、管理员审计和后台服务日志 |
 
@@ -72,7 +76,7 @@
 | 8790 | `<8790-root>/a2/task_logs.jsonl` |
 | 8896 | `<8896-root>/a2/task_logs.jsonl` |
 | 格式 | 一行一个 `TaskLogEntry` JSON |
-| 主要字段 | `task_id/request_id/search_id/session_key/identity_key`、kind、起止时间、阶段前后、outcome、题数、候选数、章节、route、`error_kind`、五态协议字段 |
+| 主要字段 | `task_id/trace_id/request_id/search_id/session_key/identity_key`、kind、起止时间、阶段前后、outcome、题数、候选数、章节、route、`error_kind`、五态协议字段 |
 | 内容边界 | 不保存原始用户文本、图片路径或异常正文 |
 | 保留 | 只追加；没有滚动、大小上限或定期清理 |
 | 写失败 | `_write_task_log` 捕获所有异常并静默继续，用户请求不失败，也没有第二处健康记录 |
@@ -88,18 +92,17 @@
 | 触发 | A2 turn 完成；A3 的分流、整页理解、框选、逐题校验、外荷载门禁和意图模型等各自完成 |
 | 当前共享库 | `<8790-root>/model_costs.sqlite3`、`<8896-root>/model_costs.sqlite3` |
 | 表 | `model_cost_runs`、`model_cost_calls` |
-| run 字段 | run/session/identity/search/task kind、起止时间、outcome、调用数、token、估算费用和 warning |
-| call 字段 | call/run/sequence、provider/model/call type/status、延迟、token、尝试数、`request_id`、`error_kind` 和价格 |
-| 语义冲突 | call 表的 `request_id` 是模型供应商响应 ID；A2 run 常把应用请求 ID 当 `run_id`，A3 run 又用 `new_request_id()` 生成独立值 |
+| run 字段 | `run_id/trace_id`、session/identity/search/task kind、起止时间、outcome、调用数、token、估算费用和 warning |
+| call 字段 | call/run/trace/sequence、provider/model/call type/status、延迟、token、尝试数、`provider_request_id`、兼容 `request_id`、`error_kind` 和价格 |
+| ID 规则 | 新 run 使用独立 `run_...`；供应商 ID 以 `provider_request_id` 为权威，旧 `request_id` 仅镜像兼容；历史行不重解释 |
 | 保留 | 没有自动删除或滚动 |
 | 写失败 | A2/A3 都捕获并静默继续；可能已经产生模型费用但账本没有对应 run |
 
 旧的 `<root>/a2/model_costs.sqlite3` 仍可能存在，但当前 8790/8896 装配把同一个根目录共享
 账本注入父 A3 与子 A2。后台为兼容历史会同时读取根库和 A2 旧库。
 
-A2 还把客户端可复用的 HTTP `request_id` 用作 cost `run_id`，而 ledger 对 run 使用
-`INSERT OR REPLACE`。若客户端复用 request ID，新 run 行可能覆盖旧 run 行，旧 call 行却继续
-留在同一 run ID 下，造成新旧调用混合。这不仅是“关联不方便”，还可能改变账本语义。
+2.1 基线中 A2 曾把可复用的 HTTP `request_id` 用作 cost `run_id`，存在覆盖/混合风险；
+2.2 已改为 `new_run_id()`。历史行继续只读兼容，不能据此把旧 provider `request_id` 当应用请求 ID。
 
 ### 3. A3 会话与页面错误
 
@@ -112,7 +115,7 @@ A2 还把客户端可复用的 HTTP `request_id` 用作 cost `run_id`，而 ledg
 | 触发 | 整页理解、schema 尝试、重试、自动框选等明确调用 `_record_page_error` 的路径 |
 | 保留 | 会话默认 2 小时；页面错误名义 30 天，但旧错误只在下一次写入页面错误时清理 |
 | 写失败 | 诊断写入异常被静默吞掉 |
-| 内容风险 | error message 最长 500 字符，保留异常链中的具体消息；没有统一字段白名单或 trace |
+| 内容风险 | error message 最长 500 字符，保留异常链中的具体消息；该旧表本身没有 trace/统一白名单，2.3 另有不复制异常正文的事件层 |
 
 `a3_sessions` 是当前状态，不是事件历史。`last_error/last_error_detail` 会被后续状态覆盖，
 不能据此还原完整执行过程。
@@ -175,7 +178,36 @@ PID 文件在启动时覆盖；进程异常退出后可能留下陈旧数字，�
 管理员登录成功/失败、普通邀请码登录、反馈审核/归档/删除目前不进入该表；反馈管理动作只改
 反馈库。因此“admin audit”也不是 8795 所有操作的完整审计日志。
 
-### 9. 非当前生产主链日志
+### 9. 结构化 Trace 事件（2.3）
+
+| 项目 | 当前事实 |
+| --- | --- |
+| 生成器 | `TraceEventRecorder` → `SQLiteTraceEventStore` |
+| 位置 | 各 8790/8896 运行根的 `trace_events.sqlite3` |
+| 触发 | ingress、路由/阶段、模型/工具、费用提交、最终公共响应、反馈和请求失败 |
+| 关联 | 服务端 `trace_id` 贯通 request、父 workflow、子 search/unit、run/call、`response_id` 和 `feedback_id` |
+| 内容边界 | 事件类型白名单和 safe attributes 白名单；不存原文、Prompt、路径、URL 或异常正文 |
+| 写失败 | 请求线程只做有界入队并 fail-open；丢失、校验、写入和重复终态计数由 `/health` 暴露 |
+
+每个 trace 只有一个权威 terminal event，JSON、stream 和媒体后处理都以实际交付的最终协议为准。
+Trace Store 独立于 8795，后者不是数据所有者或运行依赖。
+
+### 10. 权威 Response 与反馈绑定（2.4）
+
+| 项目 | 当前事实 |
+| --- | --- |
+| 生成器 | `SQLiteResponseStore.finalize`，默认由 Web app 在 feedback DB 同目录装配 |
+| 位置 | 各 8790/8896 运行根的 `responses.sqlite3` |
+| 触发 | JSON/stream、A3 父回复、A2 子题回复和可评分服务端错误完成最终协议/媒体投影后、公开前 |
+| 主要字段 | `response_id/trace_id`、identity/session、request/workflow/search/unit、协议、phase/revision、章节/route、计数、耗时、创建/过期时间 |
+| 内容边界 | 只存严格白名单投影；不保存题目正文、回复正文、完整对话、Prompt、路径或 URL |
+| 一致性 | 同 trace 同投影幂等；同 trace 不同投影冲突；投影无法落盘时不暴露未绑定的可评分成功；stream 结果公开前断开会回滚或删除尚未公开的 response row |
+
+反馈 schema v8 以唯一 `rated_response_id` 绑定 response；identity/session/有效期和 conversation
+目标一致性均由服务端校验，协议与父子任务字段取自 response row。旧 v7 反馈迁移后
+`rated_response_id=''`，仅作历史只读兼容。8795 可以展示该绑定，但不是 Response Store 所有者。
+
+### 11. 非当前生产主链日志
 
 `triage_shadow.jsonl`、`a3_decomposition.jsonl`、`a3_region_map.jsonl`、评测 records 和旧飞书
 章节失败日志属于影子、试验或 8788 路径。除非对应启动入口明确装配，不能与 8790/8896
@@ -194,10 +226,13 @@ PID 文件在启动时覆盖；进程异常退出后可能留下陈旧数字，�
 | 8790 根 `a3_sessions.sqlite3` | 当前活跃 | 当前 A3 store |
 | 8790 `a2/session.db` | 当前活跃状态库 | 当前子 A2 session store |
 | 8790 根 `session.db` | 历史残留 | 当前子 A2 store 在 `a2/session.db` |
+| 8790 根 `trace_events.sqlite3` | 当前代码装配的权威事件库 | 2.3 store；与 8896 隔离，不依赖 8795 |
+| 8790 根 `responses.sqlite3` | 当前代码装配的权威响应库 | 2.4 store；按需创建，每 trace 一条白名单投影 |
 | 8790 `feedback.sqlite3`、`feedback_cases/` | 当前反馈源 | 8790 写入，8795 直接读写反馈管理字段/案例；元信息显示已有 5 个 case 目录和 22 个媒体文件 |
 | 8790 根 stdout/stderr、status/PID | 当前服务文件 | 当前看门狗重定向/维护；无轮转，PID 可能陈旧 |
 | 8790 `server*.log`、`manual_restart.*` | 历史启动残留 | 当前看门狗装配不使用这些文件 |
 | 8896 根 `model_costs.sqlite3`、`a3_sessions.sqlite3` | 当前活跃 | 当前共享费用与 A3 store |
+| 8896 根 `trace_events.sqlite3`、`responses.sqlite3` | 当前代码装配 | 与 8790 隔离的 2.3/2.4 store；response 按需创建 |
 | 8896 `a2/session.db` | 当前活跃状态库 | 当前子 A2 session store |
 | 8896 `a2/model_costs.sqlite3` | 历史残留 | 当前 A2 写根共享费用库 |
 | 8896 `feedback.sqlite3` | 按需创建、当前尚不存在 | 入口已装配 feedback store，但没有写入就不会创建数据库 |
@@ -214,16 +249,18 @@ PID 文件在启动时覆盖；进程异常退出后可能留下陈旧数字，�
 
 | 记录 | 当前查看位置 | 当前限制 |
 | --- | --- | --- |
-| 用户反馈入口 | 8790/8896 浏览器中每条可反馈的助手回复 | 正常 UI 会带 conversation，但 API 本身允许省略 |
+| 用户反馈入口 | 8790/8896 浏览器中带服务端 `response_id` 的助手回复 | API 强制 conversation，且目标 message 必须携带相同 response ID；旧消息/客户端错误不显示反馈按钮 |
 | 反馈列表、详情和案例媒体 | 8795 管理后台直接读取 8790 feedback DB/cases | 不读取 8896 反馈；归档项的详情/媒体受限 |
 | 反馈关联费用 | 8795 详情页读取 8790 根费用库和 A2 历史费用库 | 启发式 join，不是 trace/FK |
 | 模型费用汇总 | 8795 总览、用户用量和反馈详情 | 读取根费用库及 A2 历史库；不可读时可能显示不完整/零值 |
 | 管理审计 | 8795 设置页“最近操作” | 只覆盖部分控制面操作，不含登录和反馈管理 |
 | A2 task、A3 page error、stdout/stderr、输出观察 | 只能由运维直接查看文件/SQLite | 8795 不聚合这些数据，没有一页式请求时间线 |
+| Trace/Response | 各运行根 `trace_events.sqlite3`、`responses.sqlite3` | 已有权威 join；2.5 尚未提供稳定的 Codex/Agent 查询 CLI，8795 也不是数据所有者 |
 | 看门狗状态 | 各 runtime root 的 status/PID 文件 | 只看进程代次，不看业务请求 |
 
-所以目前“用户反馈在哪里”是明确的：写入对应 Web root，生产反馈由 8795 查看；但“这条反馈
-前面发生了什么错误、哪次模型调用收费、用户最终收到哪版回复”没有一个权威页面或统一 join。
+所以目前“用户反馈对应哪版服务端回复”已经由 `rated_response_id` 权威确定，也能回到原响应
+trace；但“前面发生了什么错误、哪次模型调用收费”仍缺一个稳定、有界的一站式查询入口。
+这正是 2.5 的工作，不能把 8795 当前页面误当成长期诊断架构。
 
 ## 公共结果与错误词表
 
@@ -285,13 +322,13 @@ feedback 3、queue 2、network 2。这个分布描述词表，不代表生产 em
 | A2 上传持久化 | 转 `UPLOAD_PERSIST_FAILED` | 固定重传文案 | `_admit` 写任务摘要 | 包装后通常只剩协议错误，原始文件系统异常不保留 |
 | 纯 A3 上传持久化 | `persist_image` 异常落入通用边界 | `SERVICE_UNAVAILABLE` | 输出观察，未捕获时进 stderr | 不发 `UPLOAD_PERSIST_FAILED`，与 A2 同类失败语义不一致 |
 | ToolResult error/partial/no-match | Agent renderer 与注册表产生固定反馈 | 固定文案/恢复动作 | turn 结束写任务摘要 | 工具内部 safe facts、重试和子步骤不在任务摘要；11 个通用异常边界会压缩具体错误 |
-| A3 模型/解析/框选 | A3 阶段转固定协议或 `SERVICE_UNAVAILABLE` | 安全文案或人工回退 | 费用 run；部分路径写 `a3_page_errors`；边界可能再写任务摘要 | 不是所有 A3 异常都写 page error；unit 与 ingress request 未贯通 |
-| 媒体持久化/交付 | `_persist_response_media` 生成 media status/协议并可重开 A3 unit | 0/部分/全部交付文案 | warning 进 stderr，最终文案进输出观察 | 媒体后处理发生在 Agent turn 日志之后，任务摘要可能仍显示原业务成功 |
-| 流式执行 | `_stream_agent_events` 单独捕获队列/额度，其他异常走通用分支 | NDJSON error 事件 | runtime 内异常可能已有任务摘要；通用异常 `logger.exception` 进 stderr | 普通 `AgentProtocolError` 可能被压成 `SERVICE_UNAVAILABLE`；流式 terminal error 不进输出观察，也不新增协议事件记录 |
-| 反馈校验 | HTTP 400/413 → `FEEDBACK_INVALID/TOO_LARGE` | 固定文案 | 有 session 时写 feedback 边界任务摘要，进输出观察 | 多个不同校验原因被折叠；不保存具体安全原因码 |
-| 反馈存储异常 | 当前一般落入全局未捕获异常 | `SERVICE_UNAVAILABLE` | stderr + 全局边界任务摘要（若有 session） | 注册的 `FEEDBACK_SAVE_FAILED` 未形成稳定 emitter；无法区分 DB、媒体复制或 schema 问题 |
-| 未捕获 FastAPI 异常 | 全局转 `SERVICE_UNAVAILABLE` | 固定 500 文案 | `logger.exception` → stderr；有 session 时写边界任务摘要；进输出观察 | traceback 非结构化，且与请求仅靠时间/request ID 旁证 |
-| 观测/任务/费用写入异常 | 多数直接 `except Exception: pass` | 不影响用户 | 通常无第二落点 | 真正的可观测性盲区：写失败本身不可观测 |
+| A3 模型/解析/框选 | A3 阶段转固定协议或 `SERVICE_UNAVAILABLE` | 安全文案或人工回退 | 费用 run、结构化 stage/model/terminal event；部分路径另写 `a3_page_errors` | page-error 旧表仍非全覆盖，但 trace 已保留 ingress 与显式父子/unit 维度 |
+| 媒体持久化/交付 | `_persist_response_media` 生成 media status/协议并可重开 A3 unit | 0/部分/全部交付文案 | warning/输出观察；Response Store 和 terminal event 记录后处理后的最终投影 | 旧 task 摘要仍可能显示媒体处理前的业务成功，查询时应以 terminal/response 为准 |
+| 流式执行 | `_stream_agent_events` 捕获协议和通用异常 | NDJSON result/error | runtime task/stderr；流式实际交付写唯一 terminal event，可评分终态写 response row | 浏览器本地断网/超时仍不能证明服务端是否已完成或计费 |
+| 反馈校验 | HTTP 400/413 → `FEEDBACK_INVALID/TOO_LARGE` | 固定文案 | feedback 边界任务摘要、输出观察和失败 terminal event | 多个具体校验原因仍折叠为公共安全码 |
+| 反馈存储异常 | 当前一般落入全局未捕获异常 | `SERVICE_UNAVAILABLE` | stderr、边界摘要和请求失败 terminal event | 注册的 `FEEDBACK_SAVE_FAILED` 尚无稳定独立 emitter，DB/媒体/schema 仍被合并 |
+| 未捕获 FastAPI 异常 | 全局转 `SERVICE_UNAVAILABLE` | 固定 500 文案 | stderr、边界摘要、输出观察和安全 terminal event | traceback 仍只在非结构化 stderr；trace 不复制异常正文 |
+| 观测/任务/费用写入异常 | 旧 sink 多数 fail-open | 不影响用户 | Trace writer 有健康计数；旧 task/cost/page-error/output sink 各自规则不变 | 新健康计数不能补记旧 sink 已丢数据，2.5 查询必须显示证据缺失 |
 
 ## 重复、漏记与语义冲突
 
@@ -303,11 +340,11 @@ feedback 3、queue 2、network 2。这个分布描述词表，不代表生产 em
    有意的“attempt + terminal”多记录，后续不能按相同 search/time 盲目去重，必须显式标明类型。
 3. 纯 A3 已捕获的页面理解失败通常落在费用、`a3_page_errors` 和输出观察，不会自然进入
    A2 task log，也通常不进 stderr；不同入口的 sink 组合不一致。
-4. 反馈保存成功会写 `feedback.sqlite3`，随后再写一条 `kind=feedback` 的任务摘要；这是
-   两种不同记录，但当前没有反馈 ID 将它们精确连接。
+4. 反馈保存成功会写 `feedback.sqlite3`，随后写 `kind=feedback` 任务摘要和结构化 trace event；
+   它们是不同视图，但新事件已携带 `feedback_id/rated_response_id`，可经 response row 回到原 trace。
 5. 媒体持久化发生在 A2 turn 已写任务摘要之后；task JSONL 可能记录业务 `SUCCESS`，随后 Web
-   把最终协议改成 `MEDIA_CANDIDATES_INCOMPLETE`、`MEDIA_ANSWERS_PARTIAL` 或
-   `MEDIA_ANSWERS_UNAVAILABLE`，形成“日志成功、用户失败/降级”的冲突。
+   把最终协议改成媒体降级。2.3/2.4 已让 terminal event/response row 反映实际交付，但 2.5 查询
+   必须区分“业务结果”和“交付结果”，不能盲信旧 task 摘要。
 
 ### 确定漏记或可静默丢失
 
@@ -328,13 +365,15 @@ feedback 3、queue 2、network 2。这个分布描述词表，不代表生产 em
 
 ### ID 语义冲突
 
-- 应用 `request_id` 与模型供应商 `request_id` 同名；
+- 历史应用 `request_id` 与模型供应商 `request_id` 同名；新费用行以
+  `provider_request_id` 为权威并仅镜像旧列；
 - 纯 A3 `_response()` 会另建 request ID，部分直接响应又不带 ID；body 可能与
   `X-Request-ID` 不同或为空；
-- A2 `run_id` 常等于请求 ID，A3 `run_id` 是另一个 `req_...`；
+- 历史 A2/A3 `run_id` 语义不一；新 run 使用独立 `run_...`；
 - A3 `current_search_id` 在路由过程中可能代表父 workflow 或子搜索；
 - `unit_id` 只在一个 workflow 内唯一；
-- 反馈 `message_id` 和被评分协议由客户端带回，服务端没有权威 response row。
+- 反馈 UI 的 `message_id` 仍由客户端创建，但权威被评分协议和父子任务字段来自服务端 response row；
+  `message_id` 只能与同一 `rated_response_id` 配对，不能重绑。
 
 这些冲突是新增独立 `trace_id/response_id/provider_request_id`，而不是继续复用旧字段的直接理由。
 
@@ -342,35 +381,39 @@ feedback 3、queue 2、network 2。这个分布描述词表，不代表生产 em
 
 ### 提交与校验
 
-1. 服务器返回安全回复和协议；浏览器渲染后自行创建 `message_id`。
-2. 用户评分时，浏览器提交 rating、tags、detail、目标附近 conversation、耗时、协议字段、
-   request ID 和 search ID。
-3. `/api/feedback` 限制请求大小、字段类型、标签、detail、conversation 和 `message_id` 格式。
-4. 正常网页会提交 conversation，此时服务端要求其中存在同 ID 目标，缺失就 fail-closed；但 API
-   允许完全省略 conversation，省略后目标绑定校验不会执行，格式合法的任意 `message_id` 仍可写入。
-5. 服务端用 session cookie 和邀请码身份确定 `session_key/identity_key`，并读取当前 snapshot
-   作为缺失字段的 fallback。
-6. 反馈范围由服务端根据目标 intent、A3 overlay 和 image route 判定为 `page|question`，不信任
-   客户端直接声明的 scope；但分类所依赖的目标 intent/overlay 仍来自客户端回传，只能算受约束
-   的客户端信号。
+1. 服务器在最终安全回复/媒体载荷形成后保存白名单投影并返回 `response_id`；浏览器把它与自行
+   创建的 `message_id` 一起保存。没有 response ID 的旧消息和客户端本地错误不可评分。
+2. 用户评分时，浏览器提交 rating、tags、detail、`rated_response_id` 和截至目标消息的
+   conversation；目标消息本身也携带相同 response ID。
+3. `/api/feedback` 限制请求大小、字段类型、标签、detail、conversation、`message_id` 和
+   `rated_response_id` 格式；conversation 缺失直接拒绝。
+4. 服务端用邀请码身份和 session cookie 得到 `identity_key/session_key`，再从 Response Store
+   查找未过期且完全同 owner 的 response；不存在、过期、跨用户或跨 session 均按未找到处理。
+5. 服务端要求 conversation 中存在目标 `message_id`，且目标消息的 response ID 与
+   `rated_response_id` 完全一致；任一 ID 已绑定另一方时拒绝更新，消除 message/response 重绑。
+6. 协议、revision、候选数、章节、image route、父 workflow、子 search 和 intent 均从服务端
+   response 投影取值，不再信任客户端历史或提交时最新 snapshot。反馈范围仍由服务端据此分类为
+   `page|question`；conversation 只作为受限案例证据，不是关联权威。
 
 ### 数据库存储
 
-8790 使用 `<8790-root>/feedback.sqlite3` 的 `message_feedback`：
+8790 使用 `<8790-root>/feedback.sqlite3` 的 `message_feedback`；当前代码 schema 为 v8：
 
-- 服务端字段：`feedback_id/feedback_number`、identity/session、review/archive、创建/更新时间；
+- 服务端字段：`feedback_id/feedback_number/rated_response_id`、identity/session、review/archive、
+  创建/更新时间；
 - 用户评价：rating、tags、detail；
-- 客户端目标优先字段：revision、candidate count（缺失时才退回当前 snapshot）；
-- 客户端计算字段：搜索 duration；
-- 提交时当前 snapshot：phase、chapter、image route，评价旧回复时可能已漂移；
-- 关联字段：message/request/search/workflow search、status/layer/code、scope；
+- response 投影字段：revision、candidate count、duration、phase、chapter、image route、
+  request/search/workflow、status/layer/code、intent 和 scope；
+- 浏览器辅助字段：`message_id` 和受限 conversation，仅用于 UI/案例证据；
 - 证据：裁剪后的 conversation JSON、过期/清理时间。
 
-唯一约束是 `(identity_key, session_key, message_id)`；同一目标再次评分会更新原记录。
+新记录同时受 `(identity_key, session_key, message_id)` 和非空 `rated_response_id` 唯一约束；同一
+response/消息再次评分只更新原记录，不能改绑。删除反馈也按 response ID 加 owner 校验。
 
-本次只读元信息核验显示：当前 8790 数据库为 schema v7、共 5 行，案例目录 5 个、媒体文件
+2026-08-25 的只读元信息基线显示：当时 8790 数据库为 schema v7、共 5 行，案例目录 5 个、媒体文件
 22 个（约 2.53 MB）；只有 2/5 行同时具备 request/search/workflow 关联字段。未读取反馈正文或
-媒体内容。当前没有已清理或已到期未清理的案例；这些数量只说明现状，不证明关联链路完整。
+媒体内容。v8 代码首次打开旧库时加法迁移，历史行保持 `rated_response_id=''`，后台明确标为
+legacy binding；不会根据旧客户端字段伪造 response 归属。
 
 ### 对话和媒体证据
 
@@ -399,6 +442,8 @@ feedback 3、queue 2、network 2。这个分布描述词表，不代表生产 em
 
 8795 直接读取 8790 feedback DB/cases，并同时查询根共享费用库和 A2 历史费用库：
 
+- v8 反馈列表/详情展示 `rated_response_id`，旧 v7 行明确标记为 legacy binding；
+
 - page 反馈用 `workflow_search_id` 找费用；
 - question 反馈用 `search_key` 和 `workflow_search_id`；
 - 再按 `identity_key` 过滤；
@@ -407,7 +452,8 @@ feedback 3、queue 2、network 2。这个分布描述词表，不代表生产 em
 - 根费用库先读、A2 历史库后读，并跨库按 `run_id` 去重；后读库的同 ID run 会被丢弃；
 - 浏览器时钟偏差过大时退回服务器提交时间。
 
-这是兼容性启发式关联，不是外键：同一 search key 的多次 run、客户端时钟、历史字段缺失
+权威 response 绑定没有自动把旧费用查询变成外键查询。当前费用展示仍是兼容性启发式关联：
+同一 search key 的多次 run、客户端时钟、历史字段缺失
 都可能使展示费用包含多次调用或需要 fallback。该 join 不使用 `feedback_id/message_id`、
 被评分回复的 `request_id`、`session_key/task_revision` 或明确的 `run_id`；任一费用库读取失败还会
 fail-open 跳过，后台可能显示不完整或零费用。
@@ -417,18 +463,19 @@ fail-open 跳过，后台可能显示不完整或零费用。
 | 字段/行为 | 当前信任来源 | 结论 |
 | --- | --- | --- |
 | identity | 经验证的邀请码 Cookie | 生产身份权威 |
-| session | 非空客户端 session Cookie 的哈希 | 不暴露 Cookie，但反馈入口不验证 session 当前有效或拥有目标回复 |
+| session | 非空客户端 session Cookie 的哈希 | 不暴露 Cookie；反馈必须与 response row 的 session owner 完全一致 |
+| response ID/投影 | 服务端最终安全载荷写入 Response Store | 被评分回复权威；只存白名单元数据，不存回复正文 |
 | feedback ID/number | 服务端生成 | 权威 |
-| scope | 服务端根据目标消息与 route 分类 | 服务端计算，但依赖客户端目标内容，不能证明响应真实性 |
+| scope | 服务端根据 response intent/route 分类 | 服务端权威投影派生，不依赖客户端声明 |
 | 媒体文件 | 只允许当前/保留 session 的安全 resolver | 服务端所有权校验 |
-| message ID | 浏览器生成后回传 | 非权威；始终只校验格式，只有提交了 conversation 时才校验其中存在目标 |
-| rated protocol/request/search | 浏览器历史回传，缺失时 snapshot fallback | 客户端介导，无法证明对应精确响应 |
-| conversation/目标时间 | 浏览器回传后裁剪和限长 | 内容受限但不是服务器原始响应记录 |
+| message ID | 浏览器生成后回传 | 非权威 UI ID；必须在 conversation 中存在并与同一 `rated_response_id` 一一绑定 |
+| rated protocol/request/search | 服务端 response 投影 | 精确对应目标回复；不采用客户端覆盖或最新 snapshot |
+| conversation/目标时间 | 浏览器回传后裁剪和限长 | 强制提交且目标需匹配，但内容仍只是受限案例证据，不是响应权威 |
 | 费用 | 服务端本地账本 | 行由服务端生成但可能漏写且金额是估算；反馈到费用的 join 是启发式 |
 
-## 第一阶段确认的设计输入
+## 2.1 设计输入与当前完成状态
 
-进入 Trace Context 实现前，必须以本盘点为约束：
+下列约束来自 2.1 基线，继续约束后续实现：
 
 1. `trace_id` 由服务器生成，每个 HTTP 操作唯一；现有公共 `request_id` 只保留兼容。
 2. 新事件必须明确 `event_type/stage`，避免把内部 turn、边界错误和同一异常的不同视图当重复事故。
@@ -445,6 +492,11 @@ fail-open 跳过，后台可能显示不完整或零费用。
 11. 下一阶段测试必须覆盖：正常 A2、A3 多题父子、准入失败、内部异常、媒体失败、同题重试、
     旧回复反馈、writer 失败、重复事件抑制、协议词表/emitter/浏览器一致性和隐私白名单。
 
+其中 1～7 的 trace/response 主链及第 10 项 optional-conversation 漏洞已在 2.2～2.4 完成；
+`rated_response_id`、owner/expiry、目标 message 一致性和旧 v7 兼容均有定向回归。第 8～9 项的
+统一保留/周期清理，以及把这些物理 store 变成稳定的 Codex/Agent 有界查询入口，属于 2.5。
+8795 最多是该入口未来的只读消费者，不是完成门或数据所有者。
+
 ## 本阶段完成门槛
 
 第一阶段只有同时满足以下条件才算完成：
@@ -454,6 +506,6 @@ fail-open 跳过，后台可能显示不完整或零费用。
 - 公共错误词表与实际异常漏斗已区分；
 - 注册词表、服务端 emitter 与浏览器本地协议的不一致已列出；
 - 重复记录、静默丢失和非结构化 stderr 风险已列出；
-- 反馈入口、可选 conversation 绕过、DB、case 媒体、过期、后台查询、费用 join 和信任边界已核对；
+- 反馈入口、当时存在的可选 conversation 绕过、DB、case 媒体、过期、后台查询、费用 join 和信任边界已核对；该绕过现已由 2.4 关闭；
 - 最小 Trace V1 契约吸收上述约束；
 - 未读取或写入用户日志正文、反馈正文、媒体和敏感配置。

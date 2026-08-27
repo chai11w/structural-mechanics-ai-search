@@ -630,6 +630,15 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(snapshot["image_route"], "A2")
         self.assertEqual(snapshot["phase"], "WAIT_CANDIDATE_CHOICE")
         self.assertFalse(snapshot["a3"]["enabled"])
+        self.assertEqual(response.response_projection_snapshot["image_route"], "A2")
+        self.assertEqual(
+            response.response_projection_snapshot["workflow_search_id"],
+            snapshot["workflow_search_id"],
+        )
+        self.assertEqual(
+            response.response_projection_snapshot["search_id"],
+            snapshot["search_id"],
+        )
 
         answered = self.runtime.handle_text("full-flow-a2", "选择候选 1")
 
@@ -1133,6 +1142,43 @@ class A3RuntimeTests(unittest.TestCase):
             completed.text,
             "「四-1」的题库答案找到了，已经发给你。这张图里的可处理题目已经全部完成。",
         )
+
+    def test_answer_projection_snapshot_keeps_parent_phase_and_child_search_identity(self):
+        session_id = "a3-answer-response-snapshot"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u2")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.25, "y": 0.2, "width": 0.5, "height": 0.5},
+        )
+
+        answered = self.runtime.handle_text(session_id, "选择候选 1")
+        public_snapshot = answered.response_snapshot
+        snapshot = answered.response_projection_snapshot
+
+        self.assertTrue(answered.response_media_snapshot_captured)
+        self.assertEqual(public_snapshot["phase"], A3_PHASE_WAIT_SELECTION)
+        self.assertEqual(public_snapshot["chapter"], "")
+        self.assertEqual(public_snapshot["candidate_count"], 0)
+        self.assertEqual(snapshot["phase"], A3_PHASE_WAIT_SELECTION)
+        self.assertEqual(snapshot["a3"]["phase"], A3_PHASE_WAIT_SELECTION)
+        self.assertEqual(snapshot["chapter"], "2静定结构")
+        self.assertEqual(snapshot["candidate_count"], 1)
+        self.assertEqual(snapshot["candidate_generation"], "1:1")
+        self.assertEqual(snapshot["search_id"], "search_direct_a2")
+        self.assertTrue(snapshot["workflow_search_id"])
+        self.assertNotEqual(snapshot["workflow_search_id"], snapshot["search_id"])
+        self.assertEqual(snapshot["a3"]["selected_unit"]["unit_id"], "g1-u2")
+        self.assertEqual(snapshot["a3"]["completed_unit_ids"], ["g1-u2"])
+
+        live_snapshot = self.runtime.session_snapshot(session_id)
+        self.assertEqual(live_snapshot["phase"], A3_PHASE_WAIT_SELECTION)
+        self.assertEqual(live_snapshot["chapter"], "")
+        self.assertEqual(live_snapshot["candidate_count"], 0)
+        self.assertNotEqual(live_snapshot["search_id"], snapshot["search_id"])
+
+        self.runtime.select_unit(session_id, "g1-u1")
+        self.assertEqual(snapshot["a3"]["selected_unit"]["unit_id"], "g1-u2")
 
     def test_active_a2_candidate_rejection_keeps_fixed_text_only_fallback(self):
         session_id = "a3-candidate-rejection-fallback"

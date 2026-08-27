@@ -538,6 +538,52 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.assertIsNone(runtime.current_image_path(session_id))
         self.assertFalse(self.artifacts.session_dir(session_id).exists())
 
+    def test_response_snapshot_is_frozen_while_same_session_lock_is_held(self):
+        session_id = "response-snapshot-lock-session"
+        self.addCleanup(lambda: self.artifacts.clear_session(session_id))
+
+        class LockObservingRuntime(AgentSessionRuntime):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.snapshot_lock_states = []
+
+            def session_snapshot(self, observed_session_id):
+                clean = self._clean_session_id(observed_session_id)
+                lock = self._session_locks[hash(clean) % len(self._session_locks)]
+                self.snapshot_lock_states.append(lock.locked())
+                return super().session_snapshot(clean)
+
+        runtime = LockObservingRuntime(
+            self.store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            agent_factory=lambda state: TikuSearchAgent(
+                state=state,
+                tools=FakeTools().toolbox(),
+                use_llm_intent=False,
+            ),
+        )
+
+        searched = runtime.handle_image(session_id, self.source_image)
+        searched_snapshot = dict(searched.response_snapshot)
+
+        self.assertEqual(runtime.snapshot_lock_states, [True])
+        self.assertTrue(searched.response_media_snapshot_captured)
+        self.assertEqual(searched_snapshot["phase"], "WAIT_CANDIDATE_CHOICE")
+        self.assertEqual(searched_snapshot["chapter"], "4力法")
+        self.assertEqual(searched_snapshot["candidate_count"], 1)
+        self.assertEqual(searched_snapshot["search_id"], searched.protocol["search_id"])
+
+        answered = runtime.handle_text(session_id, "就这个")
+
+        self.assertEqual(runtime.snapshot_lock_states, [True, True])
+        self.assertEqual(answered.response_snapshot["phase"], "ANSWERED")
+        live_snapshot = runtime.session_snapshot(session_id)
+        self.assertEqual(runtime.snapshot_lock_states, [True, True, False])
+        self.assertEqual(live_snapshot["phase"], "ANSWERED")
+        self.assertEqual(searched.response_snapshot, searched_snapshot)
+        self.assertEqual(searched.response_snapshot["phase"], "WAIT_CANDIDATE_CHOICE")
+
     def test_clear_waits_for_same_session_task_then_removes_its_state(self):
         started = threading.Event()
         release = threading.Event()

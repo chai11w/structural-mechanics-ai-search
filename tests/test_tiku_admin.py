@@ -297,6 +297,7 @@ class TikuAdminTest(unittest.TestCase):
         store = SQLiteFeedbackStore(self.root / "feedback.sqlite3")
         saved = store.upsert(
             message_id="message_12345678",
+            rated_response_id=f"resp_{uuid4().hex}",
             identity_key="invite-001",
             session_key="session-hash",
             rating="negative",
@@ -344,6 +345,7 @@ class TikuAdminTest(unittest.TestCase):
         )
         newer = store.upsert(
             message_id="message_87654321",
+            rated_response_id=f"resp_{uuid4().hex}",
             identity_key="invite-001",
             session_key="newer-session",
             rating="positive",
@@ -384,6 +386,7 @@ class TikuAdminTest(unittest.TestCase):
         target_id = "message_current_page"
         saved = store.upsert(
             message_id=target_id,
+            rated_response_id=f"resp_{uuid4().hex}",
             identity_key="invite-media",
             session_key="session-media",
             rating="positive",
@@ -441,6 +444,7 @@ class TikuAdminTest(unittest.TestCase):
         target_id = "message_current_page"
         saved = store.upsert(
             message_id=target_id,
+            rated_response_id=f"resp_{uuid4().hex}",
             identity_key="invite-legacy",
             session_key="session-legacy",
             rating="positive",
@@ -591,6 +595,7 @@ class TikuAdminTest(unittest.TestCase):
         )
         saved = feedback.upsert(
             message_id="message_trace_01",
+            rated_response_id=f"resp_{uuid4().hex}",
             identity_key=invitation.invite_id,
             session_key="session-key",
             rating="negative",
@@ -631,6 +636,7 @@ class TikuAdminTest(unittest.TestCase):
         target_created_at = datetime.fromisoformat(started_at) + timedelta(seconds=2)
         page_saved = feedback.upsert(
             message_id="message_page_trace_01",
+            rated_response_id=f"resp_{uuid4().hex}",
             identity_key=invitation.invite_id,
             session_key="session-key",
             rating="negative",
@@ -676,6 +682,7 @@ class TikuAdminTest(unittest.TestCase):
         )
         skewed_saved = feedback.upsert(
             message_id="message_page_skewed_01",
+            rated_response_id=f"resp_{uuid4().hex}",
             identity_key=invitation.invite_id,
             session_key="session-key",
             rating="negative",
@@ -835,6 +842,7 @@ class TikuAdminTest(unittest.TestCase):
         self._insert_cost(costs, identity_key=invite_id, search_key="search-one")
         saved = feedback.upsert(
             message_id="message_abcdefgh",
+            rated_response_id=f"resp_{uuid4().hex}",
             identity_key=invite_id,
             session_key="session-key",
             rating="negative",

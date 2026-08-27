@@ -198,6 +198,7 @@ function protocolFields(source = {}) {
     action: String(source.action || ''),
     requestId: String(source.request_id || source.requestId || ''),
     searchId: String(source.search_id || source.searchId || ''),
+    responseId: String(source.response_id || source.responseId || ''),
   };
 }
 
@@ -267,6 +268,7 @@ function remember(item) {
     candidateCount: Number(item.candidateCount || 0),
     candidateGeneration: String(item.candidateGeneration || ''),
     messageId: String(item.messageId || ''),
+    responseId: String(item.responseId || ''),
     noticeKey: String(item.noticeKey || ''),
     createdAt: Number(item.createdAt || 0),
     feedback: item.feedback || null,
@@ -277,7 +279,6 @@ function remember(item) {
     a3: normalizeA3Snapshot(item.a3),
     ...protocolFields(item),
   });
-  history = history.slice(-HISTORY_LIMIT);
   saveHistory({ refreshActivity: true });
 }
 
@@ -371,7 +372,7 @@ function closeLightbox() {
 
 function feedbackConversation(messageId) {
   const target = history.findIndex((item) => item.messageId === messageId);
-  if (target < 0) return [];
+  if (target < 0) return null;
   const visible = history.slice(0, target + 1);
   const targetRevision = Number(visible.at(-1)?.taskRevision || 0);
   let start = visible.length - 1;
@@ -414,34 +415,12 @@ function feedbackConversation(messageId) {
     taskRevision: Number(item.taskRevision || 0),
     candidateCount: Number(item.candidateCount || 0),
     messageId: String(item.messageId || ''),
+    responseId: String(item.responseId || ''),
     createdAt: Number(item.createdAt || 0),
     a3Overlay: item.messageId === messageId
       ? String(normalizeFeedbackImages(item.feedbackImages).find((image) => image.kind === 'a3_overlay')?.url || '')
       : '',
   }));
-}
-
-function searchDurationForFeedback(messageId) {
-  const target = history.findIndex((item) => item.messageId === messageId);
-  if (target < 0) return 0;
-  const revision = Number(history[target].taskRevision || 0);
-  if (!revision) return 0;
-  let upload = null;
-  for (let index = target; index >= 0; index -= 1) {
-    const item = history[index];
-    if (item.me && item.message === '我发了一张题图。' && Number(item.taskRevision || 0) === revision) {
-      upload = item;
-      break;
-    }
-  }
-  const candidateReply = history.slice(0, target + 1).find((item) => (
-    !item.me
-    && Number(item.taskRevision || 0) === revision
-    && Number(item.candidateCount || 0) > 0
-  ));
-  const startedAt = Number(upload?.createdAt || 0);
-  const finishedAt = Number(candidateReply?.createdAt || 0);
-  return startedAt > 0 && finishedAt >= startedAt ? finishedAt - startedAt : 0;
 }
 
 function createMessageId() {
@@ -749,19 +728,13 @@ async function submitFeedback() {
   try {
     const payload = {
       message_id: context.item.messageId,
+      rated_response_id: context.item.responseId,
       rating: context.rating,
       tags: Array.from(context.tags),
       detail: feedbackDetail.value.trim(),
-      conversation: feedbackConversation(context.item.messageId),
-      search_duration_ms: searchDurationForFeedback(context.item.messageId),
-      status: context.item.status || 'SUCCESS',
-      layer: context.item.layer || 'tool',
-      code: context.item.code || 'REQUEST_SUCCEEDED',
-      retryable: Boolean(context.item.retryable),
-      action: context.item.action || '',
-      request_id: context.item.requestId || '',
-      search_id: context.item.searchId || sessionContext.search_id || '',
     };
+    const conversation = feedbackConversation(context.item.messageId);
+    if (conversation) payload.conversation = conversation;
     await request('/api/feedback', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -791,7 +764,7 @@ async function cancelFeedback() {
   feedbackCancel.textContent = '正在取消…';
   feedbackError.hidden = true;
   try {
-    await request(`/api/feedback/${encodeURIComponent(context.item.messageId)}`, {
+    await request(`/api/feedback/${encodeURIComponent(context.item.responseId)}`, {
       method: 'DELETE',
     }, 8000, '取消反馈超时，请稍后重试。', false, '暂时无法取消反馈，请检查网络。');
     context.item.feedback = null;
@@ -878,7 +851,7 @@ function addMessage(item, persist = true) {
       ? AUTHOR_CONTACT_FALLBACK
       : null);
   if (inferredAuthorContact) item = { ...item, authorContact: inferredAuthorContact };
-  const feedbackEligible = !item.me && item.variant !== 'pending';
+  const feedbackEligible = !item.me && item.variant !== 'pending' && Boolean(item.responseId);
   if (feedbackEligible) {
     item = {
       ...item,
@@ -1331,7 +1304,6 @@ async function requestStream(
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let result = null;
     while (true) {
       const { value, done } = await reader.read();
       buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
@@ -1344,13 +1316,18 @@ async function requestStream(
           if (renewTimeoutOnProgress) renewTimeout();
           onProgress?.(event);
         }
-        if (event.type === 'result') result = event.data;
+        if (event.type === 'result') {
+          const terminalResult = event.data;
+          clearTimeout(timer);
+          try { await reader.cancel(); } catch (_error) { /* terminal result already won */ }
+          if (!terminalResult) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
+          return terminalResult;
+        }
         if (event.type === 'error') throw streamedError(event);
       }
       if (done) break;
     }
-    if (!result) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
-    return result;
+    throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
   } catch (error) {
     if (error.name === 'AbortError') {
       if (controller.signal.reason === 'new-chat') throw new UserVisibleError('当前识别已取消。');
@@ -1390,6 +1367,7 @@ function responseItem(data) {
     recoveryActions: recoveryAction ? [recoveryAction] : [],
     authorContact: normalizeAuthorContact(data?.author_contact),
     messageId: createMessageId(),
+    responseId: String(data.response_id || ''),
     createdAt: Date.now(),
     a3: normalizeA3Snapshot(data.session?.a3),
     feedbackImages: normalizeFeedbackImages(data.feedback_images),
