@@ -9,11 +9,15 @@ import openpyxl
 from scripts.feishu_store_flow import (
     FeishuStoreService,
     append_excel_record,
+    classify_store_dimensions,
     format_store_confirmation,
 )
 
 
 class _FakeQwen:
+    def __init__(self):
+        self.dimension_calls = 0
+
     def classify_image(self, _image_path):
         return {
             "loads": [{"type": "均布", "raw": "q"}],
@@ -26,6 +30,7 @@ class _FakeQwen:
         return {"structure_type": "桁架"}
 
     def recognize_dimensions(self, _image_path, known_structure_type):
+        self.dimension_calls += 1
         self.known_structure_type = known_structure_type
         return {
             "normalized": {
@@ -42,6 +47,12 @@ class _FakeCoordinator:
 
 
 class FeishuStoreFlowTests(unittest.TestCase):
+    def test_arch_store_skips_outer_dimension_recognition(self):
+        coordinator = _FakeCoordinator()
+        result = classify_store_dimensions(Path("question.jpg"), "拱", coordinator)
+        self.assertEqual(result["dimension_state"], "skip")
+        self.assertEqual(coordinator.qwen.dimension_calls, 0)
+
     def test_symbolic_store_classification_carries_structure_and_dimensions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "main"

@@ -240,6 +240,8 @@ def classify_store_dimensions(
     empty = {"long_width": "", "single_side": "", "dimension_state": ""}
     if not structure_type or structure_type == "unknown":
         return empty
+    if structure_type == "拱":
+        return {"long_width": "", "single_side": "", "dimension_state": "skip"}
     recognizer = getattr(getattr(coordinator, "qwen", None), "recognize_dimensions", None)
     if not callable(recognizer):
         return empty
@@ -380,6 +382,10 @@ def format_answer_received(count: int) -> str:
 
 def format_store_confirmation(plan: StorePlan) -> str:
     answer_lines = [target.relative_to(plan.question_target.parents[2]).as_posix() for target in plan.answer_targets]
+    if plan.dimension_state == "skip" and plan.structure_type == "拱":
+        dimension_text = "不适用（拱）"
+    else:
+        dimension_text = plan.long_width or "未识别"
     lines = [
         "准备新增：",
         "",
@@ -389,7 +395,7 @@ def format_store_confirmation(plan: StorePlan) -> str:
         *answer_lines,
         f"荷载：{format_loads(plan.loads)}",
         *([f"结构类型：{plan.structure_type}"] if plan.target_bank == "symbolic" else []),
-        *([f"外围尺寸（长×宽）：{plan.long_width or '未识别'}"] if plan.target_bank == "symbolic" else []),
+        *([f"外围尺寸（长×宽）：{dimension_text}"] if plan.target_bank == "symbolic" else []),
         *([f"单边尺寸：{plan.single_side}"] if plan.target_bank == "symbolic" and plan.single_side else []),
         f"写入：{plan.workbook.name}",
         "",
