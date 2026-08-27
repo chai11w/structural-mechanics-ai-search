@@ -49,6 +49,9 @@ class StoreDraft:
     route: str = ""
     target_bank: str = ""
     structure_type: str = ""
+    long_width: str = ""
+    single_side: str = ""
+    dimension_state: str = ""
     chapter_hint: str = ""
     chapter_confidence: float = 0.0
     chapter_evidence: str = ""
@@ -71,6 +74,9 @@ class StorePlan:
     loads: list[dict[str, Any]]
     stored_loads: list[dict[str, Any]]
     structure_type: str = ""
+    long_width: str = ""
+    single_side: str = ""
+    dimension_state: str = ""
 
 
 @dataclass
@@ -119,6 +125,10 @@ class FeishuStoreService:
         elif route.route == "symbolic" and route.category == "symbolic_unassigned":
             draft.stored_loads = mapped_symbolic_loads(loads)
             draft.structure_type = classify_store_structure_type(image_path, classified, coordinator)
+            dimensions = classify_store_dimensions(image_path, draft.structure_type, coordinator)
+            draft.long_width = dimensions["long_width"]
+            draft.single_side = dimensions["single_side"]
+            draft.dimension_state = dimensions["dimension_state"]
         return draft
 
     def prepare_plan(self, draft: StoreDraft) -> StorePlan:
@@ -148,6 +158,9 @@ class FeishuStoreService:
             workbook = self.symbolic / f"{draft.chapter}.xlsx"
             stored_loads = mapped_symbolic_loads(draft.loads)
         structure_type = draft.structure_type if target_bank == "symbolic" else ""
+        long_width = draft.long_width if target_bank == "symbolic" else ""
+        single_side = draft.single_side if target_bank == "symbolic" else ""
+        dimension_state = draft.dimension_state if target_bank == "symbolic" else ""
 
         return StorePlan(
             chapter=draft.chapter,
@@ -160,6 +173,9 @@ class FeishuStoreService:
             loads=draft.loads,
             stored_loads=stored_loads,
             structure_type=structure_type,
+            long_width=long_width,
+            single_side=single_side,
+            dimension_state=dimension_state,
         )
 
     def apply_plan(self, draft: StoreDraft) -> StoreApplyResult:
@@ -179,7 +195,14 @@ class FeishuStoreService:
         for source, target in zip(draft.answer_image_paths, plan.answer_targets):
             write_as_jpeg(Path(source), target)
 
-        append_excel_record(plan.workbook, plan.question_rel_path, plan.stored_loads, structure_type=plan.structure_type)
+        append_excel_record(
+            plan.workbook,
+            plan.question_rel_path,
+            plan.stored_loads,
+            structure_type=plan.structure_type,
+            long_width=plan.long_width,
+            single_side=plan.single_side,
+        )
         return StoreApplyResult(plan=plan, dry_run=False, backup_path=backup_path)
 
 
@@ -205,6 +228,39 @@ def classify_store_structure_type(
     except Exception:  # noqa: BLE001 - structure type should not block storing.
         return ""
     return normalize_structure_type(structure.get("structure_type"))
+
+
+def classify_store_dimensions(
+    image_path: Path,
+    structure_type: str,
+    coordinator: MultiAgentCoordinator,
+) -> dict[str, str]:
+    """Recognize symbolic-bank outer dimensions using the shared V5.2 normalizer."""
+
+    empty = {"long_width": "", "single_side": "", "dimension_state": ""}
+    if not structure_type or structure_type == "unknown":
+        return empty
+    recognizer = getattr(getattr(coordinator, "qwen", None), "recognize_dimensions", None)
+    if not callable(recognizer):
+        return empty
+    try:
+        result = recognizer(image_path, structure_type)
+        normalized = result.get("normalized", {}) if isinstance(result, dict) else {}
+    except Exception:  # noqa: BLE001 - dimensions must not block conservative storing.
+        return empty
+    if not isinstance(normalized, dict):
+        return empty
+    long_width = str(normalized.get("long_width") or "").strip()
+    if long_width.lower() in {"unknown", "未知", "null"}:
+        long_width = ""
+    single_side = str(normalized.get("single_side") or "").strip()
+    if single_side.lower() in {"unknown", "未知", "null"}:
+        single_side = ""
+    return {
+        "long_width": long_width,
+        "single_side": single_side,
+        "dimension_state": str(normalized.get("dimension_state") or "").strip(),
+    }
 
 
 def answer_file_name(number: int, index: int) -> str:
@@ -259,6 +315,8 @@ def append_excel_record(
     loads: list[dict[str, Any]],
     *,
     structure_type: str = "",
+    long_width: str = "",
+    single_side: str = "",
 ) -> None:
     workbook.parent.mkdir(parents=True, exist_ok=True)
     wb, ws, headers = ensure_workbook(workbook)
@@ -270,12 +328,28 @@ def append_excel_record(
         wb.close()
         raise ValueError(f"Excel 已存在题目路径: {rel}")
 
+    # Older symbolic workbooks may predate the metadata columns. Add them only
+    # when this is a symbolic-style append, leaving the main-bank schema alone.
+    symbolic_metadata = bool(structure_type or long_width or single_side)
+    for column in ("结构类型", "长×宽", "单边尺寸"):
+        if symbolic_metadata and column not in headers:
+            column_index = ws.max_column + 1
+            ws.cell(row=1, column=column_index, value=column)
+            headers[column] = column_index
+
     row = [None] * ws.max_column
     row[question_col - 1] = rel
     row[loads_col - 1] = json_loads(loads)
+
     structure_col = headers.get("结构类型")
     if structure_col and structure_type:
         row[structure_col - 1] = structure_type
+    long_width_col = headers.get("长×宽")
+    if long_width_col and long_width:
+        row[long_width_col - 1] = long_width
+    single_side_col = headers.get("单边尺寸")
+    if single_side_col and single_side:
+        row[single_side_col - 1] = single_side
     ws.append(row)
     wb.save(workbook)
     wb.close()
@@ -314,6 +388,9 @@ def format_store_confirmation(plan: StorePlan) -> str:
         "答案：",
         *answer_lines,
         f"荷载：{format_loads(plan.loads)}",
+        *([f"结构类型：{plan.structure_type}"] if plan.target_bank == "symbolic" else []),
+        *([f"外围尺寸（长×宽）：{plan.long_width or '未识别'}"] if plan.target_bank == "symbolic" else []),
+        *([f"单边尺寸：{plan.single_side}"] if plan.target_bank == "symbolic" and plan.single_side else []),
         f"写入：{plan.workbook.name}",
         "",
         "回复：",
