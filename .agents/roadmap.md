@@ -6,7 +6,7 @@
 
 ## Current Priority
 
-- 工程化梳理优先于新增自主功能：新 Agent/Web 统一输出层以及 Trace 2.2～2.4 已完成；下一步是 2.5 Codex/Agent 诊断查询、保留与切换，不提前混入状态快照、阶段结果或暂停/继续。
+- 工程化梳理优先于新增自主功能：新 Agent/Web 统一输出层以及 Trace 2.2～2.4 已完成；先精确重启 8790/8896 并用无费用协议烟测确认 2.4 主线启用，再进入 2.5 Codex/Agent 诊断查询、保留与切换，不动 8788/8794，也不提前混入状态快照、阶段结果或暂停/继续。
 - 8790 网页已由 A3-V1 接管业务内核并继续使用 8795 控制库邀请码；费用、反馈汇总、动态额度和旧并发队列下一轮恢复。
 - 8896 保留同内核验收，8897 暂留独立回退；当前重点是 8790 真实样本验收和失败记录收集。Paddle 试验结论保留，不再作为当前阻塞项。
 - 8794 影子规划及有限自主阶段暂停排期；待 8892 固定流程、取消语义和验收样本稳定，且真实失败记录证明固定编排不足后再恢复。
@@ -66,7 +66,7 @@
 2. **2.2 Trace Context 与 ID 传播（DONE）**：服务端生成 `trace_id`，已加法贯通 HTTP、stream、线程、A3、A2、tool、task log 和 cost scope；费用 run/provider ID 已拆清，未改业务状态机。
 3. **2.3 结构化事件与终态一致性（DONE）**：各运行根独立双写 `trace_events.sqlite3`，统一 request/route/stage/model/tool/cost/feedback 事件与 JSON/stream/媒体后处理的唯一 terminal event；严格白名单禁止原文和路径入库，请求线程仅有界入队，fail-open writer 通过 `/health` 暴露丢失、校验、写入和重复终态计数。
 4. **2.4 权威响应与反馈绑定（DONE）**：JSON、stream、A3 父流程/A2 子题及可评分服务端错误在最终安全载荷形成后保存 `resp_...` 和隐私受限投影；同一 trace 同投影幂等、冲突拒绝。反馈 schema v8 必须提交 `rated_response_id` 和 conversation，服务端校验 identity、session、有效期、目标 message/response 一致性并从权威投影取协议与父子任务字段；旧 v7 反馈保持未绑定、只读兼容。
-5. **2.5 Codex/Agent 诊断查询、保留与切换（NEXT）**：建立独立只读查询库/CLI，按 trace、用户、时间、response 和 feedback 输出“摘要 → 时间线 → 按需证据”的有界诊断包；接通周期保留清理并核对新旧双写。8795 仅作为可选只读适配器，不是 trace/response 数据所有者、运行依赖或阶段完成门；不删除历史账本。
+5. **2.5 Codex/Agent 诊断查询、保留与切换（NEXT，2.4 主线启用门后开始）**：建立独立只读查询库/CLI，按 trace、用户、时间、response 和 feedback 输出“摘要 → 时间线 → 按需证据”的有界诊断包；接通周期保留清理并核对新旧双写。8795 仅作为可选只读适配器，不是 trace/response 数据所有者、运行依赖或阶段完成门；不删除历史账本。
 
 Trace/Response Store 与诊断查询层必须独立于 8795：以后即使移除 8795，Codex/Agent 仍能通过稳定的本地查询入口快速定位一次对话、错误位置和费用；任何可视化界面都只是该查询层的消费者。
 
