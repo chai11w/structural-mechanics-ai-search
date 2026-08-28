@@ -3480,8 +3480,10 @@ class FastApiDemoTest(unittest.TestCase):
         other_upload_client.cookies.set(SESSION_COOKIE, "different-session")
         self.assertEqual(other_upload_client.get(uploaded_image_url).status_code, 404)
 
+        runtime.snapshot["search_id"] = "search-before-reset"
         reset_response = client.post("/api/reset")
         self.assertEqual(reset_response.status_code, 200)
+        self.assertEqual(reset_response.json()["search_id"], "search-before-reset")
         self.assertEqual(
             reset_response.json()["task_state"],
             empty_task_state_snapshot().to_dict(),
@@ -3556,6 +3558,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual([event["type"] for event in text_events], ["progress", "result"])
         self.assertEqual(text_events[0]["stage"], "searching")
         self.assertIn("力法", text_events[0]["message"])
+        self.assertNotIn("task_state", text_events[-1]["data"])
 
         buffer = io.BytesIO()
         Image.new("RGB", (4, 4), "white").save(buffer, format="JPEG")
@@ -3566,6 +3569,7 @@ class FastApiDemoTest(unittest.TestCase):
         image_events = [json.loads(line) for line in image_response.text.splitlines() if line]
         self.assertEqual([event["type"] for event in image_events], ["progress", "result"])
         self.assertTrue(image_events[-1]["data"]["uploaded_image"].startswith("/api/upload/"))
+        self.assertNotIn("task_state", image_events[-1]["data"])
 
     def test_streaming_progress_uses_stage_catalog_instead_of_dynamic_text(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
@@ -3621,44 +3625,56 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(events[0]["data"]["intent"], "stale_candidate")
         self.assertEqual(runtime.calls, [])
 
-    def test_json_stale_candidate_uses_one_response_frozen_capture(self):
+    def test_json_stale_actions_use_one_response_frozen_capture(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
         image_path = runtime_dir / f"demo_json_stale_{uuid4().hex}.jpg"
         self.addCleanup(lambda: image_path.unlink(missing_ok=True))
         Image.new("RGB", (4, 4), "white").save(image_path)
-        runtime = FakeRuntime(image_path)
-        runtime.snapshot.update({
-            "session_valid": True,
-            "phase": "WAIT_CHAPTER",
-            "has_active_image": True,
-            "task_revision": 2,
-            "candidate_generation": "",
-            "candidate_count": 0,
-        })
-        client = TestClient(create_app(runtime=runtime))
-
-        response = client.post("/api/message", json={
-            "text": "选择候选 1",
-            "action_context": {
-                "type": "select_candidate",
-                "rank": 1,
-                "task_revision": 1,
-                "candidate_generation": "old-generation",
-            },
-        })
-
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["intent"], "stale_candidate")
-        self.assertEqual(
-            response.json()["task_state"],
-            empty_task_state_snapshot().to_dict(),
+        cases = (
+            (
+                "stale_action",
+                {"type": "unsupported_action"},
+            ),
+            (
+                "stale_candidate",
+                {
+                    "type": "select_candidate",
+                    "rank": 1,
+                    "task_revision": 1,
+                    "candidate_generation": "old-generation",
+                },
+            ),
         )
-        self.assertEqual(runtime.calls, [])
-        self.assertEqual(len(runtime.session_capture_calls), 1)
-        self.assertEqual(runtime.session_capture_frozen_flags, [True])
-        capabilities = runtime.session_capture_calls[0][1]
-        self.assertFalse(capabilities.trusted_image_event)
-        self.assertTrue(capabilities.reset_session_available)
+        for expected_intent, action_context in cases:
+            with self.subTest(intent=expected_intent):
+                runtime = FakeRuntime(image_path)
+                runtime.snapshot.update({
+                    "session_valid": True,
+                    "phase": "WAIT_CHAPTER",
+                    "has_active_image": True,
+                    "task_revision": 2,
+                    "candidate_generation": "",
+                    "candidate_count": 0,
+                })
+                client = TestClient(create_app(runtime=runtime))
+
+                response = client.post("/api/message", json={
+                    "text": "选择候选 1",
+                    "action_context": action_context,
+                })
+
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["intent"], expected_intent)
+                self.assertEqual(
+                    response.json()["task_state"],
+                    empty_task_state_snapshot().to_dict(),
+                )
+                self.assertEqual(runtime.calls, [])
+                self.assertEqual(len(runtime.session_capture_calls), 1)
+                self.assertEqual(runtime.session_capture_frozen_flags, [True])
+                capabilities = runtime.session_capture_calls[0][1]
+                self.assertFalse(capabilities.trusted_image_event)
+                self.assertTrue(capabilities.reset_session_available)
 
     def test_busy_and_budget_guards_return_safe_public_errors(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
