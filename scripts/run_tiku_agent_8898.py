@@ -58,9 +58,9 @@ def write_shadow_manifest(root: Path) -> Path:
         "output_layer_commits": list(OUTPUT_LAYER_COMMITS),
         "output_layer_files": list(OUTPUT_LAYER_FILES),
         "a3_adapter": list(MINIMAL_A3_MEDIA_ADAPTER),
+        "a3_page_orientation": "landscape_clockwise_after_a3_route",
         "file_sha256": files,
         "excluded_from_increment": [
-            "A3 recognition/cropping/selection changes",
             "retrieval and fee changes",
             "Feishu entrypoints",
             "tests and documentation",
@@ -86,6 +86,7 @@ def build_app(
     reply_timeout_seconds: float = 60.0,
     enable_a3_intent_v1: bool = True,
     enable_a3_intent_model_fallback: bool = True,
+    rotate_a3_landscape_pages_clockwise: bool = True,
 ):
     root = Path(runtime_dir).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -102,6 +103,7 @@ def build_app(
             reply_timeout_seconds=reply_timeout_seconds,
             enable_a3_intent_v1=enable_a3_intent_v1,
             enable_a3_intent_model_fallback=enable_a3_intent_model_fallback,
+            rotate_a3_landscape_pages_clockwise=rotate_a3_landscape_pages_clockwise,
         ),
         incoming_dir=root / "incoming",
         session_cookie=SESSION_COOKIE,
@@ -125,11 +127,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--disable-a3-intent-v1", dest="enable_a3_intent_v1", action="store_false"
     )
+    parser.add_argument(
+        "--disable-a3-landscape-rotation",
+        dest="rotate_a3_landscape_pages_clockwise",
+        action="store_false",
+    )
     parser.set_defaults(
         enable_triage=True,
         enable_auto_crop=True,
         enable_a3_intent_v1=True,
         enable_a3_intent_model_fallback=True,
+        rotate_a3_landscape_pages_clockwise=True,
     )
     return parser
 
@@ -147,6 +155,9 @@ def main() -> int:
             reply_timeout_seconds=args.reply_timeout_seconds,
             enable_a3_intent_v1=args.enable_a3_intent_v1,
             enable_a3_intent_model_fallback=args.enable_a3_intent_model_fallback,
+            rotate_a3_landscape_pages_clockwise=(
+                args.rotate_a3_landscape_pages_clockwise
+            ),
         ),
         host=args.host,
         port=args.port,

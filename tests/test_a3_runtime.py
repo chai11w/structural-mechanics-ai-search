@@ -110,6 +110,23 @@ class FakeObserver:
         return parse_a3_page_understanding(_page_payload())
 
 
+class InspectingObserver:
+    def __init__(self):
+        self.path = None
+        self.size = None
+        self.top_pixel = None
+        self.bottom_pixel = None
+
+    def observe(self, image_path: Path):
+        self.path = Path(image_path).resolve()
+        with Image.open(image_path) as opened:
+            image = opened.convert("RGB")
+            self.size = image.size
+            self.top_pixel = image.getpixel((image.width // 2, image.height // 4))
+            self.bottom_pixel = image.getpixel((image.width // 2, image.height * 3 // 4))
+        return parse_a3_page_understanding(_page_payload())
+
+
 class FakeSingleObserver:
     def observe(self, _image_path: Path):
         return parse_a3_page_understanding(_single_page_payload())
@@ -413,6 +430,61 @@ class A3RuntimeTests(unittest.TestCase):
             crop_verifier=self.verifier,
             unit_analyzer=self.analyzer,
         )
+
+    def test_shadow_rotation_happens_once_after_entering_a3_and_becomes_authoritative(self):
+        source = self.root / "landscape-page.jpg"
+        page = Image.new("RGB", (80, 40), "white")
+        for x in range(40):
+            for y in range(40):
+                page.putpixel((x, y), (220, 20, 20))
+        for x in range(40, 80):
+            for y in range(40):
+                page.putpixel((x, y), (20, 20, 220))
+        page.save(source, format="JPEG", quality=98)
+        observer = InspectingObserver()
+        cropper = FakeAutoCropper()
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "rotated-a3.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "rotated-sessions"),
+            a2_runtime=self.a2,
+            page_observer=observer,
+            crop_verifier=self.verifier,
+            auto_cropper=cropper,
+            rotate_a3_landscape_pages_clockwise=True,
+        )
+
+        response = runtime.handle_image("rotated-a3", source)
+        state = runtime.store.load("rotated-a3")
+
+        self.assertEqual(response.intent, "a3_auto_crops_ready")
+        self.assertIsNotNone(state)
+        self.assertEqual(observer.size, (40, 80))
+        self.assertGreater(observer.top_pixel[0], observer.top_pixel[2])
+        self.assertGreater(observer.bottom_pixel[2], observer.bottom_pixel[0])
+        self.assertEqual(observer.path, Path(state.source_page_path).resolve())
+        self.assertEqual(cropper.calls[0][0].resolve(), observer.path)
+        self.assertTrue(observer.path.name.endswith(".a3-upright.jpg"))
+
+    def test_shadow_rotation_does_not_change_a2_handoff_images(self):
+        observer = FakeObserver()
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "unrotated-a2.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "unrotated-a2-sessions"),
+            a2_runtime=self.a2,
+            page_observer=observer,
+            crop_verifier=self.verifier,
+            image_triage_authority=FakeFlowAuthority("A2"),
+            rotate_a3_landscape_pages_clockwise=True,
+        )
+
+        response = runtime.handle_image("unrotated-a2", self.source)
+        a2_path = self.a2.prechecked_calls[0][1]
+
+        self.assertEqual(response.intent, "search_image")
+        self.assertEqual(observer.calls, 0)
+        self.assertFalse(a2_path.name.endswith(".a3-upright.jpg"))
+        with Image.open(a2_path) as opened:
+            self.assertEqual(opened.size, (800, 600))
 
     def test_parent_execution_gate_bounds_a3_model_work(self):
         observer = BlockingObserver()
