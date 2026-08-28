@@ -4,7 +4,7 @@
 
 阶段 3.1 完成父 workflow、当前子题任务和题目单元的权威状态契约定稿。本文件冻结 V1 的字段、词汇、字段来源、派生谓词、拓扑边界、一致性错误和冲突策略，是后续实现的权威规范。阶段 3.2.1 已实现从“已冻结 read-set + 可信入口证据”到 `TaskStateSnapshotV1` 的纯构造器，落在 `tiku_agent/task_state_builder.py`；阶段 3.2.2 已实现 `tiku_agent/task_state_runtime.py` 的锁内读取与证据包装，并由 `A3MvpRuntime.task_state_snapshot_v1()`、`AgentSessionRuntime.task_state_snapshot_v1()` 和 `AgentSessionRuntime.task_state_snapshot_v1_from_frozen_state()` 提供内部运行时入口；阶段 3.2.3 已用实际构造结果矩阵和组合读取异常完成边界验收。
 
-**阶段 3.2 已能在服务端 runtime 内生成权威 V1 快照，但尚未接入公共出口。** 当前 HTTP、stream、前端和既有 `session_snapshot()` 仍未返回或消费统一快照；这些出口改造属于 3.3～3.5，不能因为内部运行时入口已经存在就声称已经对外启用或上线。
+**阶段 3.2 已能在服务端 runtime 内生成权威 V1 快照，但尚未接入公共出口。** 当前 HTTP、stream、前端和既有 `session_snapshot()` 仍未返回或消费统一快照；3.3.1 只冻结了纯公共映射，不改变这一接入状态。其余出口改造属于 3.3.2 及 3.4～3.5，不能因为内部运行时入口或映射函数已经存在就声称已经对外启用或上线。
 
 以下内容不属于阶段 3.1：
 
@@ -529,11 +529,54 @@ V1 consistency code 精确限定为以下 17 个：
 - stream 继续使用 `progress* -> result/error`；统一状态放进已有 result data，不增加尾随状态事件；
 - V1 不含 API key、邀请码、身份哈希、用户/模型原文、本地路径、URL、异常正文或任意扩展字典。
 
+## 3.3.1 公共映射契约（DONE；尚未接入出口）
+
+3.3.1 只冻结把已由 runtime 构造的 `TaskStateSnapshotV1` 放入公共载荷的
+纯映射边界，实现在 `tiku_agent/task_state_public.py`，不获取锁、不读取
+store、不调用 `session_snapshot()`，也不改变任何 HTTP、stream 或前端行为。
+
+### 字段位置与信封
+
+- 后续公共载荷统一使用 `task_state` 名称，其值严格等于
+  `TaskStateSnapshotV1.to_dict()` 的 V1 结构，但不改义旧 `session` 字段。
+- JSON success 与 `/api/session` 的精确位置是 `payload.task_state`；
+  stream success 的精确位置是 `event.data.task_state`；stream error 的精确
+  位置是 `event.task_state`。
+- HTTP error 只对具有会话/任务上下文的受控 Agent API 使用
+  `payload.task_state`；静态资源、登录、独立媒体等无任务上下文的错误
+  不得为了补字段而读 runtime。
+- stream 仍只允许 `progress* -> result/error`；状态不能通过尾随事件补发。
+- 3.3.1 不负责决定错误路径何时取得冻结快照；缺失/过期状态必须由调用方
+  先构造成 `empty_task_state_snapshot()`，不可用旧混合快照或客户端字段代替。
+
+### 纯映射与安全约束
+
+- 映射函数只接受精确类型 `TaskStateSnapshotV1`，拒绝 subclass、任意
+  `Mapping`、客户端传入的字典和未验证的旧 `session_snapshot()`；
+  它直接调用基类的规范 serializer，不信任实例覆写，也不修改输入。
+- 输出根及 workflow、child、unit、consistency 子对象使用精确白名单键，
+  经 `allow_nan=False` 的 JSON round-trip 后再返回，确保没有非 JSON 值、
+  NaN 或可变别名。
+- `TaskStateSnapshotV1` 自身保证可发布：公共 ID、chapter 和 display label
+  共用 `is_public_task_state_text()` 约束，拒绝 URL/本地路径、凭据与身份
+  标记、异常样文及 prompt/debug 文本。纯 builder 使用同一判定，存储中
+  的不安全 workflow/child 文本分别收口为 `WORKFLOW_STATE_UNREADABLE`
+  / `CHILD_STATE_UNREADABLE`，不会先构造一个合法 typed 快照再在映射层失败。
+- 映射层仍使用同一判定做不可达防线；若触发，说明服务端对象已被
+  违反不变式地篡改，不得偷换成表示“会话不存在”的 empty 快照。
+- `task_state` 始终由服务端快照覆盖，不能信任载荷中已有的同名字段。
+
+本小步的定向测试位于 `tests/test_task_state_public.py`，覆盖空投影、完整
+child/current-unit schema、JSON/stream result/error 同值、输入不变、subclass/
+任意 mapping 拒绝和敏感值阻断；构造器测试另验证不安全存储文本
+fail-closed。3.3.2 才接入 `/api/session` 的锁内快照，之后分别处理
+JSON success、受控 HTTP error、stream 终态和跨出口验收。
+
 ## 后续批次
 
 1. **3.2.1 纯构造器（DONE）**：已完成从冻结 read-set 和可信入口证据到 V1 快照的无 I/O 投影，实现与定向测试见 `tiku_agent/task_state_builder.py` 和 `tests/test_task_state_builder.py`。
 2. **3.2.2 锁内权威读取（DONE）**：已在 A3→A2 锁序内一次读取父子状态，在 standalone A2 锁内单读 child，并为已持锁调用方提供零重锁、零 store 读取的 frozen-state 入口；缺失/不可读/稳定未知分类、受控文件与入口能力证据及回归测试见 `tiku_agent/task_state_runtime.py`、两个 runtime 类和 `tests/test_task_state_runtime.py`。项目 Python 3.12 下 47 项 task-state 定向测试及全仓 1031 项回归通过。
 3. **3.2.3 异常与矩阵测试（DONE）**：父 route/phase 与 child phase/topology 的实际构造矩阵、A3 active/组合读取异常、脱敏及旧 revision 动作证据均已补齐；阶段 3.2 整体完成。项目 Python 3.12 下 51 项 task-state 定向测试及全仓 1035 项回归通过。
-4. **3.3 出口一致性（NEXT，尚未实现）**：接入 `/api/session`、JSON success、stream result 和受控错误出口，保持 response-time 冻结与旧字段兼容。
+4. **3.3 出口一致性（进行中）**：拆为 6 个可独立回退小步：3.3.1 公共映射契约已完成；3.3.2 接入 `/api/session`；3.3.3 接入 JSON success；3.3.4 单独接入受控 HTTP error；3.3.5 接入 stream result/error；3.3.6 做跨出口 parity 与回归验收。整体仍未对外启用。
 5. **3.4 前端消费（尚未实现）**：浏览器消费服务端 `allowed_actions/next_stage`，逐步删除对父子 phase 和 unit flag 的动作拼装。
 6. **3.5 启用门（尚未实现）**：定向/全量回归、8896 契约烟测、只读 live 对照后再精确启用 8790；不触碰 8788/8794/8795。

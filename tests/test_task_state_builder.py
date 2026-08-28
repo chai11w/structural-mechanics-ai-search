@@ -1385,6 +1385,30 @@ class TaskStateBuilderTests(unittest.TestCase):
         )
         self.assertEqual(snapshot.consistency.status, "INCONSISTENT")
 
+    def test_sensitive_public_text_fails_closed_before_view_construction(self):
+        workflow = self._workflow(
+            units=[_unit("g1-u1", 1, r"\\server\share\state.json")],
+        )
+        workflow_snapshot = self._build(workflow=workflow)
+        self.assertFailClosed(
+            workflow_snapshot,
+            ("WORKFLOW_STATE_UNREADABLE",),
+        )
+
+        child = self._child(
+            phase="WAIT_CHAPTER",
+            current_chapter="token=abcd1234",
+        )
+        child_snapshot = self._build(
+            child=child,
+            topology=builder.TOPOLOGY_STANDALONE_A2,
+        )
+        self.assertFailClosed(
+            child_snapshot,
+            ("CHILD_STATE_UNREADABLE",),
+        )
+        self.assertEqual(child_snapshot.active_child_task.chapter, "")
+
 
 if __name__ == "__main__":
     unittest.main()

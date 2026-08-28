@@ -287,7 +287,11 @@ def build_task_state_snapshot_v1(
 
 
 def _valid_public_id(value: object) -> bool:
-    return isinstance(value, str) and bool(_PUBLIC_ID_RE.fullmatch(value))
+    return bool(
+        isinstance(value, str)
+        and _PUBLIC_ID_RE.fullmatch(value)
+        and contract.is_public_task_state_text(value, 128)
+    )
 
 
 def _valid_positive_revision(value: object) -> bool:
@@ -299,11 +303,7 @@ def _valid_optional_index(value: object) -> bool:
 
 
 def _valid_public_text(value: object, max_chars: int) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) <= max_chars
-        and _CONTROL_RE.search(value) is None
-    )
+    return contract.is_public_task_state_text(value, max_chars)
 
 
 def _ordered_codes(codes: set[str]) -> tuple[str, ...]:

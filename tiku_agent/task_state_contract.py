@@ -1,7 +1,9 @@
 """Executable vocabulary for the authoritative task-state snapshot contract.
 
 Phase 3.1 defines names, normalized lifecycle meanings, and serialization
-shapes only. Runtime state collection and HTTP exposure are later batches.
+shapes. Phase 3.3.1 additionally makes every normally constructed V1 value
+safe for public serialization; runtime collection and route integration stay
+in their separate batches.
 """
 
 from __future__ import annotations
@@ -250,6 +252,60 @@ _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$")
 _TOKEN_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _CANDIDATE_GENERATION_RE = re.compile(r"^([1-9][0-9]{0,6}):([1-9][0-9]{0,6})$")
+_PUBLIC_SENSITIVE_TEXT_PATTERNS = (
+    re.compile(r"\b[a-z][a-z0-9+.-]{0,31}://", re.IGNORECASE),
+    re.compile(r"[A-Za-z]:[\\/]"),
+    re.compile(r"(?:^|[\s\"'])\\\\[^\\/\s]+[\\/][^\\/\s]+"),
+    re.compile(r"(?:^|[\s\"'])/(?!/)[^\s\"']+"),
+    re.compile(r"(?:^|[\s\"'])(?:~|\.{1,2})[\\/][^\s\"']+"),
+    re.compile(
+        r"\b(?:authorization|bearer|api[_ -]?key|access[_ -]?token|password|cookie|"
+        r"client[_ -]?secret|secret[_ -]?key|identity[_ -]?hash|"
+        r"invite[_ -]?(?:code|hash))\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:traceback|raw_model_output|reasoning|confidence|debug|prompt|stack_trace)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b[A-Za-z_][A-Za-z0-9_.]{0,80}(?:Error|Exception)\s*:",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:^|[^A-Za-z0-9])(?:token|secret|password|api[_-]?key|"
+        r"identity[_-]?hash|invite[_-]?(?:code|hash))[_:= -][A-Za-z0-9_-]{4,}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:^|[^A-Za-z0-9])sk[-_](?:proj[-_])?[A-Za-z0-9_-]{4,}",
+        re.IGNORECASE,
+    ),
+)
+
+
+def is_public_task_state_text(
+    value: object,
+    max_chars: int | None = None,
+) -> bool:
+    """Return whether text is safe for the public V1 task-state shape.
+
+    The typed snapshot is itself a public contract, so a normally constructed
+    ``TaskStateSnapshotV1`` must never depend on a later best-effort redaction
+    pass.  Builders use this same predicate to turn unsafe stored text into a
+    stable ``*_STATE_UNREADABLE`` projection before constructing the view.
+    """
+
+    if not isinstance(value, str):
+        return False
+    if max_chars is not None and (
+        type(max_chars) is not int or max_chars < 0 or len(value) > max_chars
+    ):
+        return False
+    if _CONTROL_RE.search(value):
+        return False
+    return not any(pattern.search(value) for pattern in _PUBLIC_SENSITIVE_TEXT_PATTERNS)
+
 
 def _validate_status(value: str, expected: str) -> None:
     if value not in TASK_STATUSES:
@@ -270,7 +326,11 @@ def _validate_positive_revision(value: int, name: str) -> None:
 
 
 def _validate_id(value: str, name: str) -> None:
-    if not isinstance(value, str) or not _ID_RE.fullmatch(value):
+    if (
+        not isinstance(value, str)
+        or not _ID_RE.fullmatch(value)
+        or not is_public_task_state_text(value, 128)
+    ):
         raise ValueError(f"invalid {name}")
 
 
@@ -279,7 +339,10 @@ def _validate_optional_id(value: str, name: str) -> None:
 
     if not isinstance(value, str):
         raise ValueError(f"invalid {name}")
-    if value and not _ID_RE.fullmatch(value):
+    if value and (
+        not _ID_RE.fullmatch(value)
+        or not is_public_task_state_text(value, 128)
+    ):
         raise ValueError(f"invalid {name}")
 
 
@@ -342,7 +405,7 @@ def validate_candidate_generation(
 
 
 def _validate_text(value: str, max_chars: int, name: str) -> None:
-    if not isinstance(value, str) or len(value) > max_chars or _CONTROL_RE.search(value):
+    if not is_public_task_state_text(value, max_chars):
         raise ValueError(f"invalid {name}")
 
 
