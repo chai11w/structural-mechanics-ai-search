@@ -15,6 +15,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from scripts.run_tiku_agent_8896 import build_runtime as build_8896_runtime
+from tiku_agent.a3_text_orientation import RapidOcrTextPageOrienter
 from tiku_agent.fastapi_demo import create_app
 from tiku_agent.feedback_store import SQLiteFeedbackStore
 
@@ -58,7 +59,7 @@ def write_shadow_manifest(root: Path) -> Path:
         "output_layer_commits": list(OUTPUT_LAYER_COMMITS),
         "output_layer_files": list(OUTPUT_LAYER_FILES),
         "a3_adapter": list(MINIMAL_A3_MEDIA_ADAPTER),
-        "a3_page_orientation": "landscape_clockwise_after_a3_route",
+        "a3_page_orientation": "rapidocr_text_regions_four_direction_after_a3_route",
         "file_sha256": files,
         "excluded_from_increment": [
             "retrieval and fee changes",
@@ -86,14 +87,15 @@ def build_app(
     reply_timeout_seconds: float = 60.0,
     enable_a3_intent_v1: bool = True,
     enable_a3_intent_model_fallback: bool = True,
-    rotate_a3_landscape_pages_clockwise: bool = True,
+    enable_a3_text_orientation: bool = True,
 ):
     root = Path(runtime_dir).resolve()
     root.mkdir(parents=True, exist_ok=True)
     write_shadow_manifest(root)
-    return create_app(
-        runtime=runtime
-        or build_8896_runtime(
+    resolved_runtime = runtime
+    if resolved_runtime is None:
+        page_orienter = RapidOcrTextPageOrienter() if enable_a3_text_orientation else None
+        resolved_runtime = build_8896_runtime(
             root,
             model_timeout_seconds=model_timeout_seconds,
             grounding_timeout_seconds=grounding_timeout_seconds,
@@ -103,8 +105,10 @@ def build_app(
             reply_timeout_seconds=reply_timeout_seconds,
             enable_a3_intent_v1=enable_a3_intent_v1,
             enable_a3_intent_model_fallback=enable_a3_intent_model_fallback,
-            rotate_a3_landscape_pages_clockwise=rotate_a3_landscape_pages_clockwise,
-        ),
+            a3_page_orienter=page_orienter,
+        )
+    return create_app(
+        runtime=resolved_runtime,
         incoming_dir=root / "incoming",
         session_cookie=SESSION_COOKIE,
         feedback_store=SQLiteFeedbackStore(root / "feedback.sqlite3"),
@@ -128,8 +132,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--disable-a3-intent-v1", dest="enable_a3_intent_v1", action="store_false"
     )
     parser.add_argument(
-        "--disable-a3-landscape-rotation",
-        dest="rotate_a3_landscape_pages_clockwise",
+        "--disable-a3-text-orientation",
+        dest="enable_a3_text_orientation",
         action="store_false",
     )
     parser.set_defaults(
@@ -137,7 +141,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         enable_auto_crop=True,
         enable_a3_intent_v1=True,
         enable_a3_intent_model_fallback=True,
-        rotate_a3_landscape_pages_clockwise=True,
+        enable_a3_text_orientation=True,
     )
     return parser
 
@@ -155,9 +159,7 @@ def main() -> int:
             reply_timeout_seconds=args.reply_timeout_seconds,
             enable_a3_intent_v1=args.enable_a3_intent_v1,
             enable_a3_intent_model_fallback=args.enable_a3_intent_model_fallback,
-            rotate_a3_landscape_pages_clockwise=(
-                args.rotate_a3_landscape_pages_clockwise
-            ),
+            enable_a3_text_orientation=args.enable_a3_text_orientation,
         ),
         host=args.host,
         port=args.port,

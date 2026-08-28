@@ -52,7 +52,7 @@ class TikuAgent8896FlowTest(unittest.TestCase):
                 rolled_back.session_snapshot("empty")["a3"]["auto_prepare_all_enabled"]
             )
             self.assertIsNone(rolled_back.auto_cropper)
-            self.assertFalse(promoted.rotate_a3_landscape_pages_clockwise)
+            self.assertIsNone(promoted.a3_page_orienter)
 
     def test_a3_intent_v1_is_enabled_only_when_requested(self):
         with tempfile.TemporaryDirectory() as temp:

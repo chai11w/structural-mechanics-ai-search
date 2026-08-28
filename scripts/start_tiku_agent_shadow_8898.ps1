@@ -14,15 +14,19 @@ $ErrLog = Join-Path $LogDir "tiku_8898.err.log"
 $Port = 8898
 
 if (-not $PythonExe) {
-    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
-    if ($pythonCommand) {
-        $PythonExe = $pythonCommand.Source
+    $shadowPython = Join-Path $ProjectDir ".shadow_8898\venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $shadowPython -PathType Leaf) {
+        $PythonExe = $shadowPython
     } else {
-        $PythonExe = Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"
+        throw "8898 OCR environment is missing. Run scripts\prepare_a3_orientation_env_8898.ps1 first."
     }
 }
 if (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf)) {
     throw "Python executable not found: $PythonExe"
+}
+& $PythonExe -c "import fastapi, rapidocr, onnxruntime"
+if ($LASTEXITCODE -ne 0) {
+    throw "8898 OCR environment is incomplete. Run scripts\prepare_a3_orientation_env_8898.ps1."
 }
 if (-not (Test-Path -LiteralPath (Join-Path $SourceDir "scripts\run_tiku_agent_8898.py") -PathType Leaf)) {
     throw "8898 source snapshot is missing: $SourceDir"

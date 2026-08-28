@@ -509,7 +509,7 @@ class A3MvpRuntime:
         cost_ledger: SQLiteModelCostLedger | None = None,
         intent_engine: A3IntentEngineV1 | None = None,
         enable_three_scope_cancel_clarification: bool = False,
-        rotate_a3_landscape_pages_clockwise: bool = False,
+        a3_page_orienter: Callable[[str | Path], Path] | None = None,
         max_concurrent_tasks: int = 0,
         max_queued_tasks: int = 0,
         queue_wait_seconds: float = 90.0,
@@ -532,9 +532,7 @@ class A3MvpRuntime:
         self.enable_three_scope_cancel_clarification = bool(
             enable_three_scope_cancel_clarification
         )
-        self.rotate_a3_landscape_pages_clockwise = bool(
-            rotate_a3_landscape_pages_clockwise
-        )
+        self.a3_page_orienter = a3_page_orienter
         self._execution_gate = _ExecutionGate(
             max_concurrent_tasks,
             max_queued_tasks,
@@ -1798,8 +1796,8 @@ class A3MvpRuntime:
 
         state.entry_route = "A3"
         state.phase = A3_PHASE_UNDERSTANDING
-        if self.rotate_a3_landscape_pages_clockwise:
-            persisted = _persist_upright_a3_page(persisted)
+        if self.a3_page_orienter is not None:
+            persisted = self.a3_page_orienter(persisted)
             state.source_page_path = str(persisted)
         self.store.save(state)
         self._record_image_route(state, "A3", identity_key=identity_key)
@@ -2640,33 +2638,6 @@ class A3MvpRuntime:
 
     def _lock(self, session_id: str) -> threading.RLock:
         return self._locks[hash(session_id) % len(self._locks)]
-
-
-def _persist_upright_a3_page(source_path: str | Path) -> Path:
-    """Bake EXIF orientation and turn a landscape A3 page clockwise once."""
-
-    source = Path(source_path).resolve()
-    try:
-        with Image.open(source) as opened:
-            orientation = int(opened.getexif().get(274, 1) or 1)
-            image = ImageOps.exif_transpose(opened)
-            changed = orientation != 1
-            if image.width > image.height:
-                image = image.transpose(Image.Transpose.ROTATE_270)
-                changed = True
-            if not changed:
-                return source
-            target = source.with_name(f"{source.stem}.a3-upright.jpg")
-            image.convert("RGB").save(
-                target,
-                format="JPEG",
-                quality=95,
-            )
-            return target.resolve()
-    except (OSError, TypeError, ValueError):
-        # Shadow preprocessing must never turn a readable existing upload into
-        # an A3 failure. The unchanged source remains the bounded fallback.
-        return source
 
 
 def _page_error_diagnostic(exc: Exception) -> dict[str, str]:
