@@ -350,7 +350,7 @@ def _inspect_workflow(
 
     state = read_set.workflow_state
     try:
-        schema_safe = state is not None and _workflow_schema_is_safe(state)
+        schema_safe = state is not None and workflow_state_schema_is_safe(state)
     except Exception:
         schema_safe = False
     if not schema_safe:
@@ -417,7 +417,7 @@ def _inspect_child(
         return None
 
     try:
-        schema_safe = _child_schema_is_safe(state)
+        schema_safe = child_state_schema_is_safe(state)
     except Exception:
         schema_safe = False
     if not schema_safe:
@@ -481,7 +481,9 @@ def _has_duplicate_unit_ids(units: object) -> bool:
     return len(values) != len(set(values))
 
 
-def _workflow_schema_is_safe(state: _A3SessionStateT) -> bool:
+def workflow_state_schema_is_safe(state: _A3SessionStateT) -> bool:
+    """Return whether builder-visible A3 fields have safe primitive shapes."""
+
     required_fields = (
         "session_id",
         "entry_route",
@@ -496,6 +498,8 @@ def _workflow_schema_is_safe(state: _A3SessionStateT) -> bool:
         "auto_crop_enabled",
         "auto_crops",
         "requested_unit_ids",
+        "crop_review_required",
+        "crop_review_code",
         "task_revision",
         "workflow_search_id",
         "page_finished",
@@ -510,6 +514,7 @@ def _workflow_schema_is_safe(state: _A3SessionStateT) -> bool:
             state.phase,
             state.source_page_path,
             state.selected_unit_id,
+            state.crop_review_code,
             state.workflow_search_id,
         )
     ):
@@ -518,7 +523,14 @@ def _workflow_schema_is_safe(state: _A3SessionStateT) -> bool:
         return False
     if type(state.crop_drafts) is not dict or type(state.auto_crops) is not dict:
         return False
-    if type(state.auto_crop_enabled) is not bool or type(state.page_finished) is not bool:
+    if not all(
+        type(value) is bool
+        for value in (
+            state.auto_crop_enabled,
+            state.crop_review_required,
+            state.page_finished,
+        )
+    ):
         return False
     if not all(
         type(values) is list and all(isinstance(value, str) for value in values)
@@ -558,7 +570,9 @@ def _workflow_schema_is_safe(state: _A3SessionStateT) -> bool:
     return True
 
 
-def _child_schema_is_safe(state: AgentState) -> bool:
+def child_state_schema_is_safe(state: AgentState) -> bool:
+    """Return whether builder-visible A2 fields have safe primitive shapes."""
+
     if not all(
         isinstance(value, str)
         for value in (

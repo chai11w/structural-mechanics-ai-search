@@ -21,6 +21,13 @@ from tiku_agent.external_load_screen import (
 from tiku_agent.session_artifacts import SessionArtifacts, session_key
 from tiku_agent.session_store import SessionStore
 from tiku_agent.state import AgentState
+from tiku_agent.task_state_contract import TaskStateSnapshotV1
+from tiku_agent.task_state_runtime import (
+    TaskStateEntryCapabilities,
+    build_standalone_a2_runtime_snapshot_v1,
+    classify_frozen_child_state,
+    read_child_state_once,
+)
 from tiku_agent.task_log import JsonlTaskLogger, TaskLogEntry, TaskLogger
 from tiku_agent.tools import AgentToolConfig
 from tiku_shared.model_costs import (
@@ -860,7 +867,7 @@ class AgentSessionRuntime:
     def clear(self, session_id: str, *, preserve_artifacts: bool = False) -> None:
         """Clear active state, optionally retaining media until the parent session expires."""
         clean_session_id = self._clean_session_id(session_id)
-        lock = self._session_locks[hash(clean_session_id) % len(self._session_locks)]
+        lock = self._lock(clean_session_id)
         with lock:
             self._await_background_image_work(clean_session_id)
             self.store.clear(clean_session_id)
@@ -903,6 +910,50 @@ class AgentSessionRuntime:
             "chapter": state.chapter,
             "search_id": state.current_search_id,
         }
+
+    def task_state_snapshot_v1(
+        self,
+        session_id: str,
+        *,
+        capabilities: TaskStateEntryCapabilities | None = None,
+    ) -> TaskStateSnapshotV1:
+        """Build one authoritative standalone-A2 snapshot under its session lock."""
+
+        clean_session_id = self._clean_session_id(session_id)
+        with self._lock(clean_session_id):
+            state, read_status = read_child_state_once(
+                self.store,
+                clean_session_id,
+            )
+            return build_standalone_a2_runtime_snapshot_v1(
+                clean_session_id,
+                child_state=state,
+                child_read_status=read_status,
+                child_artifacts=self.artifacts,
+                child_retry_supported=True,
+                capabilities=capabilities,
+            )
+
+    def task_state_snapshot_v1_from_frozen_state(
+        self,
+        session_id: str,
+        state: AgentState | None,
+        *,
+        capabilities: TaskStateEntryCapabilities | None = None,
+    ) -> TaskStateSnapshotV1:
+        """Project response-time A2 state without acquiring a lock or reading a store."""
+
+        clean_session_id = self._clean_session_id(session_id)
+        state, read_status = classify_frozen_child_state(state)
+        return build_standalone_a2_runtime_snapshot_v1(
+            clean_session_id,
+            child_state=state,
+            child_read_status=read_status,
+            child_artifacts=self.artifacts,
+            child_retry_supported=True,
+            capabilities=capabilities,
+            response_frozen=True,
+        )
 
     def resolve_upload(self, session_id: str, filename: str) -> Path | None:
         """Resolve one session-owned upload without exposing arbitrary paths."""
@@ -1086,7 +1137,7 @@ class AgentSessionRuntime:
     ) -> AgentResponse:
         started_at = datetime.now(UTC)
         started = time.perf_counter()
-        lock = self._session_locks[hash(session_id) % len(self._session_locks)]
+        lock = self._lock(session_id)
         try:
             with self._execution_gate.enter(progress, session_key=lock):
                 with lock:
@@ -1253,6 +1304,9 @@ class AgentSessionRuntime:
         if not clean:
             raise ValueError("session_id is required")
         return clean
+
+    def _lock(self, session_id: str) -> threading.Lock:
+        return self._session_locks[hash(session_id) % len(self._session_locks)]
 
 
 def _bind_trace_lifecycle(

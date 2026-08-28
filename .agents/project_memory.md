@@ -9,7 +9,7 @@
 - 8795 仍是可替换的过渡后台；live 已厘清页/题、模型调用/请求次数、记录时间/页面等待/反馈时间及“模型估算费用”文案，本轮未增加 Trace 页面。
 - Trace/Response 主链独立于 8795。发布前历史覆盖差异已审计；发布后真实烟测的 Response、反馈、费用、Trace、身份和时间顺序均能对应。
 - 8 个 live SQLite 库在发布前后均通过 `quick_check`、`integrity_check`；烟测完成 A2、A3、追问、正/负反馈、费用展示和停用立即失效，4 条新反馈全部绑定服务端 Response。
-- 全仓 1015 项回归通过；真实烟测发现并修复 JSON 长模型调用阻塞健康检查的问题，长请求期间 8 次健康探测均成功且 PID 未漂移。
+- 全仓 1031 项回归通过；真实烟测发现并修复 JSON 长模型调用阻塞健康检查的问题，长请求期间 8 次健康探测均成功且 PID 未漂移。
 - 8795 控制目录 ACL 已限制为当前服务账号、SYSTEM 和管理员；仓库外受限 Git Bundle、8 库在线副本、控制库/密钥成对备份及脱敏 postflight 已验证。
 - 已创建 3 个独立、7 天、每日 3 元模型估算额度的正式内测邀请码，逐个登录验证成功；明文只通过 8795 受控复制，不进入日志或项目文件。
 
@@ -25,18 +25,17 @@
 - Trace Store 使用严格白名单、每 trace 唯一终态和有界异步写入；Response Store 生成隐私受限投影并按 trace 幂等，冲突/写失败 fail-closed。两者均不依赖 8795。
 - 独立只读诊断 CLI 支持按 trace/response/feedback/稳定身份有界查询；retention 默认 dry-run，apply 需仓库外计划、备份、停机确认和漂移校验。
 - 8790/8795 看门狗固定端口，精确核对 PID、Python、完整参数和监听者；单实例锁、旧 PID 活进程保护、候选启动验证，禁止按端口杀未知进程。
-- 阶段 3.1 已冻结 `TaskStateSnapshotV1` 契约；3.2.1 已实现从冻结 read-set 与可信入口证据到 V1 快照的无 I/O 纯构造器，31 项构造器/契约定向测试通过；尚未接入运行时。
+- 阶段 3.1 已冻结 `TaskStateSnapshotV1` 契约；3.2.1 无 I/O 纯构造器与 3.2.2 锁内 runtime wrapper 均已完成。A3 固定按 A3→A2 锁序让父子 store 各读取一次，standalone A2 只获取 A2 锁，frozen-state 入口不重锁/不重读；缺失、不可读、稳定未知状态和受控文件证据均 fail-closed。47 项 task-state 定向测试及全仓 1031 项回归通过；HTTP、stream、前端和既有 `session_snapshot()` 尚未接入 V1。
 
 ## In Progress
 
 - 本地内测发布已完成；待账户侧配置 Cloudflare Access 与边缘登录限速后，把 3 个邀请码分别发给 2～3 名测试者并观察 24～48 小时。
-- 阶段 3.2.1 纯构造器已完成；3.2.2 锁内权威读取暂停，不与内测观察混做。
 
 ## Not Implemented
 
 - Cloudflare Access、边缘登录限速和测试者邮箱名单仍需账户侧配置；应用内限速不能替代边缘策略。
 - 8795 尚未提供 Trace/Response 诊断 UI；本轮明确不增加，未来若成为整体后台再以只读消费者接入。
-- 阶段 3.2.2 锁内权威读取、3.3～3.5 出口与启用门、阶段 4～6 尚未实现。
+- 阶段 3.3～3.5 的 `/api/session`、JSON success、stream result、受控 error、前端消费与启用门，以及阶段 4～6 尚未实现。
 - Paddle splitter、全自动裁剪及自动/人工回退属于 A3 V2，暂不继续。
 - 8890 影子期未完成费用报表；影子结果不能直接提升到 8790。
 - 桁架高度几何计算未实现；模型只抄录明确标注。视觉重排和候选二次位置复筛仍待真实样本。
@@ -81,11 +80,12 @@
 
 1. 在 Cloudflare 账户侧为 8790/8795 配置独立 Access，并为两条登录路径启用窄范围边缘限速；完成后从 8795 复制 3 个邀请码分别发放。
 2. 观察 24～48 小时，以成功率、排队、A3 裁图、候选质量、反馈错绑和估算费用决定下一步；异常时先停用邀请码再撤销测试者 Access。
-3. 内测数据形成稳定瓶颈后再决定是否扩建 8795 或开始阶段 3.2.2；后者必须在 A3→A2 锁序内冻结 read-set 并调用既有纯构造器，不因功能可做就提前增加。
+3. 状态快照的下一独立开发批次是阶段 3.3 出口一致性；本轮不开始。进入 3.3 前继续以真实内测数据和当前优先级判断时机，不把 HTTP/stream、前端或 8790 启用混入 3.2.2。
 
 ## Important Commands
 
 - `python -m unittest discover -s tests -p 'test_*.py'`
+- `python -m unittest discover -v -s tests -p 'test_task_state_*.py'`
 - `powershell -ExecutionPolicy Bypass -File scripts/tiku_admin_watchdog_8795.ps1`
 - `powershell -ExecutionPolicy Bypass -File scripts/tiku_agent_watchdog_8790.ps1`
 - `python scripts/run_tiku_agent_8790.py --help`

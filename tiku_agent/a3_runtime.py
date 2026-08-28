@@ -44,6 +44,14 @@ from tiku_agent.session_runtime import (
     ProgressReporter,
     _ExecutionGate,
 )
+from tiku_agent.task_state_builder import READ_OK
+from tiku_agent.task_state_contract import TaskStateSnapshotV1
+from tiku_agent.task_state_runtime import (
+    TaskStateEntryCapabilities,
+    build_a3_runtime_snapshot_v1,
+    read_child_state_once,
+    read_workflow_state_once,
+)
 from tiku_shared.model_costs import (
     ModelCostCollector,
     SQLiteModelCostLedger,
@@ -1457,6 +1465,56 @@ class A3MvpRuntime:
         path = Path(state.auto_crop_overlay_path).resolve()
         crop_dir = (self.artifacts.session_dir(state.session_id) / "crops").resolve()
         return path if path.is_file() and path.parent == crop_dir else None
+
+    def task_state_snapshot_v1(
+        self,
+        session_id: str,
+        *,
+        capabilities: TaskStateEntryCapabilities | None = None,
+    ) -> TaskStateSnapshotV1:
+        """Build one A3-wrapper snapshot from a single locked parent/child read-set."""
+
+        clean = _clean_session_id(session_id)
+        with self._lock(clean):
+            with self.a2_runtime._lock(clean):
+                workflow_state, workflow_read_status = read_workflow_state_once(
+                    self.store,
+                    clean,
+                    expected_type=A3SessionState,
+                )
+                child_state, child_read_status = read_child_state_once(
+                    self.a2_runtime.store,
+                    clean,
+                )
+                try:
+                    workflow_retry_supported = bool(
+                        workflow_read_status == READ_OK
+                        and workflow_state is not None
+                        and (
+                            (
+                                getattr(workflow_state, "entry_route", "") == "A3"
+                                and self.page_observer is not None
+                            )
+                            or (
+                                getattr(workflow_state, "entry_route", "") == ""
+                                and self.image_triage_authority is not None
+                            )
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - malformed state cannot grant retry.
+                    workflow_retry_supported = False
+                return build_a3_runtime_snapshot_v1(
+                    clean,
+                    workflow_state=workflow_state,
+                    workflow_read_status=workflow_read_status,
+                    child_state=child_state,
+                    child_read_status=child_read_status,
+                    workflow_artifacts=self.artifacts,
+                    child_artifacts=self.a2_runtime.artifacts,
+                    workflow_retry_supported=workflow_retry_supported,
+                    child_retry_supported=True,
+                    capabilities=capabilities,
+                )
 
     def session_snapshot(self, session_id: str) -> dict[str, object]:
         clean = _clean_session_id(session_id)
