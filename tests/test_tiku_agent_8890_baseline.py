@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 import shutil
 import unittest
@@ -5,6 +6,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from scripts.run_tiku_agent_8890 import (
     DEFAULT_PORT,
@@ -17,6 +19,7 @@ from scripts.run_tiku_agent_8890 import (
 from scripts.run_tiku_agent_demo import build_app as build_8790_app
 from tiku_agent.agent import AgentResponse
 from tiku_agent.fastapi_demo import SESSION_COOKIE as MAINLINE_SESSION_COOKIE
+from tiku_agent.image_triage_shadow import ImageTriageShadowRuntime
 from tiku_agent.session_runtime import SessionResponseSnapshotV1
 from tiku_agent.state import AgentState
 from tiku_agent.task_state_contract import empty_task_state_snapshot
@@ -34,11 +37,51 @@ class RecordingRuntime:
             "candidate_generation": "",
             "candidate_count": 0,
         }
+        self.image_capabilities = []
 
-    def handle_text(self, session_id: str, text: str, *, progress=None) -> AgentResponse:
+    def handle_text(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        progress=None,
+        task_state_capabilities=None,
+    ) -> AgentResponse:
         self.calls.append(("text", session_id, text))
         self.snapshot.update({"session_valid": True, "phase": "WAIT_CHAPTER"})
-        return AgentResponse(text="请告诉我题目章节。", intent="provide_chapter")
+        response = AgentResponse(text="请告诉我题目章节。", intent="provide_chapter")
+        response.response_snapshot = dict(self.snapshot)
+        response.response_projection_snapshot = dict(self.snapshot)
+        if task_state_capabilities is not None:
+            response.response_task_state_snapshot = empty_task_state_snapshot()
+        response.response_media_snapshot_captured = True
+        return response
+
+    def handle_image(
+        self,
+        session_id: str,
+        image_path: Path,
+        *,
+        progress=None,
+        task_state_capabilities=None,
+        **_kwargs,
+    ) -> AgentResponse:
+        del progress
+        self.calls.append(("image", session_id, Path(image_path).name))
+        self.image_capabilities.append(task_state_capabilities)
+        self.snapshot.update({
+            "session_valid": True,
+            "phase": "WAIT_CHAPTER",
+            "has_active_image": True,
+            "task_revision": 1,
+        })
+        response = AgentResponse(text="请告诉我题目章节。", intent="search_image")
+        response.response_snapshot = dict(self.snapshot)
+        response.response_projection_snapshot = dict(self.snapshot)
+        if task_state_capabilities is not None:
+            response.response_task_state_snapshot = empty_task_state_snapshot()
+        response.response_media_snapshot_captured = True
+        return response
 
     def session_snapshot(self, session_id: str) -> dict[str, object]:
         self.calls.append(("session", session_id, ""))
@@ -192,6 +235,9 @@ class Baseline8890Test(unittest.TestCase):
         validation_message = validation.post(
             "/api/message", json={"text": "4"}
         ).json()
+        expected_task_state = empty_task_state_snapshot().to_dict()
+        self.assertEqual(mainline_message["task_state"], expected_task_state)
+        self.assertEqual(validation_message["task_state"], expected_task_state)
         self.assertTrue(mainline_message.pop("request_id").startswith("req_"))
         self.assertTrue(validation_message.pop("request_id").startswith("req_"))
         mainline_response_id = mainline_message.pop("response_id")
@@ -208,6 +254,40 @@ class Baseline8890Test(unittest.TestCase):
         self.assertNotIn(VALIDATION_SESSION_COOKIE, mainline_cookies)
         self.assertIn(VALIDATION_SESSION_COOKIE, validation_cookies)
         self.assertNotIn(MAINLINE_SESSION_COOKIE, validation_cookies)
+
+    def test_image_shadow_wrapper_preserves_json_task_state_capabilities(self):
+        class RecordingShadow:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def submit(self, image_path, *, request_id=""):
+                self.calls.append((Path(image_path).name, request_id))
+                return True
+
+        delegate = RecordingRuntime()
+        shadow = RecordingShadow()
+        runtime = ImageTriageShadowRuntime(delegate, shadow)
+        root = self.make_root("shadow-json")
+        client = TestClient(build_8890_app(root, runtime=runtime))
+        image = io.BytesIO()
+        Image.new("RGB", (4, 4), "white").save(image, format="JPEG")
+
+        response = client.post(
+            "/api/image",
+            content=image.getvalue(),
+            headers={"x-filename": "question.jpg"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json()["task_state"],
+            empty_task_state_snapshot().to_dict(),
+        )
+        self.assertEqual(len(shadow.calls), 1)
+        self.assertEqual(len(delegate.image_capabilities), 1)
+        capabilities = delegate.image_capabilities[0]
+        self.assertTrue(capabilities.trusted_image_event)
+        self.assertTrue(capabilities.reset_session_available)
 
 
 if __name__ == "__main__":

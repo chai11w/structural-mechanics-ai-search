@@ -40,10 +40,12 @@ from tiku_agent.session_runtime import (
     AgentRuntimeBusyError,
     AgentSessionRuntime,
     SessionResponseSnapshotError,
+    SessionResponseSnapshotV1,
     _ExecutionCancelled,
 )
 from tiku_agent.session_store import SQLiteSessionStore
-from tiku_agent.task_state_public import with_public_task_state
+from tiku_agent.task_state_public import PUBLIC_TASK_STATE_FIELD, with_public_task_state
+from tiku_agent.task_state_contract import TaskStateSnapshotV1, empty_task_state_snapshot
 from tiku_agent.task_state_runtime import TaskStateEntryCapabilities
 from tiku_agent.tool_result import is_public_tool_code
 from tiku_shared.model_costs import SQLiteModelCostLedger
@@ -104,6 +106,11 @@ SUPPORTED_IMAGE_FORMATS = {
 GENERIC_CONTENT_TYPES = {"", "application/octet-stream"}
 _SESSION_TASK_STATE_CAPABILITIES = TaskStateEntryCapabilities(
     trusted_image_event=False,
+    reset_session_available=True,
+)
+_JSON_TASK_STATE_CAPABILITIES = _SESSION_TASK_STATE_CAPABILITIES
+_IMAGE_JSON_TASK_STATE_CAPABILITIES = TaskStateEntryCapabilities(
+    trusted_image_event=True,
     reset_session_available=True,
 )
 FEEDBACK_MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
@@ -1044,6 +1051,7 @@ def create_app(
                 session_id,
                 payload.get("action_context"),
                 request_id=request_id,
+                task_state_capabilities=_JSON_TASK_STATE_CAPABILITIES,
             )
             if stale is not None:
                 return _agent_json(
@@ -1054,6 +1062,7 @@ def create_app(
                     identity_key=identity_key or "local",
                     secure_cookie=secure_cookie,
                     cookie_name=session_cookie,
+                    task_state_capabilities=_JSON_TASK_STATE_CAPABILITIES,
                 )
             response = _handle_text(
                 runtime,
@@ -1061,6 +1070,7 @@ def create_app(
                 text,
                 request_id=request_id,
                 identity_key=identity_key,
+                task_state_capabilities=_JSON_TASK_STATE_CAPABILITIES,
             )
             return _agent_json(
                 response,
@@ -1070,6 +1080,7 @@ def create_app(
                 identity_key=identity_key or "local",
                 secure_cookie=secure_cookie,
                 cookie_name=session_cookie,
+                task_state_capabilities=_JSON_TASK_STATE_CAPABILITIES,
             )
 
         # The JSON compatibility endpoint runs the same synchronous model and
@@ -1165,7 +1176,10 @@ def create_app(
             request_id=_request_id(request),
             search_id=search_id,
         )
-        result = JSONResponse({"ok": True, **protocol.to_dict()})
+        result = JSONResponse(with_public_task_state(
+            {"ok": True, **protocol.to_dict()},
+            empty_task_state_snapshot(),
+        ))
         result.delete_cookie(session_cookie, secure=_is_secure_request(request), httponly=True, samesite="lax")
         return result
 
@@ -1191,6 +1205,7 @@ def create_app(
                     incoming,
                     request_id=request_id,
                     identity_key=identity_key,
+                    task_state_capabilities=_IMAGE_JSON_TASK_STATE_CAPABILITIES,
                 )
                 uploaded_image = (
                     response.uploaded_image_path
@@ -1208,6 +1223,7 @@ def create_app(
                 identity_key=identity_key or "local",
                 secure_cookie=secure_cookie,
                 cookie_name=session_cookie,
+                task_state_capabilities=_IMAGE_JSON_TASK_STATE_CAPABILITIES,
             )
 
         return await asyncio.to_thread(execute)
@@ -1314,6 +1330,7 @@ def create_app(
             kwargs: dict[str, object] = {
                 "task_revision": task_revision,
                 "request_id": _request_id(request),
+                "task_state_capabilities": _JSON_TASK_STATE_CAPABILITIES,
             }
             if identity_key:
                 kwargs["identity_key"] = identity_key
@@ -1331,6 +1348,7 @@ def create_app(
                 identity_key=_identity_key(request) or "local",
                 secure_cookie=_is_secure_request(request),
                 cookie_name=session_cookie,
+                task_state_capabilities=_JSON_TASK_STATE_CAPABILITIES,
             )
 
         @app.post("/api/a3/select/stream")
@@ -2043,6 +2061,7 @@ def _handle_text(
     request_id: str = "",
     identity_key: str = "",
     progress: Callable[[str, str], None] | None = None,
+    task_state_capabilities: TaskStateEntryCapabilities | None = None,
 ) -> AgentResponse:
     if request is not None:
         request_id = request_id or _request_id(request)
@@ -2052,6 +2071,11 @@ def _handle_text(
         kwargs["request_id"] = request_id
     if identity_key:
         kwargs["identity_key"] = identity_key
+    if task_state_capabilities is not None and _accepts_keyword(
+        runtime.handle_text,
+        "task_state_capabilities",
+    ):
+        kwargs["task_state_capabilities"] = task_state_capabilities
     return runtime.handle_text(session_id, text, **kwargs)
 
 
@@ -2064,6 +2088,7 @@ def _handle_image(
     request_id: str = "",
     identity_key: str = "",
     progress: Callable[[str, str], None] | None = None,
+    task_state_capabilities: TaskStateEntryCapabilities | None = None,
 ) -> AgentResponse:
     if request is not None:
         request_id = request_id or _request_id(request)
@@ -2073,6 +2098,11 @@ def _handle_image(
         kwargs["request_id"] = request_id
     if identity_key:
         kwargs["identity_key"] = identity_key
+    if task_state_capabilities is not None and _accepts_keyword(
+        runtime.handle_image,
+        "task_state_capabilities",
+    ):
+        kwargs["task_state_capabilities"] = task_state_capabilities
     return runtime.handle_image(session_id, image_path, **kwargs)
 
 
@@ -2197,6 +2227,7 @@ def _agent_json(
     identity_key: str = "local",
     secure_cookie: bool = False,
     cookie_name: str = SESSION_COOKIE,
+    task_state_capabilities: TaskStateEntryCapabilities,
 ) -> JSONResponse:
     payload = _agent_payload(
         response,
@@ -2207,6 +2238,8 @@ def _agent_json(
         response_store=response_store,
         identity_key=identity_key,
         response_mode="json",
+        include_task_state=True,
+        task_state_capabilities=task_state_capabilities,
     )
     result = JSONResponse(payload)
     _set_session_cookie(
@@ -2230,6 +2263,8 @@ def _agent_payload(
     identity_key: str = "local",
     response_mode: str = "json",
     defer_authoritative: bool = False,
+    include_task_state: bool = False,
+    task_state_capabilities: TaskStateEntryCapabilities | None = None,
 ) -> dict[str, object]:
     attached_public_snapshot = (
         dict(response.response_snapshot)
@@ -2241,8 +2276,23 @@ def _agent_payload(
         dict(response.response_projection_snapshot)
         if isinstance(response.response_projection_snapshot, Mapping)
         and response.response_projection_snapshot
-        else attached_public_snapshot
+        else {}
     )
+    if type(include_task_state) is not bool:
+        raise ValueError("include_task_state must be boolean")
+    if include_task_state and type(task_state_capabilities) is not TaskStateEntryCapabilities:
+        raise ValueError("JSON task-state capabilities are required")
+    response_task_state = response.response_task_state_snapshot
+    if include_task_state and (
+        not attached_public_snapshot or not attached_projection_snapshot
+    ):
+        raise RuntimeError("JSON response is missing its frozen session snapshot")
+    if include_task_state and type(response_task_state) is not TaskStateSnapshotV1:
+        raise RuntimeError("JSON response is missing its exact frozen task-state snapshot")
+    if not attached_projection_snapshot:
+        # Preserve the legacy stream/internal fallback. JSON task-state exits
+        # were validated above and may never synthesize a missing projection.
+        attached_projection_snapshot = attached_public_snapshot
     live_snapshot: Mapping[str, object] = {}
     if not attached_public_snapshot or not attached_projection_snapshot:
         live_snapshot = runtime.session_snapshot(session_id)
@@ -2257,10 +2307,11 @@ def _agent_payload(
         "partial",
         "incomplete",
     }:
-        reopen = getattr(runtime, "mark_media_delivery_failed", None)
-        if callable(reopen):
-            try:
-                reopen(
+        if include_task_state:
+            reopen_v1 = getattr(runtime, "mark_media_delivery_failed_v1", None)
+            legacy_reopen = getattr(runtime, "mark_media_delivery_failed", None)
+            if callable(reopen_v1):
+                captured = reopen_v1(
                     session_id,
                     expected_unit_id=media_guard["expected_unit_id"],
                     expected_task_revision=media_guard["expected_task_revision"],
@@ -2268,10 +2319,38 @@ def _agent_payload(
                         "expected_candidate_generation"
                     ],
                     kind=str(media.get("kind") or "answer"),
-                    snapshot_target=media_failure_snapshot,
+                    capabilities=task_state_capabilities,
                 )
-            except Exception:  # noqa: BLE001 - delivery state must not break the reply.
-                logger.warning("failed to reopen A3 unit after media failure")
+                if captured is not None:
+                    if (
+                        type(captured) is not SessionResponseSnapshotV1
+                        or type(captured.legacy_session) is not dict
+                        or not captured.legacy_session
+                        or type(captured.task_state) is not TaskStateSnapshotV1
+                    ):
+                        raise RuntimeError("media reopen returned an invalid response snapshot")
+                    media_failure_snapshot.update(captured.legacy_session)
+                    response_task_state = captured.task_state
+            elif callable(legacy_reopen):
+                raise RuntimeError(
+                    "runtime cannot freeze task state after reopening media delivery"
+                )
+        else:
+            reopen = getattr(runtime, "mark_media_delivery_failed", None)
+            if callable(reopen):
+                try:
+                    reopen(
+                        session_id,
+                        expected_unit_id=media_guard["expected_unit_id"],
+                        expected_task_revision=media_guard["expected_task_revision"],
+                        expected_candidate_generation=media_guard[
+                            "expected_candidate_generation"
+                        ],
+                        kind=str(media.get("kind") or "answer"),
+                        snapshot_target=media_failure_snapshot,
+                    )
+                except Exception:  # noqa: BLE001 - legacy stream behavior stays best effort.
+                    logger.warning("failed to reopen A3 unit after media failure")
     uploaded_image_url = f"/api/upload/{uploaded_image.name}" if uploaded_image is not None else ""
     submitted_crop_url = ""
     if submitted_crop is not None and submitted_crop.is_file():
@@ -2369,6 +2448,9 @@ def _agent_payload(
         "failure": failure,
         **protocol.to_dict(),
     })
+    if include_task_state:
+        mapped = with_public_task_state(payload, response_task_state)
+        payload[PUBLIC_TASK_STATE_FIELD] = mapped[PUBLIC_TASK_STATE_FIELD]
     image_route = str(media_snapshot.get("image_route") or "").strip().upper()
     if image_route not in {"A1", "A2", "A3"}:
         image_route = ""
@@ -2937,22 +3019,50 @@ def _validate_action_context(
     raw_context: object,
     *,
     request_id: str = "",
+    task_state_capabilities: TaskStateEntryCapabilities | None = None,
 ) -> AgentResponse | None:
     """Reject a button action when it belongs to an older question/candidate list."""
     if raw_context is None:
         return None
-    if not isinstance(raw_context, dict) or raw_context.get("type") != "select_candidate":
-        snapshot = runtime.session_snapshot(session_id)
-        return AgentResponse(
-            text="这个操作已经失效，请使用当前页面中的操作。",
-            intent="stale_action",
+    captured = (
+        runtime.session_response_snapshot_v1(
+            session_id,
+            capabilities=task_state_capabilities,
+            response_frozen=True,
+        )
+        if task_state_capabilities is not None
+        else None
+    )
+    snapshot = (
+        dict(captured.legacy_session)
+        if captured is not None
+        else runtime.session_snapshot(session_id)
+    )
+
+    def stale_response(text: str, *, intent: str, code: str) -> AgentResponse:
+        response = AgentResponse(
+            text=text,
+            intent=intent,
             protocol=RequestProtocol.from_code(
-                "STALE_ACTION",
+                code,
                 request_id=request_id,
                 search_id=str(snapshot.get("search_id") or ""),
             ).to_dict(),
         )
-    snapshot = runtime.session_snapshot(session_id)
+        if captured is not None:
+            response.response_snapshot = dict(captured.legacy_session)
+            response.response_projection_snapshot = dict(captured.legacy_session)
+            response.response_task_state_snapshot = captured.task_state
+            response.response_media_snapshot_captured = True
+            response.uploaded_image_path = captured.uploaded_image_path
+        return response
+
+    if not isinstance(raw_context, dict) or raw_context.get("type") != "select_candidate":
+        return stale_response(
+            "这个操作已经失效，请使用当前页面中的操作。",
+            intent="stale_action",
+            code="STALE_ACTION",
+        )
     try:
         rank = int(raw_context.get("rank") or 0)
         task_revision = int(raw_context.get("task_revision") or 0)
@@ -2976,14 +3086,10 @@ def _validate_action_context(
         if has_image
         else "这是已失效的候选，当前会话没有可选择的候选题，请重新上传题图。"
     )
-    return AgentResponse(
-        text=message,
+    return stale_response(
+        message,
         intent="stale_candidate",
-        protocol=RequestProtocol.from_code(
-            "STALE_CANDIDATE",
-            request_id=request_id,
-            search_id=str(snapshot.get("search_id") or ""),
-        ).to_dict(),
+        code="STALE_CANDIDATE",
     )
 
 

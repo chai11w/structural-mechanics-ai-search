@@ -154,6 +154,7 @@ def _capture_a3_response_snapshot(method: Callable[..., AgentResponse]):
     ) -> AgentResponse:
         clean = _clean_session_id(session_id)
         progress = kwargs.get("progress")
+        task_state_capabilities = kwargs.get("task_state_capabilities")
         error_snapshot_captured = False
         session_lock = runtime._lock(clean)
         try:
@@ -161,53 +162,80 @@ def _capture_a3_response_snapshot(method: Callable[..., AgentResponse]):
                 with session_lock:
                     try:
                         response = method(runtime, clean, *args, **kwargs)
-                        response.response_snapshot = dict(runtime.session_snapshot(clean))
+                        captured = None
+                        if task_state_capabilities is not None:
+                            captured = runtime._response_snapshot_v1_locked(
+                                clean,
+                                capabilities=task_state_capabilities,
+                                response_frozen=True,
+                            )
+                        response.response_snapshot = (
+                            dict(captured.legacy_session)
+                            if captured is not None
+                            else dict(runtime.session_snapshot(clean))
+                        )
                         response.response_projection_snapshot = _merge_a3_projection(
                             response.response_snapshot,
                             response.response_projection_snapshot,
                         )
+                        if captured is not None:
+                            response.response_task_state_snapshot = captured.task_state
                         response.response_media_snapshot_captured = True
                         try:
-                            response.uploaded_image_path = runtime.current_image_path(clean)
-                            raw_a3 = response.response_snapshot.get("a3")
-                            selected = (
-                                raw_a3.get("selected_unit")
-                                if isinstance(raw_a3, Mapping)
-                                else None
-                            )
-                            selected_unit_id = (
-                                str(selected.get("unit_id") or "").strip()
-                                if isinstance(selected, Mapping)
-                                else ""
-                            )
-                            if (
-                                isinstance(raw_a3, Mapping)
-                                and raw_a3.get("phase") == A3_PHASE_A2_ACTIVE
-                                and selected_unit_id
-                            ):
-                                response.submitted_crop_path = runtime.current_crop_path(
-                                    clean, selected_unit_id
+                            if captured is not None:
+                                response.uploaded_image_path = captured.uploaded_image_path
+                                response.submitted_crop_path = captured.submitted_crop_path
+                                if response.intent == "a3_units_prepared":
+                                    response.feedback_overlay_path = (
+                                        captured.feedback_overlay_path
+                                    )
+                            else:
+                                response.uploaded_image_path = runtime.current_image_path(clean)
+                                raw_a3 = response.response_snapshot.get("a3")
+                                selected = (
+                                    raw_a3.get("selected_unit")
+                                    if isinstance(raw_a3, Mapping)
+                                    else None
                                 )
-                            if response.intent == "a3_units_prepared":
-                                response.feedback_overlay_path = (
-                                    runtime.current_auto_crop_overlay_path(clean)
+                                selected_unit_id = (
+                                    str(selected.get("unit_id") or "").strip()
+                                    if isinstance(selected, Mapping)
+                                    else ""
                                 )
+                                if (
+                                    isinstance(raw_a3, Mapping)
+                                    and raw_a3.get("phase") == A3_PHASE_A2_ACTIVE
+                                    and selected_unit_id
+                                ):
+                                    response.submitted_crop_path = runtime.current_crop_path(
+                                        clean, selected_unit_id
+                                    )
+                                if response.intent == "a3_units_prepared":
+                                    response.feedback_overlay_path = (
+                                        runtime.current_auto_crop_overlay_path(clean)
+                                    )
                         except Exception:  # noqa: BLE001 - do not replace the business reply.
                             pass
                         return response
                     except Exception as exc:
-                        try:
-                            setattr(
-                                exc,
-                                "response_snapshot",
-                                dict(runtime.session_snapshot(clean)),
-                            )
+                        if isinstance(exc, SessionResponseSnapshotError):
                             error_snapshot_captured = True
-                        except Exception:  # noqa: BLE001 - never mask the original failure.
-                            pass
+                        else:
+                            try:
+                                setattr(
+                                    exc,
+                                    "response_snapshot",
+                                    dict(runtime.session_snapshot(clean)),
+                                )
+                                error_snapshot_captured = True
+                            except Exception:  # noqa: BLE001 - never mask the original failure.
+                                pass
                         raise
         except Exception as exc:
-            if not error_snapshot_captured:
+            if not error_snapshot_captured and not isinstance(
+                exc,
+                SessionResponseSnapshotError,
+            ):
                 try:
                     setattr(exc, "response_snapshot", dict(runtime.session_snapshot(clean)))
                 except Exception:  # noqa: BLE001 - never mask the original failure.
@@ -550,7 +578,9 @@ class A3MvpRuntime:
         identity_key: str = "",
         progress: ProgressReporter | None = None,
         request_id: str = "",
+        task_state_capabilities: TaskStateEntryCapabilities | None = None,
     ) -> AgentResponse:
+        del task_state_capabilities
         clean = _clean_session_id(session_id)
         lock = self._lock(clean)
         with lock:
@@ -589,7 +619,9 @@ class A3MvpRuntime:
         identity_key: str = "",
         progress: ProgressReporter | None = None,
         request_id: str = "",
+        task_state_capabilities: TaskStateEntryCapabilities | None = None,
     ) -> AgentResponse:
+        del task_state_capabilities
         clean = _clean_session_id(session_id)
         with self._lock(clean):
             self._ensure_budget(identity_key)
@@ -1062,7 +1094,9 @@ class A3MvpRuntime:
         identity_key: str = "",
         progress: ProgressReporter | None = None,
         request_id: str = "",
+        task_state_capabilities: TaskStateEntryCapabilities | None = None,
     ) -> AgentResponse:
+        del task_state_capabilities
         clean = _clean_session_id(session_id)
         with self._lock(clean):
             state = self.store.load(clean)
@@ -1453,6 +1487,13 @@ class A3MvpRuntime:
 
     def current_crop_path(self, session_id: str, unit_id: str) -> Path | None:
         state = self.store.load(_clean_session_id(session_id))
+        return self._current_crop_path_from_frozen_state(state, unit_id)
+
+    def _current_crop_path_from_frozen_state(
+        self,
+        state: A3SessionState | None,
+        unit_id: str,
+    ) -> Path | None:
         if state is None:
             return None
         clean_unit_id = str(unit_id or "").strip()
@@ -1463,6 +1504,12 @@ class A3MvpRuntime:
 
     def current_auto_crop_overlay_path(self, session_id: str) -> Path | None:
         state = self.store.load(_clean_session_id(session_id))
+        return self._auto_crop_overlay_path_from_frozen_state(state)
+
+    def _auto_crop_overlay_path_from_frozen_state(
+        self,
+        state: A3SessionState | None,
+    ) -> Path | None:
         if state is None or not state.auto_crop_overlay_path:
             return None
         path = Path(state.auto_crop_overlay_path).resolve()
@@ -1503,6 +1550,7 @@ class A3MvpRuntime:
         session_id: str,
         *,
         capabilities: TaskStateEntryCapabilities | None = None,
+        response_frozen: bool = False,
     ) -> SessionResponseSnapshotV1:
         """Capture the whole public session response from one A3/A2 read-set."""
 
@@ -1512,60 +1560,110 @@ class A3MvpRuntime:
         # ``load()`` can delete the row on its own.
         self.purge_expired()
         with self._lock(clean):
-            with self.a2_runtime._lock(clean):
-                workflow_state, workflow_read_status = read_workflow_state_once(
-                    self.store,
-                    clean,
-                    expected_type=A3SessionState,
-                )
-                child_state, child_read_status = read_child_state_once(
-                    self.a2_runtime.store,
-                    clean,
-                )
-                task_state = self._task_state_snapshot_v1_from_read_set(
-                    clean,
-                    workflow_state=workflow_state,
-                    workflow_read_status=workflow_read_status,
-                    child_state=child_state,
-                    child_read_status=child_read_status,
-                    capabilities=capabilities,
-                )
-                if workflow_read_status not in {READ_OK, READ_MISSING}:
-                    raise SessionResponseSnapshotError(
-                        "legacy workflow session state is unavailable",
-                        task_state=task_state,
-                    )
+            return self._response_snapshot_v1_locked(
+                clean,
+                capabilities=capabilities,
+                response_frozen=response_frozen,
+            )
 
-                frozen_workflow = (
-                    workflow_state
-                    if type(workflow_state) is A3SessionState
-                    else None
-                )
-                child_snapshot: dict[str, object] | None = None
-                if (
-                    frozen_workflow is not None
-                    and frozen_workflow.entry_route in {"A2", "A3"}
-                ):
-                    if child_read_status not in {READ_OK, READ_MISSING}:
-                        raise SessionResponseSnapshotError(
-                            "legacy child session state is unavailable",
-                            task_state=task_state,
-                        )
-                    child_snapshot = (
-                        self.a2_runtime._legacy_session_snapshot_from_state(
-                            child_state
-                        )
-                    )
-                return SessionResponseSnapshotV1(
-                    uploaded_image_path=self._current_image_path_from_frozen_state(
-                        frozen_workflow
-                    ),
-                    legacy_session=self._legacy_session_snapshot_from_states(
-                        frozen_workflow,
-                        child_snapshot=child_snapshot,
-                    ),
+    def _response_snapshot_v1_locked(
+        self,
+        session_id: str,
+        *,
+        capabilities: TaskStateEntryCapabilities | None,
+        response_frozen: bool = False,
+    ) -> SessionResponseSnapshotV1:
+        """Capture one A3/A2 response read-set while A3 is already locked."""
+
+        with self.a2_runtime._lock(session_id):
+            workflow_state, workflow_read_status = read_workflow_state_once(
+                self.store,
+                session_id,
+                expected_type=A3SessionState,
+            )
+            child_state, child_read_status = read_child_state_once(
+                self.a2_runtime.store,
+                session_id,
+            )
+            return self._response_snapshot_v1_from_read_set(
+                session_id,
+                workflow_state=workflow_state,
+                workflow_read_status=workflow_read_status,
+                child_state=child_state,
+                child_read_status=child_read_status,
+                capabilities=capabilities,
+                response_frozen=response_frozen,
+            )
+
+    def _response_snapshot_v1_from_read_set(
+        self,
+        session_id: str,
+        *,
+        workflow_state: object | None,
+        workflow_read_status: str,
+        child_state: AgentState | None,
+        child_read_status: str,
+        capabilities: TaskStateEntryCapabilities | None,
+        response_frozen: bool,
+    ) -> SessionResponseSnapshotV1:
+        """Build legacy and typed response views from an already-locked read-set."""
+
+        task_state = self._task_state_snapshot_v1_from_read_set(
+            session_id,
+            workflow_state=workflow_state,
+            workflow_read_status=workflow_read_status,
+            child_state=child_state,
+            child_read_status=child_read_status,
+            capabilities=capabilities,
+            response_frozen=response_frozen,
+        )
+        if workflow_read_status not in {READ_OK, READ_MISSING}:
+            raise SessionResponseSnapshotError(
+                "legacy workflow session state is unavailable",
+                task_state=task_state,
+            )
+
+        frozen_workflow = (
+            workflow_state
+            if type(workflow_state) is A3SessionState
+            else None
+        )
+        child_snapshot: dict[str, object] | None = None
+        if (
+            frozen_workflow is not None
+            and frozen_workflow.entry_route in {"A2", "A3"}
+        ):
+            if child_read_status not in {READ_OK, READ_MISSING}:
+                raise SessionResponseSnapshotError(
+                    "legacy child session state is unavailable",
                     task_state=task_state,
                 )
+            child_snapshot = self.a2_runtime._legacy_session_snapshot_from_state(
+                child_state
+            )
+        return SessionResponseSnapshotV1(
+            uploaded_image_path=self._current_image_path_from_frozen_state(
+                frozen_workflow
+            ),
+            legacy_session=self._legacy_session_snapshot_from_states(
+                frozen_workflow,
+                child_snapshot=child_snapshot,
+            ),
+            task_state=task_state,
+            submitted_crop_path=(
+                self._current_crop_path_from_frozen_state(
+                    frozen_workflow,
+                    frozen_workflow.selected_unit_id,
+                )
+                if frozen_workflow is not None
+                and frozen_workflow.phase == A3_PHASE_A2_ACTIVE
+                and frozen_workflow.selected_unit_id
+                else None
+            ),
+            feedback_overlay_path=self._auto_crop_overlay_path_from_frozen_state(
+                frozen_workflow
+            ),
+        )
 
     def _task_state_snapshot_v1_from_read_set(
         self,
@@ -1576,6 +1674,7 @@ class A3MvpRuntime:
         child_state: AgentState | None,
         child_read_status: str,
         capabilities: TaskStateEntryCapabilities | None = None,
+        response_frozen: bool = False,
     ) -> TaskStateSnapshotV1:
         try:
             workflow_retry_supported = bool(
@@ -1605,6 +1704,7 @@ class A3MvpRuntime:
             workflow_retry_supported=workflow_retry_supported,
             child_retry_supported=True,
             capabilities=capabilities,
+            response_frozen=response_frozen,
         )
 
     def session_snapshot(self, session_id: str) -> dict[str, object]:
@@ -1751,31 +1851,140 @@ class A3MvpRuntime:
                 return False
             if expected_unit_id and state.selected_unit_id != str(expected_unit_id):
                 return False
-            if expected_task_revision and state.task_revision != int(expected_task_revision):
+            if expected_task_revision and state.task_revision != int(
+                expected_task_revision
+            ):
                 return False
+            observed_candidate_generation = ""
             if expected_candidate_generation:
                 child = self.a2_runtime.session_snapshot(clean)
-                if str(child.get("candidate_generation") or "") != str(
-                    expected_candidate_generation
-                ):
-                    return False
-            if state.selected_unit_id in state.completed_unit_ids:
-                state.completed_unit_ids = [
-                    value
-                    for value in state.completed_unit_ids
-                    if value != state.selected_unit_id
-                ]
-            state.phase = A3_PHASE_A2_ACTIVE
-            state.page_finished = False
-            state.last_error = (
-                "candidate_media_delivery_failed"
-                if str(kind).strip().lower() == "candidates"
-                else "answer_media_delivery_failed"
-            )
-            self.store.save(state)
+                observed_candidate_generation = str(
+                    child.get("candidate_generation") or ""
+                )
+            if not self._reopen_media_delivery_failed_locked(
+                state,
+                expected_unit_id=expected_unit_id,
+                expected_task_revision=expected_task_revision,
+                expected_candidate_generation=expected_candidate_generation,
+                observed_candidate_generation=observed_candidate_generation,
+                kind=kind,
+            ):
+                return False
             if snapshot_target is not None:
                 snapshot_target.update(self.session_snapshot(clean))
             return True
+
+    def mark_media_delivery_failed_v1(
+        self,
+        session_id: str,
+        *,
+        expected_unit_id: str = "",
+        expected_task_revision: int = 0,
+        expected_candidate_generation: str = "",
+        kind: str = "answer",
+        capabilities: TaskStateEntryCapabilities | None = None,
+    ) -> SessionResponseSnapshotV1 | None:
+        """Reopen media delivery and freeze the new state under A3→A2 locks."""
+
+        clean = _clean_session_id(session_id)
+        clean_expected_unit_id = str(expected_unit_id or "").strip()
+        clean_expected_generation = str(
+            expected_candidate_generation or ""
+        ).strip()
+        if (
+            not clean_expected_unit_id
+            or type(expected_task_revision) is not int
+            or expected_task_revision <= 0
+            or not clean_expected_generation
+        ):
+            return None
+        with self._lock(clean):
+            with self.a2_runtime._lock(clean):
+                workflow_state, workflow_read_status = read_workflow_state_once(
+                    self.store,
+                    clean,
+                    expected_type=A3SessionState,
+                )
+                child_state, child_read_status = read_child_state_once(
+                    self.a2_runtime.store,
+                    clean,
+                )
+                if workflow_read_status == READ_MISSING:
+                    return None
+                if workflow_read_status != READ_OK:
+                    return self._response_snapshot_v1_from_read_set(
+                        clean,
+                        workflow_state=workflow_state,
+                        workflow_read_status=workflow_read_status,
+                        child_state=child_state,
+                        child_read_status=child_read_status,
+                        capabilities=capabilities,
+                        response_frozen=True,
+                    )
+                state = (
+                    workflow_state
+                    if type(workflow_state) is A3SessionState
+                    else None
+                )
+                observed_candidate_generation = (
+                    child_state.candidate_generation
+                    if child_read_status == READ_OK and child_state is not None
+                    else ""
+                )
+                if not self._reopen_media_delivery_failed_locked(
+                    state,
+                    expected_unit_id=clean_expected_unit_id,
+                    expected_task_revision=expected_task_revision,
+                    expected_candidate_generation=clean_expected_generation,
+                    observed_candidate_generation=observed_candidate_generation,
+                    kind=kind,
+                ):
+                    return None
+                return self._response_snapshot_v1_from_read_set(
+                    clean,
+                    workflow_state=state,
+                    workflow_read_status=READ_OK,
+                    child_state=child_state,
+                    child_read_status=child_read_status,
+                    capabilities=capabilities,
+                    response_frozen=True,
+                )
+
+    def _reopen_media_delivery_failed_locked(
+        self,
+        state: A3SessionState | None,
+        *,
+        expected_unit_id: str,
+        expected_task_revision: int,
+        expected_candidate_generation: str,
+        observed_candidate_generation: str,
+        kind: str,
+    ) -> bool:
+        if state is None or state.entry_route != "A3" or not state.selected_unit_id:
+            return False
+        if expected_unit_id and state.selected_unit_id != str(expected_unit_id):
+            return False
+        if expected_task_revision and state.task_revision != int(expected_task_revision):
+            return False
+        if expected_candidate_generation and str(observed_candidate_generation) != str(
+            expected_candidate_generation
+        ):
+            return False
+        if state.selected_unit_id in state.completed_unit_ids:
+            state.completed_unit_ids = [
+                value
+                for value in state.completed_unit_ids
+                if value != state.selected_unit_id
+            ]
+        state.phase = A3_PHASE_A2_ACTIVE
+        state.page_finished = False
+        state.last_error = (
+            "candidate_media_delivery_failed"
+            if str(kind).strip().lower() == "candidates"
+            else "answer_media_delivery_failed"
+        )
+        self.store.save(state)
+        return True
 
     def resolve_media(self, session_id: str, filename: str) -> Path | None:
         clean = _clean_session_id(session_id)

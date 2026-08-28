@@ -46,6 +46,7 @@ from tiku_agent.session_runtime import (
 from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_state_contract import empty_task_state_snapshot
+from tiku_agent.task_state_runtime import TaskStateEntryCapabilities
 from tiku_shared.response_store import ResponseProjection, SQLiteResponseStore
 from tiku_shared.trace_context import TraceContext, current_request_id, current_trace_id
 from tiku_shared.trace_events import (
@@ -68,6 +69,8 @@ class FakeRuntime:
         self.response_protocol = {}
         self.media_failure_calls = []
         self.session_capture_calls = []
+        self.session_capture_frozen_flags = []
+        self.response_capture_calls = []
         self.snapshot = {
             "session_valid": False,
             "phase": "IDLE",
@@ -77,7 +80,35 @@ class FakeRuntime:
             "candidate_count": 0,
         }
 
-    def handle_text(self, session_id: str, text: str, *, identity_key="", progress=None) -> AgentResponse:
+    def _freeze_response(
+        self,
+        session_id: str,
+        response: AgentResponse,
+        *,
+        task_state_capabilities=None,
+    ) -> AgentResponse:
+        if task_state_capabilities is None:
+            return response
+        frozen = dict(self.snapshot)
+        response.response_snapshot = frozen
+        response.response_projection_snapshot = dict(frozen)
+        response.response_task_state_snapshot = empty_task_state_snapshot()
+        response.response_media_snapshot_captured = True
+        response.uploaded_image_path = (
+            self.image_path if session_id == self.upload_session else None
+        )
+        self.response_capture_calls.append((session_id, task_state_capabilities))
+        return response
+
+    def handle_text(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        identity_key="",
+        progress=None,
+        task_state_capabilities=None,
+    ) -> AgentResponse:
         self.last_identity = identity_key
         self.calls.append(("text", session_id, text))
         if progress is not None:
@@ -88,14 +119,26 @@ class FakeRuntime:
             "candidate_generation": "fake-generation",
             "candidate_count": 1,
         })
-        return AgentResponse(
-            text="我明白了。",
-            images=[str(self.image_path)],
-            intent="select_candidate",
-            protocol=dict(self.response_protocol),
+        return self._freeze_response(
+            session_id,
+            AgentResponse(
+                text="我明白了。",
+                images=[str(self.image_path)],
+                intent="select_candidate",
+                protocol=dict(self.response_protocol),
+            ),
+            task_state_capabilities=task_state_capabilities,
         )
 
-    def handle_image(self, session_id: str, image_path: Path, *, identity_key="", progress=None) -> AgentResponse:
+    def handle_image(
+        self,
+        session_id: str,
+        image_path: Path,
+        *,
+        identity_key="",
+        progress=None,
+        task_state_capabilities=None,
+    ) -> AgentResponse:
         self.last_identity = identity_key
         self.calls.append(("image", session_id, image_path.is_file()))
         self.upload_session = session_id
@@ -109,11 +152,22 @@ class FakeRuntime:
         })
         if progress is not None:
             progress(self.progress_stage, self.progress_message)
-        return AgentResponse(text="我正在帮你找。", intent="search_image")
+        return self._freeze_response(
+            session_id,
+            AgentResponse(text="我正在帮你找。", intent="search_image"),
+            task_state_capabilities=task_state_capabilities,
+        )
 
     def clear(self, session_id: str) -> None:
         self.calls.append(("clear", session_id))
-        self.snapshot.update({"session_valid": False, "phase": "IDLE", "has_active_image": False})
+        self.snapshot = {
+            "session_valid": False,
+            "phase": "IDLE",
+            "has_active_image": False,
+            "task_revision": 0,
+            "candidate_generation": "",
+            "candidate_count": 0,
+        }
 
     def session_snapshot(self, session_id: str) -> dict[str, object]:
         return dict(self.snapshot)
@@ -126,8 +180,10 @@ class FakeRuntime:
         session_id: str,
         *,
         capabilities=None,
+        response_frozen: bool = False,
     ) -> SessionResponseSnapshotV1:
         self.session_capture_calls.append((session_id, capabilities))
+        self.session_capture_frozen_flags.append(response_frozen)
         return SessionResponseSnapshotV1(
             uploaded_image_path=(
                 self.image_path if session_id == self.upload_session else None
@@ -155,6 +211,10 @@ class FakeRuntime:
 
     def mark_media_delivery_failed(self, session_id: str, **kwargs) -> None:
         self.media_failure_calls.append((session_id, kwargs))
+
+    def mark_media_delivery_failed_v1(self, session_id: str, **kwargs):
+        self.media_failure_calls.append((session_id, kwargs))
+        return None
 
 
 class FastApiDemoTest(unittest.TestCase):
@@ -296,6 +356,10 @@ class FastApiDemoTest(unittest.TestCase):
         stream_events = [json.loads(line) for line in stream.text.splitlines() if line]
         stream_payload = stream_events[-1]["data"]
 
+        self.assertIn("task_state", session_payload)
+        self.assertIn("task_state", json_payload)
+        self.assertNotIn("task_state", stream_payload)
+
         for payload in (session_payload, json_payload, stream_payload):
             encoded = json.dumps(payload, ensure_ascii=False)
             self.assertNotIn("last_intent", encoded)
@@ -350,6 +414,7 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(captured_session_id, session_id)
         self.assertFalse(capabilities.trusted_image_event)
         self.assertTrue(capabilities.reset_session_available)
+        self.assertEqual(runtime.session_capture_frozen_flags, [False])
         self.assertEqual(response.headers["cache-control"], "private, no-store")
 
     def test_session_endpoint_maps_live_standalone_a2_state_and_keeps_legacy_shape(self):
@@ -408,6 +473,110 @@ class FastApiDemoTest(unittest.TestCase):
             )
             self.assertNotIn(str(root), json.dumps(payload["task_state"]))
             self.assertEqual(client.get(payload["uploaded_image"]).status_code, 200)
+
+    def test_json_cancel_returns_frozen_cancelled_v1_then_clears_live_state(self):
+        class CancelAgent:
+            def __init__(self, state: AgentState):
+                self.state = state
+                self.progress_reporter = None
+
+            def handle_text(self, _text: str) -> AgentResponse:
+                self.state.cancel()
+                return AgentResponse(text="好，已经取消了。", intent="cancel")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_id = "json-cancel-frozen-v1"
+            artifacts = SessionArtifacts(root / "sessions")
+            upload_dir = artifacts.session_dir(session_id) / "uploads"
+            upload_dir.mkdir(parents=True)
+            image_path = upload_dir / "question.png"
+            image_path.write_bytes(b"question")
+            store = SQLiteSessionStore(root / "sessions.sqlite3")
+            store.save(AgentState(
+                session_id=session_id,
+                phase="WAIT_CHAPTER",
+                current_image_path=str(image_path),
+                current_search_id="search_json_cancel_frozen_v1",
+                task_revision=1,
+            ))
+            runtime = AgentSessionRuntime(
+                store,
+                artifacts=artifacts,
+                task_logger=object(),
+                agent_factory=CancelAgent,
+            )
+            client = TestClient(create_app(runtime=runtime))
+            client.cookies.set(SESSION_COOKIE, session_id)
+
+            response = client.post("/api/message", json={"text": "取消"})
+
+            self.assertEqual(response.status_code, 200, response.text)
+            payload = response.json()
+            self.assertEqual(payload["session"]["phase"], "CANCELLED")
+            self.assertEqual(
+                payload["task_state"]["active_child_task"]["phase"],
+                "CANCELLED",
+            )
+            self.assertEqual(
+                payload["task_state"]["active_child_task"]["allowed_actions"],
+                [],
+            )
+            self.assertIsNone(store.load(session_id))
+            live = client.get("/api/session").json()
+            self.assertFalse(live["session"]["session_valid"])
+            self.assertEqual(
+                live["task_state"],
+                empty_task_state_snapshot().to_dict(),
+            )
+
+    def test_json_cancel_without_an_active_task_returns_canonical_empty_v1(self):
+        class CancelAgent:
+            def __init__(self, state: AgentState):
+                self.state = state
+                self.progress_reporter = None
+
+            def handle_text(self, _text: str) -> AgentResponse:
+                self.state.cancel()
+                return AgentResponse(text="好，已经取消了。", intent="cancel")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = SQLiteSessionStore(root / "sessions.sqlite3")
+            runtime = AgentSessionRuntime(
+                store,
+                artifacts=SessionArtifacts(root / "sessions"),
+                task_logger=object(),
+                agent_factory=CancelAgent,
+            )
+
+            client = TestClient(create_app(runtime=runtime))
+            response = client.post(
+                "/api/message",
+                json={"text": "取消"},
+            )
+
+            self.assertEqual(response.status_code, 200, response.text)
+            payload = response.json()
+            self.assertEqual(payload["session"]["phase"], "IDLE")
+            self.assertFalse(payload["session"]["session_valid"])
+            self.assertEqual(
+                payload["task_state"],
+                empty_task_state_snapshot().to_dict(),
+            )
+            session_id = client.cookies.get(SESSION_COOKIE, "")
+            self.assertTrue(session_id)
+            self.assertIsNone(store.load(session_id))
+
+            stream = client.post(
+                "/api/message/stream",
+                json={"text": "取消"},
+            )
+            self.assertEqual(stream.status_code, 200, stream.text)
+            stream_events = [
+                json.loads(line) for line in stream.text.splitlines() if line
+            ]
+            self.assertNotIn("task_state", stream_events[-1]["data"])
 
     def test_session_endpoint_maps_direct_a2_and_active_a3_without_legacy_drift(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -626,6 +795,7 @@ class FastApiDemoTest(unittest.TestCase):
                 request_id: str = "",
                 identity_key: str = "",
                 progress=None,
+                task_state_capabilities=None,
             ) -> AgentResponse:
                 self.trace_observations.append(
                     (current_trace_id(), current_request_id(), request_id)
@@ -635,6 +805,7 @@ class FastApiDemoTest(unittest.TestCase):
                     text,
                     identity_key=identity_key,
                     progress=progress,
+                    task_state_capabilities=task_state_capabilities,
                 )
 
         runtime = TraceCapturingRuntime(image_path)
@@ -1087,12 +1258,23 @@ class FastApiDemoTest(unittest.TestCase):
             secret = "raw-secret-unserializable-value"
 
             class UnserializableRuntime(FakeRuntime):
-                def handle_text(self, session_id, text, *, progress=None):
+                def handle_text(
+                    self,
+                    session_id,
+                    text,
+                    *,
+                    progress=None,
+                    task_state_capabilities=None,
+                ):
                     del session_id, text, progress
-                    return AgentResponse(
-                        text="即将序列化。",
-                        intent="public_response",
-                        author_contact={"unsafe": {secret}},  # type: ignore[dict-item]
+                    return self._freeze_response(
+                        "serialization-session",
+                        AgentResponse(
+                            text="即将序列化。",
+                            intent="public_response",
+                            author_contact={"unsafe": {secret}},  # type: ignore[dict-item]
+                        ),
+                        task_state_capabilities=task_state_capabilities,
                     )
 
             store = SQLiteTraceEventStore(root / "trace_events.sqlite3")
@@ -1738,20 +1920,21 @@ class FastApiDemoTest(unittest.TestCase):
                     request_id="",
                     identity_key="",
                     progress=None,
+                    task_state_capabilities=None,
                 ):
                     del request_id
-                    super().handle_text(
+                    response = super().handle_text(
                         session_id,
                         text,
                         identity_key=identity_key,
                         progress=progress,
+                        task_state_capabilities=task_state_capabilities,
                     )
-                    return AgentResponse(
-                        text="答案如下。",
-                        images=[str(delivered), str(root / "missing.jpg")],
-                        intent="select_candidate",
-                        media_kind="answer",
-                    )
+                    response.text = "答案如下。"
+                    response.images = [str(delivered), str(root / "missing.jpg")]
+                    response.intent = "select_candidate"
+                    response.media_kind = "answer"
+                    return response
 
             response = TestClient(
                 create_app(
@@ -1833,6 +2016,236 @@ class FastApiDemoTest(unittest.TestCase):
             self.assertEqual(payload["code"], "CANDIDATE_RANK_INVALID")
             self.assertFalse(payload["retryable"])
             self.assertEqual(payload["action"], "")
+
+    def test_http_200_business_statuses_include_task_state_only_in_json(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"business_task_state_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+
+        cases = (
+            ("NEEDS_INPUT", "CANDIDATE_RANK_INVALID"),
+            ("NO_MATCH", "NO_MATCH"),
+            ("PARTIAL", "PARTIAL_RESULT"),
+        )
+        for expected_status, code in cases:
+            with self.subTest(status=expected_status):
+                runtime = FakeRuntime(image_path)
+                runtime.response_protocol = {
+                    "status": expected_status,
+                    "layer": "tool",
+                    "code": code,
+                    "retryable": False,
+                    "action": "",
+                }
+                client = TestClient(create_app(runtime=runtime))
+
+                json_response = client.post("/api/message", json={"text": "继续"})
+                self.assertEqual(json_response.status_code, 200, json_response.text)
+                json_payload = json_response.json()
+                self.assertEqual(json_payload["status"], expected_status)
+                self.assertEqual(
+                    json_payload["task_state"],
+                    empty_task_state_snapshot().to_dict(),
+                )
+
+                stream_response = client.post(
+                    "/api/message/stream",
+                    json={"text": "继续"},
+                )
+                self.assertEqual(stream_response.status_code, 200, stream_response.text)
+                stream_events = [
+                    json.loads(line)
+                    for line in stream_response.text.splitlines()
+                    if line
+                ]
+                stream_payload = stream_events[-1]["data"]
+                self.assertEqual(stream_payload["status"], expected_status)
+                self.assertNotIn("task_state", stream_payload)
+
+    def test_json_task_state_rejects_a_missing_frozen_projection(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"missing_projection_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        runtime = FakeRuntime(image_path)
+        frozen = {
+            "session_valid": True,
+            "phase": "WAIT_CANDIDATE_CHOICE",
+            "has_active_image": True,
+            "task_revision": 1,
+            "candidate_generation": "1:1",
+            "candidate_count": 1,
+        }
+        response = AgentResponse(text="已冻结。", intent="public_response")
+        response.response_snapshot = dict(frozen)
+        response.response_projection_snapshot = {}
+        response.response_task_state_snapshot = empty_task_state_snapshot()
+        response.response_media_snapshot_captured = True
+        runtime.session_snapshot = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("JSON must not repair a missing frozen projection")
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "missing its frozen session snapshot",
+        ):
+            _agent_payload(
+                response,
+                runtime,
+                "missing-projection-json",
+                include_task_state=True,
+                task_state_capabilities=TaskStateEntryCapabilities(
+                    reset_session_available=True,
+                ),
+            )
+
+        legacy_payload = _agent_payload(
+            response,
+            runtime,
+            "missing-projection-stream",
+            response_mode="stream",
+        )
+        self.assertEqual(
+            legacy_payload["session"]["phase"],
+            "WAIT_CANDIDATE_CHOICE",
+        )
+        self.assertNotIn("task_state", legacy_payload)
+
+    def test_json_task_state_rejects_missing_or_invalid_typed_snapshot_before_media_reopen(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"typed_snapshot_guard_{uuid4().hex}.jpg"
+        missing_answer = runtime_dir / f"missing_answer_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+
+        class ReopeningRuntime(FakeRuntime):
+            def mark_media_delivery_failed_v1(self, session_id: str, **kwargs):
+                self.media_failure_calls.append((session_id, kwargs))
+                return SessionResponseSnapshotV1(
+                    uploaded_image_path=None,
+                    legacy_session=dict(self.snapshot),
+                    task_state=empty_task_state_snapshot(),
+                )
+
+        frozen = {
+            "session_valid": True,
+            "phase": "WAIT_CANDIDATE_CHOICE",
+            "has_active_image": True,
+            "task_revision": 7,
+            "candidate_generation": "7:1",
+            "candidate_count": 1,
+        }
+        for invalid_task_state in (None, object()):
+            with self.subTest(task_state_type=type(invalid_task_state).__name__):
+                runtime = ReopeningRuntime(image_path)
+                response = AgentResponse(
+                    text="答案如下。",
+                    images=[str(missing_answer)],
+                    intent="select_candidate",
+                    media_kind="answer",
+                    state={
+                        "_a3_media_guard": {
+                            "unit_id": "u1",
+                            "task_revision": 7,
+                            "candidate_generation": "7:1",
+                        }
+                    },
+                )
+                response.response_snapshot = dict(frozen)
+                response.response_projection_snapshot = dict(frozen)
+                response.response_task_state_snapshot = invalid_task_state
+                response.response_media_snapshot_captured = True
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "missing its exact frozen task-state snapshot",
+                ):
+                    _agent_payload(
+                        response,
+                        runtime,
+                        "invalid-typed-snapshot-json",
+                        include_task_state=True,
+                        task_state_capabilities=TaskStateEntryCapabilities(
+                            reset_session_available=True,
+                        ),
+                    )
+                self.assertEqual(runtime.media_failure_calls, [])
+
+    def test_json_task_state_rejects_invalid_media_reopen_snapshot_atomically(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"reopen_snapshot_guard_{uuid4().hex}.jpg"
+        missing_answer = runtime_dir / f"missing_reopen_answer_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+
+        class InvalidReopeningRuntime(FakeRuntime):
+            def __init__(self, reopen_snapshot):
+                super().__init__(image_path)
+                self.reopen_snapshot = reopen_snapshot
+
+            def mark_media_delivery_failed_v1(self, session_id: str, **kwargs):
+                self.media_failure_calls.append((session_id, kwargs))
+                return self.reopen_snapshot
+
+        frozen = {
+            "session_valid": True,
+            "phase": "WAIT_CANDIDATE_CHOICE",
+            "has_active_image": True,
+            "task_revision": 7,
+            "candidate_generation": "7:1",
+            "candidate_count": 1,
+        }
+        invalid_reopen_snapshots = (
+            SessionResponseSnapshotV1(
+                uploaded_image_path=None,
+                legacy_session={},
+                task_state=empty_task_state_snapshot(),
+            ),
+            SessionResponseSnapshotV1(
+                uploaded_image_path=None,
+                legacy_session=dict(frozen),
+                task_state=None,
+            ),
+        )
+        for reopen_snapshot in invalid_reopen_snapshots:
+            with self.subTest(
+                legacy_present=bool(reopen_snapshot.legacy_session),
+                task_state_type=type(reopen_snapshot.task_state).__name__,
+            ):
+                runtime = InvalidReopeningRuntime(reopen_snapshot)
+                response = AgentResponse(
+                    text="答案如下。",
+                    images=[str(missing_answer)],
+                    intent="select_candidate",
+                    media_kind="answer",
+                    state={
+                        "_a3_media_guard": {
+                            "unit_id": "u1",
+                            "task_revision": 7,
+                            "candidate_generation": "7:1",
+                        }
+                    },
+                )
+                response.response_snapshot = dict(frozen)
+                response.response_projection_snapshot = dict(frozen)
+                response.response_task_state_snapshot = empty_task_state_snapshot()
+                response.response_media_snapshot_captured = True
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "media reopen returned an invalid response snapshot",
+                ):
+                    _agent_payload(
+                        response,
+                        runtime,
+                        "invalid-media-reopen-snapshot-json",
+                        include_task_state=True,
+                        task_state_capabilities=TaskStateEntryCapabilities(
+                            reset_session_available=True,
+                        ),
+                    )
+                self.assertEqual(len(runtime.media_failure_calls), 1)
 
     def test_json_and_stream_use_registered_tool_recovery_semantics(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
@@ -2902,13 +3315,16 @@ class FastApiDemoTest(unittest.TestCase):
 
         missing = client.post("/api/image", files={"other": ("crop.jpg", b"data", "image/jpeg")})
         self.assertEqual(missing.status_code, 400)
+        self.assertNotIn("task_state", missing.json())
         invalid = client.post("/api/image", files={"file": ("crop.jpg", b"not an image", "image/jpeg")})
         self.assertEqual(invalid.status_code, 400)
+        self.assertNotIn("task_state", invalid.json())
         oversized = client.post(
             "/api/image",
             files={"file": ("crop.jpg", b"x" * (MAX_IMAGE_BYTES + 1), "image/jpeg")},
         )
         self.assertEqual(oversized.status_code, 413)
+        self.assertNotIn("task_state", oversized.json())
 
     def test_json_model_endpoints_keep_health_responsive_while_runtime_is_busy(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
@@ -2933,6 +3349,7 @@ class FastApiDemoTest(unittest.TestCase):
                 *,
                 identity_key="",
                 progress=None,
+                task_state_capabilities=None,
             ) -> AgentResponse:
                 self._block()
                 return super().handle_text(
@@ -2940,6 +3357,7 @@ class FastApiDemoTest(unittest.TestCase):
                     text,
                     identity_key=identity_key,
                     progress=progress,
+                    task_state_capabilities=task_state_capabilities,
                 )
 
             def handle_image(
@@ -2949,6 +3367,7 @@ class FastApiDemoTest(unittest.TestCase):
                 *,
                 identity_key="",
                 progress=None,
+                task_state_capabilities=None,
             ) -> AgentResponse:
                 self._block()
                 return super().handle_image(
@@ -2956,6 +3375,7 @@ class FastApiDemoTest(unittest.TestCase):
                     image_path,
                     identity_key=identity_key,
                     progress=progress,
+                    task_state_capabilities=task_state_capabilities,
                 )
 
         image_bytes = io.BytesIO()
@@ -3020,6 +3440,10 @@ class FastApiDemoTest(unittest.TestCase):
         text_response = client.post("/api/message", json={"text": "就这个"})
         self.assertEqual(text_response.status_code, 200)
         self.assertEqual(text_response.json()["text"], "我明白了。")
+        self.assertEqual(
+            text_response.json()["task_state"],
+            empty_task_state_snapshot().to_dict(),
+        )
         self.assertEqual(text_response.json()["author_contact"], {})
         self.assertIsNone(text_response.json()["failure"])
         self.assertIn(SESSION_COOKIE, text_response.cookies)
@@ -3036,7 +3460,17 @@ class FastApiDemoTest(unittest.TestCase):
         Image.new("RGB", (4, 4), "white").save(buffer, format="JPEG")
         image_response = client.post("/api/image", content=buffer.getvalue(), headers={"x-filename": "question.jpg"})
         self.assertEqual(image_response.status_code, 200)
+        self.assertEqual(
+            image_response.json()["task_state"],
+            empty_task_state_snapshot().to_dict(),
+        )
         self.assertEqual(runtime.calls[-1][0], "image")
+        text_capabilities = runtime.response_capture_calls[0][1]
+        image_capabilities = runtime.response_capture_calls[-1][1]
+        self.assertFalse(text_capabilities.trusted_image_event)
+        self.assertTrue(text_capabilities.reset_session_available)
+        self.assertTrue(image_capabilities.trusted_image_event)
+        self.assertTrue(image_capabilities.reset_session_available)
         uploaded_image_url = image_response.json()["uploaded_image"]
         self.assertTrue(uploaded_image_url.startswith("/api/upload/"))
         self.assertEqual(client.get("/api/session").json()["uploaded_image"], uploaded_image_url)
@@ -3048,6 +3482,10 @@ class FastApiDemoTest(unittest.TestCase):
 
         reset_response = client.post("/api/reset")
         self.assertEqual(reset_response.status_code, 200)
+        self.assertEqual(
+            reset_response.json()["task_state"],
+            empty_task_state_snapshot().to_dict(),
+        )
         self.assertEqual(runtime.calls[-1][0], "clear")
         self.assertEqual(client.get(media_url).status_code, 404)
 
@@ -3062,16 +3500,28 @@ class FastApiDemoTest(unittest.TestCase):
                 super().__init__(image_path)
                 self.has_active_image = has_active_image
 
-            def handle_text(self, session_id: str, text: str, *, identity_key="", progress=None) -> AgentResponse:
+            def handle_text(
+                self,
+                session_id: str,
+                text: str,
+                *,
+                identity_key="",
+                progress=None,
+                task_state_capabilities=None,
+            ) -> AgentResponse:
                 del text, identity_key, progress
                 self.snapshot.update({
                     "session_valid": True,
                     "phase": "ERROR",
                     "has_active_image": self.has_active_image,
                 })
-                return AgentResponse(
-                    text="这次没查成功。题图已保留，你可以直接回复“重试”。",
-                    intent="unsupported",
+                return self._freeze_response(
+                    session_id,
+                    AgentResponse(
+                        text="这次没查成功。题图已保留，你可以直接回复“重试”。",
+                        intent="unsupported",
+                    ),
+                    task_state_capabilities=task_state_capabilities,
                 )
 
         for has_active_image, expected_action, expected_code in (
@@ -3089,6 +3539,10 @@ class FastApiDemoTest(unittest.TestCase):
                     {"kind": "business_error", "recovery_action": expected_action},
                 )
                 self.assertEqual(response.json()["code"], expected_code)
+                self.assertEqual(
+                    response.json()["task_state"],
+                    empty_task_state_snapshot().to_dict(),
+                )
 
     def test_streaming_endpoints_emit_real_progress_before_result(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
@@ -3166,6 +3620,45 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertIn("上一道题", events[0]["data"]["text"])
         self.assertEqual(events[0]["data"]["intent"], "stale_candidate")
         self.assertEqual(runtime.calls, [])
+
+    def test_json_stale_candidate_uses_one_response_frozen_capture(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"demo_json_stale_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        runtime = FakeRuntime(image_path)
+        runtime.snapshot.update({
+            "session_valid": True,
+            "phase": "WAIT_CHAPTER",
+            "has_active_image": True,
+            "task_revision": 2,
+            "candidate_generation": "",
+            "candidate_count": 0,
+        })
+        client = TestClient(create_app(runtime=runtime))
+
+        response = client.post("/api/message", json={
+            "text": "选择候选 1",
+            "action_context": {
+                "type": "select_candidate",
+                "rank": 1,
+                "task_revision": 1,
+                "candidate_generation": "old-generation",
+            },
+        })
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["intent"], "stale_candidate")
+        self.assertEqual(
+            response.json()["task_state"],
+            empty_task_state_snapshot().to_dict(),
+        )
+        self.assertEqual(runtime.calls, [])
+        self.assertEqual(len(runtime.session_capture_calls), 1)
+        self.assertEqual(runtime.session_capture_frozen_flags, [True])
+        capabilities = runtime.session_capture_calls[0][1]
+        self.assertFalse(capabilities.trusted_image_event)
+        self.assertTrue(capabilities.reset_session_available)
 
     def test_busy_and_budget_guards_return_safe_public_errors(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"

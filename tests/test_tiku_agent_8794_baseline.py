@@ -34,10 +34,23 @@ class RecordingRuntime:
             "candidate_count": 0,
         }
 
-    def handle_text(self, session_id: str, text: str, *, progress=None) -> AgentResponse:
+    def handle_text(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        progress=None,
+        task_state_capabilities=None,
+    ) -> AgentResponse:
         self.calls.append(("text", session_id, text))
         self.snapshot.update({"session_valid": True, "phase": "WAIT_CHAPTER"})
-        return AgentResponse(text="请告诉我题目章节。", intent="provide_chapter")
+        response = AgentResponse(text="请告诉我题目章节。", intent="provide_chapter")
+        response.response_snapshot = dict(self.snapshot)
+        response.response_projection_snapshot = dict(self.snapshot)
+        if task_state_capabilities is not None:
+            response.response_task_state_snapshot = empty_task_state_snapshot()
+        response.response_media_snapshot_captured = True
+        return response
 
     def session_snapshot(self, session_id: str) -> dict[str, object]:
         self.calls.append(("session", session_id, ""))
@@ -197,6 +210,9 @@ class Candidate8794BaselineTest(unittest.TestCase):
         self.assertEqual(mainline.get("/api/session").json(), candidate.get("/api/session").json())
         mainline_message = mainline.post("/api/message", json={"text": "4"}).json()
         candidate_message = candidate.post("/api/message", json={"text": "4"}).json()
+        expected_task_state = empty_task_state_snapshot().to_dict()
+        self.assertEqual(mainline_message["task_state"], expected_task_state)
+        self.assertEqual(candidate_message["task_state"], expected_task_state)
         self.assertTrue(mainline_message.pop("request_id").startswith("req_"))
         self.assertTrue(candidate_message.pop("request_id").startswith("req_"))
         mainline_response_id = mainline_message.pop("response_id")

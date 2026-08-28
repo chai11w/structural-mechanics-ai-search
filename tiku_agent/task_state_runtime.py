@@ -157,6 +157,7 @@ def build_a3_runtime_snapshot_v1(
     workflow_retry_supported: bool,
     child_retry_supported: bool,
     capabilities: TaskStateEntryCapabilities | None = None,
+    response_frozen: bool = False,
 ) -> contract.TaskStateSnapshotV1:
     """Project one already-locked A3/A2 read-set."""
 
@@ -165,6 +166,8 @@ def build_a3_runtime_snapshot_v1(
         raise ValueError("workflow_retry_supported must be boolean")
     if type(child_retry_supported) is not bool:
         raise ValueError("child_retry_supported must be boolean")
+    if type(response_frozen) is not bool:
+        raise ValueError("response_frozen must be boolean")
     evidence = _build_runtime_evidence(
         session_id,
         workflow_state=(workflow_state if workflow_read_status == READ_OK else None),
@@ -183,7 +186,11 @@ def build_a3_runtime_snapshot_v1(
             child_state=child_state,
             workflow_read_status=workflow_read_status,
             child_read_status=child_read_status,
-            child_observation=CHILD_OBSERVATION_LIVE,
+            child_observation=(
+                CHILD_OBSERVATION_RESPONSE_FROZEN
+                if response_frozen
+                else CHILD_OBSERVATION_LIVE
+            ),
         ),
         evidence,
     )
@@ -204,6 +211,8 @@ def build_standalone_a2_runtime_snapshot_v1(
     entry = _entry_capabilities(capabilities)
     if type(child_retry_supported) is not bool:
         raise ValueError("child_retry_supported must be boolean")
+    if type(response_frozen) is not bool:
+        raise ValueError("response_frozen must be boolean")
     evidence = _build_runtime_evidence(
         session_id,
         workflow_state=None,

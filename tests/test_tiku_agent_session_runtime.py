@@ -17,6 +17,8 @@ from tiku_agent.session_runtime import (
 from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_log import TaskLogEntry, TaskLogger
+from tiku_agent.task_state_contract import empty_task_state_snapshot
+from tiku_agent.task_state_runtime import TaskStateEntryCapabilities
 from tiku_agent.tools import ToolResult
 from tiku_shared.trace_context import TraceContext, trace_context_scope
 from tiku_shared.trace_events import (
@@ -255,6 +257,78 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.assertIsNone(self.store.load(session_id))
         self.assertFalse(self.artifacts.session_dir(session_id).exists())
         self.assertEqual(self.logger.entries[-1].outcome, "cancelled")
+
+    def test_cancel_freezes_cancelled_v1_before_clearing_the_store(self):
+        session_id = "cancel-frozen-v1-session"
+        self.runtime.handle_image(session_id, self.source_image)
+
+        response = self.runtime.handle_text(
+            session_id,
+            "取消",
+            task_state_capabilities=TaskStateEntryCapabilities(
+                reset_session_available=True,
+            ),
+        )
+
+        self.assertEqual(response.intent, "cancel")
+        self.assertIsNone(self.store.load(session_id))
+        self.assertEqual(response.response_snapshot["phase"], "CANCELLED")
+        self.assertEqual(
+            response.response_projection_snapshot["phase"],
+            "CANCELLED",
+        )
+        self.assertTrue(response.response_media_snapshot_captured)
+        task_state = response.response_task_state_snapshot
+        self.assertIsNotNone(task_state)
+        self.assertEqual(task_state.consistency.status, "OK")
+        self.assertEqual(task_state.active_child_task.phase, "CANCELLED")
+        self.assertEqual(task_state.active_child_task.allowed_actions, ())
+
+    def test_cancel_without_an_active_task_freezes_canonical_empty_v1(self):
+        cases = (
+            ("missing", None),
+            ("idle", AgentState(session_id="empty-cancel-idle")),
+            (
+                "cancelled_residual",
+                AgentState(
+                    session_id="empty-cancel-cancelled",
+                    phase="CANCELLED",
+                    current_search_id="search_empty_cancel_residual",
+                    task_revision=1,
+                ),
+            ),
+        )
+        for label, persisted in cases:
+            with self.subTest(case=label):
+                session_id = (
+                    persisted.session_id
+                    if persisted is not None
+                    else "empty-cancel-missing"
+                )
+                if persisted is not None:
+                    self.store.save(persisted)
+
+                response = self.runtime.handle_text(
+                    session_id,
+                    "取消",
+                    task_state_capabilities=TaskStateEntryCapabilities(
+                        reset_session_available=True,
+                    ),
+                )
+
+                self.assertEqual(response.intent, "cancel")
+                self.assertIsNone(self.store.load(session_id))
+                self.assertFalse(response.response_snapshot["session_valid"])
+                self.assertEqual(response.response_snapshot["phase"], "IDLE")
+                self.assertEqual(
+                    response.response_projection_snapshot,
+                    response.response_snapshot,
+                )
+                self.assertEqual(
+                    response.response_task_state_snapshot,
+                    empty_task_state_snapshot(),
+                )
+                self.assertTrue(response.response_media_snapshot_captured)
 
     def test_parent_managed_cancel_preserves_history_media_until_full_clear(self):
         session_id = "parent-managed-cancel-session"
@@ -1045,6 +1119,77 @@ class AgentSessionRuntimeTest(unittest.TestCase):
         self.assertEqual(live_snapshot["phase"], "ANSWERED")
         self.assertEqual(searched.response_snapshot, searched_snapshot)
         self.assertEqual(searched.response_snapshot["phase"], "WAIT_CANDIDATE_CHOICE")
+
+    def test_typed_response_snapshot_is_frozen_under_the_existing_a2_lock(self):
+        session_id = "typed-response-snapshot-lock-session"
+        self.addCleanup(lambda: self.artifacts.clear_session(session_id))
+
+        class TypedCaptureRuntime(AgentSessionRuntime):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.capture_lock_states = []
+                self.response_frozen_flags = []
+
+            def session_snapshot(self, _session_id):
+                raise AssertionError("JSON response capture must not live-read session_snapshot")
+
+            def _response_snapshot_v1_locked(
+                self,
+                observed_session_id,
+                *,
+                capabilities,
+                response_frozen=False,
+            ):
+                clean = self._clean_session_id(observed_session_id)
+                lock = self._session_locks[hash(clean) % len(self._session_locks)]
+                self.capture_lock_states.append(lock.locked())
+                self.response_frozen_flags.append(response_frozen)
+                return super()._response_snapshot_v1_locked(
+                    clean,
+                    capabilities=capabilities,
+                    response_frozen=response_frozen,
+                )
+
+        runtime = TypedCaptureRuntime(
+            self.store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            agent_factory=lambda state: TikuSearchAgent(
+                state=state,
+                tools=FakeTools().toolbox(),
+                use_llm_intent=False,
+            ),
+        )
+        capabilities = TaskStateEntryCapabilities(
+            trusted_image_event=True,
+            reset_session_available=True,
+        )
+
+        response = runtime.handle_image(
+            session_id,
+            self.source_image,
+            task_state_capabilities=capabilities,
+        )
+
+        self.assertEqual(runtime.capture_lock_states, [True])
+        self.assertEqual(runtime.response_frozen_flags, [True])
+        self.assertIsNotNone(response.response_task_state_snapshot)
+        frozen = response.response_task_state_snapshot.to_dict()
+        self.assertEqual(response.response_snapshot["phase"], "WAIT_CANDIDATE_CHOICE")
+        self.assertEqual(
+            frozen["active_child_task"]["phase"],
+            "WAIT_CANDIDATE_CHOICE",
+        )
+        self.assertTrue(response.response_media_snapshot_captured)
+
+        live = self.store.load(session_id)
+        self.assertIsNotNone(live)
+        live.phase = "ANSWERED"
+        self.store.save(live)
+        self.assertEqual(
+            response.response_task_state_snapshot.to_dict()["active_child_task"]["phase"],
+            "WAIT_CANDIDATE_CHOICE",
+        )
 
     def test_clear_waits_for_same_session_task_then_removes_its_state(self):
         started = threading.Event()

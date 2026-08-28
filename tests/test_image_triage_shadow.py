@@ -98,11 +98,16 @@ class ImageTriageShadowTest(unittest.TestCase):
             "question.jpg",
             identity_key="identity-1",
             request_id="req-1",
+            task_state_capabilities="json-capabilities",
         )
 
         self.assertEqual(response.text, "原检索结果")
         self.assertEqual(len(delegate.calls), 1)
         self.assertEqual(delegate.calls[0][2]["request_id"], "req-1")
+        self.assertEqual(
+            delegate.calls[0][2]["task_state_capabilities"],
+            "json-capabilities",
+        )
 
 
 if __name__ == "__main__":

@@ -5,9 +5,10 @@ changing any HTTP or streaming route.  Runtime code is responsible for
 producing a :class:`TaskStateSnapshotV1`; this module only turns that typed
 value into a detached, JSON-safe public object.
 
-The eventual public payloads will carry the object under the same
-``task_state`` key. Existing ``session`` fields and legacy state fields stay
-outside this module and remain compatibility data until a later phase.
+Integrated public payloads carry the object under the same ``task_state``
+key. Existing ``session`` fields and legacy state fields stay outside this
+module as compatibility data. This pure mapper remains route-agnostic; the
+staged rollout contract decides which HTTP and streaming exits expose it.
 """
 
 from __future__ import annotations

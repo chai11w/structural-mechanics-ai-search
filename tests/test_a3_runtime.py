@@ -26,7 +26,7 @@ from tiku_agent.a3_runtime import (
     SQLiteA3SessionStore,
 )
 from tiku_agent.agent import AgentResponse
-from tiku_agent.fastapi_demo import SESSION_COOKIE, create_app
+from tiku_agent.fastapi_demo import SESSION_COOKIE, _agent_payload, create_app
 from tiku_agent.image_contracts import ImageTriageObservation
 from tiku_agent.image_triage import build_handoff
 from tiku_agent.image_triage_authority import ImageTriageDecision
@@ -37,6 +37,8 @@ from tiku_agent.session_runtime import (
     AgentSessionRuntime,
 )
 from tiku_agent.session_store import SQLiteSessionStore
+from tiku_agent.state import AgentState
+from tiku_agent.task_state_runtime import TaskStateEntryCapabilities
 from tiku_shared.request_protocol import RequestProtocol
 from tiku_shared.trace_context import (
     TraceContext,
@@ -225,9 +227,84 @@ class FakeAnalyzer:
         )
 
 
+class _FakeA2StateStore:
+    def __init__(self, runtime: "FakeA2Runtime") -> None:
+        self.runtime = runtime
+
+    def load(self, session_id: str) -> AgentState | None:
+        snapshot = self.runtime.sessions.get(session_id)
+        if not snapshot or snapshot.get("session_valid") is not True:
+            return None
+        candidate_generation = str(snapshot.get("candidate_generation") or "")
+        try:
+            candidate_revision = int(candidate_generation.rsplit(":", 1)[1])
+        except (IndexError, ValueError):
+            candidate_revision = 0
+        candidate_count = int(snapshot.get("candidate_count") or 0)
+        return AgentState(
+            session_id=session_id,
+            phase=str(snapshot.get("phase") or "IDLE"),
+            current_image_path=str(
+                self.runtime.image_paths.get(session_id) or ""
+            ),
+            current_loads=[{"type": "集中", "raw": "P"}],
+            current_chapter=str(snapshot.get("chapter") or ""),
+            current_route="symbolic",
+            current_search_id=str(snapshot.get("search_id") or ""),
+            candidates=[{"rank": rank} for rank in range(1, candidate_count + 1)],
+            selected_rank=(1 if snapshot.get("phase") == "ANSWERED" else None),
+            task_revision=int(snapshot.get("task_revision") or 0),
+            candidate_revision=candidate_revision,
+            candidate_generation=candidate_generation,
+        )
+
+
+class _CountingStoreProxy:
+    def __init__(self, delegate, name: str, events: list[str]) -> None:
+        self.delegate = delegate
+        self.name = name
+        self.events = events
+        self.load_count = 0
+
+    def __getattr__(self, name: str):
+        return getattr(self.delegate, name)
+
+    def load(self, session_id: str):
+        self.load_count += 1
+        self.events.append(f"{self.name}:load")
+        return self.delegate.load(session_id)
+
+    def reset_load_count(self) -> None:
+        self.load_count = 0
+
+
+class _TracingRLock:
+    def __init__(self, name: str, events: list[str]) -> None:
+        self.name = name
+        self.events = events
+        self._lock = threading.RLock()
+        self._depth = 0
+
+    @property
+    def held(self) -> bool:
+        return self._depth > 0
+
+    def __enter__(self):
+        self.events.append(f"{self.name}:acquire")
+        self._lock.acquire()
+        self._depth += 1
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self._depth -= 1
+        self._lock.release()
+        self.events.append(f"{self.name}:release")
+
+
 class FakeA2Runtime:
     def __init__(self):
         self.sessions = {}
+        self.image_paths = {}
         self.media = {}
         self.clear_calls = []
         self.preanalyzed_calls = []
@@ -235,10 +312,25 @@ class FakeA2Runtime:
         self.text_calls = []
         self.trace_ids = []
         self.candidate_count = 1
+        self.store = _FakeA2StateStore(self)
+        self.artifacts = SessionArtifacts(
+            Path(tempfile.gettempdir()) / "tiku-agent-test-a2-artifacts"
+        )
+        self._locks = tuple(threading.RLock() for _ in range(16))
+
+    def _lock(self, session_id: str):
+        return self._locks[hash(session_id) % len(self._locks)]
+
+    @staticmethod
+    def _legacy_session_snapshot_from_state(
+        state: AgentState | None,
+    ) -> dict[str, object]:
+        return AgentSessionRuntime._legacy_session_snapshot_from_state(state)
 
     def handle_prechecked_image(self, session_id, image_path, **kwargs):
         self.trace_ids.append(current_trace_id())
         self.prechecked_calls.append((session_id, Path(image_path), kwargs))
+        self.image_paths[session_id] = Path(image_path)
         self.sessions[session_id] = {
             "session_valid": True,
             "phase": "WAIT_CANDIDATE_CHOICE",
@@ -262,6 +354,7 @@ class FakeA2Runtime:
 
     def handle_preanalyzed_image(self, session_id, image_path, **kwargs):
         self.preanalyzed_calls.append((session_id, Path(image_path), kwargs))
+        self.image_paths[session_id] = Path(image_path)
         self.sessions[session_id] = {
             "session_valid": True,
             "phase": "WAIT_CANDIDATE_CHOICE",
@@ -326,6 +419,7 @@ class FakeA2Runtime:
     def clear(self, session_id, *, preserve_artifacts=False):
         self.clear_calls.append((session_id, preserve_artifacts))
         self.sessions.pop(session_id, None)
+        self.image_paths.pop(session_id, None)
         if not preserve_artifacts:
             self.media = {
                 key: value for key, value in self.media.items() if key[0] != session_id
@@ -1637,6 +1731,20 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(after["selected_unit"]["unit_id"], "g1-u1")
         self.assertEqual(after["completed_unit_ids"], [])
 
+    def test_legacy_media_failure_short_circuits_before_child_read(self):
+        self.a2.session_snapshot = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("missing parent must not read the child snapshot")
+        )
+
+        reopened = self.runtime.mark_media_delivery_failed(
+            "missing-media-failure-parent",
+            expected_unit_id="g1-u1",
+            expected_task_revision=1,
+            expected_candidate_generation="1:1",
+        )
+
+        self.assertFalse(reopened)
+
     def test_review_required_preserves_crop_draft_and_does_not_enter_a2(self):
         session_id = "a3-review-session"
         self.runtime.handle_image(session_id, self.source)
@@ -1989,10 +2097,22 @@ class A3RuntimeTests(unittest.TestCase):
         uploaded = client.post("/api/image", files={"file": ("page.jpg", self.source.read_bytes(), "image/jpeg")})
         self.assertEqual(uploaded.status_code, 200)
         self.assertEqual(uploaded.json()["session"]["a3"]["phase"], A3_PHASE_WAIT_SELECTION)
+        self.assertEqual(
+            uploaded.json()["task_state"]["workflow"]["phase"],
+            A3_PHASE_WAIT_SELECTION,
+        )
+        self.assertEqual(
+            uploaded.json()["task_state"]["consistency"],
+            {"status": "OK", "codes": []},
+        )
 
         selected = client.post("/api/a3/select", json={"unit_id": "g1-u1", "task_revision": 1})
         self.assertEqual(selected.status_code, 200)
         self.assertEqual(selected.json()["session"]["a3"]["phase"], A3_PHASE_CROP_REQUIRED)
+        self.assertEqual(
+            selected.json()["task_state"]["workflow"]["phase"],
+            A3_PHASE_CROP_REQUIRED,
+        )
 
         cropped = client.post(
             "/api/a3/crop/stream",
@@ -2006,6 +2126,7 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(events[-1]["type"], "result")
         crop_data = events[-1]["data"]
         self.assertEqual(crop_data["session"]["a3"]["phase"], A3_PHASE_A2_ACTIVE)
+        self.assertNotIn("task_state", crop_data)
         self.assertTrue(crop_data["submitted_crop"].startswith("/api/media/"))
         self.assertEqual(client.get(crop_data["submitted_crop"]).status_code, 200)
 
@@ -2017,6 +2138,10 @@ class A3RuntimeTests(unittest.TestCase):
         switched_a3 = switched.json()["session"]["a3"]
         self.assertEqual(switched_a3["phase"], A3_PHASE_CROP_REQUIRED)
         self.assertEqual(switched_a3["selected_unit"]["unit_id"], "g1-u2")
+        self.assertEqual(
+            switched.json()["task_state"]["workflow"]["phase"],
+            A3_PHASE_CROP_REQUIRED,
+        )
         self.assertEqual(client.get(crop_data["submitted_crop"]).status_code, 200)
 
         next_page = client.post(
@@ -2024,7 +2149,293 @@ class A3RuntimeTests(unittest.TestCase):
             files={"file": ("next.jpg", self.source.read_bytes(), "image/jpeg")},
         )
         self.assertEqual(next_page.status_code, 200)
+        self.assertIn("task_state", next_page.json())
         self.assertEqual(client.get(crop_data["submitted_crop"]).status_code, 200)
+
+    def test_json_media_failure_reopens_a3_and_returns_the_reopened_v1(self):
+        session_id = "a3-json-media-reopen-session"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u1")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
+        )
+        client = TestClient(create_app(runtime=self.runtime))
+        client.cookies.set(SESSION_COOKIE, session_id)
+
+        response = client.post("/api/message", json={"text": "选择候选 1"})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["code"], "MEDIA_ANSWERS_UNAVAILABLE")
+        self.assertEqual(payload["session"]["a3"]["phase"], A3_PHASE_A2_ACTIVE)
+        self.assertEqual(
+            self.runtime.session_snapshot(session_id)["a3"]["completed_unit_ids"],
+            [],
+        )
+        self.assertEqual(
+            payload["task_state"]["workflow"]["phase"],
+            A3_PHASE_A2_ACTIVE,
+        )
+        self.assertEqual(
+            payload["task_state"]["consistency"],
+            {"status": "OK", "codes": []},
+        )
+
+    def test_json_response_media_paths_come_from_the_frozen_a3_read_set(self):
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "frozen-media-a3.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "frozen-media-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            auto_cropper=FakeAutoCropper(second_status="auto_ready"),
+            auto_prepare_all_units=True,
+            external_load_screen=lambda _path: "yes",
+        )
+        capabilities = TaskStateEntryCapabilities(
+            trusted_image_event=True,
+            reset_session_available=True,
+        )
+
+        runtime.current_crop_path = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("JSON capture must not reread the crop path")
+        )
+        runtime.current_auto_crop_overlay_path = (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("JSON capture must not reread the overlay path")
+            )
+        )
+
+        response = runtime.handle_image(
+            "a3-frozen-media-session",
+            self.source,
+            task_state_capabilities=capabilities,
+        )
+
+        self.assertEqual(response.intent, "a3_units_prepared")
+        self.assertIsNotNone(response.feedback_overlay_path)
+        self.assertTrue(response.feedback_overlay_path.is_file())
+        self.assertIsNotNone(response.response_task_state_snapshot)
+
+        selected = runtime.select_unit(
+            "a3-frozen-media-session",
+            "g1-u1",
+            task_revision=1,
+            task_state_capabilities=TaskStateEntryCapabilities(
+                reset_session_available=True,
+            ),
+        )
+        self.assertIsNotNone(selected.submitted_crop_path)
+        self.assertTrue(selected.submitted_crop_path.is_file())
+        self.assertEqual(
+            selected.response_task_state_snapshot.to_dict()["workflow"]["phase"],
+            A3_PHASE_A2_ACTIVE,
+        )
+
+    def test_a3_response_snapshot_v1_locks_parent_before_child_and_reads_once(self):
+        session_id = "a3-response-v1-lock-order"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u1")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
+        )
+        events: list[str] = []
+        parent_store = _CountingStoreProxy(
+            self.runtime.store,
+            "a3_store",
+            events,
+        )
+        child_store = _CountingStoreProxy(
+            self.a2.store,
+            "a2_store",
+            events,
+        )
+        parent_lock = _TracingRLock("a3_lock", events)
+        child_lock = _TracingRLock("a2_lock", events)
+        self.runtime.store = parent_store
+        self.a2.store = child_store
+        self.runtime._lock = lambda _session_id: parent_lock
+        self.a2._lock = lambda _session_id: child_lock
+
+        captured = self.runtime.session_response_snapshot_v1(
+            session_id,
+            capabilities=TaskStateEntryCapabilities(
+                reset_session_available=True,
+            ),
+            response_frozen=True,
+        )
+
+        self.assertEqual(parent_store.load_count, 1)
+        self.assertEqual(child_store.load_count, 1)
+        self.assertEqual(
+            events,
+            [
+                "a3_lock:acquire",
+                "a2_lock:acquire",
+                "a3_store:load",
+                "a2_store:load",
+                "a2_lock:release",
+                "a3_lock:release",
+            ],
+        )
+        self.assertEqual(
+            captured.task_state.to_dict()["workflow"]["phase"],
+            A3_PHASE_A2_ACTIVE,
+        )
+
+    def test_media_failure_v1_reopens_under_parent_child_locks_and_reads_once(self):
+        session_id = "a3-media-reopen-v1-lock-order"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u1")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
+        )
+        answered = self.runtime.handle_text(session_id, "选择候选 1")
+        guard = answered.state["_a3_media_guard"]
+        events: list[str] = []
+        parent_store = _CountingStoreProxy(
+            self.runtime.store,
+            "a3_store",
+            events,
+        )
+        child_store = _CountingStoreProxy(
+            self.a2.store,
+            "a2_store",
+            events,
+        )
+        parent_lock = _TracingRLock("a3_lock", events)
+        child_lock = _TracingRLock("a2_lock", events)
+        self.runtime.store = parent_store
+        self.a2.store = child_store
+        self.runtime._lock = lambda _session_id: parent_lock
+        self.a2._lock = lambda _session_id: child_lock
+
+        captured = self.runtime.mark_media_delivery_failed_v1(
+            session_id,
+            expected_unit_id=str(guard["unit_id"]),
+            expected_task_revision=int(guard["task_revision"]),
+            expected_candidate_generation=str(guard["candidate_generation"]),
+            kind="answer",
+            capabilities=TaskStateEntryCapabilities(
+                reset_session_available=True,
+            ),
+        )
+
+        self.assertIsNotNone(captured)
+        self.assertEqual(parent_store.load_count, 1)
+        self.assertEqual(child_store.load_count, 1)
+        self.assertEqual(
+            events,
+            [
+                "a3_lock:acquire",
+                "a2_lock:acquire",
+                "a3_store:load",
+                "a2_store:load",
+                "a2_lock:release",
+                "a3_lock:release",
+            ],
+        )
+        self.assertEqual(
+            captured.legacy_session["a3"]["phase"],
+            A3_PHASE_A2_ACTIVE,
+        )
+        self.assertEqual(
+            captured.legacy_session["a3"]["completed_unit_ids"],
+            [],
+        )
+        self.assertEqual(
+            captured.task_state.to_dict()["workflow"]["phase"],
+            A3_PHASE_A2_ACTIVE,
+        )
+
+    def test_media_failure_v1_rejects_every_incomplete_guard_token(self):
+        session_id = "a3-media-reopen-v1-incomplete-guard"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u1")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
+        )
+        answered = self.runtime.handle_text(session_id, "选择候选 1")
+        guard = answered.state["_a3_media_guard"]
+        complete_guard = {
+            "expected_unit_id": str(guard["unit_id"]),
+            "expected_task_revision": int(guard["task_revision"]),
+            "expected_candidate_generation": str(
+                guard["candidate_generation"]
+            ),
+        }
+        cases = (
+            {**complete_guard, "expected_unit_id": ""},
+            {**complete_guard, "expected_task_revision": 0},
+            {**complete_guard, "expected_candidate_generation": ""},
+        )
+
+        for incomplete_guard in cases:
+            with self.subTest(guard=incomplete_guard):
+                captured = self.runtime.mark_media_delivery_failed_v1(
+                    session_id,
+                    **incomplete_guard,
+                    kind="answer",
+                    capabilities=TaskStateEntryCapabilities(
+                        reset_session_available=True,
+                    ),
+                )
+
+                self.assertIsNone(captured)
+                current = self.runtime.session_snapshot(session_id)["a3"]
+                self.assertEqual(current["phase"], A3_PHASE_WAIT_SELECTION)
+                self.assertEqual(current["completed_unit_ids"], ["g1-u1"])
+
+    def test_stale_media_guard_json_keeps_response_time_v1_without_live_read(self):
+        session_id = "a3-stale-media-json-frozen-v1"
+        capabilities = TaskStateEntryCapabilities(
+            reset_session_available=True,
+        )
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u1")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
+        )
+        answered = self.runtime.handle_text(
+            session_id,
+            "选择候选 1",
+            task_state_capabilities=capabilities,
+        )
+        original_task_state = answered.response_task_state_snapshot.to_dict()
+        answered.state["_a3_media_guard"][
+            "candidate_generation"
+        ] = "stale-generation"
+        self.runtime.session_snapshot = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale JSON media guard must not read live session state")
+        )
+        self.runtime.task_state_snapshot_v1 = (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("stale JSON media guard must keep response-time V1")
+            )
+        )
+
+        payload = _agent_payload(
+            answered,
+            self.runtime,
+            session_id,
+            include_task_state=True,
+            task_state_capabilities=capabilities,
+        )
+
+        self.assertEqual(payload["task_state"], original_task_state)
+        self.assertEqual(
+            payload["task_state"]["workflow"]["phase"],
+            A3_PHASE_WAIT_SELECTION,
+        )
+        self.assertEqual(
+            payload["session"]["a3"]["phase"],
+            A3_PHASE_WAIT_SELECTION,
+        )
 
     def test_fastapi_exposes_auto_prepare_overlay_and_direct_a2_stream(self):
         runtime = A3MvpRuntime(

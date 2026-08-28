@@ -18,7 +18,10 @@ from tiku_agent.session_runtime import (
 from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_state_builder import build_task_state_snapshot_v1
-from tiku_agent.task_state_runtime import TaskStateEntryCapabilities
+from tiku_agent.task_state_runtime import (
+    TaskStateEntryCapabilities,
+    build_standalone_a2_runtime_snapshot_v1,
+)
 
 
 SESSION_ID = "runtime_task_state_session"
@@ -192,6 +195,17 @@ class TaskStateRuntimeTests(unittest.TestCase):
         if a3_lock is not None:
             runtime._locks = (a3_lock,) * 64
         return runtime
+
+    def test_standalone_response_frozen_requires_an_exact_boolean(self):
+        with self.assertRaisesRegex(ValueError, "response_frozen must be boolean"):
+            build_standalone_a2_runtime_snapshot_v1(
+                SESSION_ID,
+                child_state=_child(phase="CANCELLED"),
+                child_read_status="OK",
+                child_artifacts=SessionArtifacts(self.root / "strict-boolean"),
+                child_retry_supported=True,
+                response_frozen="true",  # type: ignore[arg-type]
+            )
 
     def test_a3_wrapper_projects_a1_direct_a2_and_a3_routes(self):
         cases = (

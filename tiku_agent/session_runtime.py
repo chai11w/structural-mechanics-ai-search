@@ -23,7 +23,7 @@ from tiku_agent.session_artifacts import SessionArtifacts, session_key
 from tiku_agent.session_store import SessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_state_builder import READ_MISSING, READ_OK
-from tiku_agent.task_state_contract import TaskStateSnapshotV1
+from tiku_agent.task_state_contract import TaskStateSnapshotV1, empty_task_state_snapshot
 from tiku_agent.task_state_runtime import (
     TaskStateEntryCapabilities,
     build_standalone_a2_runtime_snapshot_v1,
@@ -59,11 +59,13 @@ ExternalLoadScreen = Callable[[str | Path], str]
 
 @dataclass(frozen=True)
 class SessionResponseSnapshotV1:
-    """One frozen read-set for the public ``/api/session`` response."""
+    """One frozen read-set for a public session-bearing response."""
 
     uploaded_image_path: Path | None
     legacy_session: dict[str, object]
     task_state: TaskStateSnapshotV1
+    submitted_crop_path: Path | None = None
+    feedback_overlay_path: Path | None = None
 
 
 class SessionResponseSnapshotError(RuntimeError):
@@ -356,6 +358,7 @@ class AgentSessionRuntime:
         identity_key: str = "",
         progress: ProgressReporter | None = None,
         request_id: str = "",
+        task_state_capabilities: TaskStateEntryCapabilities | None = None,
     ) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
         clean_request_id = str(request_id or "").strip() or new_request_id()
@@ -406,6 +409,7 @@ class AgentSessionRuntime:
             search_id=search_id,
             identity_key=identity_key,
             progress=progress,
+            task_state_capabilities=task_state_capabilities,
         )
 
     def handle_preanalyzed_image(
@@ -864,6 +868,7 @@ class AgentSessionRuntime:
         identity_key: str = "",
         progress: ProgressReporter | None = None,
         request_id: str = "",
+        task_state_capabilities: TaskStateEntryCapabilities | None = None,
     ) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
         clean_request_id = str(request_id or "").strip() or new_request_id()
@@ -879,12 +884,14 @@ class AgentSessionRuntime:
                 identity_key=identity_key,
                 progress=progress,
                 request_id=clean_request_id,
+                task_state_capabilities=task_state_capabilities,
             ),
             kind="text",
             request_id=clean_request_id,
             search_id=search_id,
             identity_key=identity_key,
             progress=progress,
+            task_state_capabilities=task_state_capabilities,
         )
 
     def clear(self, session_id: str, *, preserve_artifacts: bool = False) -> None:
@@ -912,6 +919,7 @@ class AgentSessionRuntime:
         session_id: str,
         *,
         capabilities: TaskStateEntryCapabilities | None = None,
+        response_frozen: bool = False,
     ) -> SessionResponseSnapshotV1:
         """Capture legacy session data and V1 state from one locked A2 read."""
 
@@ -922,32 +930,42 @@ class AgentSessionRuntime:
         # artifacts would become unreachable orphans.
         self.purge_expired()
         with self._lock(clean_session_id):
-            state, read_status = read_child_state_once(
-                self.store,
+            return self._response_snapshot_v1_locked(
                 clean_session_id,
-            )
-            task_state = self._task_state_snapshot_v1_from_read_set(
-                clean_session_id,
-                state,
-                read_status,
                 capabilities=capabilities,
+                response_frozen=response_frozen,
             )
-            if read_status not in {READ_OK, READ_MISSING}:
-                # The legacy endpoint historically failed when its live state
-                # could not be loaded. Keep that fail-closed behavior until
-                # the controlled HTTP-error outlet is handled in phase 3.3.4.
-                raise SessionResponseSnapshotError(
-                    "legacy session state is unavailable",
-                    task_state=task_state,
-                )
-            return SessionResponseSnapshotV1(
-                uploaded_image_path=self._current_image_path_from_frozen_state(
-                    clean_session_id,
-                    state,
-                ),
-                legacy_session=self._legacy_session_snapshot_from_state(state),
+
+    def _response_snapshot_v1_locked(
+        self,
+        session_id: str,
+        *,
+        capabilities: TaskStateEntryCapabilities | None,
+        response_frozen: bool = False,
+    ) -> SessionResponseSnapshotV1:
+        """Capture one A2 response read-set while the caller holds its lock."""
+
+        state, read_status = read_child_state_once(self.store, session_id)
+        task_state = self._task_state_snapshot_v1_from_read_set(
+            session_id,
+            state,
+            read_status,
+            capabilities=capabilities,
+            response_frozen=response_frozen,
+        )
+        if read_status not in {READ_OK, READ_MISSING}:
+            raise SessionResponseSnapshotError(
+                "legacy session state is unavailable",
                 task_state=task_state,
             )
+        return SessionResponseSnapshotV1(
+            uploaded_image_path=self._current_image_path_from_frozen_state(
+                session_id,
+                state,
+            ),
+            legacy_session=self._legacy_session_snapshot_from_state(state),
+            task_state=task_state,
+        )
 
     def session_snapshot(self, session_id: str) -> dict[str, object]:
         """Return the small, non-sensitive state contract needed by the web client."""
@@ -1135,10 +1153,16 @@ class AgentSessionRuntime:
         identity_key: str = "",
         progress: ProgressReporter | None = None,
         request_id: str,
+        task_state_capabilities: TaskStateEntryCapabilities | None = None,
     ) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
         self.purge_expired()
-        state = self.store.load(clean_session_id) or AgentState(session_id=clean_session_id)
+        persisted_state = self.store.load(clean_session_id)
+        state = persisted_state or AgentState(session_id=clean_session_id)
+        had_active_child = (
+            persisted_state is not None
+            and persisted_state.phase not in {"IDLE", "CANCELLED"}
+        )
         phase_before = state.phase
         started_at = datetime.now(UTC)
         started = time.perf_counter()
@@ -1164,6 +1188,22 @@ class AgentSessionRuntime:
                 search_id=agent.state.current_search_id,
             )
             if response.intent == "cancel":
+                if task_state_capabilities is not None:
+                    frozen_legacy = self._legacy_session_snapshot_from_state(
+                        agent.state if had_active_child else None
+                    )
+                    response.response_snapshot = dict(frozen_legacy)
+                    response.response_projection_snapshot = dict(frozen_legacy)
+                    response.response_task_state_snapshot = (
+                        self.task_state_snapshot_v1_from_frozen_state(
+                            clean_session_id,
+                            agent.state,
+                            capabilities=task_state_capabilities,
+                        )
+                        if had_active_child
+                        else empty_task_state_snapshot()
+                    )
+                    response.response_media_snapshot_captured = True
                 self.store.clear(clean_session_id)
                 # Nested A3 flows own the conversation-level artifact lifetime.
                 if not self.preserve_artifacts_on_cancel:
@@ -1235,6 +1275,7 @@ class AgentSessionRuntime:
         search_id: str,
         identity_key: str = "",
         progress: ProgressReporter | None = None,
+        task_state_capabilities: TaskStateEntryCapabilities | None = None,
     ) -> AgentResponse:
         started_at = datetime.now(UTC)
         started = time.perf_counter()
@@ -1253,15 +1294,49 @@ class AgentSessionRuntime:
                             pass
                         raise
                     else:
-                        response.response_snapshot = self.session_snapshot(session_id)
-                        response.response_projection_snapshot = dict(
-                            response.response_snapshot
+                        captured = None
+                        has_attached_v1 = (
+                            task_state_capabilities is not None
+                            and type(response.response_task_state_snapshot)
+                            is TaskStateSnapshotV1
+                            and type(response.response_snapshot) is dict
+                            and bool(response.response_snapshot)
+                            and type(response.response_projection_snapshot) is dict
+                            and bool(response.response_projection_snapshot)
+                            and response.response_media_snapshot_captured is True
                         )
+                        if (
+                            task_state_capabilities is not None
+                            and not has_attached_v1
+                        ):
+                            captured = self._response_snapshot_v1_locked(
+                                session_id,
+                                capabilities=task_state_capabilities,
+                                response_frozen=True,
+                            )
+                        if captured is not None:
+                            response.response_snapshot = dict(
+                                captured.legacy_session
+                            )
+                            response.response_projection_snapshot = dict(
+                                response.response_snapshot
+                            )
+                            response.response_task_state_snapshot = captured.task_state
+                        elif not has_attached_v1:
+                            response.response_snapshot = self.session_snapshot(
+                                session_id
+                            )
+                            response.response_projection_snapshot = dict(
+                                response.response_snapshot
+                            )
                         response.response_media_snapshot_captured = True
-                        try:
-                            response.uploaded_image_path = self.current_image_path(session_id)
-                        except Exception:  # noqa: BLE001 - response metadata is best effort.
-                            response.uploaded_image_path = None
+                        if captured is not None:
+                            response.uploaded_image_path = captured.uploaded_image_path
+                        elif not has_attached_v1:
+                            try:
+                                response.uploaded_image_path = self.current_image_path(session_id)
+                            except Exception:  # noqa: BLE001 - response metadata is best effort.
+                                response.uploaded_image_path = None
                         return response
         except AgentProtocolError as exc:
             if not exc.response_snapshot:

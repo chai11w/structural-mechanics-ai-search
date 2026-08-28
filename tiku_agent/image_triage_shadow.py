@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from .image_contracts import IMAGE_TRIAGE_SCHEMA_VERSION, ImageTriageObservation
 from .image_triage import QwenImageTriageResult, build_handoff
+from .task_state_runtime import TaskStateEntryCapabilities
 
 
 SHADOW_LOG_SCHEMA_VERSION = 1
@@ -265,6 +266,7 @@ class ImageTriageShadowRuntime:
         identity_key: str = "",
         progress=None,
         request_id: str = "",
+        task_state_capabilities: TaskStateEntryCapabilities | None = None,
     ):
         try:
             self.triage_shadow.submit(image_path, request_id=request_id)
@@ -276,4 +278,5 @@ class ImageTriageShadowRuntime:
             identity_key=identity_key,
             progress=progress,
             request_id=request_id,
+            task_state_capabilities=task_state_capabilities,
         )

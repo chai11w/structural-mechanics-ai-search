@@ -42,6 +42,23 @@ class ResponseBindingRuntime:
             "image_route": "",
         })
 
+    @staticmethod
+    def _freeze_response(
+        response: AgentResponse,
+        snapshot: dict[str, object],
+        *,
+        task_state_capabilities=None,
+    ) -> AgentResponse:
+        frozen = json.loads(json.dumps(snapshot, ensure_ascii=False))
+        response.response_snapshot = frozen
+        response.response_projection_snapshot = json.loads(
+            json.dumps(frozen, ensure_ascii=False)
+        )
+        if task_state_capabilities is not None:
+            response.response_task_state_snapshot = empty_task_state_snapshot()
+        response.response_media_snapshot_captured = True
+        return response
+
     def handle_text(
         self,
         session_id: str,
@@ -49,6 +66,7 @@ class ResponseBindingRuntime:
         *,
         identity_key: str = "",
         progress=None,
+        task_state_capabilities=None,
     ) -> AgentResponse:
         del identity_key
         if progress is not None:
@@ -76,7 +94,11 @@ class ResponseBindingRuntime:
                     ],
                 },
             })
-            return AgentResponse(text="已准备 3 道题。", intent="a3_units_prepared")
+            return self._freeze_response(
+                AgentResponse(text="已准备 3 道题。", intent="a3_units_prepared"),
+                snapshot,
+                task_state_capabilities=task_state_capabilities,
+            )
         if text == "A3子题":
             snapshot.update({
                 "session_valid": True,
@@ -95,7 +117,11 @@ class ResponseBindingRuntime:
                     "selected_unit": {"unit_id": "g1-u2", "page_index": 2},
                 },
             })
-            return AgentResponse(text="找到 5 道候选题。", intent="show_candidates")
+            return self._freeze_response(
+                AgentResponse(text="找到 5 道候选题。", intent="show_candidates"),
+                snapshot,
+                task_state_capabilities=task_state_capabilities,
+            )
 
         old = text == "旧回复"
         snapshot.update({
@@ -110,9 +136,13 @@ class ResponseBindingRuntime:
             "image_route": "A2",
             "a3": {"enabled": False},
         })
-        return AgentResponse(
-            text="这是旧回复。" if old else "这是新回复。",
-            intent="show_candidates",
+        return self._freeze_response(
+            AgentResponse(
+                text="这是旧回复。" if old else "这是新回复。",
+                intent="show_candidates",
+            ),
+            snapshot,
+            task_state_capabilities=task_state_capabilities,
         )
 
     def session_snapshot(self, session_id: str) -> dict[str, object]:
@@ -165,6 +195,7 @@ class ProtocolErrorRuntime(ResponseBindingRuntime):
         *,
         identity_key: str = "",
         progress=None,
+        task_state_capabilities=None,
     ) -> AgentResponse:
         if text not in {"JSON错误", "流错误"}:
             return super().handle_text(
@@ -172,8 +203,9 @@ class ProtocolErrorRuntime(ResponseBindingRuntime):
                 text,
                 identity_key=identity_key,
                 progress=progress,
+                task_state_capabilities=task_state_capabilities,
             )
-        del identity_key, progress
+        del identity_key, progress, task_state_capabilities
         self.handled_session_ids.append(session_id)
         is_stream = text == "流错误"
         snapshot = self._snapshot(session_id)
@@ -289,6 +321,10 @@ class ResponseFeedbackBindingTest(unittest.TestCase):
         parent_response = client.post("/api/message", json={"text": "A3父任务"})
         self.assertEqual(parent_response.status_code, 200, parent_response.text)
         parent_payload = parent_response.json()
+        self.assertEqual(
+            parent_payload["task_state"],
+            empty_task_state_snapshot().to_dict(),
+        )
         self.assertRegex(parent_payload["response_id"], r"^resp_[0-9a-f]{32}$")
         parent_record = response_store.get(parent_payload["response_id"])
         self.assertIsNotNone(parent_record)
@@ -304,6 +340,7 @@ class ResponseFeedbackBindingTest(unittest.TestCase):
         )
         self.assertEqual(child_response.status_code, 200, child_response.text)
         child_payload = self.result_event(child_response)
+        self.assertNotIn("task_state", child_payload)
         self.assertRegex(child_payload["response_id"], r"^resp_[0-9a-f]{32}$")
         self.assertNotEqual(child_payload["response_id"], parent_payload["response_id"])
         child_record = response_store.get(child_payload["response_id"])
@@ -360,6 +397,7 @@ class ResponseFeedbackBindingTest(unittest.TestCase):
         json_response = client.post("/api/message", json={"text": "JSON错误"})
         self.assertEqual(json_response.status_code, 500, json_response.text)
         json_payload = json_response.json()
+        self.assertNotIn("task_state", json_payload)
         self.assertRegex(json_payload["response_id"], r"^resp_[0-9a-f]{32}$")
         json_record = response_store.get(json_payload["response_id"])
         self.assertIsNotNone(json_record)
@@ -398,6 +436,7 @@ class ResponseFeedbackBindingTest(unittest.TestCase):
         )
         self.assertEqual(stream_response.status_code, 200, stream_response.text)
         stream_payload = self.error_event(stream_response)
+        self.assertNotIn("task_state", stream_payload)
         self.assertRegex(stream_payload["response_id"], r"^resp_[0-9a-f]{32}$")
         stream_record = response_store.get(stream_payload["response_id"])
         self.assertIsNotNone(stream_record)

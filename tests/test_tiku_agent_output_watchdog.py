@@ -9,6 +9,7 @@ from PIL import Image
 from tiku_agent.agent import AgentResponse
 from tiku_agent.fastapi_demo import _agent_payload, create_app
 from tiku_agent.output_watchdog import OutputWatchdog, classify_output
+from tiku_agent.task_state_contract import empty_task_state_snapshot
 
 
 class _Runtime:
@@ -24,8 +25,22 @@ class _Runtime:
         }
         self.output_watchdog = None
 
-    def handle_text(self, session_id, text, *, identity_key="", progress=None):
-        return AgentResponse(text="用户可见回复。", intent="safe_answer")
+    def handle_text(
+        self,
+        session_id,
+        text,
+        *,
+        identity_key="",
+        progress=None,
+        task_state_capabilities=None,
+    ):
+        response = AgentResponse(text="用户可见回复。", intent="safe_answer")
+        response.response_snapshot = dict(self.snapshot)
+        response.response_projection_snapshot = dict(self.snapshot)
+        if task_state_capabilities is not None:
+            response.response_task_state_snapshot = empty_task_state_snapshot()
+        response.response_media_snapshot_captured = True
+        return response
 
     def session_snapshot(self, session_id):
         return dict(self.snapshot)
@@ -111,10 +126,15 @@ class OutputWatchdogTest(unittest.TestCase):
 
             json_response = client.post("/api/message", json={"text": "你好"})
             self.assertEqual(json_response.status_code, 200)
+            self.assertIn("task_state", json_response.json())
             stream_response = client.post(
                 "/api/message/stream", json={"text": "你好"}
             )
             self.assertEqual(stream_response.status_code, 200)
+            stream_events = [
+                json.loads(line) for line in stream_response.text.splitlines() if line
+            ]
+            self.assertNotIn("task_state", stream_events[-1]["data"])
             self.assertGreaterEqual(len(observer.samples), 2)
             self.assertTrue(all(item["text"] == "用户可见回复。" for item in observer.samples))
             self.assertTrue(all(item["endpoint"] == "web_a3" for item in observer.samples))

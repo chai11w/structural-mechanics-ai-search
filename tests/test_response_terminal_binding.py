@@ -13,6 +13,7 @@ from tiku_agent.agent import AgentResponse
 from tiku_agent.fastapi_demo import create_app
 from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.session_runtime import AgentProtocolError
+from tiku_agent.task_state_contract import empty_task_state_snapshot
 from tiku_shared.response_store import SQLiteResponseStore
 from tiku_shared.trace_events import SQLiteTraceEventStore, TraceEventRecorder
 
@@ -48,6 +49,7 @@ class TerminalBindingRuntime:
         *,
         identity_key: str = "",
         progress=None,
+        task_state_capabilities=None,
     ) -> AgentResponse:
         del identity_key
         if progress is not None:
@@ -59,7 +61,13 @@ class TerminalBindingRuntime:
             )
             error.response_snapshot = dict(snapshot)
             raise error
-        return AgentResponse(text="已找到候选题。", intent="show_candidates")
+        response = AgentResponse(text="已找到候选题。", intent="show_candidates")
+        response.response_snapshot = dict(snapshot)
+        response.response_projection_snapshot = dict(snapshot)
+        if task_state_capabilities is not None:
+            response.response_task_state_snapshot = empty_task_state_snapshot()
+        response.response_media_snapshot_captured = True
+        return response
 
     def session_snapshot(self, session_id: str) -> dict[str, object]:
         return dict(self._snapshot(session_id))
@@ -165,6 +173,10 @@ class ResponseTerminalBindingTest(unittest.TestCase):
             with TestClient(app) as client:
                 response = client.post("/api/message", json={"text": "json-success"})
             self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(
+                response.json()["task_state"],
+                empty_task_state_snapshot().to_dict(),
+            )
             self._assert_ids_match(
                 payload=response.json(),
                 recorder=recorder,
@@ -181,6 +193,7 @@ class ResponseTerminalBindingTest(unittest.TestCase):
                     "/api/message/stream", json={"text": "stream-success"}
                 )
             self.assertEqual(response.status_code, 200, response.text)
+            self.assertNotIn("task_state", self._stream_payload(response, "result"))
             self._assert_ids_match(
                 payload=self._stream_payload(response, "result"),
                 recorder=recorder,

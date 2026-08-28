@@ -40,6 +40,7 @@ from tiku_agent.state import (
     PHASE_NO_MATCH,
     AgentState,
 )
+from tiku_agent.task_state_contract import TaskStateSnapshotV1
 from tiku_agent.tools import (
     AgentToolConfig,
     ToolOutcome,
@@ -95,6 +96,7 @@ class AgentResponse:
     state: dict[str, Any] = field(default_factory=dict)
     response_snapshot: dict[str, Any] = field(default_factory=dict)
     response_projection_snapshot: dict[str, Any] = field(default_factory=dict)
+    response_task_state_snapshot: TaskStateSnapshotV1 | None = None
     response_media_snapshot_captured: bool = False
     uploaded_image_path: Path | None = None
     submitted_crop_path: Path | None = None
