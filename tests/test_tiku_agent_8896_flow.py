@@ -32,6 +32,12 @@ class TikuAgent8896FlowTest(unittest.TestCase):
         self.assertTrue(defaults.enable_triage)
         self.assertTrue(defaults.enable_auto_crop)
         self.assertTrue(defaults.enable_a3_intent_v1)
+        self.assertTrue(defaults.enable_a3_text_orientation)
+        self.assertFalse(
+            build_argument_parser()
+            .parse_args(["--disable-a3-text-orientation"])
+            .enable_a3_text_orientation
+        )
 
     def test_auto_crop_is_promoted_by_default_with_manual_rollback(self):
         with tempfile.TemporaryDirectory() as temp:

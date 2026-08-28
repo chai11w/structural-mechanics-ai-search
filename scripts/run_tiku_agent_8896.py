@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import site
 import sys
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from tiku_agent.image_triage_8897 import (
 )
 from tiku_agent.image_triage_authority import ImageTriageAuthority, QwenTriageReplyClient
 from tiku_agent.output_watchdog import OutputWatchdog
+from tiku_agent.a3_text_orientation import RapidOcrTextPageOrienter
 from tiku_agent.session_artifacts import SessionArtifacts
 from tiku_shared.model_costs import SQLiteModelCostLedger
 from tiku_shared.trace_events import SQLiteTraceEventStore, TraceEventRecorder
@@ -48,6 +50,24 @@ A2_RERANK_POLICY = {
     "display_all_score": 0.95,
     "display_fallback_top_n": 3,
 }
+DEFAULT_A3_ORIENTATION_DEPENDENCY_DIR = Path(
+    r"F:\ruanjian\tiku-a3-orientation-8790"
+)
+
+
+def build_a3_page_orienter(
+    dependency_dir: str | Path = DEFAULT_A3_ORIENTATION_DEPENDENCY_DIR,
+) -> RapidOcrTextPageOrienter:
+    dependency_path = Path(dependency_dir).resolve()
+    if not dependency_path.is_dir():
+        raise RuntimeError(
+            f"A3 orientation dependency directory not found: {dependency_path}"
+        )
+    site.addsitedir(str(dependency_path))
+    return RapidOcrTextPageOrienter(
+        worker_count=4,
+        onnx_threads_per_engine=1,
+    )
 
 
 def build_runtime(
@@ -163,15 +183,22 @@ def build_app(
     enable_a3_intent_v1: bool = True,
     enable_a3_intent_model_fallback: bool = True,
     enable_output_watchdog: bool = True,
+    enable_a3_text_orientation: bool = True,
+    a3_orientation_dependency_dir: str | Path = DEFAULT_A3_ORIENTATION_DEPENDENCY_DIR,
 ):
     root = Path(runtime_dir).resolve()
     output_watchdog = OutputWatchdog(
         root / "output_watchdog",
         enabled=enable_output_watchdog,
     )
-    return create_app(
-        runtime=runtime
-        or build_runtime(
+    resolved_runtime = runtime
+    if resolved_runtime is None:
+        a3_page_orienter = (
+            build_a3_page_orienter(a3_orientation_dependency_dir)
+            if enable_a3_text_orientation
+            else None
+        )
+        resolved_runtime = build_runtime(
             root,
             model_timeout_seconds=model_timeout_seconds,
             grounding_timeout_seconds=grounding_timeout_seconds,
@@ -181,7 +208,10 @@ def build_app(
             reply_timeout_seconds=reply_timeout_seconds,
             enable_a3_intent_v1=enable_a3_intent_v1,
             enable_a3_intent_model_fallback=enable_a3_intent_model_fallback,
-        ),
+            a3_page_orienter=a3_page_orienter,
+        )
+    return create_app(
+        runtime=resolved_runtime,
         incoming_dir=root / "incoming",
         session_cookie=SESSION_COOKIE,
         output_watchdog=output_watchdog,
@@ -220,6 +250,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Temporarily use the legacy A3 text rules",
     )
     parser.add_argument(
+        "--a3-orientation-dependency-dir",
+        type=Path,
+        default=DEFAULT_A3_ORIENTATION_DEPENDENCY_DIR,
+        help="Isolated RapidOCR dependency directory",
+    )
+    parser.add_argument(
+        "--disable-a3-text-orientation",
+        dest="enable_a3_text_orientation",
+        action="store_false",
+        help="Bypass A3 OCR text orientation correction",
+    )
+    parser.add_argument(
         "--disable-output-watchdog",
         dest="enable_output_watchdog",
         action="store_false",
@@ -230,6 +272,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         enable_auto_crop=True,
         enable_a3_intent_v1=True,
         enable_output_watchdog=True,
+        enable_a3_text_orientation=True,
     )
     return parser
 
@@ -247,6 +290,8 @@ def main() -> int:
             reply_timeout_seconds=args.reply_timeout_seconds,
             enable_a3_intent_v1=args.enable_a3_intent_v1,
             enable_output_watchdog=args.enable_output_watchdog,
+            enable_a3_text_orientation=args.enable_a3_text_orientation,
+            a3_orientation_dependency_dir=args.a3_orientation_dependency_dir,
         ),
         host=args.host,
         port=args.port,

@@ -3,6 +3,7 @@ param(
     [string]$RuntimeDir,
     [string]$PythonExe = "python",
     [switch]$DisableAutoCrop,
+    [switch]$DisableA3TextOrientation,
     [switch]$DisableOutputWatchdog
 )
 
@@ -69,6 +70,9 @@ function Start-Agent {
     )
     if ($DisableAutoCrop) {
         $arguments += "--disable-auto-crop"
+    }
+    if ($DisableA3TextOrientation) {
+        $arguments += "--disable-a3-text-orientation"
     }
     if ($DisableOutputWatchdog) {
         $arguments += "--disable-output-watchdog"

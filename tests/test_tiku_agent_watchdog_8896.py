@@ -29,6 +29,8 @@ class TikuAgentWatchdog8896Test(unittest.TestCase):
         self.assertIn('$arguments += "--disable-auto-crop"', self.script)
         self.assertIn("[switch]$DisableOutputWatchdog", self.script)
         self.assertIn('$arguments += "--disable-output-watchdog"', self.script)
+        self.assertIn("[switch]$DisableA3TextOrientation", self.script)
+        self.assertIn('$arguments += "--disable-a3-text-orientation"', self.script)
 
 
 if __name__ == "__main__":

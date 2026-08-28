@@ -38,6 +38,11 @@ def main() -> int:
         type=Path,
         default=DEFAULT_A3_ORIENTATION_DEPENDENCY_DIR,
     )
+    parser.add_argument(
+        "--quick-three",
+        action="store_true",
+        help="Check three sources once each at 90, 180, and 270 degrees",
+    )
     args = parser.parse_args()
 
     site.addsitedir(str(args.dependency_dir.resolve()))
@@ -48,11 +53,17 @@ def main() -> int:
         onnx_threads_per_engine=1,
     )
     outcomes: list[dict[str, object]] = []
-    for source_item in payload["sources"]:
+    sources = payload["sources"][:3] if args.quick_three else payload["sources"]
+    for source_index, source_item in enumerate(sources):
         source = (manifest_path.parent / source_item["path"]).resolve()
         with Image.open(source) as opened:
             upright = ImageOps.exif_transpose(opened).convert("RGB")
-        for applied in payload["applied_clockwise_degrees"]:
+        applied_degrees = (
+            (90, 180, 270)[source_index : source_index + 1]
+            if args.quick_three
+            else payload["applied_clockwise_degrees"]
+        )
+        for applied in applied_degrees:
             sample = rotate_clockwise(upright, int(applied))
             started = perf_counter()
             decision = orienter.choose_correction(sample)
