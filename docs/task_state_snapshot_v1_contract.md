@@ -1,10 +1,10 @@
-# 统一任务状态快照 V1 契约（阶段 3.1）
+# 统一任务状态快照 V1 契约（阶段 3.1 / 3.2.1）
 
 ## 结论与范围
 
-阶段 3.1 只完成父 workflow、当前子题任务和题目单元的权威状态契约定稿。本文件冻结 V1 的字段、词汇、字段来源、派生谓词、拓扑边界、一致性错误和冲突策略，是后续实现的权威规范。
+阶段 3.1 完成父 workflow、当前子题任务和题目单元的权威状态契约定稿。本文件冻结 V1 的字段、词汇、字段来源、派生谓词、拓扑边界、一致性错误和冲突策略，是后续实现的权威规范。阶段 3.2.1 已实现从“已冻结 read-set + 可信入口证据”到 `TaskStateSnapshotV1` 的纯构造器，落在 `tiku_agent/task_state_builder.py`。
 
-**阶段 3.2 的运行时权威构造器尚未实现。** 当前 HTTP、stream、前端和既有 `session_snapshot()` 仍未提供本契约定义的统一快照；不得因为本文件存在就声称阶段 3 已接入运行时。
+**阶段 3.2.2 的锁内读取与运行时接入尚未实现。** 当前 HTTP、stream、前端和既有 `session_snapshot()` 仍未提供本契约定义的统一快照；不得因为纯构造器已存在就声称阶段 3 已接入运行时。
 
 以下内容不属于阶段 3.1：
 
@@ -420,6 +420,21 @@ A3 route 下 child 视图中的 `unit_id` **来自父 `selected_unit_id`**，pro
 - 只有运行拓扑明确为 standalone A2，才可输出根级 `active_child_task`；
 - 在 A3 wrapper 拓扑中必须返回 `ORPHAN_CHILD_TASK`，不得因为父 `load()` 返回 `None` 就把孤儿 child 冒充 standalone A2。
 
+## 3.2.1 纯构造器边界
+
+`build_task_state_snapshot_v1(read_set, evidence)` 已实现本文件的纯投影。它只接受调用方已经冻结的父子状态与非状态证据，不读 store、不获取锁、不访问文件系统、不写日志，也不修改输入状态。
+
+`TaskStateReadSet` 显式携带：
+
+- 已规范化的 `session_id` 和可信 topology；
+- 父、子各自独立的 `OK|MISSING|UNREADABLE|UNKNOWN_PHASE` 读取结果，父额外允许 `DUPLICATE_UNIT_ID`；
+- `OK` 必须携带对应状态，其他结果必须不携带状态，因此 missing 与 unreadable 不会被构造器混同；
+- child observation 的 `LIVE|RESPONSE_FROZEN` provenance：LIVE `CANCELLED` 是已清理残留，不投影为 active child；锁内冻结响应才可投影 `CANCELLED`。
+
+`TaskStateBuildEvidence` 只携带由调用方预先验证的事实：可信新图事件、reset 入口能力、与父原图精确匹配的可读路径证据、父重试能力、与 `(child_id, task_revision)` 精确匹配的子任务重试证据，以及 `(unit_id, crop_path)` 精确匹配的受控真实文件证据。构造器只比较精确值；路径可读、文件存在和受控目录包含性必须由 3.2.2 调用方证明。
+
+任何一致性 code 出现时，纯构造器统一清空可见动作与 unit 投影，将仍可安全表示的对象标为 `INCONSISTENT/RETRY`；若保留 child 会再次违反父子结构约束，则直接省略 child，只保留稳定 code。
+
 ## 锁内 read-set、读取失败与 task_revision
 
 ### 单次一致 read-set
@@ -503,7 +518,8 @@ V1 consistency code 精确限定为以下 17 个：
 
 ## 后续批次
 
-1. **3.2 权威构造器（尚未实现）**：按本文件在 session lock 内直接读取父 `A3SessionState` 与当前 `AgentState`，实现字段谓词、动作过滤、拓扑判断和一致性诊断；不得从现有混合公开快照反推。
-2. **3.3 出口一致性（尚未实现）**：接入 `/api/session`、JSON success、stream result 和受控错误出口，保持 response-time 冻结与旧字段兼容。
-3. **3.4 前端消费（尚未实现）**：浏览器消费服务端 `allowed_actions/next_stage`，逐步删除对父子 phase 和 unit flag 的动作拼装。
-4. **3.5 启用门（尚未实现）**：定向/全量回归、8896 契约烟测、只读 live 对照后再精确启用 8790；不触碰 8788/8794/8795。
+1. **3.2.1 纯构造器（DONE）**：已完成从冻结 read-set 和可信入口证据到 V1 快照的无 I/O 投影，实现与定向测试见 `tiku_agent/task_state_builder.py` 和 `tests/test_task_state_builder.py`。
+2. **3.2.2 锁内权威读取（NEXT）**：在 A3→A2 锁序内一次读取父子状态，分类缺失/不可读、证明受控文件与入口能力，再调用纯构造器；不得重复加锁或解锁后重读 live state。
+3. **3.3 出口一致性（尚未实现）**：接入 `/api/session`、JSON success、stream result 和受控错误出口，保持 response-time 冻结与旧字段兼容。
+4. **3.4 前端消费（尚未实现）**：浏览器消费服务端 `allowed_actions/next_stage`，逐步删除对父子 phase 和 unit flag 的动作拼装。
+5. **3.5 启用门（尚未实现）**：定向/全量回归、8896 契约烟测、只读 live 对照后再精确启用 8790；不触碰 8788/8794/8795。
