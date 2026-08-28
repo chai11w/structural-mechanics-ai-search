@@ -16,7 +16,9 @@ from scripts.run_tiku_agent_8794 import (
 )
 from tiku_agent.agent import AgentResponse
 from tiku_agent.fastapi_demo import SESSION_COOKIE as MAINLINE_SESSION_COOKIE, create_app
+from tiku_agent.session_runtime import SessionResponseSnapshotV1
 from tiku_agent.state import AgentState
+from tiku_agent.task_state_contract import empty_task_state_snapshot
 from tiku_shared.response_store import is_valid_response_id
 
 
@@ -43,6 +45,15 @@ class RecordingRuntime:
 
     def current_image_path(self, session_id: str):
         return None
+
+    def session_response_snapshot_v1(self, session_id: str, *, capabilities=None):
+        del capabilities
+        self.calls.append(("session", session_id, ""))
+        return SessionResponseSnapshotV1(
+            uploaded_image_path=None,
+            legacy_session=dict(self.snapshot),
+            task_state=empty_task_state_snapshot(),
+        )
 
     def clear(self, session_id: str) -> None:
         self.calls.append(("clear", session_id, ""))

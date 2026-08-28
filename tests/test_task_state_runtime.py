@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,7 +11,10 @@ from tiku_agent.a3_runtime import (
     SQLiteA3SessionStore,
 )
 from tiku_agent.session_artifacts import SessionArtifacts
-from tiku_agent.session_runtime import AgentSessionRuntime
+from tiku_agent.session_runtime import (
+    AgentSessionRuntime,
+    SessionResponseSnapshotError,
+)
 from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_state_builder import build_task_state_snapshot_v1
@@ -114,6 +118,9 @@ class SingleReadStore:
         self.poison = poison
         self.load_attempt_count = 0
         self.load_count = 0
+
+    def purge_expired(self):
+        return []
 
     def load(self, session_id: str):
         self.load_attempt_count += 1
@@ -241,6 +248,267 @@ class TaskStateRuntimeTests(unittest.TestCase):
         self.assertEqual(snapshot.consistency.status, "OK")
         self.assertEqual(snapshot.workflow.route, "A2")
         self.assertEqual(snapshot.active_child_task.task_id, CHILD_ID)
+
+    def test_a3_session_capture_cleans_expired_child_then_expired_parent(self):
+        current = [datetime(2026, 8, 28, tzinfo=UTC)]
+        workflow_artifacts = SessionArtifacts(self.root / "ttl-parent-sessions")
+        child_artifacts = SessionArtifacts(self.root / "ttl-child-sessions")
+        parent_upload_dir = workflow_artifacts.session_dir(SESSION_ID) / "uploads"
+        parent_upload_dir.mkdir(parents=True)
+        parent_image = parent_upload_dir / "page.png"
+        parent_image.write_bytes(b"page")
+        child_upload_dir = child_artifacts.session_dir(SESSION_ID) / "uploads"
+        child_upload_dir.mkdir(parents=True)
+        child_image = child_upload_dir / "question.png"
+        child_image.write_bytes(b"question")
+        parent_store = SQLiteA3SessionStore(
+            self.root / "ttl-parent.sqlite3",
+            ttl=timedelta(seconds=10),
+            now=lambda: current[0],
+        )
+        child_store = SQLiteSessionStore(
+            self.root / "ttl-child.sqlite3",
+            ttl=timedelta(seconds=1),
+            now=lambda: current[0],
+        )
+        parent_store.save(_workflow(
+            route="A2",
+            phase="A2_ACTIVE",
+            source_page_path=str(parent_image),
+        ))
+        child_store.save(_child(current_image_path=str(child_image)))
+        runtime = self._a3_runtime(
+            parent_store,
+            child_store,
+            workflow_artifacts=workflow_artifacts,
+            child_artifacts=child_artifacts,
+        )
+
+        current[0] += timedelta(seconds=2)
+        child_expired = runtime.session_response_snapshot_v1(SESSION_ID)
+
+        self.assertEqual(
+            child_expired.task_state.consistency.codes,
+            ("ACTIVE_CHILD_TASK_MISSING",),
+        )
+        self.assertTrue(workflow_artifacts.session_dir(SESSION_ID).exists())
+        self.assertFalse(child_artifacts.session_dir(SESSION_ID).exists())
+
+        current[0] += timedelta(seconds=10)
+        parent_expired = runtime.session_response_snapshot_v1(SESSION_ID)
+
+        self.assertFalse(parent_expired.task_state.workflow.exists)
+        self.assertIsNone(parent_expired.task_state.active_child_task)
+        self.assertEqual(parent_expired.task_state.consistency.status, "OK")
+        self.assertFalse(workflow_artifacts.session_dir(SESSION_ID).exists())
+
+    def test_session_response_capture_uses_one_locked_a2_read_set(self):
+        events: list[str] = []
+        lock = TracingLock("a2", events)
+        artifacts = SessionArtifacts(self.root / "a2-session-response")
+        upload_dir = artifacts.session_dir(SESSION_ID) / "uploads"
+        upload_dir.mkdir(parents=True)
+        image = upload_dir / "question.png"
+        image.write_bytes(b"question")
+        state = _child(current_image_path=str(image))
+        store = SingleReadStore(
+            state,
+            name="child",
+            events=events,
+            required_locks=(lock,),
+        )
+        runtime = self._a2_runtime(store, artifacts=artifacts, lock=lock)
+
+        captured = runtime.session_response_snapshot_v1(
+            SESSION_ID,
+            capabilities=TaskStateEntryCapabilities(
+                reset_session_available=True,
+            ),
+        )
+
+        self.assertEqual(
+            events,
+            ["a2:acquire", "child:load", "a2:release"],
+        )
+        self.assertEqual(store.load_count, 1)
+        self.assertEqual(captured.uploaded_image_path, image)
+        self.assertEqual(
+            captured.legacy_session,
+            runtime._legacy_session_snapshot_from_state(state),
+        )
+        self.assertEqual(captured.task_state.consistency.status, "OK")
+        self.assertEqual(captured.task_state.active_child_task.task_id, CHILD_ID)
+        self.assertNotIn(
+            "upload_image",
+            captured.task_state.active_child_task.allowed_actions,
+        )
+
+    def test_session_response_capture_uses_one_ordered_a3_a2_read_set(self):
+        events: list[str] = []
+        a3_lock = TracingLock("a3", events)
+        a2_lock = TracingLock("a2", events)
+        workflow_artifacts = SessionArtifacts(self.root / "a3-session-response")
+        upload_dir = workflow_artifacts.session_dir(SESSION_ID) / "uploads"
+        upload_dir.mkdir(parents=True)
+        image = upload_dir / "page.png"
+        image.write_bytes(b"page")
+        parent = _workflow(
+            route="A3",
+            phase="A2_ACTIVE",
+            source_page_path=str(image),
+            units=[_unit()],
+            selected_unit_id="g1-u1",
+        )
+        child = _child()
+        parent_store = SingleReadStore(
+            parent,
+            name="parent",
+            events=events,
+            required_locks=(a3_lock, a2_lock),
+        )
+        child_store = SingleReadStore(
+            child,
+            name="child",
+            events=events,
+            required_locks=(a3_lock, a2_lock),
+        )
+        runtime = self._a3_runtime(
+            parent_store,
+            child_store,
+            a3_lock=a3_lock,
+            a2_lock=a2_lock,
+            workflow_artifacts=workflow_artifacts,
+        )
+
+        captured = runtime.session_response_snapshot_v1(
+            SESSION_ID,
+            capabilities=TaskStateEntryCapabilities(
+                reset_session_available=True,
+            ),
+        )
+
+        self.assertEqual(
+            events,
+            [
+                "a3:acquire",
+                "a2:acquire",
+                "parent:load",
+                "child:load",
+                "a2:release",
+                "a3:release",
+            ],
+        )
+        self.assertEqual(parent_store.load_count, 1)
+        self.assertEqual(child_store.load_count, 1)
+        self.assertEqual(captured.uploaded_image_path, image)
+        self.assertEqual(captured.legacy_session["phase"], child.phase)
+        self.assertEqual(captured.legacy_session["image_route"], "A3")
+        self.assertEqual(captured.task_state.workflow.route, "A3")
+        self.assertIn(
+            "reset_session",
+            captured.task_state.workflow.allowed_actions,
+        )
+        self.assertNotIn(
+            "upload_image",
+            captured.task_state.workflow.allowed_actions,
+        )
+        self.assertEqual(captured.task_state.current_unit.unit_id, "g1-u1")
+        self.assertEqual(captured.task_state.active_child_task.task_id, CHILD_ID)
+
+    def test_session_response_capture_keeps_missing_and_orphan_distinct(self):
+        missing = self._a2_runtime(
+            SingleReadStore(None)
+        ).session_response_snapshot_v1(SESSION_ID)
+        self.assertFalse(missing.legacy_session["session_valid"])
+        self.assertFalse(missing.task_state.workflow.exists)
+        self.assertIsNone(missing.task_state.active_child_task)
+
+        orphan = self._a3_runtime(
+            SingleReadStore(None),
+            SingleReadStore(_child()),
+        ).session_response_snapshot_v1(SESSION_ID)
+        self.assertFalse(orphan.legacy_session["session_valid"])
+        self.assertEqual(
+            orphan.task_state.consistency.codes,
+            ("ORPHAN_CHILD_TASK",),
+        )
+
+    def test_session_response_capture_does_not_publish_legacy_empty_on_bad_state(self):
+        events: list[str] = []
+        lock = TracingLock("a2", events)
+        store = SingleReadStore(
+            error=ValueError("secret broken session JSON"),
+            name="child",
+            events=events,
+            required_locks=(lock,),
+        )
+        runtime = self._a2_runtime(store, lock=lock)
+
+        with self.assertRaisesRegex(
+            SessionResponseSnapshotError,
+            "legacy session state",
+        ) as raised:
+            runtime.session_response_snapshot_v1(SESSION_ID)
+
+        self.assertEqual(
+            events,
+            ["a2:acquire", "child:load", "a2:release"],
+        )
+        self.assertEqual(store.load_count, 1)
+        self.assertFalse(lock.held)
+        self.assertEqual(
+            raised.exception.task_state.consistency.codes,
+            ("CHILD_STATE_UNREADABLE",),
+        )
+        self.assertTrue(raised.exception.response_snapshot)
+
+    def test_a3_session_response_capture_retains_failed_frozen_read_set(self):
+        events: list[str] = []
+        a3_lock = TracingLock("a3", events)
+        a2_lock = TracingLock("a2", events)
+        parent_store = SingleReadStore(
+            error=ValueError("secret unreadable workflow"),
+            name="parent",
+            events=events,
+            required_locks=(a3_lock, a2_lock),
+        )
+        child_store = SingleReadStore(
+            _child(),
+            name="child",
+            events=events,
+            required_locks=(a3_lock, a2_lock),
+        )
+        runtime = self._a3_runtime(
+            parent_store,
+            child_store,
+            a3_lock=a3_lock,
+            a2_lock=a2_lock,
+        )
+
+        with self.assertRaises(SessionResponseSnapshotError) as raised:
+            runtime.session_response_snapshot_v1(SESSION_ID)
+
+        self.assertEqual(
+            events,
+            [
+                "a3:acquire",
+                "a2:acquire",
+                "parent:load",
+                "child:load",
+                "a2:release",
+                "a3:release",
+            ],
+        )
+        self.assertEqual(parent_store.load_count, 1)
+        self.assertEqual(child_store.load_count, 1)
+        self.assertIn(
+            "WORKFLOW_STATE_UNREADABLE",
+            raised.exception.task_state.consistency.codes,
+        )
+        self.assertNotIn(
+            "secret unreadable workflow",
+            json.dumps(raised.exception.task_state.to_dict(), ensure_ascii=False),
+        )
 
     def test_standalone_a2_takes_only_a2_lock_and_reads_once(self):
         events: list[str] = []

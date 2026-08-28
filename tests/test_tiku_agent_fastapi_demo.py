@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import shutil
 import sqlite3
@@ -15,6 +16,7 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from tiku_agent.a3_runtime import A3MvpRuntime, A3SessionState, SQLiteA3SessionStore
 from tiku_agent.agent import AgentResponse
 from tiku_agent.fastapi_demo import (
     MAX_FEEDBACK_BYTES,
@@ -37,10 +39,13 @@ from tiku_agent.session_runtime import (
     AgentProtocolError,
     AgentRuntimeBusyError,
     AgentSessionRuntime,
+    SessionResponseSnapshotV1,
     _ExecutionCancelled,
     _ExecutionGate,
 )
 from tiku_agent.session_store import SQLiteSessionStore
+from tiku_agent.state import AgentState
+from tiku_agent.task_state_contract import empty_task_state_snapshot
 from tiku_shared.response_store import ResponseProjection, SQLiteResponseStore
 from tiku_shared.trace_context import TraceContext, current_request_id, current_trace_id
 from tiku_shared.trace_events import (
@@ -62,6 +67,7 @@ class FakeRuntime:
         self.progress_message = "正在按「4力法」搜索题目…"
         self.response_protocol = {}
         self.media_failure_calls = []
+        self.session_capture_calls = []
         self.snapshot = {
             "session_valid": False,
             "phase": "IDLE",
@@ -114,6 +120,21 @@ class FakeRuntime:
 
     def current_image_path(self, session_id: str) -> Path | None:
         return self.image_path if session_id == self.upload_session else None
+
+    def session_response_snapshot_v1(
+        self,
+        session_id: str,
+        *,
+        capabilities=None,
+    ) -> SessionResponseSnapshotV1:
+        self.session_capture_calls.append((session_id, capabilities))
+        return SessionResponseSnapshotV1(
+            uploaded_image_path=(
+                self.image_path if session_id == self.upload_session else None
+            ),
+            legacy_session=dict(self.snapshot),
+            task_state=empty_task_state_snapshot(),
+        )
 
     def resolve_upload(self, session_id: str, filename: str) -> Path | None:
         if session_id != self.upload_session:
@@ -280,6 +301,277 @@ class FastApiDemoTest(unittest.TestCase):
             self.assertNotIn("last_intent", encoded)
             self.assertNotIn("LEAK_", encoded)
             self.assertEqual(payload["session"]["a3"]["crop_review_code"], "")
+
+    def test_session_endpoint_uses_only_the_atomic_runtime_capture(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"session_capture_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+
+        class CaptureOnlyRuntime(FakeRuntime):
+            def current_image_path(self, session_id: str):
+                raise AssertionError("legacy current_image_path must not be called")
+
+            def session_snapshot(self, session_id: str):
+                raise AssertionError("legacy session_snapshot must not be called")
+
+            def task_state_snapshot_v1(self, session_id: str, **kwargs):
+                raise AssertionError("standalone task_state capture must not be called")
+
+        runtime = CaptureOnlyRuntime(image_path)
+        session_id = "atomic-session-capture"
+        runtime.upload_session = session_id
+        runtime.snapshot.update({
+            "session_valid": True,
+            "phase": "WAIT_CHAPTER",
+            "has_active_image": True,
+            "task_revision": 3,
+            "candidate_generation": "",
+            "candidate_count": 0,
+            "chapter": "",
+            "search_id": "search_atomic_session_01",
+            "a3": {"enabled": False},
+        })
+        client = TestClient(create_app(runtime=runtime))
+        client.cookies.set(SESSION_COOKIE, session_id)
+
+        response = client.get("/api/session")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(set(response.json()), {"uploaded_image", "session", "task_state"})
+        self.assertEqual(response.json()["uploaded_image"], f"/api/upload/{image_path.name}")
+        self.assertIsNone(response.json()["session"]["a3"])
+        self.assertEqual(
+            response.json()["task_state"],
+            empty_task_state_snapshot().to_dict(),
+        )
+        self.assertEqual(len(runtime.session_capture_calls), 1)
+        captured_session_id, capabilities = runtime.session_capture_calls[0]
+        self.assertEqual(captured_session_id, session_id)
+        self.assertFalse(capabilities.trusted_image_event)
+        self.assertTrue(capabilities.reset_session_available)
+        self.assertEqual(response.headers["cache-control"], "private, no-store")
+
+    def test_session_endpoint_maps_live_standalone_a2_state_and_keeps_legacy_shape(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_id = "session-endpoint-a2"
+            artifacts = SessionArtifacts(root / "sessions")
+            upload_dir = artifacts.session_dir(session_id) / "uploads"
+            upload_dir.mkdir(parents=True)
+            image_path = upload_dir / "question.png"
+            image_path.write_bytes(b"question")
+            store = SQLiteSessionStore(root / "sessions.sqlite3")
+            store.save(AgentState(
+                session_id=session_id,
+                phase="WAIT_CHAPTER",
+                current_image_path=str(image_path),
+                current_search_id="search_session_endpoint_a2_01",
+                task_revision=1,
+            ))
+            runtime = AgentSessionRuntime(
+                store,
+                artifacts=artifacts,
+                task_logger=object(),
+            )
+            client = TestClient(create_app(runtime=runtime))
+            client.cookies.set(SESSION_COOKIE, session_id)
+
+            response = client.get("/api/session")
+
+            self.assertEqual(response.status_code, 200, response.text)
+            payload = response.json()
+            self.assertEqual(payload["uploaded_image"], "/api/upload/question.png")
+            self.assertEqual(payload["session"], {
+                "session_valid": True,
+                "phase": "WAIT_CHAPTER",
+                "has_active_image": True,
+                "task_revision": 1,
+                "candidate_generation": "",
+                "candidate_count": 0,
+                "chapter": "",
+                "search_id": "search_session_endpoint_a2_01",
+                "a3": None,
+            })
+            self.assertFalse(payload["task_state"]["workflow"]["exists"])
+            self.assertEqual(
+                payload["task_state"]["active_child_task"]["task_id"],
+                "search_session_endpoint_a2_01",
+            )
+            self.assertEqual(
+                payload["task_state"]["active_child_task"]["phase"],
+                "WAIT_CHAPTER",
+            )
+            self.assertEqual(
+                payload["task_state"]["consistency"],
+                {"status": "OK", "codes": []},
+            )
+            self.assertNotIn(str(root), json.dumps(payload["task_state"]))
+            self.assertEqual(client.get(payload["uploaded_image"]).status_code, 200)
+
+    def test_session_endpoint_maps_direct_a2_and_active_a3_without_legacy_drift(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_id = "session-endpoint-a3"
+            workflow_id = "search_session_endpoint_workflow_01"
+            child_id = "search_session_endpoint_child_01"
+            parent_artifacts = SessionArtifacts(root / "parent-sessions")
+            child_artifacts = SessionArtifacts(root / "child-sessions")
+            upload_dir = parent_artifacts.session_dir(session_id) / "uploads"
+            upload_dir.mkdir(parents=True)
+            image_path = upload_dir / "page.png"
+            image_path.write_bytes(b"page")
+            parent_store = SQLiteA3SessionStore(root / "parent.sqlite3")
+            child_store = SQLiteSessionStore(root / "child.sqlite3")
+            child_store.save(AgentState(
+                session_id=session_id,
+                phase="WAIT_CHAPTER",
+                current_image_path=str(image_path),
+                current_search_id=child_id,
+                task_revision=1,
+            ))
+            parent_store.save(A3SessionState(
+                session_id=session_id,
+                entry_route="A2",
+                phase="A2_ACTIVE",
+                source_page_path=str(image_path),
+                task_revision=1,
+                current_search_id=child_id,
+                workflow_search_id=workflow_id,
+            ))
+            runtime = A3MvpRuntime(
+                store=parent_store,
+                artifacts=parent_artifacts,
+                a2_runtime=AgentSessionRuntime(
+                    child_store,
+                    artifacts=child_artifacts,
+                    task_logger=object(),
+                ),
+                page_observer=object(),
+                crop_verifier=object(),
+            )
+            client = TestClient(create_app(runtime=runtime))
+            client.cookies.set(SESSION_COOKIE, session_id)
+
+            direct_a2 = client.get("/api/session")
+
+            self.assertEqual(direct_a2.status_code, 200, direct_a2.text)
+            direct_payload = direct_a2.json()
+            self.assertIsNone(direct_payload["session"]["a3"])
+            self.assertEqual(direct_payload["session"]["phase"], "WAIT_CHAPTER")
+            self.assertEqual(direct_payload["task_state"]["workflow"]["route"], "A2")
+            self.assertEqual(
+                direct_payload["task_state"]["active_child_task"]["task_id"],
+                child_id,
+            )
+
+            parent_store.save(A3SessionState(
+                session_id=session_id,
+                entry_route="A3",
+                phase="A2_ACTIVE",
+                source_page_path=str(image_path),
+                page_understanding={"page_disposition": "has_searchable_candidates"},
+                units=[{
+                    "unit_id": "g1-u1",
+                    "page_index": 1,
+                    "display_label": "四-1",
+                    "searchability": "searchable_candidate",
+                }],
+                selected_unit_id="g1-u1",
+                task_revision=2,
+                current_search_id=child_id,
+                workflow_search_id=workflow_id,
+            ))
+
+            active_a3 = client.get("/api/session")
+
+            self.assertEqual(active_a3.status_code, 200, active_a3.text)
+            active_payload = active_a3.json()
+            self.assertEqual(active_payload["session"]["a3"]["phase"], "A2_ACTIVE")
+            self.assertEqual(active_payload["task_state"]["workflow"]["route"], "A3")
+            self.assertEqual(
+                active_payload["task_state"]["current_unit"]["unit_id"],
+                "g1-u1",
+            )
+            self.assertEqual(
+                active_payload["task_state"]["active_child_task"]["unit_id"],
+                "g1-u1",
+            )
+
+    def test_session_endpoint_unreadable_state_fails_once_without_fake_empty_v1(self):
+        class UnreadableStore:
+            def __init__(self):
+                self.load_attempt_count = 0
+
+            def load(self, session_id):
+                self.load_attempt_count += 1
+                raise ValueError("secret broken state payload")
+
+            def purge_expired(self):
+                return []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = UnreadableStore()
+            runtime = AgentSessionRuntime(
+                store,
+                artifacts=SessionArtifacts(Path(temp_dir) / "sessions"),
+                task_logger=object(),
+            )
+            client = TestClient(
+                create_app(runtime=runtime),
+                raise_server_exceptions=False,
+            )
+            client.cookies.set(SESSION_COOKIE, "unreadable-session")
+
+            response = client.get("/api/session")
+
+            self.assertEqual(response.status_code, 500, response.text)
+            self.assertEqual(response.json()["code"], "SERVICE_UNAVAILABLE")
+            self.assertNotIn("task_state", response.json())
+            self.assertNotIn("secret broken", response.text)
+            self.assertEqual(store.load_attempt_count, 1)
+
+    def test_session_endpoint_expires_state_and_artifacts_before_capture(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current = [datetime(2026, 8, 28, tzinfo=UTC)]
+            session_id = "expired-session-capture"
+            artifacts = SessionArtifacts(root / "sessions")
+            upload_dir = artifacts.session_dir(session_id) / "uploads"
+            upload_dir.mkdir(parents=True)
+            image_path = upload_dir / "expired.png"
+            image_path.write_bytes(b"expired")
+            store = SQLiteSessionStore(
+                root / "sessions.sqlite3",
+                ttl=timedelta(seconds=1),
+                now=lambda: current[0],
+            )
+            store.save(AgentState(
+                session_id=session_id,
+                phase="WAIT_CHAPTER",
+                current_image_path=str(image_path),
+                current_search_id="search_expired_session_01",
+                task_revision=1,
+            ))
+            runtime = AgentSessionRuntime(
+                store,
+                artifacts=artifacts,
+                task_logger=object(),
+            )
+            client = TestClient(create_app(runtime=runtime))
+            client.cookies.set(SESSION_COOKIE, session_id)
+            current[0] += timedelta(seconds=2)
+
+            response = client.get("/api/session")
+
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["uploaded_image"], "")
+            self.assertFalse(response.json()["session"]["session_valid"])
+            self.assertEqual(
+                response.json()["task_state"],
+                empty_task_state_snapshot().to_dict(),
+            )
+            self.assertFalse(artifacts.session_dir(session_id).exists())
 
     def test_json_and_stream_replace_unregistered_internal_protocol(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
@@ -462,8 +754,9 @@ class FastApiDemoTest(unittest.TestCase):
             config_path.write_text(json.dumps(config), encoding="utf-8")
             store = SQLiteTraceEventStore(root / "trace_events.sqlite3")
             recorder = TraceEventRecorder(store)
+            runtime = FakeRuntime(image_path)
             client = TestClient(create_app(
-                runtime=FakeRuntime(image_path),
+                runtime=runtime,
                 invite_access=InviteAccess(config_path),
                 trace_event_recorder=recorder,
             ))
@@ -485,6 +778,8 @@ class FastApiDemoTest(unittest.TestCase):
             )
 
             self.assertEqual(session_gate.status_code, 401)
+            self.assertEqual(runtime.session_capture_calls, [])
+            self.assertNotIn("task_state", session_gate.json())
             self.assertEqual(stream_gate.status_code, 401)
             self.assertEqual(invalid_login.status_code, 401)
             expected = (
@@ -2557,6 +2852,20 @@ class FastApiDemoTest(unittest.TestCase):
         session_response = no_page_visit.get("/api/session")
         self.assertEqual(session_response.status_code, 200)
         self.assertIn(SESSION_COOKIE, session_response.cookies)
+        assigned_session_id = session_response.cookies.get(SESSION_COOKIE)
+        self.assertEqual(runtime.session_capture_calls[-1][0], assigned_session_id)
+        set_cookie = session_response.headers["set-cookie"]
+        self.assertIn("Max-Age=7200", set_cookie)
+        self.assertIn("HttpOnly", set_cookie)
+        self.assertIn("SameSite=lax", set_cookie)
+        self.assertNotIn("Secure", set_cookie)
+
+        secure_visit = TestClient(app)
+        secure_session = secure_visit.get(
+            "/api/session",
+            headers={"x-forwarded-proto": "https"},
+        )
+        self.assertIn("Secure", secure_session.headers["set-cookie"])
 
     def test_multipart_cropped_jpeg_and_png_metadata_mismatch_are_accepted(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"

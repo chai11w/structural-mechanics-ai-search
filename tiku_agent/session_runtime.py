@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -21,6 +22,7 @@ from tiku_agent.external_load_screen import (
 from tiku_agent.session_artifacts import SessionArtifacts, session_key
 from tiku_agent.session_store import SessionStore
 from tiku_agent.state import AgentState
+from tiku_agent.task_state_builder import READ_MISSING, READ_OK
 from tiku_agent.task_state_contract import TaskStateSnapshotV1
 from tiku_agent.task_state_runtime import (
     TaskStateEntryCapabilities,
@@ -53,6 +55,27 @@ from tiku_shared.trace_events import (
 AgentFactory = Callable[[AgentState], TikuSearchAgent]
 ProgressReporter = Callable[[str, str], None]
 ExternalLoadScreen = Callable[[str | Path], str]
+
+
+@dataclass(frozen=True)
+class SessionResponseSnapshotV1:
+    """One frozen read-set for the public ``/api/session`` response."""
+
+    uploaded_image_path: Path | None
+    legacy_session: dict[str, object]
+    task_state: TaskStateSnapshotV1
+
+
+class SessionResponseSnapshotError(RuntimeError):
+    """Fail a session capture without discarding or rereading its frozen V1 state."""
+
+    def __init__(self, message: str, *, task_state: TaskStateSnapshotV1) -> None:
+        super().__init__(message)
+        self.task_state = task_state
+        # A non-empty safe snapshot prevents the generic HTTP handler from
+        # performing a second live store read. Phase 3.3.4 will decide when
+        # and how the carried task_state becomes part of an error payload.
+        self.response_snapshot: dict[str, object] = {"session_valid": False}
 
 
 class _ImageRace:
@@ -884,11 +907,61 @@ class AgentSessionRuntime:
         path = Path(state.current_image_path)
         return path if self.resolve_upload(clean_session_id, path.name) == path.resolve() else None
 
+    def session_response_snapshot_v1(
+        self,
+        session_id: str,
+        *,
+        capabilities: TaskStateEntryCapabilities | None = None,
+    ) -> SessionResponseSnapshotV1:
+        """Capture legacy session data and V1 state from one locked A2 read."""
+
+        clean_session_id = self._clean_session_id(session_id)
+        # Preserve the legacy endpoint's expiration cleanup before freezing
+        # the read-set. SQLite ``load()`` removes an expired row without
+        # returning its session id, so cleanup must happen first or its
+        # artifacts would become unreachable orphans.
+        self.purge_expired()
+        with self._lock(clean_session_id):
+            state, read_status = read_child_state_once(
+                self.store,
+                clean_session_id,
+            )
+            task_state = self._task_state_snapshot_v1_from_read_set(
+                clean_session_id,
+                state,
+                read_status,
+                capabilities=capabilities,
+            )
+            if read_status not in {READ_OK, READ_MISSING}:
+                # The legacy endpoint historically failed when its live state
+                # could not be loaded. Keep that fail-closed behavior until
+                # the controlled HTTP-error outlet is handled in phase 3.3.4.
+                raise SessionResponseSnapshotError(
+                    "legacy session state is unavailable",
+                    task_state=task_state,
+                )
+            return SessionResponseSnapshotV1(
+                uploaded_image_path=self._current_image_path_from_frozen_state(
+                    clean_session_id,
+                    state,
+                ),
+                legacy_session=self._legacy_session_snapshot_from_state(state),
+                task_state=task_state,
+            )
+
     def session_snapshot(self, session_id: str) -> dict[str, object]:
         """Return the small, non-sensitive state contract needed by the web client."""
         clean_session_id = self._clean_session_id(session_id)
         self.purge_expired()
         state = self.store.load(clean_session_id)
+        return self._legacy_session_snapshot_from_state(state)
+
+    @staticmethod
+    def _legacy_session_snapshot_from_state(
+        state: AgentState | None,
+    ) -> dict[str, object]:
+        """Project the existing browser session shape from one frozen state."""
+
         if state is None:
             return {
                 "session_valid": False,
@@ -911,6 +984,38 @@ class AgentSessionRuntime:
             "search_id": state.current_search_id,
         }
 
+    def _current_image_path_from_frozen_state(
+        self,
+        session_id: str,
+        state: AgentState | None,
+    ) -> Path | None:
+        """Resolve the legacy upload from a state already read under the lock."""
+
+        if state is None or not state.current_image_path:
+            return None
+        path = Path(state.current_image_path)
+        resolved = self.artifacts.resolve_upload(session_id, path.name)
+        return path if resolved == path.resolve() else None
+
+    def _task_state_snapshot_v1_from_read_set(
+        self,
+        session_id: str,
+        state: AgentState | None,
+        read_status: str,
+        *,
+        capabilities: TaskStateEntryCapabilities | None = None,
+        response_frozen: bool = False,
+    ) -> TaskStateSnapshotV1:
+        return build_standalone_a2_runtime_snapshot_v1(
+            session_id,
+            child_state=state,
+            child_read_status=read_status,
+            child_artifacts=self.artifacts,
+            child_retry_supported=True,
+            capabilities=capabilities,
+            response_frozen=response_frozen,
+        )
+
     def task_state_snapshot_v1(
         self,
         session_id: str,
@@ -925,12 +1030,10 @@ class AgentSessionRuntime:
                 self.store,
                 clean_session_id,
             )
-            return build_standalone_a2_runtime_snapshot_v1(
+            return self._task_state_snapshot_v1_from_read_set(
                 clean_session_id,
-                child_state=state,
-                child_read_status=read_status,
-                child_artifacts=self.artifacts,
-                child_retry_supported=True,
+                state,
+                read_status,
                 capabilities=capabilities,
             )
 
@@ -945,12 +1048,10 @@ class AgentSessionRuntime:
 
         clean_session_id = self._clean_session_id(session_id)
         state, read_status = classify_frozen_child_state(state)
-        return build_standalone_a2_runtime_snapshot_v1(
+        return self._task_state_snapshot_v1_from_read_set(
             clean_session_id,
-            child_state=state,
-            child_read_status=read_status,
-            child_artifacts=self.artifacts,
-            child_retry_supported=True,
+            state,
+            read_status,
             capabilities=capabilities,
             response_frozen=True,
         )

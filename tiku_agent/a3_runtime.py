@@ -38,13 +38,16 @@ from tiku_agent.a3_models import (
 from tiku_agent.agent import AgentResponse
 from tiku_agent.image_triage_authority import NO_EXTERNAL_LOAD_REPLY
 from tiku_agent.session_artifacts import SessionArtifacts, session_key
+from tiku_agent.state import AgentState
 from tiku_agent.session_runtime import (
     AgentProtocolError,
     AgentSessionRuntime,
     ProgressReporter,
+    SessionResponseSnapshotError,
+    SessionResponseSnapshotV1,
     _ExecutionGate,
 )
-from tiku_agent.task_state_builder import READ_OK
+from tiku_agent.task_state_builder import READ_MISSING, READ_OK
 from tiku_agent.task_state_contract import TaskStateSnapshotV1
 from tiku_agent.task_state_runtime import (
     TaskStateEntryCapabilities,
@@ -1486,42 +1489,146 @@ class A3MvpRuntime:
                     self.a2_runtime.store,
                     clean,
                 )
-                try:
-                    workflow_retry_supported = bool(
-                        workflow_read_status == READ_OK
-                        and workflow_state is not None
-                        and (
-                            (
-                                getattr(workflow_state, "entry_route", "") == "A3"
-                                and self.page_observer is not None
-                            )
-                            or (
-                                getattr(workflow_state, "entry_route", "") == ""
-                                and self.image_triage_authority is not None
-                            )
-                        )
-                    )
-                except Exception:  # noqa: BLE001 - malformed state cannot grant retry.
-                    workflow_retry_supported = False
-                return build_a3_runtime_snapshot_v1(
+                return self._task_state_snapshot_v1_from_read_set(
                     clean,
                     workflow_state=workflow_state,
                     workflow_read_status=workflow_read_status,
                     child_state=child_state,
                     child_read_status=child_read_status,
-                    workflow_artifacts=self.artifacts,
-                    child_artifacts=self.a2_runtime.artifacts,
-                    workflow_retry_supported=workflow_retry_supported,
-                    child_retry_supported=True,
                     capabilities=capabilities,
                 )
 
+    def session_response_snapshot_v1(
+        self,
+        session_id: str,
+        *,
+        capabilities: TaskStateEntryCapabilities | None = None,
+    ) -> SessionResponseSnapshotV1:
+        """Capture the whole public session response from one A3/A2 read-set."""
+
+        clean = _clean_session_id(session_id)
+        # Expire the parent and its child together before the atomic capture.
+        # This also keeps expired artifact cleanup reachable before store
+        # ``load()`` can delete the row on its own.
+        self.purge_expired()
+        with self._lock(clean):
+            with self.a2_runtime._lock(clean):
+                workflow_state, workflow_read_status = read_workflow_state_once(
+                    self.store,
+                    clean,
+                    expected_type=A3SessionState,
+                )
+                child_state, child_read_status = read_child_state_once(
+                    self.a2_runtime.store,
+                    clean,
+                )
+                task_state = self._task_state_snapshot_v1_from_read_set(
+                    clean,
+                    workflow_state=workflow_state,
+                    workflow_read_status=workflow_read_status,
+                    child_state=child_state,
+                    child_read_status=child_read_status,
+                    capabilities=capabilities,
+                )
+                if workflow_read_status not in {READ_OK, READ_MISSING}:
+                    raise SessionResponseSnapshotError(
+                        "legacy workflow session state is unavailable",
+                        task_state=task_state,
+                    )
+
+                frozen_workflow = (
+                    workflow_state
+                    if type(workflow_state) is A3SessionState
+                    else None
+                )
+                child_snapshot: dict[str, object] | None = None
+                if (
+                    frozen_workflow is not None
+                    and frozen_workflow.entry_route in {"A2", "A3"}
+                ):
+                    if child_read_status not in {READ_OK, READ_MISSING}:
+                        raise SessionResponseSnapshotError(
+                            "legacy child session state is unavailable",
+                            task_state=task_state,
+                        )
+                    child_snapshot = (
+                        self.a2_runtime._legacy_session_snapshot_from_state(
+                            child_state
+                        )
+                    )
+                return SessionResponseSnapshotV1(
+                    uploaded_image_path=self._current_image_path_from_frozen_state(
+                        frozen_workflow
+                    ),
+                    legacy_session=self._legacy_session_snapshot_from_states(
+                        frozen_workflow,
+                        child_snapshot=child_snapshot,
+                    ),
+                    task_state=task_state,
+                )
+
+    def _task_state_snapshot_v1_from_read_set(
+        self,
+        session_id: str,
+        *,
+        workflow_state: object | None,
+        workflow_read_status: str,
+        child_state: AgentState | None,
+        child_read_status: str,
+        capabilities: TaskStateEntryCapabilities | None = None,
+    ) -> TaskStateSnapshotV1:
+        try:
+            workflow_retry_supported = bool(
+                workflow_read_status == READ_OK
+                and workflow_state is not None
+                and (
+                    (
+                        getattr(workflow_state, "entry_route", "") == "A3"
+                        and self.page_observer is not None
+                    )
+                    or (
+                        getattr(workflow_state, "entry_route", "") == ""
+                        and self.image_triage_authority is not None
+                    )
+                )
+            )
+        except Exception:  # noqa: BLE001 - malformed state cannot grant retry.
+            workflow_retry_supported = False
+        return build_a3_runtime_snapshot_v1(
+            session_id,
+            workflow_state=workflow_state,
+            workflow_read_status=workflow_read_status,
+            child_state=child_state,
+            child_read_status=child_read_status,
+            workflow_artifacts=self.artifacts,
+            child_artifacts=self.a2_runtime.artifacts,
+            workflow_retry_supported=workflow_retry_supported,
+            child_retry_supported=True,
+            capabilities=capabilities,
+        )
+
     def session_snapshot(self, session_id: str) -> dict[str, object]:
         clean = _clean_session_id(session_id)
+        state = self.store.load(clean)
+        child_snapshot = None
+        if state is not None and state.entry_route in {"A2", "A3"}:
+            child_snapshot = self.a2_runtime.session_snapshot(clean)
+        return self._legacy_session_snapshot_from_states(
+            state,
+            child_snapshot=child_snapshot,
+        )
+
+    def _legacy_session_snapshot_from_states(
+        self,
+        state: A3SessionState | None,
+        *,
+        child_snapshot: dict[str, object] | None,
+    ) -> dict[str, object]:
+        """Project the existing browser shape from frozen parent/child state."""
+
         auto_prepare_all_enabled = bool(
             self.auto_prepare_all_units and self.auto_cropper is not None
         )
-        state = self.store.load(clean)
         if state is None:
             return {
                 "session_valid": False,
@@ -1542,7 +1649,10 @@ class A3MvpRuntime:
                 },
             }
         if state.entry_route == "A2":
-            snapshot = dict(self.a2_runtime.session_snapshot(clean))
+            snapshot = dict(
+                child_snapshot
+                or self.a2_runtime._legacy_session_snapshot_from_state(None)
+            )
             snapshot["session_valid"] = True
             snapshot["has_active_image"] = bool(state.source_page_path)
             snapshot["image_route"] = "A2"
@@ -1575,7 +1685,10 @@ class A3MvpRuntime:
                     "units": [],
                 },
             }
-        child = self.a2_runtime.session_snapshot(clean)
+        child = dict(
+            child_snapshot
+            or self.a2_runtime._legacy_session_snapshot_from_state(None)
+        )
         if state.phase != A3_PHASE_A2_ACTIVE:
             child = {
                 "session_valid": True,
@@ -1594,6 +1707,15 @@ class A3MvpRuntime:
         snapshot["workflow_search_id"] = state.workflow_search_id or state.current_search_id
         snapshot["a3"] = self._a3_snapshot(state)
         return snapshot
+
+    @staticmethod
+    def _current_image_path_from_frozen_state(
+        state: A3SessionState | None,
+    ) -> Path | None:
+        if state is None or not state.source_page_path:
+            return None
+        path = Path(state.source_page_path).resolve()
+        return path if path.is_file() else None
 
     def resolve_upload(self, session_id: str, filename: str) -> Path | None:
         clean = _clean_session_id(session_id)

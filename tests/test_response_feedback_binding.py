@@ -15,7 +15,8 @@ from tiku_agent.agent import AgentResponse
 from tiku_agent.fastapi_demo import SESSION_COOKIE, create_app
 from tiku_agent.feedback_store import FEEDBACK_SCHEMA_VERSION, SQLiteFeedbackStore
 from tiku_agent.session_artifacts import session_key
-from tiku_agent.session_runtime import AgentProtocolError
+from tiku_agent.session_runtime import AgentProtocolError, SessionResponseSnapshotV1
+from tiku_agent.task_state_contract import empty_task_state_snapshot
 from tiku_shared.response_store import (
     ResponseProjection,
     ResponseStoreError,
@@ -120,6 +121,14 @@ class ResponseBindingRuntime:
     def current_image_path(self, session_id: str):
         del session_id
         return None
+
+    def session_response_snapshot_v1(self, session_id: str, *, capabilities=None):
+        del capabilities
+        return SessionResponseSnapshotV1(
+            uploaded_image_path=None,
+            legacy_session=self.session_snapshot(session_id),
+            task_state=empty_task_state_snapshot(),
+        )
 
     def persist_media(self, session_id: str, source: Path):
         del session_id, source

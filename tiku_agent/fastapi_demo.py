@@ -39,9 +39,12 @@ from tiku_agent.session_runtime import (
     AgentProtocolError,
     AgentRuntimeBusyError,
     AgentSessionRuntime,
+    SessionResponseSnapshotError,
     _ExecutionCancelled,
 )
 from tiku_agent.session_store import SQLiteSessionStore
+from tiku_agent.task_state_public import with_public_task_state
+from tiku_agent.task_state_runtime import TaskStateEntryCapabilities
 from tiku_agent.tool_result import is_public_tool_code
 from tiku_shared.model_costs import SQLiteModelCostLedger
 from tiku_shared.request_protocol import (
@@ -99,6 +102,10 @@ SUPPORTED_IMAGE_FORMATS = {
     "BMP": ("image/bmp", ".bmp"),
 }
 GENERIC_CONTENT_TYPES = {"", "application/octet-stream"}
+_SESSION_TASK_STATE_CAPABILITIES = TaskStateEntryCapabilities(
+    trusted_image_event=False,
+    reset_session_available=True,
+)
 FEEDBACK_MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 MAX_FEEDBACK_BYTES = 128 * 1024
 FEEDBACK_TAGS = {
@@ -497,7 +504,7 @@ def create_app(
             request_id=_request_id(request),
             search_id=search_id,
         )
-        if session_id:
+        if session_id and not isinstance(exc, SessionResponseSnapshotError):
             _record_protocol_event(
                 runtime,
                 session_id,
@@ -992,12 +999,21 @@ def create_app(
     @app.get("/api/session")
     def session(request: Request) -> JSONResponse:
         session_id = _session_id(request, cookie_name=session_cookie)
-        path = runtime.current_image_path(session_id)
-        snapshot = _public_session_snapshot(runtime.session_snapshot(session_id))
-        result = JSONResponse({
-            "uploaded_image": f"/api/upload/{path.name}" if path is not None else "",
-            "session": snapshot,
-        })
+        captured = runtime.session_response_snapshot_v1(
+            session_id,
+            capabilities=_SESSION_TASK_STATE_CAPABILITIES,
+        )
+        path = captured.uploaded_image_path
+        payload = with_public_task_state(
+            {
+                "uploaded_image": (
+                    f"/api/upload/{path.name}" if path is not None else ""
+                ),
+                "session": _public_session_snapshot(captured.legacy_session),
+            },
+            captured.task_state,
+        )
+        result = JSONResponse(payload)
         _set_session_cookie(
             result,
             session_id,

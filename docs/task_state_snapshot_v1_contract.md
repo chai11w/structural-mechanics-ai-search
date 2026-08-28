@@ -1,10 +1,10 @@
-# 统一任务状态快照 V1 契约（阶段 3.1 / 3.2）
+# 统一任务状态快照 V1 契约（阶段 3.1 / 3.2 / 3.3.1～3.3.2）
 
 ## 结论与范围
 
-阶段 3.1 完成父 workflow、当前子题任务和题目单元的权威状态契约定稿。本文件冻结 V1 的字段、词汇、字段来源、派生谓词、拓扑边界、一致性错误和冲突策略，是后续实现的权威规范。阶段 3.2.1 已实现从“已冻结 read-set + 可信入口证据”到 `TaskStateSnapshotV1` 的纯构造器，落在 `tiku_agent/task_state_builder.py`；阶段 3.2.2 已实现 `tiku_agent/task_state_runtime.py` 的锁内读取与证据包装，并由 `A3MvpRuntime.task_state_snapshot_v1()`、`AgentSessionRuntime.task_state_snapshot_v1()` 和 `AgentSessionRuntime.task_state_snapshot_v1_from_frozen_state()` 提供内部运行时入口；阶段 3.2.3 已用实际构造结果矩阵和组合读取异常完成边界验收。
+阶段 3.1 完成父 workflow、当前子题任务和题目单元的权威状态契约定稿。本文件冻结 V1 的字段、词汇、字段来源、派生谓词、拓扑边界、一致性错误和冲突策略，是后续实现的权威规范。阶段 3.2.1 已实现从“已冻结 read-set + 可信入口证据”到 `TaskStateSnapshotV1` 的纯构造器，落在 `tiku_agent/task_state_builder.py`；阶段 3.2.2 已实现 `tiku_agent/task_state_runtime.py` 的锁内读取与证据包装，并由 `A3MvpRuntime.task_state_snapshot_v1()`、`AgentSessionRuntime.task_state_snapshot_v1()` 和 `AgentSessionRuntime.task_state_snapshot_v1_from_frozen_state()` 提供内部运行时入口；阶段 3.2.3 已用实际构造结果矩阵和组合读取异常完成边界验收。阶段 3.3.1 冻结 exact typed 公共映射，阶段 3.3.2 已用 runtime 组合捕获把它接入 `/api/session`。
 
-**阶段 3.2 已能在服务端 runtime 内生成权威 V1 快照，但尚未接入公共出口。** 当前 HTTP、stream、前端和既有 `session_snapshot()` 仍未返回或消费统一快照；3.3.1 只冻结了纯公共映射，不改变这一接入状态。其余出口改造属于 3.3.2 及 3.4～3.5，不能因为内部运行时入口或映射函数已经存在就声称已经对外启用或上线。
+**当前只有 `/api/session` 在代码中返回根级 `task_state`，尚未部署启用到 8790。** JSON success、受控 HTTP error、stream、前端和既有 `session_snapshot()` 仍未返回或消费统一快照；它们分别属于 3.3.3～3.5，不能因为首个出口已接入就声称阶段 3.3 整体完成或已经上线。
 
 以下内容不属于阶段 3.1：
 
@@ -448,7 +448,7 @@ A3 route 下 child 视图中的 `unit_id` **来自父 `selected_unit_id`**，pro
 - `/api/session` 也必须先取锁，再一次性构造；
 - 不得用父子 `task_revision` 相等、大小或变化来猜测 read-set 是否原子。
 
-3.2.2 的实现映射如下：A3 wrapper 固定在 A3→A2 双锁内让父、子 store 各 `load()` 一次，并在完成证据验证和 V1 投影后逆序释放；standalone A2 只获取 A2 锁并单读 child；已持有 A2 锁的调用方可使用 frozen-state 入口，该入口不获取锁、不读取 store。读取异常正文不会进入快照；稳定未知 phase 和重复 unit 独立分类，文件探测失败只撤销对应动作证据。这里仅提供可调用的 runtime 能力，尚不表示 `/api/session` 或业务响应已经调用这些入口。
+3.2.2 的实现映射如下：A3 wrapper 固定在 A3→A2 双锁内让父、子 store 各 `load()` 一次，并在完成证据验证和 V1 投影后逆序释放；standalone A2 只获取 A2 锁并单读 child；已持有 A2 锁的调用方可使用 frozen-state 入口，该入口不获取锁、不读取 store。读取异常正文不会进入快照；稳定未知 phase 和重复 unit 独立分类，文件探测失败只撤销对应动作证据。3.2.2 完成时这里只提供可调用的内部 runtime 能力；3.3.2 现已由 `/api/session` 通过 `session_response_snapshot_v1()` 组合捕获使用同一 classified read-set，业务 JSON 和 stream 仍未接入。
 
 ### `None` 与 unreadable 严格分离
 
@@ -518,7 +518,7 @@ V1 consistency code 精确限定为以下 17 个：
 - A3 active child 不可读及父子同时不可读时，仍保持 A3→A2 锁序、每个 store 单次读取、逆序释放、稳定错误码、全动作清空和异常正文脱敏；
 - 同一 child ID 的旧 `task_revision` 不得获得 `retry_search`。
 
-项目 Python 3.12 下 51 项 task-state 定向测试及全仓 1035 项回归通过。因此阶段 3.2 整体 DONE；公共 HTTP/stream、前端消费和 8790 启用仍分别属于 3.3～3.5。
+项目 Python 3.12 下 51 项 task-state 定向测试及全仓 1035 项回归通过。因此阶段 3.2 整体 DONE；截至 3.2 验收时，公共 HTTP/stream、前端消费和 8790 启用仍分别属于 3.3～3.5。当前仅 `/api/session` 已在 3.3.2 接入且尚未部署。
 
 ## 响应时序与兼容边界
 
@@ -529,7 +529,7 @@ V1 consistency code 精确限定为以下 17 个：
 - stream 继续使用 `progress* -> result/error`；统一状态放进已有 result data，不增加尾随状态事件；
 - V1 不含 API key、邀请码、身份哈希、用户/模型原文、本地路径、URL、异常正文或任意扩展字典。
 
-## 3.3.1 公共映射契约（DONE；尚未接入出口）
+## 3.3.1 公共映射契约（DONE；3.3.2 已接入首个出口）
 
 3.3.1 只冻结把已由 runtime 构造的 `TaskStateSnapshotV1` 放入公共载荷的
 纯映射边界，实现在 `tiku_agent/task_state_public.py`，不获取锁、不读取
@@ -569,14 +569,46 @@ store、不调用 `session_snapshot()`，也不改变任何 HTTP、stream 或前
 本小步的定向测试位于 `tests/test_task_state_public.py`，覆盖空投影、完整
 child/current-unit schema、JSON/stream result/error 同值、输入不变、subclass/
 任意 mapping 拒绝和敏感值阻断；构造器测试另验证不安全存储文本
-fail-closed。3.3.2 才接入 `/api/session` 的锁内快照，之后分别处理
+fail-closed。3.3.2 已接入 `/api/session` 的锁内快照；后续分别处理
 JSON success、受控 HTTP error、stream 终态和跨出口验收。
+
+## 3.3.2 `/api/session` 接入（DONE；尚未部署）
+
+`GET /api/session` 的成功载荷现在固定为三个根级 sibling：
+`uploaded_image`、兼容字段 `session` 和权威 `task_state`。新增字段严格经过
+3.3.1 的 `with_public_task_state()` 映射；旧 `session` 的键、含义和清洗逻辑
+不变，A1/direct A2/standalone A2 下用于清除旧前端状态的 `a3: null` 语义
+继续保留，恢复题图 URL、Cookie、缓存头和媒体会话隔离也不变。
+
+为避免在同一 HTTP 响应中拼接不同时刻的数据，两个 runtime 新增
+`session_response_snapshot_v1()` 组合捕获：
+
+- standalone A2 先完成过期清理，再在 A2 session lock 内让 child store
+  `load()` 一次，从同一冻结 `AgentState` 投影题图、旧 session 与 V1；
+- A3 wrapper 先共同清理父子过期状态，再严格按 A3→A2 获取双锁，parent/
+  child store 各 `load()` 一次，并在解锁前完成三部分投影；
+- endpoint 不再分别调用 `current_image_path()`、`session_snapshot()` 和
+  `task_state_snapshot_v1()`，也不提供会退回多次 live 读取的兼容 fallback；
+- GET 没有可信新图事件，因此 `trusted_image_event=false`；同一 Web 入口确有
+  `/api/reset`，因此显式设置 `reset_session_available=true`，最终动作仍受
+  phase 候选和字段谓词过滤。
+
+missing/expired 只输出标准 empty V1；parent missing + child live 仍按
+`ORPHAN_CHILD_TASK` fail-closed。不可读状态不伪装成 200/IDLE：组合捕获以
+`SessionResponseSnapshotError` 保留本次锁内 typed V1 和安全 legacy 占位，
+通用 500 处理不会再次读取 store；错误载荷本阶段仍不输出 `task_state`，留待
+3.3.4。邀请码 401 在进入 endpoint 前返回，不为补状态读取 runtime。
+
+验收覆盖 standalone A2、A1/direct A2/A3 active、missing/orphan、不可读单读
+失败、A3→A2 锁序、父子各单读、过期状态及 artifacts 清理、旧 session/a3
+兼容、题图恢复与隔离、Cookie 属性、401 零读取和 8790/8890/8794 基线。
+项目 Python 3.12 下 64 项 task-state 定向测试及全仓 1053 项回归通过。
 
 ## 后续批次
 
 1. **3.2.1 纯构造器（DONE）**：已完成从冻结 read-set 和可信入口证据到 V1 快照的无 I/O 投影，实现与定向测试见 `tiku_agent/task_state_builder.py` 和 `tests/test_task_state_builder.py`。
 2. **3.2.2 锁内权威读取（DONE）**：已在 A3→A2 锁序内一次读取父子状态，在 standalone A2 锁内单读 child，并为已持锁调用方提供零重锁、零 store 读取的 frozen-state 入口；缺失/不可读/稳定未知分类、受控文件与入口能力证据及回归测试见 `tiku_agent/task_state_runtime.py`、两个 runtime 类和 `tests/test_task_state_runtime.py`。项目 Python 3.12 下 47 项 task-state 定向测试及全仓 1031 项回归通过。
 3. **3.2.3 异常与矩阵测试（DONE）**：父 route/phase 与 child phase/topology 的实际构造矩阵、A3 active/组合读取异常、脱敏及旧 revision 动作证据均已补齐；阶段 3.2 整体完成。项目 Python 3.12 下 51 项 task-state 定向测试及全仓 1035 项回归通过。
-4. **3.3 出口一致性（进行中）**：拆为 6 个可独立回退小步：3.3.1 公共映射契约已完成；3.3.2 接入 `/api/session`；3.3.3 接入 JSON success；3.3.4 单独接入受控 HTTP error；3.3.5 接入 stream result/error；3.3.6 做跨出口 parity 与回归验收。整体仍未对外启用。
+4. **3.3 出口一致性（进行中）**：拆为 6 个可独立回退小步：3.3.1 公共映射契约与 3.3.2 `/api/session` 接入已完成；下一步是 3.3.3 JSON success，之后依次为 3.3.4 受控 HTTP error、3.3.5 stream result/error、3.3.6 跨出口 parity 与回归验收。整体尚未部署启用。
 5. **3.4 前端消费（尚未实现）**：浏览器消费服务端 `allowed_actions/next_stage`，逐步删除对父子 phase 和 unit flag 的动作拼装。
 6. **3.5 启用门（尚未实现）**：定向/全量回归、8896 契约烟测、只读 live 对照后再精确启用 8790；不触碰 8788/8794/8795。
