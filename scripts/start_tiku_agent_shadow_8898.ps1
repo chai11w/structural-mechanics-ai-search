@@ -82,7 +82,20 @@ if (-not $healthy) {
     throw "8898 failed its startup health check.$([Environment]::NewLine)$tail"
 }
 
-Write-Output "PID=$($process.Id)"
+$activeListener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+if (@($activeListener).Count -ne 1) {
+    throw "8898 listener identity is ambiguous after startup."
+}
+$listenerPid = [int]$activeListener[0].OwningProcess
+$listenerProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $listenerPid"
+if (-not $listenerProcess -or
+    $listenerProcess.CommandLine -notlike "*scripts\run_tiku_agent_8898.py*") {
+    throw "8898 listener does not match the expected shadow command."
+}
+Set-Content -LiteralPath $PidFile -Value $listenerPid -Encoding ASCII
+
+Write-Output "PID=$listenerPid"
+Write-Output "LAUNCHER_PID=$($process.Id)"
 Write-Output "URL=http://127.0.0.1:$Port"
 Write-Output "SOURCE=$SourceDir"
 Write-Output "RUNTIME=$RuntimeDir"
