@@ -1,0 +1,22 @@
+{
+  "schema": "a1-a2-a3-routing-suite-v1",
+  "suite": "routing/a1_a2_a3",
+  "created_at": "2026-08-23",
+  "sources": [
+    {"path": "A1/ac1a2246e25445d98bed38c02949abfa.jpg", "expected_route": "A1", "sha256": "3383ca0aa469b8d313959d6d684205ae3fc1285c6a2e358514f51788077d2859"},
+    {"path": "A1/download.png", "expected_route": "A1", "sha256": "4425dfe9d6c4fd55cd4976f12e085d8ed261a744d334dbeaf2f3b19b7cfcf836"},
+    {"path": "A1/Snipaste_2026-08-23_16-39-40.png", "expected_route": "A1", "sha256": "bc1c65f64cedcbb79837a7e5dfc979dc8d986b04a6dd6da6b2ffeac91a747582"},
+    {"path": "A2/56d1db5c-a264-43b3-8366-0464f2026985.jpg", "expected_route": "A2", "sha256": "582a971dc7a99c8a11908cdcca7ac3ef92be0110590f80395bbec852a14f65c4"},
+    {"path": "A2/825617186343a4e6d562197e0ca8d425.jpg", "expected_route": "A2", "sha256": "b405f8b71cc61e62a0f315c46915045dbfc75e1942ce36625edc44081afe4ae0"},
+    {"path": "A2/c72f7aefb76c4919ad927dcbf722c9f0.jpg", "expected_route": "A2", "sha256": "3c4f0869fc1b808eef2443566512b0f2084c82b3537d472802ceb9862ba27d62"},
+    {"path": "A3/1.jpg", "expected_route": "A3", "sha256": "55f85469589efdfe9e205f8ca64396bc5fc9823bbd2e1e015de0e62ef01611f4"},
+    {"path": "A3/18e322adba6248b69cd3113bab7fd439.jpg", "expected_route": "A3", "sha256": "c0ac434ce63e798da94a47374467d728344a62046ee24946a78741f20b565744"},
+    {"path": "A3/2.jpg", "expected_route": "A3", "sha256": "998cd6c89ef9adef85d72c6cd1521b4531033e875eed02677bb31ae29049af9f"},
+    {"path": "A3/3.png", "expected_route": "A3", "sha256": "5fdf1bffe32d7c18a4ea54d4a3edd5dfb1e234913b5e956f66ea21107faf42f7"},
+    {"path": "A3/4.jpg", "expected_route": "A3", "sha256": "e8fef23239ed8f984bca977a9be5ffb88035dc82014681dcf98eb79f01375091"},
+    {"path": "A3/5.jpg", "expected_route": "A3", "sha256": "299ef0544e5086e809c3ffd6b65fb6425dcda70951584fe9bcb3e43f336b0651"},
+    {"path": "A3/6.jpg", "expected_route": "A3", "sha256": "451c6f1cd6b8fb8ed4c56d56a5764fbdee59a6f34bbd3ad26d5041f6fe6a0d1b"},
+    {"path": "A3/7.jpg", "expected_route": "A3", "sha256": "1a35c2c2b0f51e387f4e3380369dadde9f1745143d4cdf40f798086ae50146c0"},
+    {"path": "A3/cbdf060937a0b9d96fceab554d221431.jpg", "expected_route": "A3", "sha256": "7264bd44b9269628b23be03b4363c01d42d350b32a0b50f0a0d30a823d861c48"}
+  ]
+}
