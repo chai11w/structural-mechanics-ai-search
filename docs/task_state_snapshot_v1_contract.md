@@ -2,7 +2,7 @@
 
 ## 结论与范围
 
-阶段 3.1 完成父 workflow、当前子题任务和题目单元的权威状态契约定稿。本文件冻结 V1 的字段、词汇、字段来源、派生谓词、拓扑边界、一致性错误和冲突策略，是后续实现的权威规范。阶段 3.2.1 已实现从“已冻结 read-set + 可信入口证据”到 `TaskStateSnapshotV1` 的纯构造器，落在 `tiku_agent/task_state_builder.py`；阶段 3.2.2 已实现 `tiku_agent/task_state_runtime.py` 的锁内读取与证据包装，并由 `A3MvpRuntime.task_state_snapshot_v1()`、`AgentSessionRuntime.task_state_snapshot_v1()` 和 `AgentSessionRuntime.task_state_snapshot_v1_from_frozen_state()` 提供内部运行时入口。
+阶段 3.1 完成父 workflow、当前子题任务和题目单元的权威状态契约定稿。本文件冻结 V1 的字段、词汇、字段来源、派生谓词、拓扑边界、一致性错误和冲突策略，是后续实现的权威规范。阶段 3.2.1 已实现从“已冻结 read-set + 可信入口证据”到 `TaskStateSnapshotV1` 的纯构造器，落在 `tiku_agent/task_state_builder.py`；阶段 3.2.2 已实现 `tiku_agent/task_state_runtime.py` 的锁内读取与证据包装，并由 `A3MvpRuntime.task_state_snapshot_v1()`、`AgentSessionRuntime.task_state_snapshot_v1()` 和 `AgentSessionRuntime.task_state_snapshot_v1_from_frozen_state()` 提供内部运行时入口；阶段 3.2.3 已用实际构造结果矩阵和组合读取异常完成边界验收。
 
 **阶段 3.2 已能在服务端 runtime 内生成权威 V1 快照，但尚未接入公共出口。** 当前 HTTP、stream、前端和既有 `session_snapshot()` 仍未返回或消费统一快照；这些出口改造属于 3.3～3.5，不能因为内部运行时入口已经存在就声称已经对外启用或上线。
 
@@ -509,6 +509,17 @@ V1 consistency code 精确限定为以下 17 个：
 5. 未知或不可读 phase 对外使用稳定 `UNKNOWN`，不得透传任意原始值；
 6. 不从 response、trace、日志或另一个入口拼装替代状态来掩盖冲突。
 
+## 3.2.3 异常与矩阵验收
+
+阶段 3.2.3 不增加新的生产行为，只补齐对既有 3.2 实现的运行时证明：
+
+- 实际构造器覆盖空记录 `NONE/IDLE`，穷举可持久化的 `PENDING/A1/A2/A3` 合法父 route/phase，并验证这些 route 的全部非法 phase 组合均以 `WORKFLOW_ROUTE_PHASE_MISMATCH` fail-closed；
+- 九个 live child phase 分别在 standalone A2、direct A2 和 A3 active 三种载体上投影，另覆盖 `IDLE`、live/frozen `CANCELLED`、稳定未知 phase 与非 active 残留 child；
+- A3 active child 不可读及父子同时不可读时，仍保持 A3→A2 锁序、每个 store 单次读取、逆序释放、稳定错误码、全动作清空和异常正文脱敏；
+- 同一 child ID 的旧 `task_revision` 不得获得 `retry_search`。
+
+项目 Python 3.12 下 51 项 task-state 定向测试及全仓 1035 项回归通过。因此阶段 3.2 整体 DONE；公共 HTTP/stream、前端消费和 8790 启用仍分别属于 3.3～3.5。
+
 ## 响应时序与兼容边界
 
 - 业务响应继续优先使用持有 session lock 时冻结的 response-time state，不能在响应末尾重新读取 live 状态替换；
@@ -522,6 +533,7 @@ V1 consistency code 精确限定为以下 17 个：
 
 1. **3.2.1 纯构造器（DONE）**：已完成从冻结 read-set 和可信入口证据到 V1 快照的无 I/O 投影，实现与定向测试见 `tiku_agent/task_state_builder.py` 和 `tests/test_task_state_builder.py`。
 2. **3.2.2 锁内权威读取（DONE）**：已在 A3→A2 锁序内一次读取父子状态，在 standalone A2 锁内单读 child，并为已持锁调用方提供零重锁、零 store 读取的 frozen-state 入口；缺失/不可读/稳定未知分类、受控文件与入口能力证据及回归测试见 `tiku_agent/task_state_runtime.py`、两个 runtime 类和 `tests/test_task_state_runtime.py`。项目 Python 3.12 下 47 项 task-state 定向测试及全仓 1031 项回归通过。
-3. **3.3 出口一致性（NEXT，尚未实现）**：接入 `/api/session`、JSON success、stream result 和受控错误出口，保持 response-time 冻结与旧字段兼容。
-4. **3.4 前端消费（尚未实现）**：浏览器消费服务端 `allowed_actions/next_stage`，逐步删除对父子 phase 和 unit flag 的动作拼装。
-5. **3.5 启用门（尚未实现）**：定向/全量回归、8896 契约烟测、只读 live 对照后再精确启用 8790；不触碰 8788/8794/8795。
+3. **3.2.3 异常与矩阵测试（DONE）**：父 route/phase 与 child phase/topology 的实际构造矩阵、A3 active/组合读取异常、脱敏及旧 revision 动作证据均已补齐；阶段 3.2 整体完成。项目 Python 3.12 下 51 项 task-state 定向测试及全仓 1035 项回归通过。
+4. **3.3 出口一致性（NEXT，尚未实现）**：接入 `/api/session`、JSON success、stream result 和受控错误出口，保持 response-time 冻结与旧字段兼容。
+5. **3.4 前端消费（尚未实现）**：浏览器消费服务端 `allowed_actions/next_stage`，逐步删除对父子 phase 和 unit flag 的动作拼装。
+6. **3.5 启用门（尚未实现）**：定向/全量回归、8896 契约烟测、只读 live 对照后再精确启用 8790；不触碰 8788/8794/8795。

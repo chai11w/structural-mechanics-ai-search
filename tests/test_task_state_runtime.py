@@ -388,6 +388,129 @@ class TaskStateRuntimeTests(unittest.TestCase):
         self.assertNotIn("secret child failure", public)
         self.assertNotIn("private", public)
 
+    def test_a3_active_child_read_failure_is_fail_closed_under_both_locks(self):
+        events: list[str] = []
+        a3_lock = TracingLock("a3", events)
+        a2_lock = TracingLock("a2", events)
+        parent_store = SingleReadStore(
+            _workflow(
+                route="A3",
+                phase="A2_ACTIVE",
+                units=[_unit()],
+                selected_unit_id="g1-u1",
+            ),
+            name="parent",
+            events=events,
+            required_locks=(a3_lock, a2_lock),
+        )
+        child_store = SingleReadStore(
+            error=RuntimeError(
+                "secret A3 child failure C:/private/a3-child-state.json"
+            ),
+            name="child",
+            events=events,
+            required_locks=(a3_lock, a2_lock),
+        )
+
+        snapshot = self._a3_runtime(
+            parent_store,
+            child_store,
+            a3_lock=a3_lock,
+            a2_lock=a2_lock,
+        ).task_state_snapshot_v1(SESSION_ID)
+
+        self.assertEqual(snapshot.consistency.codes, ("CHILD_STATE_UNREADABLE",))
+        self.assertEqual(snapshot.consistency.status, "INCONSISTENT")
+        self.assertEqual(snapshot.workflow.status, "INCONSISTENT")
+        self.assertEqual(snapshot.workflow.allowed_actions, ())
+        # An unreadable A3 child cannot safely expose its identity or unit
+        # binding.  The fail-closed projection therefore omits the child view
+        # together with all unit state instead of manufacturing placeholders.
+        self.assertIsNone(snapshot.active_child_task)
+        self.assertIsNone(snapshot.current_unit)
+        self.assertEqual(snapshot.units, ())
+        self.assertEqual(parent_store.load_attempt_count, 1)
+        self.assertEqual(child_store.load_attempt_count, 1)
+        self.assertEqual(parent_store.load_count, 1)
+        self.assertEqual(child_store.load_count, 1)
+        self.assertEqual(
+            events,
+            [
+                "a3:acquire",
+                "a2:acquire",
+                "parent:load",
+                "child:load",
+                "a2:release",
+                "a3:release",
+            ],
+        )
+        self.assertFalse(a3_lock.held)
+        self.assertFalse(a2_lock.held)
+        public = json.dumps(snapshot.to_dict(), ensure_ascii=False)
+        self.assertNotIn("secret A3 child failure", public)
+        self.assertNotIn("a3-child-state.json", public)
+
+    def test_parent_and_child_read_failures_are_ordered_and_fail_closed(self):
+        events: list[str] = []
+        a3_lock = TracingLock("a3", events)
+        a2_lock = TracingLock("a2", events)
+        parent_store = SingleReadStore(
+            error=RuntimeError(
+                "secret parent double failure C:/private/parent-state.json"
+            ),
+            name="parent",
+            events=events,
+            required_locks=(a3_lock, a2_lock),
+        )
+        child_store = SingleReadStore(
+            error=RuntimeError(
+                "secret child double failure C:/private/child-state.json"
+            ),
+            name="child",
+            events=events,
+            required_locks=(a3_lock, a2_lock),
+        )
+
+        snapshot = self._a3_runtime(
+            parent_store,
+            child_store,
+            a3_lock=a3_lock,
+            a2_lock=a2_lock,
+        ).task_state_snapshot_v1(SESSION_ID)
+
+        self.assertEqual(
+            snapshot.consistency.codes,
+            ("WORKFLOW_STATE_UNREADABLE", "CHILD_STATE_UNREADABLE"),
+        )
+        self.assertEqual(snapshot.consistency.status, "INCONSISTENT")
+        self.assertEqual(snapshot.workflow.status, "INCONSISTENT")
+        self.assertEqual(snapshot.workflow.allowed_actions, ())
+        self.assertIsNone(snapshot.active_child_task)
+        self.assertIsNone(snapshot.current_unit)
+        self.assertEqual(snapshot.units, ())
+        self.assertEqual(parent_store.load_attempt_count, 1)
+        self.assertEqual(child_store.load_attempt_count, 1)
+        self.assertEqual(parent_store.load_count, 1)
+        self.assertEqual(child_store.load_count, 1)
+        self.assertEqual(
+            events,
+            [
+                "a3:acquire",
+                "a2:acquire",
+                "parent:load",
+                "child:load",
+                "a2:release",
+                "a3:release",
+            ],
+        )
+        self.assertFalse(a3_lock.held)
+        self.assertFalse(a2_lock.held)
+        public = json.dumps(snapshot.to_dict(), ensure_ascii=False)
+        self.assertNotIn("secret parent double failure", public)
+        self.assertNotIn("secret child double failure", public)
+        self.assertNotIn("parent-state.json", public)
+        self.assertNotIn("child-state.json", public)
+
     def test_standalone_read_failure_releases_a2_lock(self):
         events: list[str] = []
         a2_lock = TracingLock("a2", events)
@@ -408,6 +531,9 @@ class TaskStateRuntimeTests(unittest.TestCase):
         self.assertEqual(events, ["a2:acquire", "child:load", "a2:release"])
         self.assertFalse(a2_lock.held)
         self.assertEqual(child_store.load_count, 1)
+        self.assertEqual(child_store.load_attempt_count, 1)
+        public = json.dumps(snapshot.to_dict(), ensure_ascii=False)
+        self.assertNotIn("secret standalone failure", public)
 
     def test_frozen_cancelled_never_touches_lock_or_store_but_live_residual_is_hidden(self):
         poison_lock = TracingLock("poison", [], poison=True)

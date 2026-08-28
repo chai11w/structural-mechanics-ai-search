@@ -9,7 +9,7 @@
 - 8795 仍是可替换的过渡后台；live 已厘清页/题、模型调用/请求次数、记录时间/页面等待/反馈时间及“模型估算费用”文案，本轮未增加 Trace 页面。
 - Trace/Response 主链独立于 8795。发布前历史覆盖差异已审计；发布后真实烟测的 Response、反馈、费用、Trace、身份和时间顺序均能对应。
 - 8 个 live SQLite 库在发布前后均通过 `quick_check`、`integrity_check`；烟测完成 A2、A3、追问、正/负反馈、费用展示和停用立即失效，4 条新反馈全部绑定服务端 Response。
-- 全仓 1031 项回归通过；真实烟测发现并修复 JSON 长模型调用阻塞健康检查的问题，长请求期间 8 次健康探测均成功且 PID 未漂移。
+- 全仓 1035 项回归通过；真实烟测发现并修复 JSON 长模型调用阻塞健康检查的问题，长请求期间 8 次健康探测均成功且 PID 未漂移。
 - 8795 控制目录 ACL 已限制为当前服务账号、SYSTEM 和管理员；仓库外受限 Git Bundle、8 库在线副本、控制库/密钥成对备份及脱敏 postflight 已验证。
 - 已创建 3 个独立、7 天、每日 3 元模型估算额度的正式内测邀请码，逐个登录验证成功；明文只通过 8795 受控复制，不进入日志或项目文件。
 
@@ -25,7 +25,7 @@
 - Trace Store 使用严格白名单、每 trace 唯一终态和有界异步写入；Response Store 生成隐私受限投影并按 trace 幂等，冲突/写失败 fail-closed。两者均不依赖 8795。
 - 独立只读诊断 CLI 支持按 trace/response/feedback/稳定身份有界查询；retention 默认 dry-run，apply 需仓库外计划、备份、停机确认和漂移校验。
 - 8790/8795 看门狗固定端口，精确核对 PID、Python、完整参数和监听者；单实例锁、旧 PID 活进程保护、候选启动验证，禁止按端口杀未知进程。
-- 阶段 3.1 已冻结 `TaskStateSnapshotV1` 契约；3.2.1 无 I/O 纯构造器与 3.2.2 锁内 runtime wrapper 均已完成。A3 固定按 A3→A2 锁序让父子 store 各读取一次，standalone A2 只获取 A2 锁，frozen-state 入口不重锁/不重读；缺失、不可读、稳定未知状态和受控文件证据均 fail-closed。47 项 task-state 定向测试及全仓 1031 项回归通过；HTTP、stream、前端和既有 `session_snapshot()` 尚未接入 V1。
+- 阶段 3.1 已冻结 `TaskStateSnapshotV1` 契约；3.2.1 无 I/O 纯构造器、3.2.2 锁内 runtime wrapper 与 3.2.3 异常/矩阵测试均已完成，阶段 3.2 整体 DONE。A3 固定按 A3→A2 锁序让父子 store 各读取一次，standalone A2 只获取 A2 锁，frozen-state 入口不重锁/不重读；缺失、不可读、稳定未知状态、组合读取失败和受控文件证据均 fail-closed。实际父 route/phase、九个 child phase × 三种载体、17 个一致性 code、旧 revision 与残留 `CANCELLED` 均有测试证据；51 项 task-state 定向测试及全仓 1035 项回归通过。HTTP、stream、前端和既有 `session_snapshot()` 尚未接入 V1。
 
 ## In Progress
 
@@ -80,7 +80,7 @@
 
 1. 在 Cloudflare 账户侧为 8790/8795 配置独立 Access，并为两条登录路径启用窄范围边缘限速；完成后从 8795 复制 3 个邀请码分别发放。
 2. 观察 24～48 小时，以成功率、排队、A3 裁图、候选质量、反馈错绑和估算费用决定下一步；异常时先停用邀请码再撤销测试者 Access。
-3. 状态快照的下一独立开发批次是阶段 3.3 出口一致性；本轮不开始。进入 3.3 前继续以真实内测数据和当前优先级判断时机，不把 HTTP/stream、前端或 8790 启用混入 3.2.2。
+3. 状态快照阶段 3.2 已完成；下一独立开发批次是阶段 3.3 出口一致性，本轮不开始。进入 3.3 前继续以真实内测数据和当前优先级判断时机，不把 HTTP/stream、前端或 8790 启用倒灌进已冻结的 3.2 基线。
 
 ## Important Commands
 

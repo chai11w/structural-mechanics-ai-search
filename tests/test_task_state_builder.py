@@ -4,6 +4,7 @@ import unittest
 from unittest import mock
 
 from tiku_agent import task_state_builder as builder
+from tiku_agent import task_state_contract as contract
 from tiku_agent.a3_runtime import A3SessionState
 from tiku_agent.state import AgentState
 
@@ -267,6 +268,227 @@ class TaskStateBuilderTests(unittest.TestCase):
         self.assertEqual([unit.status for unit in complete.units], ["COMPLETED", "CLOSED"])
         self.assertIsNone(complete.current_unit)
         self.assertIsNone(complete.active_child_task)
+
+    def test_builder_projects_the_complete_workflow_route_phase_matrix(self):
+        phase_views = {
+            "IDLE": ("IDLE", "UPLOAD_IMAGE"),
+            "UNDERSTANDING_PAGE": ("RUNNING", "SYSTEM_CONTINUE"),
+            "AUTO_GROUNDING_PAGE": ("RUNNING", "SYSTEM_CONTINUE"),
+            "AUTO_VALIDATING_CROPS": ("RUNNING", "SYSTEM_CONTINUE"),
+            "WAIT_UNIT_SELECTION": ("WAITING_USER", "SELECT_UNIT"),
+            "CROP_REQUIRED": ("WAITING_USER", "SUBMIT_CROP"),
+            "VERIFYING_CROP": ("RUNNING", "SYSTEM_CONTINUE"),
+            "A2_ACTIVE": ("RUNNING", "FOLLOW_CHILD_TASK"),
+            "COMPLETE": ("COMPLETED", "DONE"),
+            "ERROR": ("FAILED", "RETRY"),
+        }
+        legal_phases = {
+            "PENDING": {"UNDERSTANDING_PAGE", "ERROR"},
+            "A1": {"COMPLETE"},
+            "A2": {"A2_ACTIVE"},
+            "A3": {
+                "UNDERSTANDING_PAGE",
+                "AUTO_GROUNDING_PAGE",
+                "AUTO_VALIDATING_CROPS",
+                "WAIT_UNIT_SELECTION",
+                "CROP_REQUIRED",
+                "VERIFYING_CROP",
+                "A2_ACTIVE",
+                "COMPLETE",
+                "ERROR",
+            },
+        }
+        current_unit_phases = {"CROP_REQUIRED", "VERIFYING_CROP", "A2_ACTIVE"}
+
+        self.assertEqual(
+            set(phase_views),
+            set(contract.WORKFLOW_PHASE_CONTRACTS) - {contract.PHASE_UNKNOWN},
+        )
+        self.assertEqual(
+            set(legal_phases),
+            set(contract.WORKFLOW_PHASES_BY_ROUTE)
+            - {contract.WORKFLOW_ROUTE_NONE},
+        )
+        for route, phases in legal_phases.items():
+            self.assertEqual(phases, set(contract.WORKFLOW_PHASES_BY_ROUTE[route]))
+
+        empty = self._build()
+        self.assertEqual(empty.consistency.status, "OK")
+        self.assertEqual(empty.workflow.route, contract.WORKFLOW_ROUTE_NONE)
+        self.assertEqual(empty.workflow.phase, "IDLE")
+        self.assertEqual(empty.workflow.status, "IDLE")
+        self.assertEqual(empty.workflow.next_stage, "UPLOAD_IMAGE")
+
+        for route, allowed in legal_phases.items():
+            for phase, (expected_status, expected_next_stage) in phase_views.items():
+                with self.subTest(route=route, phase=phase):
+                    workflow_kwargs = {}
+                    child = None
+                    if route == "A3" and phase in current_unit_phases:
+                        workflow_kwargs = {
+                            "units": [_unit("g1-u1", 1)],
+                            "selected_unit_id": "g1-u1",
+                        }
+                    if phase == "A2_ACTIVE" and route in {"A2", "A3"}:
+                        child = self._child(phase="WAIT_CHAPTER")
+
+                    snapshot = self._build(
+                        workflow=self._workflow(
+                            route=route,
+                            phase=phase,
+                            **workflow_kwargs,
+                        ),
+                        child=child,
+                    )
+
+                    if phase not in allowed:
+                        self.assertFailClosed(
+                            snapshot,
+                            ("WORKFLOW_ROUTE_PHASE_MISMATCH",),
+                        )
+                        continue
+
+                    self.assertEqual(snapshot.consistency.status, "OK")
+                    self.assertEqual(snapshot.workflow.route, route)
+                    self.assertEqual(snapshot.workflow.phase, phase)
+                    self.assertEqual(snapshot.workflow.status, expected_status)
+                    self.assertEqual(
+                        snapshot.workflow.next_stage,
+                        expected_next_stage,
+                    )
+                    if route == "A3" and phase in current_unit_phases:
+                        self.assertEqual(snapshot.current_unit.unit_id, "g1-u1")
+                    else:
+                        self.assertIsNone(snapshot.current_unit)
+
+    def test_builder_projects_the_complete_child_phase_topology_matrix(self):
+        active_phase_views = {
+            "PROCESSING": ("RUNNING", "SYSTEM_CONTINUE"),
+            "WAIT_CHAPTER": ("WAITING_USER", "SET_CHAPTER"),
+            "WAIT_QUESTION_CHOICE": ("WAITING_USER", "SELECT_QUESTION"),
+            "WAIT_CANDIDATE_CHOICE": ("WAITING_USER", "SELECT_CANDIDATE"),
+            "READY_TO_ROUTE": ("RUNNING", "SYSTEM_CONTINUE"),
+            "READY_FOR_SEARCH": ("RUNNING", "SYSTEM_CONTINUE"),
+            "ANSWERED": ("COMPLETED", "DONE"),
+            "ERROR": ("FAILED", "RETRY"),
+            "NO_MATCH": ("NO_MATCH", "DONE"),
+        }
+        self.assertEqual(
+            set(active_phase_views),
+            set(contract.CHILD_PHASE_CONTRACTS)
+            - {"IDLE", "CANCELLED", contract.PHASE_UNKNOWN},
+        )
+
+        for topology in ("standalone", "direct-a2", "a3-active"):
+            for phase, (expected_status, expected_next_stage) in active_phase_views.items():
+                with self.subTest(topology=topology, phase=phase):
+                    workflow = None
+                    builder_topology = builder.TOPOLOGY_STANDALONE_A2
+                    expected_unit_id = ""
+                    if topology == "direct-a2":
+                        workflow = self._workflow(route="A2", phase="A2_ACTIVE")
+                        builder_topology = builder.TOPOLOGY_A3_WRAPPER
+                    elif topology == "a3-active":
+                        workflow = self._workflow(
+                            route="A3",
+                            phase="A2_ACTIVE",
+                            units=[_unit("g1-u1", 1)],
+                            selected_unit_id="g1-u1",
+                        )
+                        builder_topology = builder.TOPOLOGY_A3_WRAPPER
+                        expected_unit_id = "g1-u1"
+
+                    snapshot = self._build(
+                        workflow=workflow,
+                        child=self._child(phase=phase),
+                        topology=builder_topology,
+                    )
+
+                    self.assertEqual(snapshot.consistency.status, "OK")
+                    self.assertEqual(snapshot.active_child_task.phase, phase)
+                    self.assertEqual(
+                        snapshot.active_child_task.status,
+                        expected_status,
+                    )
+                    self.assertEqual(
+                        snapshot.active_child_task.next_stage,
+                        expected_next_stage,
+                    )
+                    self.assertEqual(
+                        snapshot.active_child_task.unit_id,
+                        expected_unit_id,
+                    )
+                    if workflow is not None:
+                        self.assertEqual(snapshot.workflow.status, "RUNNING")
+                        self.assertEqual(
+                            snapshot.workflow.next_stage,
+                            "FOLLOW_CHILD_TASK",
+                        )
+
+        idle = self._child(phase="IDLE")
+        standalone_idle = self._build(
+            child=idle,
+            topology=builder.TOPOLOGY_STANDALONE_A2,
+        )
+        self.assertEqual(standalone_idle.consistency.status, "OK")
+        self.assertIsNone(standalone_idle.active_child_task)
+
+        direct_parent = self._workflow(route="A2", phase="A2_ACTIVE")
+        self.assertFailClosed(
+            self._build(workflow=direct_parent, child=idle),
+            ("ACTIVE_CHILD_TASK_MISSING",),
+        )
+
+        a3_parent = self._workflow(
+            route="A3",
+            phase="A2_ACTIVE",
+            units=[_unit("g1-u1", 1)],
+            selected_unit_id="g1-u1",
+        )
+        self.assertFailClosed(
+            self._build(workflow=a3_parent, child=idle),
+            ("ACTIVE_CHILD_TASK_MISSING",),
+        )
+
+        cancelled = self._child(phase="CANCELLED")
+        self.assertFailClosed(
+            self._build(workflow=a3_parent, child=cancelled),
+            ("ACTIVE_CHILD_TASK_MISSING",),
+        )
+        frozen_cancelled = self._build(
+            workflow=a3_parent,
+            child=cancelled,
+            child_observation=builder.CHILD_OBSERVATION_RESPONSE_FROZEN,
+        )
+        self.assertEqual(frozen_cancelled.consistency.status, "OK")
+        self.assertEqual(frozen_cancelled.active_child_task.phase, "CANCELLED")
+        self.assertEqual(frozen_cancelled.active_child_task.status, "CANCELLED")
+        self.assertEqual(frozen_cancelled.active_child_task.next_stage, "DONE")
+        self.assertEqual(frozen_cancelled.active_child_task.unit_id, "g1-u1")
+        self.assertEqual(frozen_cancelled.workflow.status, "RUNNING")
+        self.assertEqual(
+            frozen_cancelled.workflow.next_stage,
+            "FOLLOW_CHILD_TASK",
+        )
+
+        for topology, parent in (
+            ("direct-a2", direct_parent),
+            ("a3-active", a3_parent),
+        ):
+            with self.subTest(topology=topology, phase="UNKNOWN"):
+                unknown_child = self._child(phase="WAIT_CHAPTER")
+                unknown_child.phase = contract.PHASE_UNKNOWN
+                self.assertFailClosed(
+                    self._build(workflow=parent, child=unknown_child),
+                    ("UNKNOWN_CHILD_PHASE",),
+                )
+
+        a1_residual = self._build(
+            workflow=self._workflow(route="A1", phase="COMPLETE"),
+            child=self._child(phase="WAIT_CHAPTER"),
+        )
+        self.assertEqual(a1_residual.consistency.status, "OK")
+        self.assertIsNone(a1_residual.active_child_task)
 
     def test_workflow_completed_steps_are_derived_from_current_fields(self):
         unit1 = _unit("g1-u1", 1)
@@ -726,6 +948,18 @@ class TaskStateBuilderTests(unittest.TestCase):
             ),
         )
         self.assertNotIn("retry_search", no_retry.active_child_task.allowed_actions)
+
+        stale_retry_revision = self._build(
+            child=self._child(phase="ERROR", last_error="safe failure"),
+            topology=builder.TOPOLOGY_STANDALONE_A2,
+            evidence=builder.TaskStateBuildEvidence(
+                retryable_child_task=(CHILD_ID, 2),
+            ),
+        )
+        self.assertNotIn(
+            "retry_search",
+            stale_retry_revision.active_child_task.allowed_actions,
+        )
 
         for phase in ("PROCESSING", "READY_TO_ROUTE", "READY_FOR_SEARCH"):
             with self.subTest(internal_phase=phase):
