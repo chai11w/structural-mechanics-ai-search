@@ -540,6 +540,7 @@ class A3MvpRuntime:
         cost_ledger: SQLiteModelCostLedger | None = None,
         intent_engine: A3IntentEngineV1 | None = None,
         enable_three_scope_cancel_clarification: bool = False,
+        a3_page_orienter: Callable[[str | Path], Path] | None = None,
         max_concurrent_tasks: int = 0,
         max_queued_tasks: int = 0,
         queue_wait_seconds: float = 90.0,
@@ -562,6 +563,7 @@ class A3MvpRuntime:
         self.enable_three_scope_cancel_clarification = bool(
             enable_three_scope_cancel_clarification
         )
+        self.a3_page_orienter = a3_page_orienter
         self._execution_gate = _ExecutionGate(
             max_concurrent_tasks,
             max_queued_tasks,
@@ -2125,6 +2127,9 @@ class A3MvpRuntime:
 
         state.entry_route = "A3"
         state.phase = A3_PHASE_UNDERSTANDING
+        if self.a3_page_orienter is not None:
+            persisted = self.a3_page_orienter(persisted)
+            state.source_page_path = str(persisted)
         self.store.save(state)
         self._record_image_route(state, "A3", identity_key=identity_key)
         return self._understand_page(

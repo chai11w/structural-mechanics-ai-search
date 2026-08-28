@@ -21,11 +21,17 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
         self.assertTrue(defaults.enable_triage)
         self.assertTrue(defaults.enable_auto_crop)
         self.assertTrue(defaults.enable_output_watchdog)
+        self.assertTrue(defaults.enable_a3_text_orientation)
         self.assertEqual(defaults.max_concurrent_tasks, 1)
         self.assertEqual(defaults.max_queued_tasks, 2)
         self.assertEqual(defaults.queue_wait_seconds, 55.0)
         self.assertFalse(
             build_argument_parser().parse_args(["--disable-output-watchdog"]).enable_output_watchdog
+        )
+        self.assertFalse(
+            build_argument_parser()
+            .parse_args(["--disable-a3-text-orientation"])
+            .enable_a3_text_orientation
         )
 
         custom = build_argument_parser().parse_args([
@@ -73,6 +79,7 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
                 control_db=control_path,
                 enable_triage=False,
                 enable_auto_crop=False,
+                enable_a3_text_orientation=False,
             )
 
             self.assertIsNotNone(app)
@@ -80,7 +87,10 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
     def test_production_auto_validates_all_units_before_selection(self):
         with tempfile.TemporaryDirectory() as temp, patch(
             "scripts.run_tiku_agent_8790.build_a3_runtime"
-        ) as build_runtime:
+        ) as build_runtime, patch(
+            "scripts.run_tiku_agent_8790.build_a3_page_orienter",
+            return_value="orienter",
+        ):
             build_runtime.return_value = object()
 
             app = build_app(
@@ -110,9 +120,32 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
             self.assertTrue(
                 build_runtime.call_args.kwargs["preserve_a2_artifacts_on_cancel"]
             )
+            self.assertEqual(
+                build_runtime.call_args.kwargs["a3_page_orienter"],
+                "orienter",
+            )
             self.assertEqual(build_runtime.call_args.kwargs["max_concurrent_tasks"], 3)
             self.assertEqual(build_runtime.call_args.kwargs["max_queued_tasks"], 4)
             self.assertEqual(build_runtime.call_args.kwargs["queue_wait_seconds"], 66)
+
+    def test_production_orientation_can_be_disabled_without_loading_ocr(self):
+        with tempfile.TemporaryDirectory() as temp, patch(
+            "scripts.run_tiku_agent_8790.build_a3_runtime",
+            return_value=object(),
+        ) as build_runtime, patch(
+            "scripts.run_tiku_agent_8790.build_a3_page_orienter"
+        ) as build_orienter:
+            app = build_app(
+                Path(temp) / "runtime",
+                enable_triage=False,
+                enable_a3_text_orientation=False,
+            )
+
+            self.assertIsNotNone(app)
+            build_orienter.assert_not_called()
+            self.assertIsNone(
+                build_runtime.call_args.kwargs["a3_page_orienter"]
+            )
 
 
 if __name__ == "__main__":

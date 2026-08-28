@@ -72,6 +72,7 @@ def build_runtime(
     enable_author_contact_fallback: bool = True,
     enable_three_scope_cancel_clarification: bool = True,
     preserve_a2_artifacts_on_cancel: bool = True,
+    a3_page_orienter=None,
     max_concurrent_tasks: int = 0,
     max_queued_tasks: int = 0,
     queue_wait_seconds: float = 90.0,
@@ -142,6 +143,7 @@ def build_runtime(
             else None
         ),
         enable_three_scope_cancel_clarification=enable_three_scope_cancel_clarification,
+        a3_page_orienter=a3_page_orienter,
         max_concurrent_tasks=max_concurrent_tasks,
         max_queued_tasks=max_queued_tasks,
         queue_wait_seconds=queue_wait_seconds,

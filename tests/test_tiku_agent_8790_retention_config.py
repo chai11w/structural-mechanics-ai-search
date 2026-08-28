@@ -33,7 +33,11 @@ class TikuAgent8790RetentionConfigTest(unittest.TestCase):
                     return_value=object(),
                 ) as create_app,
             ):
-                build_app(root / "runtime", control_db=control_store.path)
+                build_app(
+                    root / "runtime",
+                    control_db=control_store.path,
+                    enable_a3_text_orientation=False,
+                )
 
             provider = create_app.call_args.kwargs[
                 "feedback_retention_days_provider"
@@ -65,7 +69,7 @@ class TikuAgent8790RetentionConfigTest(unittest.TestCase):
                     return_value=object(),
                 ) as create_app,
             ):
-                build_app(root / "runtime")
+                build_app(root / "runtime", enable_a3_text_orientation=False)
 
             self.assertIsNone(
                 create_app.call_args.kwargs["feedback_retention_days_provider"]

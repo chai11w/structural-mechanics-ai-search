@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import site
 import sys
 from pathlib import Path
 
@@ -20,11 +21,30 @@ from tiku_agent.fastapi_demo import SESSION_COOKIE, create_app
 from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.invite_access import InviteAccess
 from tiku_agent.output_watchdog import OutputWatchdog
+from tiku_agent.a3_text_orientation import RapidOcrTextPageOrienter
 from tiku_shared.trace_events import SQLiteTraceEventStore, TraceEventRecorder
 
 
 DEFAULT_PORT = 8790
 DEFAULT_RUNTIME_DIR = BASE / ".tmp_tiku_agent_v2_prod_8790"
+DEFAULT_A3_ORIENTATION_DEPENDENCY_DIR = Path(
+    r"F:\ruanjian\tiku-a3-orientation-8790"
+)
+
+
+def build_a3_page_orienter(
+    dependency_dir: str | Path = DEFAULT_A3_ORIENTATION_DEPENDENCY_DIR,
+) -> RapidOcrTextPageOrienter:
+    dependency_path = Path(dependency_dir).resolve()
+    if not dependency_path.is_dir():
+        raise RuntimeError(
+            f"A3 orientation dependency directory not found: {dependency_path}"
+        )
+    site.addsitedir(str(dependency_path))
+    return RapidOcrTextPageOrienter(
+        worker_count=4,
+        onnx_threads_per_engine=1,
+    )
 
 
 def _positive_int(value: str) -> int:
@@ -74,6 +94,8 @@ def build_app(
     triage_timeout_seconds: float = 120.0,
     reply_timeout_seconds: float = 60.0,
     enable_output_watchdog: bool = True,
+    enable_a3_text_orientation: bool = True,
+    a3_orientation_dependency_dir: str | Path = DEFAULT_A3_ORIENTATION_DEPENDENCY_DIR,
     max_concurrent_tasks: int = 1,
     max_queued_tasks: int = 2,
     queue_wait_seconds: float = 55.0,
@@ -94,6 +116,11 @@ def build_app(
         root / "output_watchdog",
         enabled=enable_output_watchdog,
     )
+    a3_page_orienter = (
+        build_a3_page_orienter(a3_orientation_dependency_dir)
+        if enable_a3_text_orientation
+        else None
+    )
     return create_app(
         runtime=build_a3_runtime(
             root,
@@ -110,6 +137,7 @@ def build_app(
             enable_author_contact_fallback=True,
             enable_three_scope_cancel_clarification=True,
             preserve_a2_artifacts_on_cancel=True,
+            a3_page_orienter=a3_page_orienter,
             max_concurrent_tasks=max_concurrent_tasks,
             max_queued_tasks=max_queued_tasks,
             queue_wait_seconds=queue_wait_seconds,
@@ -166,6 +194,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Maximum queue wait before returning busy (default: 55)",
     )
     parser.add_argument(
+        "--a3-orientation-dependency-dir",
+        type=Path,
+        default=DEFAULT_A3_ORIENTATION_DEPENDENCY_DIR,
+        help="Isolated RapidOCR dependency directory",
+    )
+    parser.add_argument(
+        "--disable-a3-text-orientation",
+        dest="enable_a3_text_orientation",
+        action="store_false",
+        help="Bypass A3 OCR text orientation correction",
+    )
+    parser.add_argument(
         "--disable-output-watchdog",
         dest="enable_output_watchdog",
         action="store_false",
@@ -187,6 +227,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         enable_triage=True,
         enable_auto_crop=True,
         enable_output_watchdog=True,
+        enable_a3_text_orientation=True,
     )
     return parser
 
@@ -205,6 +246,8 @@ def main() -> int:
             triage_timeout_seconds=args.triage_timeout_seconds,
             reply_timeout_seconds=args.reply_timeout_seconds,
             enable_output_watchdog=args.enable_output_watchdog,
+            enable_a3_text_orientation=args.enable_a3_text_orientation,
+            a3_orientation_dependency_dir=args.a3_orientation_dependency_dir,
             max_concurrent_tasks=args.max_concurrent_tasks,
             max_queued_tasks=args.max_queued_tasks,
             queue_wait_seconds=args.queue_wait_seconds,

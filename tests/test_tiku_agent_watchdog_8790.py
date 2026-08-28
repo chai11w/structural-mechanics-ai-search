@@ -18,6 +18,7 @@ class TikuAgentWatchdog8790Test(unittest.TestCase):
         self.assertIn('"--disable-auto-crop"', script)
         self.assertIn("[switch]$DisableOutputWatchdog", script)
         self.assertIn('"--disable-output-watchdog"', script)
+        self.assertIn('"--disable-a3-text-orientation"', script)
         self.assertIn('"--max-concurrent-tasks", "$MaxConcurrentTasks"', script)
         self.assertIn('"--max-queued-tasks", "$MaxQueuedTasks"', script)
         self.assertIn('"--queue-wait-seconds", "$QueueWaitSeconds"', script)

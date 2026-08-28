@@ -10,6 +10,7 @@ param(
     [string]$ControlDb,
     [switch]$DisableExternalLoadScreen,
     [switch]$DisableAutoCrop,
+    [switch]$DisableA3TextOrientation,
     [switch]$DisableOutputWatchdog,
     [string]$PythonExe = "python"
 )
@@ -69,6 +70,9 @@ if ($ControlDb) {
 }
 if ($DisableAutoCrop) {
     $BotArguments += "--disable-auto-crop"
+}
+if ($DisableA3TextOrientation) {
+    $BotArguments += "--disable-a3-text-orientation"
 }
 if ($DisableOutputWatchdog) {
     $BotArguments += "--disable-output-watchdog"
