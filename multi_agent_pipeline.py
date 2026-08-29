@@ -45,7 +45,7 @@ MAIN_RERANK_MIN_SCORE = 0.65
 SYMBOLIC_RERANK_MIN_SCORE = 0.50
 AUTO_CHAPTER_VALUES = {"", "auto", "自动", "自动识别", "自动识别章节"}
 AUTO_CHAPTER_MIN_CONFIDENCE = 0.45
-DIMENSION_FILTER_TRIGGER_COUNT = 20
+DIMENSION_FILTER_TRIGGER_COUNT = 10
 
 
 @dataclass
@@ -584,7 +584,7 @@ def apply_dimension_prefilter(
     """Optionally apply the conservative V5.2 dimension layer.
 
     The trigger is deliberately strict: symbolic bank, known participating
-    structure, a query image, and more than 20 perfect load candidates. Any
+    structure, a query image, and more than 10 perfect load candidates. Any
     model/parse problem leaves the original candidate order untouched.
     """
 
@@ -609,7 +609,7 @@ def apply_dimension_prefilter(
         trace["reason"] = "missing_query_image"
         return list(candidates), trace
     if len(candidates) <= DIMENSION_FILTER_TRIGGER_COUNT:
-        trace["reason"] = "candidate_count_not_over_20"
+        trace["reason"] = "candidate_count_not_over_10"
         return list(candidates), trace
 
     trace["triggered"] = True

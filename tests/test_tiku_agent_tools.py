@@ -132,12 +132,12 @@ class TikuAgentToolsTest(unittest.TestCase):
             },
         )
 
-    def test_dimension_filter_requires_strictly_more_than_twenty_candidates(self):
+    def test_dimension_filter_requires_strictly_more_than_ten_candidates(self):
         recognizer = Mock()
         config = AgentToolConfig(dimension_filter_enabled=True)
         with patch(
             "tiku_agent.tools.search.scan_chapter_candidates",
-            return_value=self._dimension_scan(20),
+            return_value=self._dimension_scan(10),
         ), patch(
             "tiku_agent.tools.search.resolve_question_path",
             side_effect=lambda name, **_kwargs: (Path(name), name, False),
@@ -154,9 +154,9 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertTrue(result.ok)
         recognizer.recognize_dimensions.assert_not_called()
         self.assertFalse(result.data["dimension_filter"]["triggered"])
-        self.assertEqual(result.data["dimension_filter"]["reason"], "candidate_count_not_over_20")
+        self.assertEqual(result.data["dimension_filter"]["reason"], "candidate_count_not_over_10")
 
-    def test_dimension_filter_calls_qwen_once_at_twenty_one_and_filters_full_mismatch(self):
+    def test_dimension_filter_calls_qwen_once_at_eleven_and_filters_full_mismatch(self):
         recognizer = Mock()
         recognizer.recognize_dimensions.return_value = {
             "normalized": {
@@ -171,7 +171,7 @@ class TikuAgentToolsTest(unittest.TestCase):
         config = AgentToolConfig(dimension_filter_enabled=True)
         with patch(
             "tiku_agent.tools.search.scan_chapter_candidates",
-            return_value=self._dimension_scan(21),
+            return_value=self._dimension_scan(11),
         ), patch(
             "tiku_agent.tools.search.resolve_question_path",
             side_effect=lambda name, **_kwargs: (Path(name), name, False),
@@ -187,7 +187,7 @@ class TikuAgentToolsTest(unittest.TestCase):
 
         self.assertTrue(result.ok)
         recognizer.recognize_dimensions.assert_called_once_with("query.jpg", "钢架")
-        self.assertEqual(len(result.data["candidates"]), 20)
+        self.assertEqual(len(result.data["candidates"]), 10)
         self.assertTrue(result.data["dimension_filter"]["applied"])
         self.assertEqual(result.data["dimension_filter"]["mismatches"], 1)
 
@@ -197,7 +197,7 @@ class TikuAgentToolsTest(unittest.TestCase):
         config = AgentToolConfig(dimension_filter_enabled=True)
         with patch(
             "tiku_agent.tools.search.scan_chapter_candidates",
-            return_value=self._dimension_scan(21),
+            return_value=self._dimension_scan(11),
         ), patch(
             "tiku_agent.tools.search.resolve_question_path",
             side_effect=lambda name, **_kwargs: (Path(name), name, False),
@@ -212,7 +212,7 @@ class TikuAgentToolsTest(unittest.TestCase):
             )
 
         self.assertTrue(result.ok)
-        self.assertEqual(len(result.data["candidates"]), 21)
+        self.assertEqual(len(result.data["candidates"]), 11)
         self.assertEqual(result.data["dimension_filter"]["reason"], "recognition_failed")
 
     def test_coarse_search_continuation_excludes_every_attempted_candidate(self):
@@ -351,7 +351,7 @@ class TikuAgentToolsTest(unittest.TestCase):
         )
         with patch("tiku_agent.tools.CHAPTERS", ["4力法"]), patch(
             "tiku_agent.tools.search.scan_chapter_candidates",
-            return_value=self._dimension_scan(21),
+            return_value=self._dimension_scan(11),
         ), patch(
             "tiku_agent.tools.search.resolve_question_path",
             side_effect=lambda name, **_kwargs: (Path(name), name, False),
@@ -372,10 +372,10 @@ class TikuAgentToolsTest(unittest.TestCase):
 
         self.assertTrue(result.ok, result.to_dict())
         recognizer.recognize_dimensions.assert_called_once_with(query, "钢架")
-        self.assertEqual(result.data["coarse_candidate_count"], 21)
-        self.assertEqual(result.data["rerank_candidate_count"], 20)
-        self.assertEqual(result.data["model_calls"], 20)
-        self.assertEqual(scorer.call_count, 20)
+        self.assertEqual(result.data["coarse_candidate_count"], 11)
+        self.assertEqual(result.data["rerank_candidate_count"], 10)
+        self.assertEqual(result.data["model_calls"], 10)
+        self.assertEqual(scorer.call_count, 10)
         self.assertTrue(result.data["dimension_filter"]["applied"])
         self.assertEqual(result.data["dimension_filter"]["mismatches"], 1)
         self.assertNotIn("q21.jpg", [item["name"] for item in result.data["candidates"]])
