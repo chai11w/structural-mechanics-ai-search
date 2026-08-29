@@ -31,6 +31,8 @@ class TikuAgentWatchdog8896Test(unittest.TestCase):
         self.assertIn('$arguments += "--disable-output-watchdog"', self.script)
         self.assertIn("[switch]$DisableA3TextOrientation", self.script)
         self.assertIn('$arguments += "--disable-a3-text-orientation"', self.script)
+        self.assertIn("[switch]$DisableMediaCache", self.script)
+        self.assertIn('$arguments += "--disable-media-cache"', self.script)
 
 
 if __name__ == "__main__":

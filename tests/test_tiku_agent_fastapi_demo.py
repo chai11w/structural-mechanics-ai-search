@@ -417,6 +417,22 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(runtime.session_capture_frozen_flags, [False])
         self.assertEqual(response.headers["cache-control"], "private, no-store")
 
+    def test_session_media_can_use_private_browser_cache_when_enabled(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"private_cache_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        runtime = FakeRuntime(image_path)
+        session_id = "private-media-cache"
+        runtime.upload_session = session_id
+        client = TestClient(create_app(runtime=runtime, media_cache_seconds=300))
+        client.cookies.set(SESSION_COOKIE, session_id)
+
+        response = client.get(f"/api/upload/{image_path.name}")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "private, max-age=300")
+
     def test_session_endpoint_maps_live_standalone_a2_state_and_keeps_legacy_shape(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -185,6 +185,8 @@ def build_app(
     enable_output_watchdog: bool = True,
     enable_a3_text_orientation: bool = True,
     a3_orientation_dependency_dir: str | Path = DEFAULT_A3_ORIENTATION_DEPENDENCY_DIR,
+    enable_media_cache: bool = True,
+    media_cache_seconds: int = 300,
 ):
     root = Path(runtime_dir).resolve()
     output_watchdog = OutputWatchdog(
@@ -219,6 +221,7 @@ def build_app(
         trace_event_recorder=TraceEventRecorder(
             SQLiteTraceEventStore(root / "trace_events.sqlite3")
         ),
+        media_cache_seconds=(media_cache_seconds if enable_media_cache else 0),
     )
 
 
@@ -262,6 +265,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Bypass A3 OCR text orientation correction",
     )
     parser.add_argument(
+        "--media-cache-seconds",
+        type=int,
+        default=300,
+        help="Private browser cache lifetime for session media (default: 300)",
+    )
+    parser.add_argument(
+        "--disable-media-cache",
+        dest="enable_media_cache",
+        action="store_false",
+        help="Keep no-store behavior for session media",
+    )
+    parser.add_argument(
         "--disable-output-watchdog",
         dest="enable_output_watchdog",
         action="store_false",
@@ -273,6 +288,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         enable_a3_intent_v1=True,
         enable_output_watchdog=True,
         enable_a3_text_orientation=True,
+        enable_media_cache=True,
     )
     return parser
 
@@ -292,6 +308,8 @@ def main() -> int:
             enable_output_watchdog=args.enable_output_watchdog,
             enable_a3_text_orientation=args.enable_a3_text_orientation,
             a3_orientation_dependency_dir=args.a3_orientation_dependency_dir,
+            enable_media_cache=args.enable_media_cache,
+            media_cache_seconds=args.media_cache_seconds,
         ),
         host=args.host,
         port=args.port,

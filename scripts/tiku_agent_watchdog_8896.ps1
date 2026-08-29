@@ -4,6 +4,7 @@ param(
     [string]$PythonExe = "python",
     [switch]$DisableAutoCrop,
     [switch]$DisableA3TextOrientation,
+    [switch]$DisableMediaCache,
     [switch]$DisableOutputWatchdog
 )
 
@@ -73,6 +74,9 @@ function Start-Agent {
     }
     if ($DisableA3TextOrientation) {
         $arguments += "--disable-a3-text-orientation"
+    }
+    if ($DisableMediaCache) {
+        $arguments += "--disable-media-cache"
     }
     if ($DisableOutputWatchdog) {
         $arguments += "--disable-output-watchdog"

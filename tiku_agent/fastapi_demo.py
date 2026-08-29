@@ -265,11 +265,18 @@ def create_app(
     feedback_retention_days_provider: Callable[[], int] | None = None,
     output_watchdog: object | None = None,
     trace_event_recorder: TraceEventRecorder | None = None,
+    media_cache_seconds: float = 0.0,
 ) -> FastAPI:
     """Create a local-only demo app without any existing Feishu configuration."""
     session_cookie = str(session_cookie).strip()
     if not session_cookie:
         raise ValueError("session_cookie is required")
+    media_cache_seconds = max(0.0, float(media_cache_seconds))
+    media_cache_header = (
+        f"private, max-age={int(media_cache_seconds)}"
+        if media_cache_seconds > 0
+        else "private, no-store"
+    )
     runtime = runtime or AgentSessionRuntime(
         SQLiteSessionStore(DEFAULT_RUNTIME_DIR / "session.db"),
         cost_ledger=SQLiteModelCostLedger(DEFAULT_RUNTIME_DIR / "model_costs.sqlite3"),
@@ -1298,7 +1305,7 @@ def create_app(
         path = runtime.resolve_upload(session_id, filename) if session_id else None
         if path is None:
             raise HTTPException(status_code=404, detail="upload not found")
-        return FileResponse(path, headers={"Cache-Control": "private, no-store"})
+        return FileResponse(path, headers={"Cache-Control": media_cache_header})
 
     @app.get("/api/media/{media_id}")
     def get_media(media_id: str, request: Request) -> FileResponse:
@@ -1306,7 +1313,7 @@ def create_app(
         path = runtime.resolve_media(session_id, media_id) if session_id else None
         if path is None:
             raise HTTPException(status_code=404, detail="media not found")
-        return FileResponse(path, headers={"Cache-Control": "private, no-store"})
+        return FileResponse(path, headers={"Cache-Control": media_cache_header})
 
     if bool(getattr(runtime, "a3_enabled", False)):
 
