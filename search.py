@@ -1071,12 +1071,17 @@ def select_coarse_results(results):
     return perfect or [max(results, key=display_similarity_score)]
 
 
-def select_rerank_pool(results, pool_size=RERANK_FALLBACK_POOL_SIZE):
+def select_rerank_pool(
+    results,
+    pool_size=RERANK_FALLBACK_POOL_SIZE,
+    *,
+    min_score=0.0,
+):
     """Build a bounded visual-rerank pool without discarding perfect matches.
 
     Perfect coarse matches stay together. When fewer than ``pool_size`` perfect
-    matches exist, the next coarse-ranked candidates fill the bounded pool.
-    This is a model-call bound, not the user-facing display count.
+    matches exist, candidates at or above ``min_score`` fill the pool. Scores
+    below that route-specific threshold never consume a visual model call.
     """
     if not results:
         return []
@@ -1098,6 +1103,8 @@ def select_rerank_pool(results, pool_size=RERANK_FALLBACK_POOL_SIZE):
         for item in selected
     }
     for item in ordered:
+        if display_similarity_score(item) < float(min_score):
+            continue
         key = str(item.get("path")) if isinstance(item, dict) else str(item)
         if key in seen:
             continue
@@ -1590,7 +1597,11 @@ def search(
 
     # Image rerank gets a bounded pool. Plain load search keeps the legacy
     # coarse display policy so it does not suddenly expose extra candidates.
-    top = select_rerank_pool(results) if rerank_image_path else select_coarse_results(results)
+    top = (
+        select_rerank_pool(results, min_score=0.65)
+        if rerank_image_path
+        else select_coarse_results(results)
+    )
 
     if not top or top[0][0] == 0:
         print("(未找到高相似度匹配，以下是章节内最近题目)")

@@ -27,6 +27,7 @@ from multi_agent_pipeline import (
     load_bank_excel,
     normalize_rerank_results,
     normalize_structure_type,
+    rerank_threshold_for_route,
     resolve_effective_chapter,
     select_rerank_candidates,
     symbolic_root,
@@ -531,7 +532,14 @@ def coarse_search_tool(
             if candidate_key not in excluded:
                 scored.append((score, name, candidate_key))
         scored = [item for item in scored if item[0] > 0]
-        top = search.select_coarse_results(scored)
+        top = (
+            search.select_rerank_pool(
+                scored,
+                min_score=rerank_threshold_for_route(route),
+            )
+            if query_image_path
+            else search.select_coarse_results(scored)
+        )
         has_more = len(scored) > len(top)
 
         candidates = []
@@ -955,10 +963,13 @@ def rerank_candidates_tool(
             preserve_bounded_pool=True,
         )
         if not rerank_input:
-            return ToolResult.success(
-                code="RERANK_NOT_REQUIRED",
-                data={"reranked": False, "visible_candidates": _renumber(coarse_candidates), "rerank_note": "候选未达到复筛阈值，已显示粗筛结果。"},
-                next_state="WAIT_CANDIDATE_CHOICE",
+            return ToolResult.no_match(
+                code="NO_CANDIDATES_TO_RERANK",
+                data={
+                    "reranked": False,
+                    "visible_candidates": [],
+                    "rerank_note": "候选未达到当前题库的复筛准入门槛。",
+                },
             )
         rerank_options: dict[str, Any] = {"top_n": rerank_top}
         optional_policy = {

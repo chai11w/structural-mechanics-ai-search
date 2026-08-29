@@ -266,6 +266,50 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertFalse(fourth.data["has_more"])
         self.assertTrue(set(first_keys).isdisjoint(item["candidate_key"] for item in second.data["candidates"]))
 
+    def test_image_coarse_search_fills_main_pool_to_three_above_sixty_five_percent(self):
+        scan = SimpleNamespace(
+            scored=[(0.90, "q1.jpg"), (0.80, "q2.jpg"), (0.65, "q3.jpg"), (0.64, "q4.jpg")],
+            structure_filter_applied=False,
+            dimensions_by_name={},
+        )
+        with patch("tiku_agent.tools.search.scan_chapter_candidates", return_value=scan), patch(
+            "tiku_agent.tools.search.resolve_question_path",
+            side_effect=lambda name, **_kwargs: (Path(name), name, False),
+        ):
+            result = coarse_search_tool(
+                [{"type": "集中", "raw": "10"}],
+                chapter="4力法",
+                route="main",
+                query_image_path="query.jpg",
+            )
+
+        self.assertEqual(
+            [item["name"] for item in result.data["candidates"]],
+            ["q1.jpg", "q2.jpg", "q3.jpg"],
+        )
+
+    def test_image_coarse_search_uses_fifty_percent_symbolic_boundary(self):
+        scan = SimpleNamespace(
+            scored=[(0.60, "q1.jpg"), (0.55, "q2.jpg"), (0.50, "q3.jpg"), (0.49, "q4.jpg")],
+            structure_filter_applied=False,
+            dimensions_by_name={},
+        )
+        with patch("tiku_agent.tools.search.scan_chapter_candidates", return_value=scan), patch(
+            "tiku_agent.tools.search.resolve_question_path",
+            side_effect=lambda name, **_kwargs: (Path(name), name, False),
+        ):
+            result = coarse_search_tool(
+                [{"type": "集中", "raw": "P"}],
+                chapter="4力法",
+                route="symbolic",
+                query_image_path="query.jpg",
+            )
+
+        self.assertEqual(
+            [item["name"] for item in result.data["candidates"]],
+            ["q1.jpg", "q2.jpg", "q3.jpg"],
+        )
+
     def test_global_search_reranks_every_deduplicated_perfect_candidate(self):
         loads = [{"type": "集中", "raw": "P"}]
         query = Path("query.jpg")
@@ -745,7 +789,7 @@ class TikuAgentToolsTest(unittest.TestCase):
 
         def fake_rerank(query_image_path, rerank_input, top_n=3):
             self.assertEqual(query_image_path, "query.jpg")
-            self.assertEqual([item["path"] for item in rerank_input], ["q1.jpg", "q2.jpg", "q3.jpg"])
+            self.assertEqual([item["path"] for item in rerank_input], ["q1.jpg", "q2.jpg"])
             self.assertEqual(top_n, 3)
             return [
                 {
@@ -819,7 +863,7 @@ class TikuAgentToolsTest(unittest.TestCase):
             ["q2.jpg", "q3.jpg", "q4.jpg"],
         )
 
-    def test_agent_rerank_keeps_bounded_low_score_pool_for_model_comparison(self):
+    def test_agent_rerank_rejects_pool_below_route_threshold(self):
         candidates = [
             {"rank": 1, "path": "q1.jpg", "score": 0.50, "name": "q1.jpg"},
             {"rank": 2, "path": "q2.jpg", "score": 0.40, "name": "q2.jpg"},
@@ -831,11 +875,11 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.tool, "rerank_candidates")
         self.assertFalse(result.data["reranked"])
-        self.assertEqual(result.outcome, ToolOutcome.PARTIAL)
-        self.assertEqual(result.code, "RERANK_EMPTY_COARSE_FALLBACK")
-        self.assertEqual(rerank.call_count, 1)
-        self.assertEqual([item["path"] for item in result.data["visible_candidates"]], ["q1.jpg", "q2.jpg"])
-        self.assertIn("粗筛", result.data["rerank_note"])
+        self.assertEqual(result.outcome, ToolOutcome.NO_MATCH)
+        self.assertEqual(result.code, "NO_CANDIDATES_TO_RERANK")
+        self.assertEqual(rerank.call_count, 0)
+        self.assertEqual(result.data["visible_candidates"], [])
+        self.assertIn("准入门槛", result.data["rerank_note"])
 
     def test_agent_rerank_falls_back_to_coarse_candidates_when_incomplete(self):
         candidates = [

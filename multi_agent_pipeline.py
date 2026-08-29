@@ -381,6 +381,7 @@ class MultiAgentCoordinator:
             self.top_k,
             structure_type=structure_type if route.route == "symbolic" else None,
             for_rerank=bool(rerank and query_image_path),
+            rerank_min_score=rerank_threshold_for_route(route.route),
         )
         structure_filter_applied = any(item.get("structure_filter") for item in results)
         results, dimension_filter = apply_dimension_prefilter(
@@ -535,6 +536,7 @@ def rank_bank_candidates(
     top_k: int,
     structure_type: str | None = None,
     for_rerank: bool = False,
+    rerank_min_score: float = 0.0,
 ) -> list[dict[str, Any]]:
     filter_type = normalize_structure_type(structure_type)
     scan = search.scan_chapter_candidates(
@@ -547,7 +549,7 @@ def rank_bank_candidates(
     if scan is None:
         return []
     top = (
-        search.select_rerank_pool(scan.scored)
+        search.select_rerank_pool(scan.scored, min_score=rerank_min_score)
         if for_rerank
         else search.select_coarse_results(scan.scored)
     )
@@ -653,13 +655,11 @@ def select_rerank_candidates(
 ) -> list[dict[str, Any]]:
     """Select visual candidates, preserving a deliberately bounded pool.
 
-    Existing callers can retain the route threshold. The image rerank path
-    passes ``preserve_bounded_pool`` so its top-three coarse pool is not
-    silently reduced again by a second threshold.
+    The route threshold remains authoritative even for a bounded pool. The
+    compatibility argument is retained for callers but no longer bypasses the
+    numeric/symbolic admission floor.
     """
     threshold = rerank_threshold_for_route(route)
-    if preserve_bounded_pool and len(results) <= search.RERANK_FALLBACK_POOL_SIZE:
-        threshold = 0.0
     selected = []
     seen_paths = set()
 

@@ -89,7 +89,24 @@ class SharedDisplayPolicyTest(unittest.TestCase):
 
     def test_rerank_pool_fills_fewer_than_three_perfect_matches(self):
         results = [(1.0, "a"), (1.0, "b"), (0.65, "c"), (0.6, "d")]
-        self.assertEqual(search.select_rerank_pool(results), results[:3])
+        self.assertEqual(
+            search.select_rerank_pool(results, min_score=0.65),
+            results[:3],
+        )
+
+    def test_rerank_pool_does_not_fill_below_route_threshold(self):
+        results = [(1.0, "a"), (0.64, "b"), (0.5, "c")]
+        self.assertEqual(
+            search.select_rerank_pool(results, min_score=0.65),
+            results[:1],
+        )
+
+    def test_rerank_pool_returns_empty_when_no_candidate_reaches_threshold(self):
+        results = [(0.64, "a"), (0.5, "b"), (0.2, "c")]
+        self.assertEqual(
+            search.select_rerank_pool(results, min_score=0.65),
+            [],
+        )
 
     def test_rerank_pool_keeps_all_perfect_matches(self):
         results = [(1.0, "a"), (1.0, "b"), (1.0, "c"), (1.0, "d"), (0.8, "e")]
