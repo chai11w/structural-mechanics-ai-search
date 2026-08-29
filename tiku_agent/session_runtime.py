@@ -22,7 +22,7 @@ from tiku_agent.external_load_screen import (
 from tiku_agent.session_artifacts import SessionArtifacts, session_key
 from tiku_agent.session_store import SessionStore
 from tiku_agent.state import AgentState
-from tiku_agent.task_state_builder import READ_MISSING, READ_OK
+from tiku_agent.task_state_builder import READ_MISSING, READ_OK, READ_UNREADABLE
 from tiku_agent.task_state_contract import TaskStateSnapshotV1, empty_task_state_snapshot
 from tiku_agent.task_state_runtime import (
     TaskStateEntryCapabilities,
@@ -74,9 +74,9 @@ class SessionResponseSnapshotError(RuntimeError):
     def __init__(self, message: str, *, task_state: TaskStateSnapshotV1) -> None:
         super().__init__(message)
         self.task_state = task_state
+        self.response_task_state_snapshot: TaskStateSnapshotV1 | None = task_state
         # A non-empty safe snapshot prevents the generic HTTP handler from
-        # performing a second live store read. Phase 3.3.4 will decide when
-        # and how the carried task_state becomes part of an error payload.
+        # performing a second live store read.
         self.response_snapshot: dict[str, object] = {"session_valid": False}
 
 
@@ -131,6 +131,7 @@ class AgentProtocolError(RuntimeError):
         self.request_id = ""
         self.search_id = ""
         self.response_snapshot: dict[str, object] = {}
+        self.response_task_state_snapshot: TaskStateSnapshotV1 | None = None
 
     def bind(self, *, request_id: str, search_id: str = "") -> RequestProtocol:
         self.request_id = request_id
@@ -349,6 +350,7 @@ class AgentSessionRuntime:
         )
         self._background_image_lock = threading.Lock()
         self._background_image_futures: dict[str, set[Future]] = {}
+        self._error_snapshot_capture_local = threading.local()
 
     def handle_image(
         self,
@@ -382,6 +384,7 @@ class AgentSessionRuntime:
                     progress=progress,
                     request_id=clean_request_id,
                     search_id=search_id,
+                    task_state_capabilities=task_state_capabilities,
                 )
             if self.image_triage_authority is not None:
                 return self._run_authoritative_image(
@@ -391,6 +394,7 @@ class AgentSessionRuntime:
                     progress=progress,
                     request_id=clean_request_id,
                     search_id=search_id,
+                    task_state_capabilities=task_state_capabilities,
                 )
             return self._run(
                 clean_session_id,
@@ -399,6 +403,7 @@ class AgentSessionRuntime:
                 identity_key=identity_key,
                 progress=progress,
                 request_id=clean_request_id,
+                task_state_capabilities=task_state_capabilities,
             )
 
         return self._admit(
@@ -526,6 +531,7 @@ class AgentSessionRuntime:
         progress: ProgressReporter | None,
         request_id: str,
         search_id: str,
+        task_state_capabilities: TaskStateEntryCapabilities | None = None,
     ) -> AgentResponse:
         """Run 8891 triage inside the normal admission, logging and cost scope."""
 
@@ -582,6 +588,7 @@ class AgentSessionRuntime:
             identity_key=identity_key,
             progress=progress,
             request_id=request_id,
+            task_state_capabilities=task_state_capabilities,
         )
 
     def _run_screened_image(
@@ -593,8 +600,56 @@ class AgentSessionRuntime:
         progress: ProgressReporter | None,
         request_id: str,
         search_id: str,
+        task_state_capabilities: TaskStateEntryCapabilities | None = None,
     ) -> AgentResponse:
-        baseline_state = self.store.load(session_id) or AgentState(session_id=session_id)
+        """Run the image race and carry its in-memory state on any failure."""
+
+        error_context: dict[str, object] = {
+            "state": None,
+            "read_status": READ_UNREADABLE,
+            "initial_state": None,
+            "initially_missing": False,
+        }
+        try:
+            return self._run_screened_image_inner(
+                session_id,
+                image_path,
+                identity_key=identity_key,
+                progress=progress,
+                request_id=request_id,
+                search_id=search_id,
+                error_context=error_context,
+            )
+        except Exception as exc:
+            state, read_status = self._error_snapshot_read_set(error_context)
+            self._attach_error_response_snapshot_from_read_set(
+                exc,
+                session_id,
+                state=state,
+                read_status=read_status,
+                capabilities=task_state_capabilities,
+            )
+            raise
+
+    def _run_screened_image_inner(
+        self,
+        session_id: str,
+        image_path: Path,
+        *,
+        identity_key: str,
+        progress: ProgressReporter | None,
+        request_id: str,
+        search_id: str,
+        error_context: dict[str, object],
+    ) -> AgentResponse:
+        persisted_state = self._load_session_state(session_id)
+        baseline_state = persisted_state or AgentState(session_id=session_id)
+        error_context.update(
+            state=baseline_state,
+            read_status=(READ_MISSING if persisted_state is None else None),
+            initial_state=baseline_state.to_dict(),
+            initially_missing=persisted_state is None,
+        )
         phase_before = baseline_state.phase
         started_at = datetime.now(UTC)
         started = time.perf_counter()
@@ -611,6 +666,7 @@ class AgentSessionRuntime:
         agent = self._make_agent(
             AgentState.from_dict(baseline_state.to_dict()), progress=progress
         )
+        error_context["state"] = agent.state
         agent.image_search_cancelled = race.cancel_search.is_set
         agent.commit_image_candidates = race.claim_candidates
         assert self._image_executor is not None
@@ -706,6 +762,11 @@ class AgentSessionRuntime:
                     response_state = agent.state
 
         assert response is not None and response_state is not None
+        error_context.update(
+            state=response_state,
+            read_status=None,
+            initially_missing=False,
+        )
         record_trace_event(
             "route_decided",
             stage="image_routing",
@@ -872,8 +933,10 @@ class AgentSessionRuntime:
     ) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
         clean_request_id = str(request_id or "").strip() or new_request_id()
-        current_state = self.store.load(clean_session_id)
-        search_id = current_state.current_search_id if current_state is not None else ""
+        # The state is read after admission while the session lock is held.
+        # A lock-external pre-read could both race and bypass the frozen error
+        # snapshot path when the store is unreadable.
+        search_id = ""
         _bind_trace_lifecycle(clean_session_id, search_id, identity_key=identity_key)
         return self._admit(
             clean_session_id,
@@ -894,21 +957,40 @@ class AgentSessionRuntime:
             task_state_capabilities=task_state_capabilities,
         )
 
-    def clear(self, session_id: str, *, preserve_artifacts: bool = False) -> None:
+    def clear(
+        self,
+        session_id: str,
+        *,
+        preserve_artifacts: bool = False,
+        task_state_capabilities: TaskStateEntryCapabilities | None = None,
+    ) -> None:
         """Clear active state, optionally retaining media until the parent session expires."""
         clean_session_id = self._clean_session_id(session_id)
         lock = self._lock(clean_session_id)
         with lock:
-            self._await_background_image_work(clean_session_id)
-            self.store.clear(clean_session_id)
-            if not preserve_artifacts:
-                self.artifacts.clear_session(clean_session_id)
+            try:
+                self._await_background_image_work(clean_session_id)
+                self.store.clear(clean_session_id)
+                if not preserve_artifacts:
+                    self.artifacts.clear_session(clean_session_id)
+            except Exception as exc:
+                # Freeze the post-attempt state before releasing the A2 lock.
+                # A failed store clear keeps the child visible; a later
+                # artifact failure after the delete produces canonical empty.
+                if not self._error_response_snapshot_capture_deferred():
+                    self._capture_error_response_snapshot_locked(
+                        exc,
+                        clean_session_id,
+                        capabilities=task_state_capabilities,
+                        reuse_carried=False,
+                    )
+                raise
 
     def current_image_path(self, session_id: str) -> Path | None:
         """Return the current persisted upload for a live session."""
         clean_session_id = self._clean_session_id(session_id)
         self.purge_expired()
-        state = self.store.load(clean_session_id)
+        state = self._load_session_state(clean_session_id)
         if state is None or not state.current_image_path:
             return None
         path = Path(state.current_image_path)
@@ -927,14 +1009,46 @@ class AgentSessionRuntime:
         # Preserve the legacy endpoint's expiration cleanup before freezing
         # the read-set. SQLite ``load()`` removes an expired row without
         # returning its session id, so cleanup must happen first or its
-        # artifacts would become unreachable orphans.
-        self.purge_expired()
+        # artifacts would become unreachable orphans. A cleanup failure means
+        # freshness was not established, so it must not be downgraded to an
+        # ordinary missing/IDLE state. Carry a no-read UNREADABLE sentinel and
+        # let the controlled HTTP boundary publish that exact failure state.
+        try:
+            self.purge_expired()
+        except Exception as exc:  # noqa: BLE001 - preserve the cleanup failure.
+            with self._lock(clean_session_id):
+                self._attach_error_response_snapshot_from_read_set(
+                    exc,
+                    clean_session_id,
+                    state=None,
+                    read_status=READ_UNREADABLE,
+                    capabilities=capabilities,
+                )
+            setattr(exc, "_response_snapshot_attempted", True)
+            raise
+
         with self._lock(clean_session_id):
-            return self._response_snapshot_v1_locked(
-                clean_session_id,
-                capabilities=capabilities,
-                response_frozen=response_frozen,
-            )
+            try:
+                captured = self._response_snapshot_v1_locked(
+                    clean_session_id,
+                    capabilities=capabilities,
+                    response_frozen=response_frozen,
+                )
+            except Exception as capture_error:  # noqa: BLE001 - preserve the first failure.
+                # Mark the attempted read-set so an outer HTTP handler will
+                # never blindly retry a live capture.  The helper also gives
+                # a controlled caller a typed unreadable sentinel when the
+                # lower-level read failed before it could construct one.
+                setattr(capture_error, "_response_snapshot_attempted", True)
+                self._attach_error_response_snapshot_from_read_set(
+                    capture_error,
+                    clean_session_id,
+                    state=None,
+                    read_status=READ_UNREADABLE,
+                    capabilities=capabilities,
+                )
+                raise
+            return captured
 
     def _response_snapshot_v1_locked(
         self,
@@ -971,7 +1085,7 @@ class AgentSessionRuntime:
         """Return the small, non-sensitive state contract needed by the web client."""
         clean_session_id = self._clean_session_id(session_id)
         self.purge_expired()
-        state = self.store.load(clean_session_id)
+        state = self._load_session_state(clean_session_id)
         return self._legacy_session_snapshot_from_state(state)
 
     @staticmethod
@@ -1081,7 +1195,7 @@ class AgentSessionRuntime:
     def persist_media(self, session_id: str, source: str | Path) -> Path | None:
         """Keep candidate/answer media available for the live conversation."""
         clean_session_id = self._clean_session_id(session_id)
-        if self.store.load(clean_session_id) is None:
+        if self._load_session_state(clean_session_id) is None:
             return None
         return self.artifacts.persist_media(clean_session_id, source)
 
@@ -1097,7 +1211,9 @@ class AgentSessionRuntime:
         """Record an API-boundary event that never reached the Agent runner."""
 
         clean_session_id = self._clean_session_id(session_id)
-        state = self.store.load(clean_session_id) or AgentState(session_id=clean_session_id)
+        state = self._load_session_state(clean_session_id) or AgentState(
+            session_id=clean_session_id
+        )
         now = datetime.now(UTC)
         self._write_task_log(
             task_id=protocol.request_id or new_request_id(),
@@ -1136,7 +1252,7 @@ class AgentSessionRuntime:
         allow_preserved: bool = False,
     ) -> Path | None:
         clean_session_id = self._clean_session_id(session_id)
-        if not allow_preserved and self.store.load(clean_session_id) is None:
+        if not allow_preserved and self._load_session_state(clean_session_id) is None:
             return None
         if folder == "uploads":
             return self.artifacts.resolve_upload(clean_session_id, filename)
@@ -1157,25 +1273,65 @@ class AgentSessionRuntime:
     ) -> AgentResponse:
         clean_session_id = self._clean_session_id(session_id)
         self.purge_expired()
-        persisted_state = self.store.load(clean_session_id)
-        state = persisted_state or AgentState(session_id=clean_session_id)
-        had_active_child = (
-            persisted_state is not None
-            and persisted_state.phase not in {"IDLE", "CANCELLED"}
-        )
-        phase_before = state.phase
-        started_at = datetime.now(UTC)
-        started = time.perf_counter()
-        task_id = request_id
-        cost_collector = ModelCostCollector(
-            run_id=new_run_id(),
-            trace_id=current_trace_id(),
-            session_key=session_key(clean_session_id),
-            identity_key=str(identity_key).strip(),
-            task_kind=kind,
-            started_at=started_at.isoformat(),
-        )
-        agent = self._make_agent(state, progress=progress)
+        try:
+            persisted_state = self._load_session_state(clean_session_id)
+        except Exception as exc:
+            self._attach_error_response_snapshot_from_read_set(
+                exc,
+                clean_session_id,
+                state=None,
+                read_status=READ_UNREADABLE,
+                capabilities=task_state_capabilities,
+            )
+            raise
+        error_context: dict[str, object] = {
+            "state": None,
+            "read_status": READ_UNREADABLE,
+            "initial_state": None,
+            "initially_missing": False,
+        }
+        try:
+            state = persisted_state or AgentState(session_id=clean_session_id)
+            error_context.update(
+                state=state,
+                read_status=(READ_MISSING if persisted_state is None else None),
+                initial_state=state.to_dict(),
+                initially_missing=persisted_state is None,
+            )
+            if kind == "text":
+                _bind_trace_lifecycle(
+                    clean_session_id,
+                    state.current_search_id,
+                    identity_key=identity_key,
+                )
+            had_active_child = (
+                persisted_state is not None
+                and persisted_state.phase not in {"IDLE", "CANCELLED"}
+            )
+            phase_before = state.phase
+            started_at = datetime.now(UTC)
+            started = time.perf_counter()
+            task_id = request_id
+            cost_collector = ModelCostCollector(
+                run_id=new_run_id(),
+                trace_id=current_trace_id(),
+                session_key=session_key(clean_session_id),
+                identity_key=str(identity_key).strip(),
+                task_kind=kind,
+                started_at=started_at.isoformat(),
+            )
+            agent = self._make_agent(state, progress=progress)
+        except Exception as exc:
+            frozen_state, read_status = self._error_snapshot_read_set(error_context)
+            self._attach_error_response_snapshot_from_read_set(
+                exc,
+                clean_session_id,
+                state=frozen_state,
+                read_status=read_status,
+                capabilities=task_state_capabilities,
+            )
+            raise
+        error_context["state"] = agent.state
         response: AgentResponse | None = None
         error_kind = ""
         try:
@@ -1213,6 +1369,15 @@ class AgentSessionRuntime:
             return response
         except Exception as exc:
             error_kind = type(exc).__name__
+            error_context["state"] = getattr(agent, "state", None)
+            frozen_state, read_status = self._error_snapshot_read_set(error_context)
+            self._attach_error_response_snapshot_from_read_set(
+                exc,
+                clean_session_id,
+                state=frozen_state,
+                read_status=read_status,
+                capabilities=task_state_capabilities,
+            )
             raise
         finally:
             outcome = _task_outcome(agent.state, response, error_kind)
@@ -1263,7 +1428,14 @@ class AgentSessionRuntime:
 
     def purge_expired(self) -> None:
         """Remove expired state and its session-scoped files."""
-        self.artifacts.clear_sessions(self.store.purge_expired())
+        try:
+            expired = self.store.purge_expired()
+        except Exception as exc:
+            # The store that defines child readability just failed. An A3
+            # wrapper must not probe it again while rendering the same error.
+            setattr(exc, "_task_state_read_set_unavailable", True)
+            raise
+        self.artifacts.clear_sessions(expired)
 
     def _admit(
         self,
@@ -1288,10 +1460,30 @@ class AgentSessionRuntime:
                         self._check_daily_budget(identity_key)
                         response = execute()
                     except Exception as exc:
-                        try:
-                            setattr(exc, "response_snapshot", self.session_snapshot(session_id))
-                        except Exception:  # noqa: BLE001 - never mask the original failure.
-                            pass
+                        if not self._error_response_snapshot_capture_deferred():
+                            if getattr(
+                                exc,
+                                "_task_state_read_set_unavailable",
+                                False,
+                            ):
+                                # purge_expired() already established that
+                                # this store cannot provide a trustworthy
+                                # read-set. Attach a pure unreadable sentinel;
+                                # loading here would immediately repeat the
+                                # failed store access.
+                                self._attach_error_response_snapshot_from_read_set(
+                                    exc,
+                                    session_id,
+                                    state=None,
+                                    read_status=READ_UNREADABLE,
+                                    capabilities=task_state_capabilities,
+                                )
+                            else:
+                                self._capture_error_response_snapshot_locked(
+                                    exc,
+                                    session_id,
+                                    capabilities=task_state_capabilities,
+                                )
                         raise
                     else:
                         captured = None
@@ -1340,15 +1532,22 @@ class AgentSessionRuntime:
                         return response
         except AgentProtocolError as exc:
             if not exc.response_snapshot:
-                try:
-                    exc.response_snapshot = self.session_snapshot(session_id)
-                except Exception:  # noqa: BLE001 - preserve the admission failure.
-                    pass
+                # Queue rejection happens before the session lock. Preserve the
+                # legacy shape without a lock-external store read; typed state
+                # intentionally remains absent on that path.
+                exc.response_snapshot = self._legacy_session_snapshot_from_state(None)
             response_search_id = str(
                 exc.response_snapshot.get("search_id") or search_id
             ).strip()
             protocol = exc.bind(request_id=request_id, search_id=response_search_id)
-            state = self.store.load(session_id) or AgentState(session_id=session_id)
+            # Protocol logging must not turn one frozen capture (or a queue
+            # rejection) into another live store read.
+            carried_state = getattr(exc, "_response_frozen_agent_state", None)
+            state = (
+                AgentState.from_dict(carried_state.to_dict())
+                if type(carried_state) is AgentState
+                else AgentState(session_id=session_id)
+            )
             self._write_task_log(
                 task_id=request_id,
                 session_id=session_id,
@@ -1363,6 +1562,172 @@ class AgentSessionRuntime:
                 protocol=protocol,
             )
             raise
+
+    @staticmethod
+    def _error_snapshot_read_set(
+        context: dict[str, object],
+    ) -> tuple[AgentState | None, str | None]:
+        """Resolve the exact in-memory read-set to freeze after one failed turn."""
+
+        state = context.get("state")
+        read_status = context.get("read_status")
+        if type(state) is not AgentState:
+            return None, str(read_status or READ_UNREADABLE)
+        if context.get("initially_missing") is True:
+            try:
+                unchanged = state.to_dict() == context.get("initial_state")
+            except Exception:  # noqa: BLE001 - malformed in-memory state is unreadable.
+                unchanged = False
+            if unchanged:
+                return None, READ_MISSING
+        return state, None
+
+    def _attach_error_response_snapshot_from_read_set(
+        self,
+        exc: Exception,
+        session_id: str,
+        *,
+        state: AgentState | None,
+        read_status: str | None,
+        capabilities: TaskStateEntryCapabilities | None,
+    ) -> None:
+        """Carry one frozen legacy/typed pair without touching the live store."""
+
+        # Even if projection itself fails, an outer HTTP boundary must know
+        # that the authoritative response-time read-set was already consumed
+        # and use a zero-I/O sentinel instead of attempting a live recapture.
+        setattr(exc, "_response_snapshot_attempted", True)
+
+        existing_legacy = getattr(exc, "response_snapshot", None)
+        existing_task_state = getattr(exc, "response_task_state_snapshot", None)
+        if type(existing_legacy) is dict and bool(existing_legacy) and (
+            capabilities is None or type(existing_task_state) is TaskStateSnapshotV1
+        ):
+            return
+
+        try:
+            frozen_state = state
+            frozen_read_status = read_status
+            if frozen_read_status is None:
+                frozen_state, frozen_read_status = classify_frozen_child_state(state)
+            elif frozen_read_status == READ_OK:
+                frozen_state, frozen_read_status = classify_frozen_child_state(state)
+            elif frozen_read_status != READ_MISSING:
+                frozen_state = None
+
+            if frozen_read_status == READ_OK:
+                legacy = self._legacy_session_snapshot_from_state(frozen_state)
+            elif frozen_read_status == READ_MISSING:
+                legacy = self._legacy_session_snapshot_from_state(None)
+            else:
+                # An unreadable/unknown state cannot safely populate legacy
+                # fields. Keep a non-empty placeholder so no outer handler
+                # attempts to repair it with another live read.
+                legacy = {"session_valid": False}
+
+            task_state = None
+            if capabilities is not None:
+                task_state = self._task_state_snapshot_v1_from_read_set(
+                    session_id,
+                    frozen_state,
+                    str(frozen_read_status),
+                    capabilities=capabilities,
+                    response_frozen=True,
+                )
+
+            setattr(exc, "response_snapshot", dict(legacy))
+            if task_state is not None:
+                setattr(exc, "response_task_state_snapshot", task_state)
+            if frozen_read_status == READ_OK and type(frozen_state) is AgentState:
+                setattr(
+                    exc,
+                    "_response_frozen_agent_state",
+                    AgentState.from_dict(frozen_state.to_dict()),
+                )
+        except Exception:  # noqa: BLE001 - never replace the business failure.
+            return
+
+    def _capture_error_response_snapshot_locked(
+        self,
+        exc: Exception,
+        session_id: str,
+        *,
+        capabilities: TaskStateEntryCapabilities | None,
+        reuse_carried: bool = True,
+    ) -> None:
+        """Attach one response-time error snapshot while the A2 lock is held."""
+
+        # Mark before reading so every failure path, including a failed
+        # projection, prevents a second live capture at the HTTP boundary.
+        setattr(exc, "_response_snapshot_attempted", True)
+
+        carried_legacy = getattr(exc, "response_snapshot", None)
+        if reuse_carried and (
+            capabilities is None
+            and type(carried_legacy) is dict
+            and bool(carried_legacy)
+        ):
+            return
+        if capabilities is None:
+            try:
+                setattr(exc, "response_snapshot", self.session_snapshot(session_id))
+            except Exception:  # noqa: BLE001 - never mask the original failure.
+                pass
+            return
+
+        if reuse_carried and (
+            type(getattr(exc, "response_task_state_snapshot", None))
+            is TaskStateSnapshotV1
+            and type(getattr(exc, "response_snapshot", None)) is dict
+            and bool(getattr(exc, "response_snapshot", None))
+        ):
+            return
+
+        try:
+            captured = self._response_snapshot_v1_locked(
+                session_id,
+                capabilities=capabilities,
+                response_frozen=True,
+            )
+        except SessionResponseSnapshotError as capture_error:
+            try:
+                setattr(
+                    exc,
+                    "response_task_state_snapshot",
+                    capture_error.task_state,
+                )
+                setattr(exc, "response_snapshot", dict(capture_error.response_snapshot))
+            except Exception:  # noqa: BLE001 - never mask the original failure.
+                pass
+            return
+        except Exception:  # noqa: BLE001 - never mask the original failure.
+            return
+
+        try:
+            setattr(exc, "response_snapshot", dict(captured.legacy_session))
+            setattr(exc, "response_task_state_snapshot", captured.task_state)
+        except Exception:  # noqa: BLE001 - never mask the original failure.
+            pass
+
+    @contextmanager
+    def _defer_error_response_snapshot_capture(self):
+        """Let an enclosing A3 runtime own the combined error snapshot."""
+
+        depth = int(getattr(self._error_snapshot_capture_local, "depth", 0))
+        self._error_snapshot_capture_local.depth = depth + 1
+        try:
+            yield
+        finally:
+            if depth:
+                self._error_snapshot_capture_local.depth = depth
+            else:
+                try:
+                    del self._error_snapshot_capture_local.depth
+                except AttributeError:
+                    pass
+
+    def _error_response_snapshot_capture_deferred(self) -> bool:
+        return bool(getattr(self._error_snapshot_capture_local, "depth", 0))
 
     def _check_daily_budget(self, identity_key: str = "") -> None:
         if self.cost_ledger is None:
@@ -1480,6 +1845,15 @@ class AgentSessionRuntime:
         if not clean:
             raise ValueError("session_id is required")
         return clean
+
+    def _load_session_state(self, session_id: str) -> AgentState | None:
+        """Load authoritative child state and mark an unreadable store once."""
+
+        try:
+            return self.store.load(session_id)
+        except Exception as exc:
+            setattr(exc, "_task_state_read_set_unavailable", True)
+            raise
 
     def _lock(self, session_id: str) -> threading.Lock:
         return self._session_locks[hash(session_id) % len(self._session_locks)]

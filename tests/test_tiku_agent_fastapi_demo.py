@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import shutil
@@ -16,6 +17,7 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from tiku_agent import task_state_contract as task_state_contract
 from tiku_agent.a3_runtime import A3MvpRuntime, A3SessionState, SQLiteA3SessionStore
 from tiku_agent.agent import AgentResponse
 from tiku_agent.fastapi_demo import (
@@ -39,6 +41,7 @@ from tiku_agent.session_runtime import (
     AgentProtocolError,
     AgentRuntimeBusyError,
     AgentSessionRuntime,
+    SessionResponseSnapshotError,
     SessionResponseSnapshotV1,
     _ExecutionCancelled,
     _ExecutionGate,
@@ -47,7 +50,11 @@ from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_state_contract import empty_task_state_snapshot
 from tiku_agent.task_state_runtime import TaskStateEntryCapabilities
-from tiku_shared.response_store import ResponseProjection, SQLiteResponseStore
+from tiku_shared.response_store import (
+    ResponseProjection,
+    ResponseStoreError,
+    SQLiteResponseStore,
+)
 from tiku_shared.trace_context import TraceContext, current_request_id, current_trace_id
 from tiku_shared.trace_events import (
     SQLiteTraceEventStore,
@@ -218,6 +225,53 @@ class FakeRuntime:
 
 
 class FastApiDemoTest(unittest.TestCase):
+    @staticmethod
+    def _http_error_task_state():
+        return task_state_contract.TaskStateSnapshotV1(
+            workflow=empty_task_state_snapshot().workflow,
+            active_child_task=task_state_contract.ChildTaskStateView(
+                task_id="search_http_error_frozen_01",
+                kind=task_state_contract.CHILD_KIND_A2_QUESTION,
+                unit_id="",
+                task_revision=7,
+                phase="WAIT_CHAPTER",
+                status=task_state_contract.STATUS_WAITING_USER,
+                completed_steps=(
+                    task_state_contract.CHILD_STEP_QUESTION_ACCEPTED,
+                    task_state_contract.CHILD_STEP_QUESTION_ANALYZED,
+                ),
+                allowed_actions=(),
+                next_stage=task_state_contract.NEXT_SET_CHAPTER,
+                chapter="",
+                candidate_count=0,
+                candidate_generation="",
+            ),
+        )
+
+    @staticmethod
+    def _unreadable_http_error_task_state():
+        return task_state_contract.TaskStateSnapshotV1(
+            workflow=empty_task_state_snapshot().workflow,
+            active_child_task=task_state_contract.ChildTaskStateView(
+                task_id="",
+                kind=task_state_contract.CHILD_KIND_A2_QUESTION,
+                unit_id="",
+                task_revision=0,
+                phase=task_state_contract.PHASE_UNKNOWN,
+                status=task_state_contract.STATUS_INCONSISTENT,
+                completed_steps=(),
+                allowed_actions=(),
+                next_stage=task_state_contract.NEXT_RETRY,
+                chapter="",
+                candidate_count=0,
+                candidate_generation="",
+            ),
+            consistency=task_state_contract.ConsistencyView(
+                status=task_state_contract.CONSISTENCY_INCONSISTENT,
+                codes=(task_state_contract.CONSISTENCY_CHILD_STATE_UNREADABLE,),
+            ),
+        )
+
     def _terminal_for_request(self, store, request_id, *, recorder=None):
         if recorder is not None:
             recorder.flush()
@@ -707,13 +761,35 @@ class FastApiDemoTest(unittest.TestCase):
                 raise_server_exceptions=False,
             )
             client.cookies.set(SESSION_COOKIE, "unreadable-session")
+            request_id = "req_00000000000000000000000000000334"
 
-            response = client.get("/api/session")
+            response = client.get(
+                "/api/session",
+                headers={"X-Request-ID": request_id},
+            )
 
             self.assertEqual(response.status_code, 500, response.text)
             self.assertEqual(response.json()["code"], "SERVICE_UNAVAILABLE")
-            self.assertNotIn("task_state", response.json())
+            task_state = response.json()["task_state"]
+            self.assertEqual(
+                task_state["consistency"],
+                {
+                    "status": "INCONSISTENT",
+                    "codes": ["CHILD_STATE_UNREADABLE"],
+                },
+            )
+            self.assertEqual(
+                task_state["active_child_task"]["status"],
+                "INCONSISTENT",
+            )
+            self.assertEqual(
+                task_state["active_child_task"]["next_stage"],
+                "RETRY",
+            )
+            self.assertNotEqual(task_state, empty_task_state_snapshot().to_dict())
             self.assertNotIn("secret broken", response.text)
+            self.assertEqual(response.headers["x-request-id"], request_id)
+            self.assertIn("no-store", response.headers["cache-control"])
             self.assertEqual(store.load_attempt_count, 1)
 
     def test_session_endpoint_expires_state_and_artifacts_before_capture(self):
@@ -1265,6 +1341,1114 @@ class FastApiDemoTest(unittest.TestCase):
                         [event.to_dict() for event in events], ensure_ascii=False
                     ),
                 )
+
+    def test_controlled_http_validation_error_uses_one_frozen_typed_snapshot(self):
+        """A session-bearing non-stream validation error publishes its carried V1."""
+
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"http_error_frozen_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        frozen = self._http_error_task_state()
+        legacy = {
+            "session_valid": True,
+            "phase": "WAIT_CHAPTER",
+            "has_active_image": True,
+            "task_revision": 7,
+            "candidate_generation": "",
+            "candidate_count": 0,
+            "search_id": "search_http_error_frozen_01",
+        }
+
+        class CaptureOnlyRuntime(FakeRuntime):
+            def __init__(self, image_path):
+                super().__init__(image_path)
+                self.capture_count = 0
+
+            def session_response_snapshot_v1(self, session_id, *, capabilities=None, response_frozen=False):
+                self.capture_count += 1
+                self.capture_args = (session_id, capabilities, response_frozen)
+                return SessionResponseSnapshotV1(
+                    uploaded_image_path=None,
+                    legacy_session=dict(legacy),
+                    task_state=frozen,
+                )
+
+            def session_snapshot(self, session_id):
+                raise AssertionError("HTTP error rendering must not reread live state")
+
+        runtime = CaptureOnlyRuntime(image_path)
+        response_store_path = image_path.with_suffix(".responses.sqlite3")
+        self.addCleanup(lambda: response_store_path.unlink(missing_ok=True))
+        response_store = SQLiteResponseStore(response_store_path)
+        # Keep the response store outside the runtime's state; the endpoint still
+        # exercises authoritative binding.
+        client = TestClient(create_app(runtime=runtime, response_store=response_store))
+        session_id = "http-error-existing-session"
+        client.cookies.set(SESSION_COOKIE, session_id)
+        request_id = "req_00000000000000000000000000000335"
+
+        response = client.post(
+            "/api/message",
+            content=b"not-json",
+            headers={"Content-Type": "application/json", "X-Request-ID": request_id},
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        payload = response.json()
+        self.assertEqual(payload["status"], "NEEDS_INPUT")
+        self.assertEqual(payload["layer"], "session")
+        self.assertEqual(payload["code"], "MESSAGE_INVALID")
+        self.assertEqual(payload["request_id"], request_id)
+        self.assertEqual(payload["search_id"], legacy["search_id"])
+        self.assertEqual(payload["task_state"], frozen.to_dict())
+        self.assertEqual(payload["detail"], "请求内容无效，请重新提交。")
+        self.assertNotIn("invalid json", response.text.lower())
+        self.assertNotIn("not-json", response.text)
+        self.assertEqual(runtime.capture_count, 1)
+        captured_session, capabilities, response_frozen = runtime.capture_args
+        self.assertEqual(captured_session, session_id)
+        self.assertFalse(capabilities.trusted_image_event)
+        self.assertTrue(capabilities.reset_session_available)
+        self.assertTrue(response_frozen)
+        self.assertEqual(response.headers["x-request-id"], request_id)
+        self.assertIn("no-store", response.headers["cache-control"])
+        self.assertNotIn("set-cookie", {key.lower() for key in response.headers})
+
+    def test_controlled_http_validation_real_runtime_does_not_reread_for_logging(self):
+        class UnreadableStore:
+            def __init__(self):
+                self.load_attempt_count = 0
+
+            def load(self, session_id):
+                del session_id
+                self.load_attempt_count += 1
+                raise ValueError("secret malformed child state")
+
+            def purge_expired(self):
+                return []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = UnreadableStore()
+            runtime = AgentSessionRuntime(
+                store,
+                artifacts=SessionArtifacts(root / "sessions"),
+                task_logger=object(),
+            )
+            client = TestClient(
+                create_app(
+                    runtime=runtime,
+                    response_store=SQLiteResponseStore(root / "responses.sqlite3"),
+                ),
+                raise_server_exceptions=False,
+            )
+            client.cookies.set(SESSION_COOKIE, "unreadable-http-validation")
+
+            response = client.post(
+                "/api/message",
+                content=b"not-json",
+                headers={"Content-Type": "application/json"},
+            )
+
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertEqual(response.json()["code"], "MESSAGE_INVALID")
+            self.assertEqual(
+                response.json()["task_state"]["consistency"],
+                {
+                    "status": "INCONSISTENT",
+                    "codes": ["CHILD_STATE_UNREADABLE"],
+                },
+            )
+            self.assertNotIn("secret malformed", response.text)
+            self.assertEqual(store.load_attempt_count, 1)
+
+    def test_controlled_http_purge_failure_returns_unreadable_v1_without_load(self):
+        class PurgeFailingStore:
+            def __init__(self):
+                self.purge_count = 0
+                self.load_count = 0
+
+            def purge_expired(self):
+                self.purge_count += 1
+                raise RuntimeError("secret purge database path")
+
+            def load(self, session_id):
+                del session_id
+                self.load_count += 1
+                raise AssertionError("purge failure must not trigger a live load")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = PurgeFailingStore()
+            runtime = AgentSessionRuntime(
+                store,
+                artifacts=SessionArtifacts(root / "sessions"),
+                task_logger=object(),
+            )
+            client = TestClient(
+                create_app(
+                    runtime=runtime,
+                    response_store=SQLiteResponseStore(root / "responses.sqlite3"),
+                ),
+                raise_server_exceptions=False,
+            )
+            client.cookies.set(SESSION_COOKIE, "purge-failure-http-session")
+
+            validation = client.post(
+                "/api/message",
+                content=b"not-json",
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertLogs("tiku_agent.fastapi_demo", level="ERROR"):
+                session = client.get("/api/session")
+            with self.assertLogs("tiku_agent.fastapi_demo", level="ERROR"):
+                business = client.post("/api/message", json={"text": "继续"})
+
+            self.assertEqual(validation.status_code, 400, validation.text)
+            self.assertEqual(session.status_code, 500, session.text)
+            self.assertEqual(business.status_code, 500, business.text)
+            for response in (validation, session, business):
+                task_state = response.json()["task_state"]
+                self.assertEqual(task_state["consistency"]["status"], "INCONSISTENT")
+                self.assertEqual(
+                    task_state["consistency"]["codes"],
+                    ["CHILD_STATE_UNREADABLE"],
+                )
+                self.assertEqual(
+                    task_state["active_child_task"]["status"],
+                    "INCONSISTENT",
+                )
+                self.assertNotIn("secret purge", response.text)
+            self.assertEqual(store.purge_count, 3)
+            self.assertEqual(store.load_count, 0)
+
+    def test_plain_controlled_exception_captures_one_frozen_fallback(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"plain_http_error_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        frozen = self._http_error_task_state()
+        legacy = {
+            "session_valid": True,
+            "phase": "WAIT_CHAPTER",
+            "has_active_image": True,
+            "task_revision": 7,
+            "candidate_generation": "",
+            "candidate_count": 0,
+            "search_id": "search_plain_error_fallback_01",
+        }
+
+        class PlainFailingRuntime(FakeRuntime):
+            def __init__(self, path):
+                super().__init__(path)
+                self.capture_count = 0
+
+            def handle_text(self, session_id, text, **kwargs):
+                del session_id, text, kwargs
+                raise RuntimeError("secret plain provider failure")
+
+            def session_response_snapshot_v1(
+                self,
+                session_id,
+                *,
+                capabilities=None,
+                response_frozen=False,
+            ):
+                del session_id, capabilities
+                self.capture_count += 1
+                self.capture_frozen = response_frozen
+                return SessionResponseSnapshotV1(
+                    uploaded_image_path=None,
+                    legacy_session=dict(legacy),
+                    task_state=frozen,
+                )
+
+            def session_snapshot(self, session_id):
+                del session_id
+                raise AssertionError("unexpected handler must not use legacy reread")
+
+        runtime = PlainFailingRuntime(image_path)
+        client = TestClient(create_app(runtime=runtime), raise_server_exceptions=False)
+        client.cookies.set(SESSION_COOKIE, "plain-controlled-error-session")
+
+        with self.assertLogs("tiku_agent.fastapi_demo", level="ERROR"):
+            response = client.post("/api/message", json={"text": "继续"})
+
+        self.assertEqual(response.status_code, 500, response.text)
+        self.assertEqual(response.json()["task_state"], frozen.to_dict())
+        self.assertEqual(response.json()["search_id"], legacy["search_id"])
+        self.assertEqual(runtime.capture_count, 1)
+        self.assertTrue(runtime.capture_frozen)
+        self.assertNotIn("secret plain", response.text)
+
+    def test_attempted_snapshot_failure_uses_zero_io_http_fallback(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"attempted_http_error_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+
+        class AttemptedRuntime(FakeRuntime):
+            def __init__(self, path):
+                super().__init__(path)
+                self.capture_count = 0
+
+            def session_response_snapshot_v1(self, *args, **kwargs):
+                del args, kwargs
+                self.capture_count += 1
+                error = RuntimeError("secret failed response projection")
+                error._response_snapshot_attempted = True
+                raise error
+
+            def session_snapshot(self, session_id):
+                del session_id
+                raise AssertionError("attempted capture must not trigger a live reread")
+
+        runtime = AttemptedRuntime(image_path)
+        client = TestClient(create_app(runtime=runtime), raise_server_exceptions=False)
+        client.cookies.set(SESSION_COOKIE, "attempted-controlled-error-session")
+
+        with self.assertLogs("tiku_agent.fastapi_demo", level="ERROR"):
+            response = client.get("/api/session")
+
+        self.assertEqual(response.status_code, 500, response.text)
+        self.assertEqual(
+            response.json()["task_state"]["consistency"],
+            {
+                "status": "INCONSISTENT",
+                "codes": ["CHILD_STATE_UNREADABLE"],
+            },
+        )
+        self.assertEqual(runtime.capture_count, 1)
+        self.assertNotIn("secret failed response", response.text)
+
+    def test_exact_controlled_http_error_paths_publish_root_task_state(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"http_error_path_matrix_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        frozen = self._http_error_task_state()
+        legacy = {
+            "session_valid": True,
+            "phase": "WAIT_CHAPTER",
+            "has_active_image": True,
+            "task_revision": 7,
+            "candidate_generation": "",
+            "candidate_count": 0,
+            "search_id": "search_http_error_matrix_01",
+        }
+
+        class CaptureErrorRuntime(FakeRuntime):
+            a3_enabled = True
+
+            def __init__(self, path):
+                super().__init__(path)
+                self.capture_count = 0
+
+            def session_response_snapshot_v1(self, *args, **kwargs):
+                del args, kwargs
+                self.capture_count += 1
+                error = SessionResponseSnapshotError(
+                    "secret matrix capture failure",
+                    task_state=frozen,
+                )
+                error.response_snapshot = dict(legacy)
+                raise error
+
+        cases = (
+            ("GET", "/api/session", {}, 500),
+            (
+                "POST",
+                "/api/message",
+                {"content": b"not-json", "headers": {"Content-Type": "application/json"}},
+                400,
+            ),
+            (
+                "POST",
+                "/api/image",
+                {"content": b"not-image", "headers": {"Content-Type": "image/png"}},
+                400,
+            ),
+            (
+                "POST",
+                "/api/a3/select",
+                {"content": b"not-json", "headers": {"Content-Type": "application/json"}},
+                400,
+            ),
+            ("POST", "/api/reset", {}, 500),
+        )
+        for index, (method, path, kwargs, expected_status) in enumerate(cases):
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as temp_dir:
+                runtime = CaptureErrorRuntime(image_path)
+                client = TestClient(
+                    create_app(
+                        runtime=runtime,
+                        response_store=SQLiteResponseStore(
+                            Path(temp_dir) / "responses.sqlite3"
+                        ),
+                    ),
+                    raise_server_exceptions=False,
+                )
+                client.cookies.set(SESSION_COOKIE, f"controlled-path-{index}")
+                log_context = (
+                    self.assertLogs("tiku_agent.fastapi_demo", level="ERROR")
+                    if expected_status >= 500
+                    else nullcontext()
+                )
+                with log_context:
+                    response = client.request(method, path, **kwargs)
+
+                self.assertEqual(response.status_code, expected_status, response.text)
+                self.assertEqual(response.json()["task_state"], frozen.to_dict())
+                self.assertEqual(runtime.capture_count, 1)
+                self.assertNotIn("secret matrix", response.text)
+
+    def test_http_error_mapping_failure_uses_inconsistent_typed_fallback(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "mapping-failure.jpg"
+            Image.new("RGB", (4, 4), "white").save(image_path)
+            runtime = FakeRuntime(image_path)
+            client = TestClient(
+                create_app(
+                    runtime=runtime,
+                    response_store=SQLiteResponseStore(root / "responses.sqlite3"),
+                ),
+                raise_server_exceptions=False,
+            )
+            client.cookies.set(SESSION_COOKIE, "mapping-failure-session")
+
+            with patch(
+                "tiku_agent.fastapi_demo.with_public_task_state",
+                side_effect=RuntimeError("secret public mapper failure"),
+            ), self.assertLogs("tiku_agent.fastapi_demo", level="ERROR"):
+                response = client.post("/api/message", json={"text": "继续"})
+
+            self.assertEqual(response.status_code, 500, response.text)
+            payload = response.json()
+            self.assertEqual(payload["code"], "SERVICE_UNAVAILABLE")
+            self.assertEqual(payload["task_state"]["consistency"]["status"], "INCONSISTENT")
+            self.assertEqual(
+                payload["task_state"]["consistency"]["codes"],
+                ["CHILD_STATE_UNREADABLE"],
+            )
+            self.assertNotEqual(
+                payload["task_state"],
+                empty_task_state_snapshot().to_dict(),
+            )
+            self.assertEqual(len(runtime.response_capture_calls), 1)
+            self.assertEqual(runtime.session_capture_calls, [])
+            self.assertNotIn("secret public mapper", response.text)
+
+    def test_media_reopen_mapping_failure_carries_the_reopened_frozen_pair(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"mapping_reopen_source_{uuid4().hex}.jpg"
+        missing_answer = runtime_dir / f"mapping_reopen_missing_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        reopened_task_state = self._http_error_task_state()
+        initial_legacy = {
+            "session_valid": True,
+            "phase": "ANSWERED",
+            "has_active_image": True,
+            "task_revision": 7,
+            "candidate_generation": "7:1",
+            "candidate_count": 1,
+            "search_id": "search_before_media_reopen_01",
+        }
+        reopened_legacy = {
+            "session_valid": True,
+            "phase": "WAIT_CANDIDATE_CHOICE",
+            "has_active_image": True,
+            "task_revision": 8,
+            "candidate_generation": "8:1",
+            "candidate_count": 1,
+            "search_id": "search_after_media_reopen_02",
+        }
+
+        class ReopenedRuntime(FakeRuntime):
+            def mark_media_delivery_failed_v1(self, session_id: str, **kwargs):
+                self.media_failure_calls.append((session_id, kwargs))
+                return SessionResponseSnapshotV1(
+                    uploaded_image_path=None,
+                    legacy_session=dict(reopened_legacy),
+                    task_state=reopened_task_state,
+                )
+
+        runtime = ReopenedRuntime(image_path)
+        response = AgentResponse(
+            text="答案如下。",
+            images=[str(missing_answer)],
+            intent="select_candidate",
+            media_kind="answer",
+            state={
+                "_a3_media_guard": {
+                    "unit_id": "u1",
+                    "task_revision": 7,
+                    "candidate_generation": "7:1",
+                }
+            },
+        )
+        response.response_snapshot = dict(initial_legacy)
+        response.response_projection_snapshot = dict(initial_legacy)
+        response.response_task_state_snapshot = empty_task_state_snapshot()
+        response.response_media_snapshot_captured = True
+
+        with patch(
+            "tiku_agent.fastapi_demo.with_public_task_state",
+            side_effect=RuntimeError("secret reopened mapper failure"),
+        ), self.assertRaises(RuntimeError) as raised:
+            _agent_payload(
+                response,
+                runtime,
+                "mapping-reopen-session",
+                include_task_state=True,
+                task_state_capabilities=TaskStateEntryCapabilities(
+                    reset_session_available=True,
+                ),
+            )
+
+        self.assertEqual(raised.exception.response_snapshot, reopened_legacy)
+        self.assertIs(
+            raised.exception.response_task_state_snapshot,
+            reopened_task_state,
+        )
+        self.assertEqual(len(runtime.media_failure_calls), 1)
+        self.assertNotEqual(raised.exception.response_snapshot, initial_legacy)
+
+    def test_controlled_http_validation_without_cookie_does_not_create_session(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"http_error_no_cookie_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+
+        class NoCaptureRuntime(FakeRuntime):
+            def session_response_snapshot_v1(self, *args, **kwargs):
+                raise AssertionError("unauthenticated validation must not capture runtime")
+
+            def session_snapshot(self, *args, **kwargs):
+                raise AssertionError("unauthenticated validation must not read runtime")
+
+        for endpoint, body in (
+            ("/api/message", b"not-json"),
+            ("/api/message", b"[]"),
+        ):
+            with self.subTest(endpoint=endpoint, body=body):
+                runtime = NoCaptureRuntime(image_path)
+                client = TestClient(create_app(runtime=runtime))
+                response = client.post(
+                    endpoint,
+                    content=body,
+                    headers={"Content-Type": "application/json"},
+                )
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertNotIn("task_state", response.json())
+                self.assertNotIn("set-cookie", {key.lower() for key in response.headers})
+
+    def test_missing_session_http_error_publishes_canonical_empty_snapshot(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"http_error_empty_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        runtime = FakeRuntime(image_path)
+        runtime.snapshot.update({"session_valid": False, "search_id": ""})
+        runtime.session_capture_calls.clear()
+        client = TestClient(create_app(runtime=runtime))
+        client.cookies.set(SESSION_COOKIE, "expired-http-error-session")
+
+        response = client.post(
+            "/api/message",
+            content=b"not-json",
+            headers={"Content-Type": "application/json"},
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["task_state"], empty_task_state_snapshot().to_dict())
+        self.assertEqual(len(runtime.session_capture_calls), 1)
+        self.assertTrue(runtime.session_capture_frozen_flags[-1])
+
+    def test_unreadable_http_error_preserves_inconsistent_typed_snapshot_once(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"http_error_unreadable_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        typed = self._unreadable_http_error_task_state()
+        legacy = {"session_valid": False}
+
+        class UnreadableRuntime(FakeRuntime):
+            def __init__(self, image_path):
+                super().__init__(image_path)
+                self.capture_count = 0
+
+            def session_response_snapshot_v1(self, session_id, *, capabilities=None, response_frozen=False):
+                self.capture_count += 1
+                error = SessionResponseSnapshotError(
+                    "secret unreadable state",
+                    task_state=typed,
+                )
+                error.response_snapshot = dict(legacy)
+                raise error
+
+            def session_snapshot(self, session_id):
+                raise AssertionError("unreadable error must not trigger a second read")
+
+        runtime = UnreadableRuntime(image_path)
+        client = TestClient(create_app(runtime=runtime), raise_server_exceptions=False)
+        client.cookies.set(SESSION_COOKIE, "http-error-unreadable-session")
+
+        response = client.post(
+            "/api/message",
+            content=b"not-json",
+            headers={"Content-Type": "application/json"},
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        payload = response.json()
+        self.assertEqual(payload["task_state"], typed.to_dict())
+        self.assertEqual(payload["task_state"]["consistency"]["status"], "INCONSISTENT")
+        self.assertEqual(
+            payload["task_state"]["consistency"]["codes"],
+            ["CHILD_STATE_UNREADABLE"],
+        )
+        self.assertNotEqual(payload["task_state"], empty_task_state_snapshot().to_dict())
+        self.assertNotIn("secret unreadable", response.text)
+        self.assertEqual(runtime.capture_count, 1)
+
+    def test_runtime_http_errors_keep_carried_state_protocol_and_retry_headers(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"http_error_runtime_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        frozen = self._http_error_task_state()
+        legacy = {
+            "session_valid": True,
+            "phase": "WAIT_CHAPTER",
+            "has_active_image": True,
+            "task_revision": 7,
+            "candidate_generation": "",
+            "candidate_count": 0,
+            "search_id": "search_http_error_runtime_01",
+        }
+        secret = "provider-token-and-private-path"
+
+        class ErrorRuntime(FakeRuntime):
+            def __init__(self, image_path, error_factory):
+                super().__init__(image_path)
+                self.error_factory = error_factory
+
+            def handle_text(self, session_id, text, *, progress=None, task_state_capabilities=None):
+                del session_id, text, progress, task_state_capabilities
+                error = self.error_factory()
+                # A real queue rejection occurs before admission and therefore
+                # deliberately carries neither a legacy nor typed snapshot.
+                if isinstance(error, AgentRuntimeBusyError):
+                    # Harden the exclusion gate against malformed/custom Busy
+                    # exceptions that nevertheless carry a typed object.
+                    error.response_task_state_snapshot = frozen
+                else:
+                    error.response_snapshot = dict(legacy)
+                    error.response_task_state_snapshot = frozen
+                raise error
+
+        cases = (
+            (
+                "busy",
+                lambda: AgentRuntimeBusyError(secret),
+                429,
+                "QUEUE_FULL",
+                "queue",
+                "15",
+            ),
+            (
+                "budget",
+                lambda: AgentBudgetExceededError(secret),
+                503,
+                "GLOBAL_DAILY_QUOTA_EXCEEDED",
+                "quota",
+                "3600",
+            ),
+            (
+                "protocol",
+                lambda: AgentProtocolError(secret, code="UPLOAD_PERSIST_FAILED"),
+                500,
+                "UPLOAD_PERSIST_FAILED",
+                "upload",
+                None,
+            ),
+            (
+                "unexpected",
+                lambda: RuntimeError(secret),
+                500,
+                "SERVICE_UNAVAILABLE",
+                "tool",
+                None,
+            ),
+        )
+        for name, factory, expected_status, expected_code, expected_layer, retry_after in cases:
+            with self.subTest(error=name):
+                runtime = ErrorRuntime(image_path, factory)
+                client = TestClient(create_app(runtime=runtime), raise_server_exceptions=False)
+                session_id = f"http-error-{name}-session"
+                client.cookies.set(SESSION_COOKIE, session_id)
+                request_id = f"req_{(100 + len(name)):032x}"
+                log_context = self.assertLogs("tiku_agent.fastapi_demo", level="ERROR") if name == "unexpected" else nullcontext()
+                with log_context:
+                    response = client.post(
+                        "/api/message",
+                        json={"text": "继续"},
+                        headers={"X-Request-ID": request_id},
+                    )
+                self.assertEqual(response.status_code, expected_status, response.text)
+                payload = response.json()
+                self.assertEqual(payload["code"], expected_code)
+                self.assertEqual(payload["layer"], expected_layer)
+                self.assertEqual(payload["request_id"], request_id)
+                if name == "busy":
+                    self.assertEqual(payload["search_id"], "")
+                    self.assertNotIn("task_state", payload)
+                else:
+                    self.assertEqual(payload["search_id"], legacy["search_id"])
+                    self.assertEqual(payload["task_state"], frozen.to_dict())
+                self.assertNotIn(secret, response.text)
+                self.assertNotIn("Traceback", response.text)
+                self.assertNotIn("private", response.text)
+                self.assertEqual(response.headers["x-request-id"], request_id)
+                self.assertIn("no-store", response.headers["cache-control"])
+                if retry_after is None:
+                    self.assertNotIn("retry-after", {key.lower() for key in response.headers})
+                else:
+                    self.assertEqual(response.headers["retry-after"], retry_after)
+
+    def test_http_error_exclusion_paths_never_capture_task_state(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"http_error_excluded_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+
+        class GuardedRuntime(FakeRuntime):
+            def __init__(self, image_path):
+                super().__init__(image_path)
+                self.legacy_snapshot_reads = 0
+                self.task_state_captures = 0
+
+            def session_response_snapshot_v1(self, *args, **kwargs):
+                self.task_state_captures += 1
+                raise AssertionError("excluded HTTP paths must not capture task state")
+
+            def session_snapshot(self, *args, **kwargs):
+                self.legacy_snapshot_reads += 1
+                return {}
+
+        runtime = GuardedRuntime(image_path)
+        client = TestClient(create_app(runtime=runtime), raise_server_exceptions=False)
+        client.cookies.set(SESSION_COOKIE, "excluded-http-error-session")
+
+        feedback = client.post(
+            "/api/feedback",
+            content=b"not-json",
+            headers={"Content-Type": "application/json"},
+        )
+        upload = client.get("/api/upload/missing.jpg")
+        media = client.get("/api/media/missing.jpg")
+        stream = client.post(
+            "/api/message/stream",
+            content=b"not-json",
+            headers={"Content-Type": "application/json"},
+        )
+        static = client.get("/assets/does-not-exist.css")
+
+        self.assertEqual(feedback.status_code, 400)
+        self.assertEqual(upload.status_code, 404)
+        self.assertEqual(media.status_code, 404)
+        self.assertEqual(stream.status_code, 400)
+        self.assertEqual(static.status_code, 404)
+        for response in (feedback, upload, media, stream):
+            self.assertNotIn("task_state", response.json())
+        self.assertNotIn("task_state", static.text)
+        self.assertEqual(runtime.task_state_captures, 0)
+        # Stream validation retains its legacy authoritative projection for
+        # compatibility, but must not add the typed task-state field.
+        # The stream endpoint performs its preflight search-id read before
+        # validation and may perform one compatibility projection read in the
+        # error handler; this path is outside 3.3.4's single-capture promise.
+        self.assertGreaterEqual(runtime.legacy_snapshot_reads, 1)
+
+    def test_a3_http_errors_publish_frozen_task_state_for_json_only(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"http_error_a3_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        frozen = self._http_error_task_state()
+        legacy = {
+            "session_valid": True,
+            "phase": "WAIT_UNIT_SELECTION",
+            "has_active_image": True,
+            "task_revision": 7,
+            "candidate_generation": "",
+            "candidate_count": 0,
+            "search_id": "search_http_error_a3_01",
+            "image_route": "A3",
+        }
+
+        class A3ErrorRuntime(FakeRuntime):
+            a3_enabled = True
+
+            def __init__(self, image_path):
+                super().__init__(image_path)
+                self.capture_count = 0
+
+            def session_response_snapshot_v1(self, session_id, *, capabilities=None, response_frozen=False):
+                self.capture_count += 1
+                self.capture_args = (session_id, capabilities, response_frozen)
+                return SessionResponseSnapshotV1(
+                    uploaded_image_path=None,
+                    legacy_session=dict(legacy),
+                    task_state=frozen,
+                )
+
+            def session_snapshot(self, session_id):
+                raise AssertionError("A3 HTTP error must use one frozen capture")
+
+            def select_unit(self, session_id, unit_id, **kwargs):
+                del session_id, unit_id, kwargs
+                error = AgentProtocolError(
+                    "private provider failure",
+                    code="UPLOAD_PERSIST_FAILED",
+                )
+                error.response_snapshot = dict(legacy)
+                error.response_task_state_snapshot = frozen
+                raise error
+
+        runtime = A3ErrorRuntime(image_path)
+        client = TestClient(create_app(runtime=runtime), raise_server_exceptions=False)
+        client.cookies.set(SESSION_COOKIE, "http-error-a3-session")
+
+        malformed = client.post(
+            "/api/a3/select",
+            content=b"not-json",
+            headers={"Content-Type": "application/json", "X-Request-ID": "req_00000000000000000000000000000336"},
+        )
+        self.assertEqual(malformed.status_code, 400, malformed.text)
+        self.assertEqual(malformed.json()["code"], "MESSAGE_INVALID")
+        self.assertEqual(malformed.json()["task_state"], frozen.to_dict())
+        self.assertEqual(runtime.capture_count, 1)
+        self.assertTrue(runtime.capture_args[2])
+
+        runtime.capture_count = 0
+        runtime.capture_args = None
+        runtime.session_snapshot = lambda session_id: dict(legacy)  # type: ignore[method-assign]
+        runtime_response = client.post(
+            "/api/a3/select",
+            json={"unit_id": "g1-u1", "task_revision": 7},
+            headers={"X-Request-ID": "req_00000000000000000000000000000337"},
+        )
+        self.assertEqual(runtime_response.status_code, 500, runtime_response.text)
+        self.assertEqual(runtime_response.json()["code"], "UPLOAD_PERSIST_FAILED")
+        self.assertEqual(runtime_response.json()["task_state"], frozen.to_dict())
+        self.assertNotIn("retry-after", {key.lower() for key in runtime_response.headers})
+        self.assertEqual(runtime.capture_count, 0)
+
+    def test_reset_failure_uses_post_attempt_carried_snapshot_and_keeps_cookie(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "reset-error.jpg"
+            Image.new("RGB", (4, 4), "white").save(image_path)
+            before = self._http_error_task_state()
+            after = self._unreadable_http_error_task_state()
+            before_legacy = {
+                "session_valid": True,
+                "phase": "WAIT_CHAPTER",
+                "has_active_image": True,
+                "task_revision": 7,
+                "candidate_generation": "",
+                "candidate_count": 0,
+                "search_id": "search_reset_before_01",
+            }
+            after_legacy = {
+                "session_valid": False,
+                "phase": "IDLE",
+                "has_active_image": False,
+                "task_revision": 0,
+                "candidate_generation": "",
+                "candidate_count": 0,
+                "search_id": "",
+            }
+
+            class ResetFailingRuntime(FakeRuntime):
+                def __init__(self, path):
+                    super().__init__(path)
+                    self.capture_count = 0
+                    self.clear_capabilities = None
+
+                def session_response_snapshot_v1(
+                    self,
+                    session_id,
+                    *,
+                    capabilities=None,
+                    response_frozen=False,
+                ):
+                    del session_id
+                    self.capture_count += 1
+                    self.capture_args = (capabilities, response_frozen)
+                    return SessionResponseSnapshotV1(
+                        uploaded_image_path=None,
+                        legacy_session=dict(before_legacy),
+                        task_state=before,
+                    )
+
+                def clear(self, session_id, *, task_state_capabilities=None):
+                    del session_id
+                    self.clear_capabilities = task_state_capabilities
+                    error = RuntimeError("secret partial clear failure")
+                    error.response_snapshot = dict(after_legacy)
+                    error.response_task_state_snapshot = after
+                    raise error
+
+                def session_snapshot(self, session_id):
+                    del session_id
+                    raise AssertionError("reset error rendering must not reread live state")
+
+            runtime = ResetFailingRuntime(image_path)
+            client = TestClient(
+                create_app(
+                    runtime=runtime,
+                    response_store=SQLiteResponseStore(root / "responses.sqlite3"),
+                ),
+                raise_server_exceptions=False,
+            )
+            session_id = "reset-failure-existing-session"
+            client.cookies.set(SESSION_COOKIE, session_id)
+            request_id = "req_00000000000000000000000000000338"
+
+            with self.assertLogs("tiku_agent.fastapi_demo", level="ERROR"):
+                response = client.post(
+                    "/api/reset",
+                    headers={"X-Request-ID": request_id},
+                )
+
+            self.assertEqual(response.status_code, 500, response.text)
+            payload = response.json()
+            self.assertEqual(payload["code"], "SERVICE_UNAVAILABLE")
+            self.assertEqual(payload["search_id"], "")
+            self.assertEqual(payload["task_state"], after.to_dict())
+            self.assertNotEqual(payload["task_state"], before.to_dict())
+            self.assertNotIn("secret partial", response.text)
+            self.assertEqual(runtime.capture_count, 1)
+            self.assertTrue(runtime.capture_args[1])
+            self.assertIsNotNone(runtime.clear_capabilities)
+            self.assertEqual(response.headers["x-request-id"], request_id)
+            self.assertIn("no-store", response.headers["cache-control"])
+            self.assertNotIn("set-cookie", {key.lower() for key in response.headers})
+            self.assertEqual(client.cookies.get(SESSION_COOKIE), session_id)
+
+    def test_reset_attempted_capture_failure_does_not_recapture_live_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "reset-attempted-error.jpg"
+            Image.new("RGB", (4, 4), "white").save(image_path)
+            before = self._http_error_task_state()
+            before_legacy = {
+                "session_valid": True,
+                "phase": "WAIT_CHAPTER",
+                "has_active_image": True,
+                "task_revision": 7,
+                "candidate_generation": "",
+                "candidate_count": 0,
+                "search_id": "search_reset_attempted_before_01",
+            }
+
+            class AttemptedResetRuntime(FakeRuntime):
+                def __init__(self, path):
+                    super().__init__(path)
+                    self.capture_count = 0
+
+                def session_response_snapshot_v1(
+                    self,
+                    session_id,
+                    *,
+                    capabilities=None,
+                    response_frozen=False,
+                ):
+                    del session_id, capabilities, response_frozen
+                    self.capture_count += 1
+                    if self.capture_count != 1:
+                        raise AssertionError("reset must not recapture after attempted clear")
+                    return SessionResponseSnapshotV1(
+                        uploaded_image_path=None,
+                        legacy_session=dict(before_legacy),
+                        task_state=before,
+                    )
+
+                def clear(self, session_id, *, task_state_capabilities=None):
+                    del session_id, task_state_capabilities
+                    error = RuntimeError("secret attempted reset clear")
+                    error._response_snapshot_attempted = True
+                    raise error
+
+                def session_snapshot(self, session_id):
+                    del session_id
+                    raise AssertionError("reset attempted fallback must stay zero-I/O")
+
+            runtime = AttemptedResetRuntime(image_path)
+            client = TestClient(create_app(runtime=runtime), raise_server_exceptions=False)
+            session_id = "reset-attempted-existing-session"
+            client.cookies.set(SESSION_COOKIE, session_id)
+
+            with self.assertLogs("tiku_agent.fastapi_demo", level="ERROR"):
+                response = client.post("/api/reset")
+
+            self.assertEqual(response.status_code, 500, response.text)
+            self.assertEqual(
+                response.json()["task_state"]["consistency"],
+                {
+                    "status": "INCONSISTENT",
+                    "codes": ["CHILD_STATE_UNREADABLE"],
+                },
+            )
+            self.assertEqual(runtime.capture_count, 1)
+            self.assertEqual(client.cookies.get(SESSION_COOKIE), session_id)
+            self.assertNotIn("secret attempted", response.text)
+
+    def test_image_initialization_failure_cleans_incoming_and_does_not_mint_cookie(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "unused.jpg"
+            Image.new("RGB", (4, 4), "white").save(image_path)
+            incoming_dir = root / "incoming"
+            content = io.BytesIO()
+            Image.new("RGB", (8, 8), "white").save(content, format="PNG")
+            client = TestClient(
+                create_app(
+                    runtime=FakeRuntime(image_path),
+                    incoming_dir=incoming_dir,
+                    response_store=SQLiteResponseStore(root / "responses.sqlite3"),
+                ),
+                raise_server_exceptions=False,
+            )
+
+            with patch(
+                "tiku_agent.fastapi_demo.bind_trace_event_dimensions",
+                side_effect=RuntimeError("secret trace binding failure"),
+            ), self.assertLogs("tiku_agent.fastapi_demo", level="ERROR"):
+                response = client.post(
+                    "/api/image",
+                    content=content.getvalue(),
+                    headers={
+                        "Content-Type": "image/png",
+                        "X-Filename": "question.png",
+                    },
+                )
+
+            self.assertEqual(response.status_code, 500, response.text)
+            self.assertEqual(response.json()["code"], "SERVICE_UNAVAILABLE")
+            self.assertNotIn("task_state", response.json())
+            self.assertNotIn("secret trace", response.text)
+            self.assertFalse(incoming_dir.exists() and any(incoming_dir.iterdir()))
+            self.assertNotIn("set-cookie", {key.lower() for key in response.headers})
+
+    def test_response_store_finalization_failure_keeps_frozen_error_contract(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "finalization-error.jpg"
+            Image.new("RGB", (4, 4), "white").save(image_path)
+            secret = "secret response-store database path"
+
+            class FailingResponseStore(SQLiteResponseStore):
+                def __init__(self, path):
+                    super().__init__(path)
+                    self.finalize_attempts = 0
+
+                def finalize(self, *args, **kwargs):
+                    del args, kwargs
+                    self.finalize_attempts += 1
+                    raise ResponseStoreError(secret)
+
+            runtime = FakeRuntime(image_path)
+            runtime.snapshot["search_id"] = "search_finalization_error_01"
+            store = FailingResponseStore(root / "responses.sqlite3")
+            client = TestClient(
+                create_app(runtime=runtime, response_store=store),
+                raise_server_exceptions=False,
+            )
+            session_id = "response-finalization-existing-session"
+            client.cookies.set(SESSION_COOKIE, session_id)
+            request_id = "req_00000000000000000000000000000339"
+
+            with self.assertLogs("tiku_agent.fastapi_demo", level="ERROR"):
+                response = client.post(
+                    "/api/message",
+                    json={"text": "继续"},
+                    headers={"X-Request-ID": request_id},
+                )
+
+            self.assertEqual(response.status_code, 500, response.text)
+            payload = response.json()
+            self.assertEqual(payload["code"], "SERVICE_UNAVAILABLE")
+            self.assertEqual(payload["search_id"], "search_finalization_error_01")
+            self.assertEqual(
+                payload["task_state"],
+                empty_task_state_snapshot().to_dict(),
+            )
+            self.assertNotIn(secret, response.text)
+            self.assertEqual(store.finalize_attempts, 1)
+            self.assertEqual(response.headers["x-request-id"], request_id)
+            self.assertIn("no-store", response.headers["cache-control"])
+            self.assertNotIn("set-cookie", {key.lower() for key in response.headers})
+
+    def test_runtime_error_after_session_established_sets_recovery_cookie(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "runtime-error-new-session.jpg"
+            Image.new("RGB", (4, 4), "white").save(image_path)
+            frozen = self._http_error_task_state()
+            legacy = {
+                "session_valid": True,
+                "phase": "WAIT_CHAPTER",
+                "has_active_image": True,
+                "task_revision": 7,
+                "candidate_generation": "",
+                "candidate_count": 0,
+                "search_id": "search_runtime_error_cookie_01",
+            }
+
+            class FailingRuntime(FakeRuntime):
+                def handle_text(
+                    self,
+                    session_id,
+                    text,
+                    *,
+                    progress=None,
+                    task_state_capabilities=None,
+                ):
+                    del session_id, text, progress, task_state_capabilities
+                    error = AgentProtocolError(
+                        "secret accepted-work failure",
+                        code="UPLOAD_PERSIST_FAILED",
+                    )
+                    error.response_snapshot = dict(legacy)
+                    error.response_task_state_snapshot = frozen
+                    raise error
+
+            client = TestClient(
+                create_app(
+                    runtime=FailingRuntime(image_path),
+                    response_store=SQLiteResponseStore(root / "responses.sqlite3"),
+                ),
+                raise_server_exceptions=False,
+            )
+
+            response = client.post("/api/message", json={"text": "继续"})
+
+            self.assertEqual(response.status_code, 500, response.text)
+            self.assertEqual(response.json()["task_state"], frozen.to_dict())
+            self.assertIn(SESSION_COOKIE, response.cookies)
+            self.assertTrue(response.cookies.get(SESSION_COOKIE))
+            set_cookie = response.headers["set-cookie"]
+            self.assertIn("Max-Age=7200", set_cookie)
+            self.assertIn("HttpOnly", set_cookie)
+            self.assertIn("SameSite=lax", set_cookie)
+            self.assertNotIn("secret accepted", response.text)
+
 
     def test_serialization_failure_replaces_success_with_failure_terminal(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3327,20 +4511,36 @@ class FastApiDemoTest(unittest.TestCase):
         image_path = runtime_dir / f"demo_reject_{uuid4().hex}.jpg"
         self.addCleanup(lambda: image_path.unlink(missing_ok=True))
         Image.new("RGB", (4, 4), "white").save(image_path)
-        client = TestClient(create_app(runtime=FakeRuntime(image_path)))
-
-        missing = client.post("/api/image", files={"other": ("crop.jpg", b"data", "image/jpeg")})
-        self.assertEqual(missing.status_code, 400)
-        self.assertNotIn("task_state", missing.json())
-        invalid = client.post("/api/image", files={"file": ("crop.jpg", b"not an image", "image/jpeg")})
-        self.assertEqual(invalid.status_code, 400)
-        self.assertNotIn("task_state", invalid.json())
-        oversized = client.post(
-            "/api/image",
-            files={"file": ("crop.jpg", b"x" * (MAX_IMAGE_BYTES + 1), "image/jpeg")},
+        cases = (
+            (
+                "missing",
+                {"other": ("crop.jpg", b"data", "image/jpeg")},
+                400,
+                "UPLOAD_REQUIRED",
+            ),
+            (
+                "invalid",
+                {"file": ("crop.jpg", b"not an image", "image/jpeg")},
+                400,
+                "UPLOAD_DECODE_FAILED",
+            ),
+            (
+                "oversized",
+                {"file": ("crop.jpg", b"x" * (MAX_IMAGE_BYTES + 1), "image/jpeg")},
+                413,
+                "UPLOAD_TOO_LARGE",
+            ),
         )
-        self.assertEqual(oversized.status_code, 413)
-        self.assertNotIn("task_state", oversized.json())
+        for name, files, status_code, code in cases:
+            with self.subTest(upload=name):
+                runtime = FakeRuntime(image_path)
+                client = TestClient(create_app(runtime=runtime))
+                response = client.post("/api/image", files=files)
+                self.assertEqual(response.status_code, status_code)
+                self.assertEqual(response.json()["code"], code)
+                self.assertNotIn("task_state", response.json())
+                self.assertNotIn(SESSION_COOKIE, client.cookies)
+                self.assertEqual(runtime.session_capture_calls, [])
 
     def test_json_model_endpoints_keep_health_responsive_while_runtime_is_busy(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"

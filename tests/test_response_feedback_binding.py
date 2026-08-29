@@ -152,8 +152,14 @@ class ResponseBindingRuntime:
         del session_id
         return None
 
-    def session_response_snapshot_v1(self, session_id: str, *, capabilities=None):
-        del capabilities
+    def session_response_snapshot_v1(
+        self,
+        session_id: str,
+        *,
+        capabilities=None,
+        response_frozen: bool = False,
+    ):
+        del capabilities, response_frozen
         return SessionResponseSnapshotV1(
             uploaded_image_path=None,
             legacy_session=self.session_snapshot(session_id),
@@ -397,7 +403,13 @@ class ResponseFeedbackBindingTest(unittest.TestCase):
         json_response = client.post("/api/message", json={"text": "JSON错误"})
         self.assertEqual(json_response.status_code, 500, json_response.text)
         json_payload = json_response.json()
-        self.assertNotIn("task_state", json_payload)
+        self.assertEqual(
+            json_payload["task_state"]["consistency"],
+            {
+                "status": "INCONSISTENT",
+                "codes": ["CHILD_STATE_UNREADABLE"],
+            },
+        )
         self.assertRegex(json_payload["response_id"], r"^resp_[0-9a-f]{32}$")
         json_record = response_store.get(json_payload["response_id"])
         self.assertIsNotNone(json_record)

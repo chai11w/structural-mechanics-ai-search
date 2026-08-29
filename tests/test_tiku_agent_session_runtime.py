@@ -17,7 +17,7 @@ from tiku_agent.session_runtime import (
 from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_log import TaskLogEntry, TaskLogger
-from tiku_agent.task_state_contract import empty_task_state_snapshot
+from tiku_agent.task_state_contract import TaskStateSnapshotV1, empty_task_state_snapshot
 from tiku_agent.task_state_runtime import TaskStateEntryCapabilities
 from tiku_agent.tools import ToolResult
 from tiku_shared.trace_context import TraceContext, trace_context_scope
@@ -1190,6 +1190,428 @@ class AgentSessionRuntimeTest(unittest.TestCase):
             response.response_task_state_snapshot.to_dict()["active_child_task"]["phase"],
             "WAIT_CANDIDATE_CHOICE",
         )
+
+    def test_a2_business_error_carries_mutated_frozen_state_after_one_load(self):
+        session_id = "typed-business-error-single-read"
+        self.addCleanup(lambda: self.artifacts.clear_session(session_id))
+
+        class CountingStore(SQLiteSessionStore):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.load_count = 0
+
+            def load(self, observed_session_id):
+                self.load_count += 1
+                return super().load(observed_session_id)
+
+        class MutatingFailingAgent:
+            def __init__(self, state):
+                self.state = state
+                self.progress_reporter = None
+
+            def handle_text(self, _text):
+                self.state.set_chapter("4力法")
+                raise RuntimeError("private provider failure")
+
+        store = CountingStore(self.database_path)
+        persisted_image = self.artifacts.persist_image(session_id, self.source_image)
+        persisted = AgentState(session_id=session_id)
+        persisted.start_search(
+            str(persisted_image),
+            search_id="search_single_read_error_01",
+        )
+        persisted.set_analysis(loads=[{"type": "集中", "raw": "P"}])
+        store.save(persisted)
+        runtime = AgentSessionRuntime(
+            store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            agent_factory=MutatingFailingAgent,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "private provider failure") as raised:
+            runtime.handle_text(
+                session_id,
+                "第四章",
+                task_state_capabilities=TaskStateEntryCapabilities(
+                    reset_session_available=True,
+                ),
+            )
+
+        self.assertEqual(store.load_count, 1)
+        error = raised.exception
+        self.assertEqual(error.response_snapshot["phase"], "READY_TO_ROUTE")
+        self.assertEqual(error.response_snapshot["chapter"], "4力法")
+        frozen = error.response_task_state_snapshot
+        self.assertIsNotNone(frozen)
+        self.assertEqual(frozen.consistency.status, "OK")
+        self.assertEqual(frozen.active_child_task.phase, "READY_TO_ROUTE")
+        self.assertEqual(frozen.active_child_task.chapter, "4力法")
+        self.assertEqual(
+            frozen.active_child_task.task_id,
+            "search_single_read_error_01",
+        )
+        # The failure did not checkpoint the mutation; the response snapshot is
+        # therefore provably carried from memory rather than reread from SQLite.
+        live = SQLiteSessionStore.load(store, session_id)
+        self.assertEqual(live.phase, "WAIT_CHAPTER")
+        self.assertEqual(live.chapter, "")
+
+    def test_image_error_routes_forward_capabilities_and_avoid_a_second_load(self):
+        class CountingStore(SQLiteSessionStore):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.load_count = 0
+
+            def load(self, observed_session_id):
+                self.load_count += 1
+                return super().load(observed_session_id)
+
+        class FailingImageAgent:
+            def __init__(self, state):
+                self.state = state
+                self.progress_reporter = None
+
+            def handle_image(self, image_path, *, search_id, **_kwargs):
+                self.state.start_search(str(image_path), search_id=search_id)
+                self.state.set_analysis(loads=[{"type": "集中", "raw": "P"}])
+                raise RuntimeError("private image provider failure")
+
+        decision = SimpleNamespace(handoff=SimpleNamespace(route="A2"))
+        cases = (
+            ("direct", {}),
+            (
+                "authoritative",
+                {
+                    "image_triage_authority": SimpleNamespace(
+                        decide=lambda _path: decision,
+                    )
+                },
+            ),
+            ("screened", {"external_load_screen": lambda _path: "yes"}),
+        )
+        for label, route_kwargs in cases:
+            with self.subTest(route=label):
+                session_id = f"typed-image-error-{label}"
+                self.addCleanup(lambda value=session_id: self.artifacts.clear_session(value))
+                store = CountingStore(self.database_path)
+                runtime = AgentSessionRuntime(
+                    store,
+                    artifacts=self.artifacts,
+                    task_logger=self.logger,
+                    agent_factory=FailingImageAgent,
+                    **route_kwargs,
+                )
+                try:
+                    with self.assertRaisesRegex(RuntimeError, "private image") as raised:
+                        runtime.handle_image(
+                            session_id,
+                            self.source_image,
+                            task_state_capabilities=TaskStateEntryCapabilities(
+                                trusted_image_event=True,
+                                reset_session_available=True,
+                            ),
+                        )
+                finally:
+                    if runtime._image_executor is not None:
+                        runtime._image_executor.shutdown(wait=True)
+                    if runtime._observer_executor is not None:
+                        runtime._observer_executor.shutdown(wait=True)
+
+                self.assertEqual(store.load_count, 1)
+                error = raised.exception
+                self.assertEqual(error.response_snapshot["phase"], "WAIT_CHAPTER")
+                frozen = error.response_task_state_snapshot
+                self.assertIsNotNone(frozen)
+                self.assertEqual(frozen.consistency.status, "OK")
+                self.assertEqual(frozen.active_child_task.phase, "WAIT_CHAPTER")
+                self.assertTrue(frozen.active_child_task.task_id.startswith("search_"))
+
+    def test_a2_unreadable_initial_load_carries_inconsistent_v1_without_reread(self):
+        class UnreadableStore(SQLiteSessionStore):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.load_count = 0
+
+            def load(self, _session_id):
+                self.load_count += 1
+                raise RuntimeError("private malformed state details")
+
+        store = UnreadableStore(self.database_path)
+        runtime = AgentSessionRuntime(
+            store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+            agent_factory=lambda _state: (_ for _ in ()).throw(
+                AssertionError("unreadable state must not construct an agent")
+            ),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "private malformed") as raised:
+            runtime.handle_text(
+                "typed-unreadable-error-single-read",
+                "继续",
+                task_state_capabilities=TaskStateEntryCapabilities(
+                    reset_session_available=True,
+                ),
+            )
+
+        self.assertEqual(store.load_count, 1)
+        error = raised.exception
+        self.assertEqual(error.response_snapshot, {"session_valid": False})
+        frozen = error.response_task_state_snapshot
+        self.assertIsNotNone(frozen)
+        self.assertEqual(frozen.consistency.status, "INCONSISTENT")
+        self.assertEqual(frozen.consistency.codes, ("CHILD_STATE_UNREADABLE",))
+        self.assertEqual(frozen.active_child_task.status, "INCONSISTENT")
+        self.assertNotEqual(frozen, empty_task_state_snapshot())
+
+    def test_session_response_purge_failure_carries_unreadable_v1_without_load(self):
+        failure = RuntimeError("private purge database failure")
+
+        class PurgeFailingStore(SQLiteSessionStore):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.purge_count = 0
+                self.load_count = 0
+
+            def purge_expired(self):
+                self.purge_count += 1
+                raise failure
+
+            def load(self, observed_session_id):
+                del observed_session_id
+                self.load_count += 1
+                raise AssertionError("failed purge must not be repaired by a live load")
+
+        store = PurgeFailingStore(self.database_path)
+        runtime = AgentSessionRuntime(
+            store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+        )
+
+        with self.assertRaises(RuntimeError) as raised:
+            runtime.session_response_snapshot_v1(
+                "purge-failure-session",
+                capabilities=TaskStateEntryCapabilities(
+                    reset_session_available=True,
+                ),
+                response_frozen=True,
+            )
+
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(store.purge_count, 1)
+        self.assertEqual(store.load_count, 0)
+        self.assertEqual(failure.response_snapshot, {"session_valid": False})
+        frozen = failure.response_task_state_snapshot
+        self.assertIs(type(frozen), TaskStateSnapshotV1)
+        self.assertEqual(frozen.consistency.status, "INCONSISTENT")
+        self.assertEqual(frozen.consistency.codes, ("CHILD_STATE_UNREADABLE",))
+        self.assertEqual(frozen.active_child_task.status, "INCONSISTENT")
+        self.assertTrue(getattr(failure, "_response_snapshot_attempted", False))
+
+    def test_a2_queue_rejections_do_not_read_or_carry_typed_state(self):
+        class CountingStore(SQLiteSessionStore):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.load_count = 0
+
+            def load(self, observed_session_id):
+                self.load_count += 1
+                return super().load(observed_session_id)
+
+        cases = (
+            ("full", 0, 1.0, "QUEUE_FULL"),
+            ("timeout", 1, 0.01, "QUEUE_TIMEOUT"),
+        )
+        for label, max_queued, wait_seconds, expected_code in cases:
+            with self.subTest(case=label):
+                store = CountingStore(self.database_path)
+                runtime = AgentSessionRuntime(
+                    store,
+                    artifacts=self.artifacts,
+                    task_logger=self.logger,
+                    max_concurrent_tasks=1,
+                    max_queued_tasks=max_queued,
+                    queue_wait_seconds=wait_seconds,
+                )
+                held = runtime._execution_gate.enter(session_key=object())
+                held.__enter__()
+                try:
+                    with self.assertRaises(AgentRuntimeBusyError) as raised:
+                        runtime.handle_text(
+                            f"typed-queue-{label}",
+                            "继续",
+                            task_state_capabilities=TaskStateEntryCapabilities(
+                                reset_session_available=True,
+                            ),
+                        )
+                finally:
+                    held.__exit__(None, None, None)
+
+                self.assertEqual(raised.exception.code, expected_code)
+                self.assertEqual(store.load_count, 0)
+                self.assertIsNone(raised.exception.response_task_state_snapshot)
+                self.assertFalse(raised.exception.response_snapshot["session_valid"])
+                self.assertEqual(raised.exception.response_snapshot["phase"], "IDLE")
+
+    def test_clear_store_failure_captures_post_attempt_state_once_under_lock(self):
+        session_id = "clear-store-failure-post-attempt"
+        failure = RuntimeError("private store clear failure")
+
+        class FailingClearStore(SQLiteSessionStore):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.load_count = 0
+                self.load_lock_states = []
+                self.lock_probe = lambda: False
+
+            def load(self, observed_session_id):
+                self.load_count += 1
+                self.load_lock_states.append(self.lock_probe())
+                return super().load(observed_session_id)
+
+            def clear(self, _session_id):
+                raise failure
+
+        store = FailingClearStore(self.database_path)
+        self.addCleanup(lambda: SQLiteSessionStore.clear(store, session_id))
+        self.addCleanup(lambda: self.artifacts.clear_session(session_id))
+        persisted_image = self.artifacts.persist_image(session_id, self.source_image)
+        state = AgentState(session_id=session_id)
+        state.start_search(
+            str(persisted_image),
+            search_id="search_clear_store_failure_01",
+        )
+        state.set_analysis(loads=[{"type": "集中", "raw": "P"}])
+        store.save(state)
+        runtime = AgentSessionRuntime(
+            store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+        )
+        store.lock_probe = lambda: runtime._lock(session_id).locked()
+
+        with self.assertRaises(RuntimeError) as raised:
+            runtime.clear(
+                session_id,
+                task_state_capabilities=TaskStateEntryCapabilities(
+                    reset_session_available=True,
+                ),
+            )
+
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(store.load_count, 1)
+        self.assertEqual(store.load_lock_states, [True])
+        self.assertEqual(failure.response_snapshot["phase"], "WAIT_CHAPTER")
+        frozen = failure.response_task_state_snapshot
+        self.assertIsNotNone(frozen)
+        self.assertEqual(frozen.consistency.status, "OK")
+        self.assertEqual(frozen.active_child_task.phase, "WAIT_CHAPTER")
+        self.assertEqual(
+            frozen.active_child_task.task_id,
+            "search_clear_store_failure_01",
+        )
+
+    def test_deferred_clear_failure_leaves_the_combined_capture_to_a3(self):
+        failure = RuntimeError("private nested clear failure")
+
+        class FailingClearStore(SQLiteSessionStore):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.load_count = 0
+
+            def load(self, observed_session_id):
+                self.load_count += 1
+                return super().load(observed_session_id)
+
+            def clear(self, _session_id):
+                raise failure
+
+        store = FailingClearStore(self.database_path)
+        runtime = AgentSessionRuntime(
+            store,
+            artifacts=self.artifacts,
+            task_logger=self.logger,
+        )
+
+        with runtime._defer_error_response_snapshot_capture():
+            with self.assertRaises(RuntimeError) as raised:
+                runtime.clear(
+                    "deferred-clear-failure",
+                    task_state_capabilities=TaskStateEntryCapabilities(
+                        reset_session_available=True,
+                    ),
+                )
+
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(store.load_count, 0)
+        self.assertFalse(hasattr(failure, "response_snapshot"))
+        self.assertFalse(hasattr(failure, "response_task_state_snapshot"))
+
+    def test_clear_artifact_failure_captures_canonical_empty_once_under_lock(self):
+        session_id = "clear-artifact-failure-post-attempt"
+        failure = RuntimeError("private artifact cleanup failure")
+
+        class CountingStore(SQLiteSessionStore):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.load_count = 0
+                self.load_lock_states = []
+                self.lock_probe = lambda: False
+
+            def load(self, observed_session_id):
+                self.load_count += 1
+                self.load_lock_states.append(self.lock_probe())
+                return super().load(observed_session_id)
+
+        class FailingArtifacts(SessionArtifacts):
+            def clear_session(self, _session_id):
+                raise failure
+
+        store = CountingStore(self.database_path)
+        artifact_root = RUNTIME_DIR / f"clear_failure_artifacts_{uuid4().hex}"
+        artifacts = FailingArtifacts(artifact_root)
+        self.addCleanup(
+            lambda: SessionArtifacts.clear_session(artifacts, session_id)
+        )
+        persisted_image = artifacts.persist_image(session_id, self.source_image)
+        state = AgentState(session_id=session_id)
+        state.start_search(
+            str(persisted_image),
+            search_id="search_clear_artifact_failure_01",
+        )
+        state.set_analysis(loads=[{"type": "集中", "raw": "P"}])
+        store.save(state)
+        runtime = AgentSessionRuntime(
+            store,
+            artifacts=artifacts,
+            task_logger=self.logger,
+        )
+        store.lock_probe = lambda: runtime._lock(session_id).locked()
+
+        with self.assertRaises(RuntimeError) as raised:
+            runtime.clear(
+                session_id,
+                task_state_capabilities=TaskStateEntryCapabilities(
+                    reset_session_available=True,
+                ),
+            )
+
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(store.load_count, 1)
+        self.assertEqual(store.load_lock_states, [True])
+        self.assertEqual(
+            failure.response_snapshot,
+            runtime._legacy_session_snapshot_from_state(None),
+        )
+        self.assertEqual(
+            failure.response_task_state_snapshot,
+            empty_task_state_snapshot(),
+        )
+        self.assertIsNone(SQLiteSessionStore.load(store, session_id))
+        self.assertTrue(artifacts.session_dir(session_id).exists())
 
     def test_clear_waits_for_same_session_task_then_removes_its_state(self):
         started = threading.Event()

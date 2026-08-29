@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -41,13 +41,14 @@ from tiku_agent.session_artifacts import SessionArtifacts, session_key
 from tiku_agent.state import AgentState
 from tiku_agent.session_runtime import (
     AgentProtocolError,
+    AgentRuntimeBusyError,
     AgentSessionRuntime,
     ProgressReporter,
     SessionResponseSnapshotError,
     SessionResponseSnapshotV1,
     _ExecutionGate,
 )
-from tiku_agent.task_state_builder import READ_MISSING, READ_OK
+from tiku_agent.task_state_builder import READ_MISSING, READ_OK, READ_UNREADABLE
 from tiku_agent.task_state_contract import TaskStateSnapshotV1
 from tiku_agent.task_state_runtime import (
     TaskStateEntryCapabilities,
@@ -155,20 +156,33 @@ def _capture_a3_response_snapshot(method: Callable[..., AgentResponse]):
         clean = _clean_session_id(session_id)
         progress = kwargs.get("progress")
         task_state_capabilities = kwargs.get("task_state_capabilities")
-        error_snapshot_captured = False
         session_lock = runtime._lock(clean)
         try:
             with runtime._execution_gate.enter(progress, session_key=session_lock):
                 with session_lock:
+                    captured: SessionResponseSnapshotV1 | None = None
+                    capture_in_progress = False
                     try:
-                        response = method(runtime, clean, *args, **kwargs)
-                        captured = None
+                        defer_child_capture = getattr(
+                            runtime.a2_runtime,
+                            "_defer_error_response_snapshot_capture",
+                            None,
+                        )
+                        child_capture_context = (
+                            defer_child_capture()
+                            if callable(defer_child_capture)
+                            else nullcontext()
+                        )
+                        with child_capture_context:
+                            response = method(runtime, clean, *args, **kwargs)
                         if task_state_capabilities is not None:
+                            capture_in_progress = True
                             captured = runtime._response_snapshot_v1_locked(
                                 clean,
                                 capabilities=task_state_capabilities,
                                 response_frozen=True,
                             )
+                            capture_in_progress = False
                         response.response_snapshot = (
                             dict(captured.legacy_session)
                             if captured is not None
@@ -218,28 +232,139 @@ def _capture_a3_response_snapshot(method: Callable[..., AgentResponse]):
                             pass
                         return response
                     except Exception as exc:
-                        if isinstance(exc, SessionResponseSnapshotError):
-                            error_snapshot_captured = True
-                        else:
+                        if (
+                            task_state_capabilities is not None
+                            and not isinstance(exc, AgentRuntimeBusyError)
+                        ):
+                            # The A3 boundary either already consumed its
+                            # final read-set or is about to attempt the one
+                            # combined error capture below. If projection
+                            # fails, the HTTP layer must not read live state a
+                            # second time.
+                            setattr(exc, "_response_snapshot_attempted", True)
+                        if task_state_capabilities is None:
                             try:
                                 setattr(
                                     exc,
                                     "response_snapshot",
                                     dict(runtime.session_snapshot(clean)),
                                 )
-                                error_snapshot_captured = True
                             except Exception:  # noqa: BLE001 - never mask the original failure.
                                 pass
+                        elif isinstance(exc, AgentRuntimeBusyError):
+                            # Queue rejection can happen in a nested A2 gate
+                            # before the child lock is admitted.  There is no
+                            # response-time read-set for that request, so do
+                            # not acquire the A2 lock here or attach a typed
+                            # snapshot (the outer handler supplies only the
+                            # canonical legacy placeholder when needed).
+                            exc.response_snapshot = {}
+                            exc.response_task_state_snapshot = None
+                        elif getattr(
+                            exc,
+                            "_task_state_read_set_unavailable",
+                            False,
+                        ):
+                            # A nested child or parent purge just failed. The
+                            # failed store is not a valid source for the usual
+                            # combined error capture, so attach the same
+                            # zero-read A3 sentinel used by session capture.
+                            try:
+                                exc.response_snapshot = {"session_valid": False}
+                                exc.response_task_state_snapshot = (
+                                    runtime._task_state_snapshot_v1_from_read_set(
+                                        clean,
+                                        workflow_state=None,
+                                        workflow_read_status=READ_UNREADABLE,
+                                        child_state=None,
+                                        child_read_status=READ_UNREADABLE,
+                                        capabilities=task_state_capabilities,
+                                        response_frozen=True,
+                                    )
+                                )
+                            except Exception:  # noqa: BLE001 - preserve purge failure.
+                                pass
+                        elif isinstance(exc, SessionResponseSnapshotError):
+                            # This exception already owns the exact typed
+                            # value from its failed frozen read-set.  Reuse it
+                            # verbatim; a second combined capture could observe
+                            # a later state or turn one unreadable store into
+                            # two reads.
+                            if type(exc.task_state) is TaskStateSnapshotV1:
+                                try:
+                                    setattr(
+                                        exc,
+                                        "response_task_state_snapshot",
+                                        exc.task_state,
+                                    )
+                                except Exception:  # noqa: BLE001 - preserve the original failure.
+                                    pass
+                        elif capture_in_progress:
+                            # The successful business call reached its final
+                            # combined capture. Never retry that read-set; a
+                            # classified failure already carries its typed V1.
+                            pass
+                        elif captured is not None:
+                            try:
+                                setattr(
+                                    exc,
+                                    "response_snapshot",
+                                    dict(captured.legacy_session),
+                                )
+                                setattr(
+                                    exc,
+                                    "response_task_state_snapshot",
+                                    captured.task_state,
+                                )
+                            except Exception:  # noqa: BLE001 - never mask the original failure.
+                                pass
+                        else:
+                            try:
+                                error_capture = runtime._response_snapshot_v1_locked(
+                                    clean,
+                                    capabilities=task_state_capabilities,
+                                    response_frozen=True,
+                                )
+                            except SessionResponseSnapshotError as capture_error:
+                                try:
+                                    setattr(
+                                        exc,
+                                        "response_snapshot",
+                                        dict(capture_error.response_snapshot),
+                                    )
+                                    setattr(
+                                        exc,
+                                        "response_task_state_snapshot",
+                                        capture_error.task_state,
+                                    )
+                                except Exception:  # noqa: BLE001 - never mask the original failure.
+                                    pass
+                            except Exception:  # noqa: BLE001 - never mask the original failure.
+                                pass
+                            else:
+                                try:
+                                    setattr(
+                                        exc,
+                                        "response_snapshot",
+                                        dict(error_capture.legacy_session),
+                                    )
+                                    setattr(
+                                        exc,
+                                        "response_task_state_snapshot",
+                                        error_capture.task_state,
+                                    )
+                                except Exception:  # noqa: BLE001 - never mask the original failure.
+                                    pass
                         raise
-        except Exception as exc:
-            if not error_snapshot_captured and not isinstance(
-                exc,
-                SessionResponseSnapshotError,
-            ):
-                try:
-                    setattr(exc, "response_snapshot", dict(runtime.session_snapshot(clean)))
-                except Exception:  # noqa: BLE001 - never mask the original failure.
-                    pass
+        except AgentProtocolError as exc:
+            if not exc.response_snapshot:
+                # Queue rejection occurs before the A3 lock. Keep the legacy
+                # compatibility shape without reading parent or child state;
+                # typed state remains absent by design.
+                exc.response_snapshot = runtime._legacy_session_snapshot_from_states(
+                    None,
+                    child_snapshot=None,
+                )
             raise
 
     return wrapped
@@ -587,7 +712,7 @@ class A3MvpRuntime:
         lock = self._lock(clean)
         with lock:
             self._ensure_budget(identity_key)
-            previous = self.store.load(clean)
+            previous = self._load_workflow_state(clean)
             next_revision = int(previous.task_revision if previous is not None else 0) + 1
             self._clear_locked(clean, preserve_artifacts=True)
             persisted = self.artifacts.persist_image(clean, image_path)
@@ -627,7 +752,7 @@ class A3MvpRuntime:
         clean = _clean_session_id(session_id)
         with self._lock(clean):
             self._ensure_budget(identity_key)
-            state = self.store.load(clean)
+            state = self._load_workflow_state(clean)
             if state is None:
                 return AgentResponse(
                     text="先发一张题图给我吧。",
@@ -1101,7 +1226,7 @@ class A3MvpRuntime:
         del task_state_capabilities
         clean = _clean_session_id(session_id)
         with self._lock(clean):
-            state = self.store.load(clean)
+            state = self._load_workflow_state(clean)
             if state is None:
                 return AgentResponse(
                     text="当前题目列表已失效，请重新上传题图。",
@@ -1146,7 +1271,7 @@ class A3MvpRuntime:
             )
         with self._lock(clean):
             self._ensure_budget(identity_key)
-            state = self.store.load(clean)
+            state = self._load_workflow_state(clean)
             if state is None or not state.auto_crop_enabled:
                 return AgentResponse(
                     text="当前自动裁剪任务已失效，请重新上传题图。",
@@ -1352,7 +1477,7 @@ class A3MvpRuntime:
         clean = _clean_session_id(session_id)
         with self._lock(clean):
             self._ensure_budget(identity_key)
-            state = self.store.load(clean)
+            state = self._load_workflow_state(clean)
             if state is None or state.phase != A3_PHASE_CROP_REQUIRED:
                 return AgentResponse(
                     text="这次裁剪已失效，请从当前题目列表重新选择。",
@@ -1481,14 +1606,14 @@ class A3MvpRuntime:
             return self._after_a2_response(state, response)
 
     def current_image_path(self, session_id: str) -> Path | None:
-        state = self.store.load(_clean_session_id(session_id))
+        state = self._load_workflow_state(_clean_session_id(session_id))
         if state is None or not state.source_page_path:
             return None
         path = Path(state.source_page_path).resolve()
         return path if path.is_file() else None
 
     def current_crop_path(self, session_id: str, unit_id: str) -> Path | None:
-        state = self.store.load(_clean_session_id(session_id))
+        state = self._load_workflow_state(_clean_session_id(session_id))
         return self._current_crop_path_from_frozen_state(state, unit_id)
 
     def _current_crop_path_from_frozen_state(
@@ -1505,7 +1630,7 @@ class A3MvpRuntime:
         return path if path.is_file() and path.parent == crop_dir else None
 
     def current_auto_crop_overlay_path(self, session_id: str) -> Path | None:
-        state = self.store.load(_clean_session_id(session_id))
+        state = self._load_workflow_state(_clean_session_id(session_id))
         return self._auto_crop_overlay_path_from_frozen_state(state)
 
     def _auto_crop_overlay_path_from_frozen_state(
@@ -1560,13 +1685,96 @@ class A3MvpRuntime:
         # Expire the parent and its child together before the atomic capture.
         # This also keeps expired artifact cleanup reachable before store
         # ``load()`` can delete the row on its own.
-        self.purge_expired()
+        purge_error: Exception | None = None
+        defer_child_capture = getattr(
+            self.a2_runtime,
+            "_defer_error_response_snapshot_capture",
+            None,
+        )
+        child_capture_context = (
+            defer_child_capture() if callable(defer_child_capture) else nullcontext()
+        )
+        try:
+            # If parent cleanup succeeds and a later child clear fails, the
+            # A3 wrapper owns the one post-attempt parent/child read-set.
+            # Suppressing the nested child hook prevents an earlier A2-only
+            # capture and a second child load below.
+            with child_capture_context:
+                self.purge_expired()
+        except Exception as exc:  # noqa: BLE001 - preserve cleanup failure.
+            if getattr(exc, "_task_state_read_set_unavailable", False):
+                # A parent/child store purge itself failed, so probing either
+                # store again could repeat the failed I/O or observe a later
+                # value. Publish a zero-read, doubly-unreadable pair instead.
+                try:
+                    exc.response_snapshot = {"session_valid": False}
+                    exc.response_task_state_snapshot = (
+                        self._task_state_snapshot_v1_from_read_set(
+                            clean,
+                            workflow_state=None,
+                            workflow_read_status=READ_UNREADABLE,
+                            child_state=None,
+                            child_read_status=READ_UNREADABLE,
+                            capabilities=capabilities,
+                            response_frozen=True,
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - preserve purge failure.
+                    pass
+                setattr(exc, "_response_snapshot_attempted", True)
+                raise
+            purge_error = exc
         with self._lock(clean):
-            return self._response_snapshot_v1_locked(
-                clean,
-                capabilities=capabilities,
-                response_frozen=response_frozen,
-            )
+            try:
+                captured = self._response_snapshot_v1_locked(
+                    clean,
+                    capabilities=capabilities,
+                    response_frozen=(True if purge_error is not None else response_frozen),
+                )
+            except SessionResponseSnapshotError as capture_error:
+                setattr(capture_error, "_response_snapshot_attempted", True)
+                if purge_error is None:
+                    raise
+                try:
+                    purge_error.response_snapshot = dict(
+                        capture_error.response_snapshot
+                    )
+                    purge_error.response_task_state_snapshot = capture_error.task_state
+                except Exception:  # noqa: BLE001 - never replace cleanup failure.
+                    pass
+                setattr(purge_error, "_response_snapshot_attempted", True)
+                raise purge_error from capture_error
+            except Exception as capture_error:  # noqa: BLE001 - preserve first failure.
+                target = purge_error or capture_error
+                try:
+                    target.response_snapshot = {"session_valid": False}
+                    target.response_task_state_snapshot = (
+                        self._task_state_snapshot_v1_from_read_set(
+                            clean,
+                            workflow_state=None,
+                            workflow_read_status=READ_UNREADABLE,
+                            child_state=None,
+                            child_read_status=READ_UNREADABLE,
+                            capabilities=capabilities,
+                            response_frozen=True,
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - preserve the original failure.
+                    pass
+                setattr(target, "_response_snapshot_attempted", True)
+                if purge_error is not None:
+                    raise purge_error from capture_error
+                raise
+
+            if purge_error is not None:
+                try:
+                    purge_error.response_snapshot = dict(captured.legacy_session)
+                    purge_error.response_task_state_snapshot = captured.task_state
+                except Exception:  # noqa: BLE001 - never replace cleanup failure.
+                    pass
+                setattr(purge_error, "_response_snapshot_attempted", True)
+                raise purge_error
+            return captured
 
     def _response_snapshot_v1_locked(
         self,
@@ -1709,9 +1917,18 @@ class A3MvpRuntime:
             response_frozen=response_frozen,
         )
 
+    def _load_workflow_state(self, session_id: str) -> A3SessionState | None:
+        """Load authoritative parent state and mark an unreadable store once."""
+
+        try:
+            return self.store.load(session_id)
+        except Exception as exc:
+            setattr(exc, "_task_state_read_set_unavailable", True)
+            raise
+
     def session_snapshot(self, session_id: str) -> dict[str, object]:
         clean = _clean_session_id(session_id)
-        state = self.store.load(clean)
+        state = self._load_workflow_state(clean)
         child_snapshot = None
         if state is not None and state.entry_route in {"A2", "A3"}:
             child_snapshot = self.a2_runtime.session_snapshot(clean)
@@ -1821,13 +2038,13 @@ class A3MvpRuntime:
 
     def resolve_upload(self, session_id: str, filename: str) -> Path | None:
         clean = _clean_session_id(session_id)
-        if self.store.load(clean) is None:
+        if self._load_workflow_state(clean) is None:
             return None
         return self.artifacts.resolve_upload(clean, filename)
 
     def persist_media(self, session_id: str, source: str | Path) -> Path | None:
         clean = _clean_session_id(session_id)
-        if self.store.load(clean) is None:
+        if self._load_workflow_state(clean) is None:
             return None
         persisted = self.a2_runtime.persist_media(clean, source)
         if persisted is not None:
@@ -1848,7 +2065,7 @@ class A3MvpRuntime:
 
         clean = _clean_session_id(session_id)
         with self._lock(clean):
-            state = self.store.load(clean)
+            state = self._load_workflow_state(clean)
             if state is None or state.entry_route != "A3" or not state.selected_unit_id:
                 return False
             if expected_unit_id and state.selected_unit_id != str(expected_unit_id):
@@ -1990,7 +2207,7 @@ class A3MvpRuntime:
 
     def resolve_media(self, session_id: str, filename: str) -> Path | None:
         clean = _clean_session_id(session_id)
-        if self.store.load(clean) is None:
+        if self._load_workflow_state(clean) is None:
             return None
         persisted = self.a2_runtime.resolve_media(clean, filename, allow_preserved=True)
         if persisted is not None:
@@ -2000,18 +2217,89 @@ class A3MvpRuntime:
     def record_protocol_event(self, *args: Any, **kwargs: Any) -> None:
         self.a2_runtime.record_protocol_event(*args, **kwargs)
 
-    def clear(self, session_id: str) -> None:
+    def clear(
+        self,
+        session_id: str,
+        *,
+        task_state_capabilities: TaskStateEntryCapabilities | None = None,
+    ) -> None:
         clean = _clean_session_id(session_id)
         with self._lock(clean):
-            self._clear_locked(clean)
+            # A3 owns the combined parent/child error read-set.  Suppress the
+            # nested A2 clear hook while the child operation runs so a child
+            # failure cannot capture its own legacy snapshot first and force
+            # this method to read the child store a second time below.
+            defer_child_capture = getattr(
+                self.a2_runtime,
+                "_defer_error_response_snapshot_capture",
+                None,
+            )
+            child_capture_context = (
+                defer_child_capture() if callable(defer_child_capture) else nullcontext()
+            )
+            try:
+                with child_capture_context:
+                    self._clear_locked(clean)
+            except Exception as exc:
+                if task_state_capabilities is not None:
+                    setattr(exc, "_response_snapshot_attempted", True)
+                # Clear is intentionally ordered parent then child. If a later
+                # step fails, capture the post-attempt state while the parent
+                # lock is still held so the error cannot reuse the pre-clear
+                # pair or observe an unrelated later mutation.
+                try:
+                    captured = self._response_snapshot_v1_locked(
+                        clean,
+                        capabilities=task_state_capabilities,
+                        response_frozen=True,
+                    )
+                except SessionResponseSnapshotError as capture_error:
+                    try:
+                        exc.response_snapshot = dict(
+                            capture_error.response_snapshot
+                        )
+                        exc.response_task_state_snapshot = capture_error.task_state
+                    except Exception:  # noqa: BLE001 - preserve the clear failure.
+                        pass
+                except Exception:  # noqa: BLE001 - preserve the clear failure.
+                    pass
+                else:
+                    try:
+                        exc.response_snapshot = dict(captured.legacy_session)
+                        exc.response_task_state_snapshot = captured.task_state
+                    except Exception:  # noqa: BLE001 - preserve the clear failure.
+                        pass
+                raise
 
     def purge_expired(self) -> None:
-        expired = self.store.purge_expired()
-        if expired:
-            self.artifacts.clear_sessions(expired)
-            for session_id in expired:
-                self.a2_runtime.clear(session_id)
-        self.a2_runtime.purge_expired()
+        defer_child_capture = getattr(
+            self.a2_runtime,
+            "_defer_error_response_snapshot_capture",
+            None,
+        )
+        child_capture_context = (
+            defer_child_capture() if callable(defer_child_capture) else nullcontext()
+        )
+        with child_capture_context:
+            try:
+                expired = self.store.purge_expired()
+            except Exception as exc:
+                # The parent store just declared its read-set unavailable;
+                # session_response_snapshot_v1 must not immediately load it.
+                setattr(exc, "_task_state_read_set_unavailable", True)
+                raise
+            if expired:
+                self.artifacts.clear_sessions(expired)
+                for session_id in expired:
+                    self.a2_runtime.clear(session_id)
+            try:
+                self.a2_runtime.purge_expired()
+            except Exception as exc:
+                # This final cleanup boundary cannot distinguish a failed
+                # child-store purge from its follow-up artifact cleanup. Both
+                # are fail-closed and must avoid a second child store probe.
+                setattr(exc, "_task_state_read_set_unavailable", True)
+                raise
 
     def _route_persisted_image(
         self,
@@ -2818,7 +3106,13 @@ class A3MvpRuntime:
             try:
                 child = self.a2_runtime.session_snapshot(state.session_id)
                 child_search_id = str(child.get("search_id") or "").strip()
-            except Exception:  # noqa: BLE001 - observability must not affect A3.
+            except Exception as exc:  # noqa: BLE001 - keep ordinary trace lookup best effort.
+                if getattr(exc, "_task_state_read_set_unavailable", False):
+                    # session_snapshot() performs authoritative expiry
+                    # cleanup. A store-purge failure is not merely missing
+                    # observability data: swallowing it would let business
+                    # execution immediately hit the same failed store again.
+                    raise
                 child_search_id = ""
         bind_trace_event_dimensions(
             session_key=session_key(state.session_id),

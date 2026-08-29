@@ -44,7 +44,9 @@ from tiku_agent.session_runtime import (
     _ExecutionCancelled,
 )
 from tiku_agent.session_store import SQLiteSessionStore
+from tiku_agent import task_state_contract as task_state_contract
 from tiku_agent.task_state_public import PUBLIC_TASK_STATE_FIELD, with_public_task_state
+from tiku_agent.task_state_public import public_task_state_snapshot
 from tiku_agent.task_state_contract import TaskStateSnapshotV1, empty_task_state_snapshot
 from tiku_agent.task_state_runtime import TaskStateEntryCapabilities
 from tiku_agent.tool_result import is_public_tool_code
@@ -352,22 +354,61 @@ def create_app(
         headers: dict[str, str] | None = None,
         error_kind: str = "ProtocolFailure",
         response_snapshot: object = None,
+        response_task_state_snapshot: object = None,
+        response_snapshot_attempted: bool = False,
+        capture_missing_task_state: bool = True,
         persist_authoritative: bool = True,
     ) -> JSONResponse:
-        targetable = _is_authoritative_reply_path(request.url.path)
+        clean_path = str(request.url.path or "").split("?", 1)[0]
+        targetable = _is_authoritative_reply_path(clean_path)
+        task_state_allowed = _is_http_error_task_state_path(clean_path)
         if invite_access is not None and not isinstance(
             getattr(request.state, "invite_identity", None), InviteIdentity
         ):
             targetable = False
+            task_state_allowed = False
         session_id = str(
             getattr(request.state, "session_id", "")
             or request.cookies.get(session_cookie)
             or ""
         ).strip()
-        if targetable and not session_id:
-            session_id = _session_id(request, cookie_name=session_cookie)
         snapshot = response_snapshot if isinstance(response_snapshot, Mapping) else {}
-        if targetable and session_id and not snapshot:
+        if (
+            task_state_allowed
+            and session_id
+            and capture_missing_task_state
+            and type(response_task_state_snapshot) is not TaskStateSnapshotV1
+        ):
+            if snapshot or response_snapshot_attempted:
+                # A carried legacy projection proves that execution already
+                # established a response-time read-set. The attempted marker
+                # covers projection failure before either half could be
+                # attached. Never replace either case with a later live read.
+                if not snapshot:
+                    snapshot = {"session_valid": False}
+                response_task_state_snapshot = _unreadable_http_error_task_state(
+                    runtime
+                )
+            else:
+                snapshot, response_task_state_snapshot = _safe_error_snapshot(
+                    runtime,
+                    session_id,
+                    capabilities=_JSON_TASK_STATE_CAPABILITIES,
+                )
+        protocol = _with_protocol_search_id(
+            protocol,
+            str(snapshot.get("search_id") or "").strip(),
+        )
+        # HTTP-error task-state and Response Store persistence are separate
+        # gates.  A task-state-capable route must consume the carried legacy
+        # snapshot (if any) and never repair it with a live read here.
+        if (
+            targetable
+            and session_id
+            and not snapshot
+            and not task_state_allowed
+            and type(response_task_state_snapshot) is not TaskStateSnapshotV1
+        ):
             snapshot = _safe_runtime_snapshot(runtime, session_id)
         result = _protocol_json_response(
             detail,
@@ -383,8 +424,18 @@ def create_app(
             ),
             identity_key=_identity_key(request) or "local",
             session_id=session_id,
-            response_mode=_trace_response_mode(request.url.path),
+            response_mode=_trace_response_mode(clean_path),
             response_snapshot=snapshot,
+            response_task_state_snapshot=(
+                response_task_state_snapshot
+                if task_state_allowed and session_id
+                else None
+            ),
+            response_task_state_fallback=(
+                _unreadable_http_error_task_state(runtime)
+                if task_state_allowed and session_id
+                else None
+            ),
             trace_id=_request_trace_context(request).trace_id,
         )
         if session_id and not request.cookies.get(session_cookie):
@@ -394,24 +445,58 @@ def create_app(
                 secure_cookie=_is_secure_request(request),
                 cookie_name=session_cookie,
             )
+        # Exception-handler responses bypass the normal middleware response
+        # decoration path. Preserve the same request correlation header while
+        # respecting any explicitly supplied value.
+        result.headers.setdefault("X-Request-ID", _request_id(request))
         return result
 
     @app.exception_handler(HTTPException)
     async def public_http_error(request: Request, exc: HTTPException) -> Response:
         if not request.url.path.startswith("/api/"):
             return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+        clean_path = str(request.url.path or "").split("?", 1)[0]
         session_id = str(
             getattr(request.state, "session_id", "")
             or request.cookies.get(session_cookie)
             or ""
         ).strip()
-        search_id = ""
-        snapshot: Mapping[str, object] = {}
-        if session_id:
+        task_state_allowed = _is_http_error_task_state_path(clean_path) and (
+            invite_access is None
+            or isinstance(getattr(request.state, "invite_identity", None), InviteIdentity)
+        )
+        snapshot: Mapping[str, object] = _exception_response_snapshot(exc)
+        response_task_state_snapshot: object = _exception_task_state_snapshot(exc)
+        response_snapshot_attempted = _exception_response_snapshot_attempted(exc)
+        carries_response_snapshot = bool(snapshot) or (
+            type(response_task_state_snapshot) is TaskStateSnapshotV1
+        )
+
+        # A validation error can happen before an endpoint calls _session_id.
+        # Only an already-established session may trigger one controlled,
+        # response-frozen capture; never mint a session merely to decorate an
+        # error response.
+        if task_state_allowed:
+            if (
+                session_id
+                and not carries_response_snapshot
+                and not response_snapshot_attempted
+            ):
+                snapshot, response_task_state_snapshot = _safe_error_snapshot(
+                    runtime,
+                    session_id,
+                    # An HTTP input rejection is not a successfully accepted
+                    # image event, including on /api/image.
+                    capabilities=_JSON_TASK_STATE_CAPABILITIES,
+                )
+        elif _is_authoritative_reply_path(clean_path) and session_id:
+            # Stream and other legacy authoritative errors still retain their
+            # existing Response Store projection, but never gain task_state.
             snapshot = _safe_runtime_snapshot(runtime, session_id)
-            search_id = str(snapshot.get("search_id") or "")
+
+        search_id = str(snapshot.get("search_id") or "")
         protocol = _http_error_protocol(request, exc, search_id=search_id)
-        if request.url.path == "/api/invite/login":
+        if clean_path == "/api/invite/login":
             if exc.status_code == 413:
                 message = "登录请求过大，请刷新页面后重试。"
             elif exc.status_code >= 500:
@@ -424,7 +509,15 @@ def create_app(
                 status_code=exc.status_code,
                 headers=exc.headers,
             )
-        if session_id and protocol.layer is not RequestLayer.LOGIN:
+        if (
+            session_id
+            and protocol.layer is not RequestLayer.LOGIN
+            and not task_state_allowed
+        ):
+            # Controlled task-state errors have already consumed their one
+            # authoritative frozen read-set.  The legacy task logger obtains
+            # state with another store.load(), so leave these boundary errors
+            # to the request/terminal trace instead of observing a later state.
             _record_protocol_event(
                 runtime,
                 session_id,
@@ -441,12 +534,15 @@ def create_app(
             headers=exc.headers,
             error_kind=type(exc).__name__,
             response_snapshot=snapshot,
+            response_task_state_snapshot=response_task_state_snapshot,
+            response_snapshot_attempted=response_snapshot_attempted,
         )
 
     @app.exception_handler(AgentRuntimeBusyError)
     async def runtime_busy(request: Request, exc: AgentRuntimeBusyError) -> JSONResponse:
+        response_snapshot = _exception_response_snapshot(exc)
         response_search_id = str(
-            exc.response_snapshot.get("search_id") or exc.search_id
+            response_snapshot.get("search_id") or exc.search_id
         ).strip()
         protocol = exc.bind(
             request_id=_request_id(request),
@@ -459,13 +555,22 @@ def create_app(
             status_code=429,
             headers={"Retry-After": "15", "Cache-Control": "no-store"},
             error_kind=type(exc).__name__,
-            response_snapshot=exc.response_snapshot,
+            response_snapshot=response_snapshot,
+            # Admission rejection has no authoritative session read-set. Even
+            # a malformed/custom Busy exception must not smuggle typed state
+            # into the controlled-path response.
+            response_task_state_snapshot=None,
+            # Queue rejection occurs before the session lock/read-set exists.
+            # It must neither read live state nor manufacture a typed view.
+            capture_missing_task_state=False,
         )
 
     @app.exception_handler(AgentBudgetExceededError)
     async def runtime_budget(request: Request, exc: AgentBudgetExceededError) -> JSONResponse:
+        response_snapshot = _exception_response_snapshot(exc)
+        response_task_state_snapshot = _exception_task_state_snapshot(exc)
         response_search_id = str(
-            exc.response_snapshot.get("search_id") or exc.search_id
+            response_snapshot.get("search_id") or exc.search_id
         ).strip()
         protocol = exc.bind(
             request_id=_request_id(request),
@@ -478,13 +583,17 @@ def create_app(
             status_code=503,
             headers={"Retry-After": "3600", "Cache-Control": "no-store"},
             error_kind=type(exc).__name__,
-            response_snapshot=exc.response_snapshot,
+            response_snapshot=response_snapshot,
+            response_task_state_snapshot=response_task_state_snapshot,
+            response_snapshot_attempted=_exception_response_snapshot_attempted(exc),
         )
 
     @app.exception_handler(AgentProtocolError)
     async def protocol_error(request: Request, exc: AgentProtocolError) -> JSONResponse:
+        response_snapshot = _exception_response_snapshot(exc)
+        response_task_state_snapshot = _exception_task_state_snapshot(exc)
         response_search_id = str(
-            exc.response_snapshot.get("search_id") or exc.search_id
+            response_snapshot.get("search_id") or exc.search_id
         ).strip()
         protocol = exc.bind(
             request_id=_request_id(request),
@@ -497,28 +606,36 @@ def create_app(
             status_code=500,
             headers={"Cache-Control": "no-store"},
             error_kind=type(exc).__name__,
-            response_snapshot=exc.response_snapshot,
+            response_snapshot=response_snapshot,
+            response_task_state_snapshot=response_task_state_snapshot,
+            response_snapshot_attempted=_exception_response_snapshot_attempted(exc),
         )
 
     @app.exception_handler(Exception)
     async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("unhandled public Agent request failure")
+        clean_path = str(request.url.path or "").split("?", 1)[0]
         session_id = str(
             getattr(request.state, "session_id", "")
             or request.cookies.get(session_cookie)
             or ""
         ).strip()
-        response_snapshot = getattr(exc, "response_snapshot", None)
-        snapshot = response_snapshot if isinstance(response_snapshot, Mapping) else {}
-        if session_id and not snapshot:
-            snapshot = _safe_runtime_snapshot(runtime, session_id)
+        snapshot = _exception_response_snapshot(exc)
+        response_task_state_snapshot = _exception_task_state_snapshot(exc)
         search_id = str(snapshot.get("search_id") or "").strip()
         protocol = RequestProtocol.from_code(
             "SERVICE_UNAVAILABLE",
             request_id=_request_id(request),
             search_id=search_id,
         )
-        if session_id and not isinstance(exc, SessionResponseSnapshotError):
+        if (
+            session_id
+            and not _is_http_error_task_state_path(clean_path)
+            and not isinstance(exc, SessionResponseSnapshotError)
+        ):
+            # Runtime work errors already carry their response-time snapshot
+            # and task log.  Re-reading here would both duplicate that log and
+            # let error rendering observe a newer store value.
             _record_protocol_event(
                 runtime,
                 session_id,
@@ -535,6 +652,8 @@ def create_app(
             headers={"Cache-Control": "no-store"},
             error_kind=type(exc).__name__,
             response_snapshot=snapshot,
+            response_task_state_snapshot=response_task_state_snapshot,
+            response_snapshot_attempted=_exception_response_snapshot_attempted(exc),
             persist_authoritative=not isinstance(exc, ResponseStoreError),
         )
 
@@ -1018,15 +1137,23 @@ def create_app(
             capabilities=_SESSION_TASK_STATE_CAPABILITIES,
         )
         path = captured.uploaded_image_path
-        payload = with_public_task_state(
-            {
-                "uploaded_image": (
-                    f"/api/upload/{path.name}" if path is not None else ""
-                ),
-                "session": _public_session_snapshot(captured.legacy_session),
-            },
-            captured.task_state,
-        )
+        try:
+            payload = with_public_task_state(
+                {
+                    "uploaded_image": (
+                        f"/api/upload/{path.name}" if path is not None else ""
+                    ),
+                    "session": _public_session_snapshot(captured.legacy_session),
+                },
+                captured.task_state,
+            )
+        except Exception as exc:
+            # Mapping is part of the controlled response boundary. Preserve
+            # the already-frozen pair so the 500 handler neither rereads live
+            # state nor loses task_state when the mapper itself fails.
+            setattr(exc, "response_snapshot", dict(captured.legacy_session))
+            setattr(exc, "response_task_state_snapshot", captured.task_state)
+            raise
         result = JSONResponse(payload)
         _set_session_cookie(
             result,
@@ -1174,8 +1301,66 @@ def create_app(
         session_id = str(request.cookies.get(session_cookie) or "").strip()
         search_id = ""
         if session_id:
-            search_id = str(runtime.session_snapshot(session_id).get("search_id") or "")
-            runtime.clear(session_id)
+            captured = runtime.session_response_snapshot_v1(
+                session_id,
+                capabilities=_JSON_TASK_STATE_CAPABILITIES,
+                response_frozen=True,
+            )
+            if (
+                type(captured) is not SessionResponseSnapshotV1
+                or type(captured.legacy_session) is not dict
+                or type(captured.task_state) is not TaskStateSnapshotV1
+            ):
+                raise RuntimeError("reset preflight returned an invalid response snapshot")
+            search_id = str(captured.legacy_session.get("search_id") or "")
+            clear_kwargs: dict[str, object] = {}
+            try:
+                if _accepts_keyword(runtime.clear, "task_state_capabilities"):
+                    clear_kwargs["task_state_capabilities"] = (
+                        _JSON_TASK_STATE_CAPABILITIES
+                    )
+            except Exception:  # noqa: BLE001 - compatibility runtime; fallback below.
+                clear_kwargs = {}
+            try:
+                runtime.clear(session_id, **clear_kwargs)
+            except Exception as exc:
+                # Production runtimes capture while their clear lock is still
+                # held.  A compatibility runtime without that hook gets one
+                # immediate post-attempt capture here. Never reuse the
+                # pre-clear pair: a parent or child store may already be gone.
+                error_legacy = _exception_response_snapshot(exc)
+                error_task_state = _exception_task_state_snapshot(exc)
+                if not error_legacy or error_task_state is None:
+                    if _exception_response_snapshot_attempted(exc):
+                        fallback_legacy = {"session_valid": False}
+                        fallback_task_state = _unreadable_http_error_task_state(
+                            runtime
+                        )
+                    else:
+                        fallback_legacy, fallback_task_state = _safe_error_snapshot(
+                            runtime,
+                            session_id,
+                            capabilities=_JSON_TASK_STATE_CAPABILITIES,
+                        )
+                    if not error_legacy:
+                        error_legacy = fallback_legacy
+                    if error_task_state is None:
+                        error_task_state = fallback_task_state
+                if error_legacy:
+                    try:
+                        setattr(exc, "response_snapshot", dict(error_legacy))
+                    except Exception:  # noqa: BLE001 - preserve the clear failure.
+                        pass
+                if type(error_task_state) is TaskStateSnapshotV1:
+                    try:
+                        setattr(
+                            exc,
+                            "response_task_state_snapshot",
+                            error_task_state,
+                        )
+                    except Exception:  # noqa: BLE001 - preserve the clear failure.
+                        pass
+                raise
         protocol = RequestProtocol(
             status=RequestStatus.SUCCESS,
             layer=RequestLayer.SESSION,
@@ -1183,26 +1368,43 @@ def create_app(
             request_id=_request_id(request),
             search_id=search_id,
         )
-        result = JSONResponse(with_public_task_state(
-            {"ok": True, **protocol.to_dict()},
-            empty_task_state_snapshot(),
-        ))
+        reset_task_state = empty_task_state_snapshot()
+        try:
+            reset_payload = with_public_task_state(
+                {"ok": True, **protocol.to_dict()},
+                reset_task_state,
+            )
+        except Exception as exc:
+            setattr(exc, "response_snapshot", {"session_valid": False})
+            setattr(exc, "response_task_state_snapshot", reset_task_state)
+            raise
+        result = JSONResponse(reset_payload)
         result.delete_cookie(session_cookie, secure=_is_secure_request(request), httponly=True, samesite="lax")
         return result
 
     @app.post("/api/image")
     async def image(request: Request) -> Response:
         content, filename, content_type = await _read_image_upload(request)
-        session_id = _session_id(request, cookie_name=session_cookie)
-        request_id = _request_id(request)
-        identity_key = _identity_key(request)
-        secure_cookie = _is_secure_request(request)
         incoming = _write_incoming_image(
             content,
             filename,
             content_type,
             incoming_dir=incoming_dir,
         )
+        # Missing, oversized, and undecodable input is rejected before a new
+        # session exists. A failed upload must not mint a Cookie merely so the
+        # HTTP error can carry task state.
+        try:
+            session_id = _session_id(request, cookie_name=session_cookie)
+            request_id = _request_id(request)
+            identity_key = _identity_key(request)
+            secure_cookie = _is_secure_request(request)
+        except BaseException:
+            # The worker-level finally below has not been installed yet.  A
+            # failed request/session initialization must not orphan the file
+            # that input validation just persisted.
+            incoming.unlink(missing_ok=True)
+            raise
 
         def execute() -> Response:
             try:
@@ -1635,6 +1837,18 @@ def _is_authoritative_reply_path(path: object) -> bool:
     }
 
 
+def _is_http_error_task_state_path(path: object) -> bool:
+    """Return whether a non-stream Agent API may expose frozen task state."""
+
+    return str(path or "").split("?", 1)[0] in {
+        "/api/session",
+        "/api/message",
+        "/api/image",
+        "/api/a3/select",
+        "/api/reset",
+    }
+
+
 def _trace_duration_ms() -> int:
     started = _current_public_trace_meta().get("started_perf")
     return max(0, round((time.perf_counter() - float(started)) * 1000)) if started else 0
@@ -1739,6 +1953,8 @@ def _protocol_json_response(
     session_id: str = "",
     response_mode: str = "json",
     response_snapshot: Mapping[str, object] | None = None,
+    response_task_state_snapshot: object = None,
+    response_task_state_fallback: object = None,
     trace_id: str = "",
 ) -> JSONResponse:
     protocol = _public_response_protocol(protocol)
@@ -1753,6 +1969,22 @@ def _protocol_json_response(
         session_id="",
     )
     payload: dict[str, object] = {"detail": message, **protocol.to_dict()}
+    if type(response_task_state_snapshot) is TaskStateSnapshotV1:
+        try:
+            payload = with_public_task_state(payload, response_task_state_snapshot)
+        except Exception:  # noqa: BLE001 - fail closed with a stable typed sentinel.
+            logger.exception("public task-state mapping failed during HTTP error handling")
+            fallback = (
+                response_task_state_fallback
+                if type(response_task_state_fallback) is TaskStateSnapshotV1
+                else _unreadable_task_state_like(response_task_state_snapshot)
+            )
+            # Do not silently drop the field: mapping failure is an invariant
+            # breach, so publish a canonical INCONSISTENT value through the
+            # lower-level exact mapper.  If this defensive mapping itself ever
+            # fails, let the response fail closed instead of emitting a
+            # plausible error envelope without authoritative state.
+            payload[PUBLIC_TASK_STATE_FIELD] = public_task_state_snapshot(fallback)
     if response_store is not None and session_id:
         snapshot = response_snapshot if isinstance(response_snapshot, Mapping) else {}
         raw_a3 = snapshot.get("a3") if isinstance(snapshot, Mapping) else None
@@ -1875,6 +2107,27 @@ def _with_protocol_request_id(
     )
 
 
+def _with_protocol_search_id(
+    protocol: RequestProtocol,
+    search_id: str,
+) -> RequestProtocol:
+    """Fill an absent protocol search id from the exact frozen snapshot."""
+
+    clean = str(search_id or "").strip()
+    if not clean or protocol.search_id:
+        return protocol
+    return RequestProtocol(
+        status=protocol.status,
+        layer=protocol.layer,
+        code=protocol.code,
+        retryable=protocol.retryable,
+        action=protocol.action,
+        request_id=protocol.request_id,
+        search_id=clean,
+        schema_version=protocol.schema_version,
+    )
+
+
 def _http_error_protocol(
     request: Request,
     exc: HTTPException,
@@ -1932,8 +2185,11 @@ def _session_id(request: Request, *, cookie_name: str = SESSION_COOKIE) -> str:
     cached = str(getattr(request.state, "session_id", "") or "").strip()
     value = str(request.cookies.get(cookie_name) or "").strip()
     resolved = cached or value or secrets.token_urlsafe(24)
-    request.state.session_id = resolved
     bind_trace_event_dimensions(session_key=session_key(resolved))
+    # Publish the new session to exception handlers only after request
+    # initialization has completed. Otherwise a trace-binding failure could
+    # mint a Cookie for a request that never established a usable session.
+    request.state.session_id = resolved
     return resolved
 
 
@@ -2456,8 +2712,20 @@ def _agent_payload(
         **protocol.to_dict(),
     })
     if include_task_state:
-        mapped = with_public_task_state(payload, response_task_state)
-        payload[PUBLIC_TASK_STATE_FIELD] = mapped[PUBLIC_TASK_STATE_FIELD]
+        try:
+            mapped = with_public_task_state(payload, response_task_state)
+            payload[PUBLIC_TASK_STATE_FIELD] = mapped[PUBLIC_TASK_STATE_FIELD]
+        except Exception as exc:
+            # Keep the response-time legacy/typed pair on mapping failures.
+            # The controlled 500 handler can then publish its safe fallback
+            # without observing a newer store value.
+            setattr(
+                exc,
+                "response_snapshot",
+                dict(media_failure_snapshot or public_snapshot_source),
+            )
+            setattr(exc, "response_task_state_snapshot", response_task_state)
+            raise
     image_route = str(media_snapshot.get("image_route") or "").strip().upper()
     if image_route not in {"A1", "A2", "A3"}:
         image_route = ""
@@ -2524,6 +2792,15 @@ def _agent_payload(
                 setattr(exc, "response_snapshot", dict(finalization_snapshot))
             except Exception:  # noqa: BLE001 - preserve the persistence failure.
                 pass
+            if include_task_state and type(response_task_state) is TaskStateSnapshotV1:
+                try:
+                    setattr(
+                        exc,
+                        "response_task_state_snapshot",
+                        response_task_state,
+                    )
+                except Exception:  # noqa: BLE001 - preserve the persistence failure.
+                    pass
             raise
         dimensions["response_id"] = record.response_id
     bind_trace_event_dimensions(**dimensions)
@@ -2877,6 +3154,163 @@ def _safe_runtime_snapshot(
         logger.warning("runtime session snapshot unavailable during error handling")
         return {}
     return snapshot if isinstance(snapshot, Mapping) else {}
+
+
+def _exception_response_snapshot(exc: object) -> dict[str, object]:
+    """Return only the legacy projection explicitly carried by an exception."""
+
+    snapshot = getattr(exc, "response_snapshot", None)
+    if not isinstance(snapshot, Mapping):
+        return {}
+    return dict(snapshot)
+
+
+def _exception_task_state_snapshot(
+    exc: object,
+) -> TaskStateSnapshotV1 | None:
+    """Return an exception's exact frozen V1 snapshot, never a legacy mapping."""
+
+    snapshot = getattr(exc, "response_task_state_snapshot", None)
+    if type(snapshot) is TaskStateSnapshotV1:
+        return snapshot
+    # SessionResponseSnapshotError predates the public error attribute and
+    # carries its exact frozen value under ``task_state``.
+    if isinstance(exc, SessionResponseSnapshotError):
+        snapshot = getattr(exc, "task_state", None)
+        if type(snapshot) is TaskStateSnapshotV1:
+            return snapshot
+    return None
+
+
+def _exception_response_snapshot_attempted(exc: object) -> bool:
+    """Return whether runtime already consumed the authoritative read-set."""
+
+    try:
+        return getattr(exc, "_response_snapshot_attempted", False) is True
+    except Exception:  # noqa: BLE001 - malformed exceptions grant no evidence.
+        return False
+
+
+def _unreadable_task_state(*, a3_wrapper: bool) -> TaskStateSnapshotV1:
+    """Return a no-I/O fail-closed V1 for an unavailable response read-set."""
+
+    if a3_wrapper:
+        return task_state_contract.TaskStateSnapshotV1(
+            workflow=task_state_contract.WorkflowStateView(
+                exists=True,
+                workflow_id="",
+                kind=task_state_contract.WORKFLOW_KIND_IMAGE_SEARCH,
+                route=task_state_contract.WORKFLOW_ROUTE_PENDING,
+                task_revision=0,
+                phase=task_state_contract.PHASE_UNKNOWN,
+                status=task_state_contract.STATUS_INCONSISTENT,
+                completed_steps=(),
+                allowed_actions=(),
+                next_stage=task_state_contract.NEXT_RETRY,
+            ),
+            consistency=task_state_contract.ConsistencyView(
+                status=task_state_contract.CONSISTENCY_INCONSISTENT,
+                codes=(
+                    task_state_contract.CONSISTENCY_WORKFLOW_STATE_UNREADABLE,
+                    task_state_contract.CONSISTENCY_CHILD_STATE_UNREADABLE,
+                ),
+            ),
+        )
+    return task_state_contract.TaskStateSnapshotV1(
+        workflow=empty_task_state_snapshot().workflow,
+        active_child_task=task_state_contract.ChildTaskStateView(
+            task_id="",
+            kind=task_state_contract.CHILD_KIND_A2_QUESTION,
+            unit_id="",
+            task_revision=0,
+            phase=task_state_contract.PHASE_UNKNOWN,
+            status=task_state_contract.STATUS_INCONSISTENT,
+            completed_steps=(),
+            allowed_actions=(),
+            next_stage=task_state_contract.NEXT_RETRY,
+            chapter="",
+            candidate_count=0,
+            candidate_generation="",
+        ),
+        consistency=task_state_contract.ConsistencyView(
+            status=task_state_contract.CONSISTENCY_INCONSISTENT,
+            codes=(task_state_contract.CONSISTENCY_CHILD_STATE_UNREADABLE,),
+        ),
+    )
+
+
+def _unreadable_http_error_task_state(runtime: object) -> TaskStateSnapshotV1:
+    """Select the stable unreadable sentinel from trusted runtime topology."""
+
+    try:
+        a3_wrapper = bool(getattr(runtime, "a3_enabled", False))
+    except Exception:  # noqa: BLE001 - topology lookup must not break error rendering.
+        a3_wrapper = False
+    return _unreadable_task_state(a3_wrapper=a3_wrapper)
+
+
+def _unreadable_task_state_like(snapshot: object) -> TaskStateSnapshotV1:
+    """Choose a defensive sentinel when only a typed source is available."""
+
+    try:
+        workflow = getattr(snapshot, "workflow", None)
+        a3_wrapper = bool(
+            type(workflow) is task_state_contract.WorkflowStateView
+            and workflow.exists is True
+        )
+    except Exception:  # noqa: BLE001 - a corrupt source grants no topology facts.
+        a3_wrapper = False
+    return _unreadable_task_state(a3_wrapper=a3_wrapper)
+
+
+def _safe_error_snapshot(
+    runtime: AgentSessionRuntime,
+    session_id: str,
+    *,
+    capabilities: TaskStateEntryCapabilities,
+) -> tuple[dict[str, object], TaskStateSnapshotV1 | None]:
+    """Capture one response-frozen legacy/V1 pair for an HTTP validation error."""
+
+    fallback_task_state = _unreadable_http_error_task_state(runtime)
+    capture = getattr(runtime, "session_response_snapshot_v1", None)
+    if not callable(capture) or not session_id:
+        return (
+            ({"session_valid": False}, fallback_task_state)
+            if session_id
+            else ({}, None)
+        )
+    kwargs: dict[str, object] = {"capabilities": capabilities}
+    try:
+        if _accepts_keyword(capture, "response_frozen"):
+            kwargs["response_frozen"] = True
+    except Exception:  # noqa: BLE001 - an unusual test/runtime object is not fatal.
+        pass
+    try:
+        captured = capture(session_id, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - preserve the original HTTP error.
+        legacy = _exception_response_snapshot(exc)
+        task_state = _exception_task_state_snapshot(exc)
+        if task_state is None:
+            logger.warning("runtime response snapshot unavailable during HTTP error handling")
+            task_state = fallback_task_state
+        return legacy or {"session_valid": False}, task_state
+    if type(captured) is not SessionResponseSnapshotV1:
+        logger.warning("runtime returned an invalid response snapshot during HTTP error handling")
+        return {"session_valid": False}, fallback_task_state
+    legacy = (
+        dict(captured.legacy_session)
+        if isinstance(captured.legacy_session, Mapping)
+        else {}
+    )
+    task_state = (
+        captured.task_state
+        if type(captured.task_state) is TaskStateSnapshotV1
+        else None
+    )
+    if task_state is None:
+        logger.warning("runtime response snapshot omitted its exact task-state value")
+        task_state = fallback_task_state
+    return legacy or {"session_valid": False}, task_state
 
 
 def _public_a3_snapshot(value: object) -> dict[str, object] | None:

@@ -1,4 +1,5 @@
 import json
+from contextlib import contextmanager
 from pathlib import Path
 import tempfile
 import threading
@@ -35,9 +36,12 @@ from tiku_agent.session_runtime import (
     AgentProtocolError,
     AgentRuntimeBusyError,
     AgentSessionRuntime,
+    SessionResponseSnapshotError,
+    _ExecutionGate,
 )
 from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.state import AgentState
+from tiku_agent.task_state_contract import TaskStateSnapshotV1
 from tiku_agent.task_state_runtime import TaskStateEntryCapabilities
 from tiku_shared.request_protocol import RequestProtocol
 from tiku_shared.trace_context import (
@@ -855,6 +859,152 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertNotEqual(
             outcomes["second"].response_snapshot["workflow_search_id"],
             first_workflow_search_id,
+        )
+
+    def test_nested_a2_queue_rejection_does_not_capture_a3_task_state(self):
+        """A child gate rejection happens before the child read-set exists."""
+
+        class QueueRejectingA2Runtime(FakeA2Runtime):
+            def __init__(self, *, max_queued_tasks, queue_wait_seconds):
+                super().__init__()
+                self._execution_gate = _ExecutionGate(
+                    1,
+                    max_queued_tasks,
+                    queue_wait_seconds,
+                )
+
+            @contextmanager
+            def _defer_error_response_snapshot_capture(self):
+                # Match AgentSessionRuntime's nested-capture suppression hook.
+                yield
+
+            def handle_text(self, session_id, text, **kwargs):
+                del text
+                with self._execution_gate.enter(
+                    kwargs.get("progress"),
+                    session_key=self._lock(session_id),
+                ):
+                    raise AgentRuntimeBusyError("nested child queue is full")
+
+        cases = (
+            ("full", 0, 1.0, "QUEUE_FULL"),
+            ("timeout", 1, 0.01, "QUEUE_TIMEOUT"),
+        )
+        for label, max_queued_tasks, queue_wait_seconds, expected_code in cases:
+            with self.subTest(case=label):
+                a2 = QueueRejectingA2Runtime(
+                    max_queued_tasks=max_queued_tasks,
+                    queue_wait_seconds=queue_wait_seconds,
+                )
+                runtime = A3MvpRuntime(
+                    store=SQLiteA3SessionStore(
+                        self.root / f"nested-queue-{label}-a3.sqlite3"
+                    ),
+                    artifacts=SessionArtifacts(
+                        self.root / f"nested-queue-{label}-sessions"
+                    ),
+                    a2_runtime=a2,
+                    page_observer=FakeObserver(),
+                    crop_verifier=self.verifier,
+                )
+                session_id = f"nested-child-queue-{label}"
+                runtime.handle_image(session_id, self.source)
+                runtime.select_unit(session_id, "g1-u1")
+                runtime.handle_crop(
+                    session_id,
+                    {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
+                )
+
+                # Occupy the child permit so the nested call is rejected
+                # before it can enter the child lock or establish a
+                # response-time read-set.
+                child_lock = a2._lock(session_id)
+                held = a2._execution_gate.enter(session_key=child_lock)
+                held.__enter__()
+                try:
+                    runtime._response_snapshot_v1_locked = (
+                        lambda *args, **kwargs: (_ for _ in ()).throw(
+                            AssertionError(
+                                "nested queue rejection must not capture a combined V1"
+                            )
+                        )
+                    )
+                    with self.assertRaises(AgentRuntimeBusyError) as raised:
+                        runtime.handle_text(
+                            session_id,
+                            "继续",
+                            task_state_capabilities=TaskStateEntryCapabilities(
+                                reset_session_available=True,
+                            ),
+                        )
+                finally:
+                    held.__exit__(None, None, None)
+
+                self.assertEqual(raised.exception.code, expected_code)
+                self.assertIsNone(raised.exception.response_task_state_snapshot)
+                self.assertEqual(
+                    raised.exception.response_snapshot["phase"],
+                    "IDLE",
+                )
+
+    def test_nested_snapshot_error_reuses_its_exact_task_state_without_reread(self):
+        class SnapshotFailingA2Runtime(FakeA2Runtime):
+            frozen_task_state = None
+
+            @contextmanager
+            def _defer_error_response_snapshot_capture(self):
+                yield
+
+            def handle_text(self, session_id, text, **kwargs):
+                del session_id, text, kwargs
+                raise SessionResponseSnapshotError(
+                    "secret child snapshot failure",
+                    task_state=self.frozen_task_state,
+                )
+
+        a2 = SnapshotFailingA2Runtime()
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "nested-snapshot-error-a3.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "nested-snapshot-error-sessions"),
+            a2_runtime=a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+        )
+        session_id = "nested-child-snapshot-error"
+        runtime.handle_image(session_id, self.source)
+        runtime.select_unit(session_id, "g1-u1")
+        runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
+        )
+        frozen = runtime.session_response_snapshot_v1(
+            session_id,
+            capabilities=TaskStateEntryCapabilities(
+                reset_session_available=True,
+            ),
+            response_frozen=True,
+        )
+        a2.frozen_task_state = frozen.task_state
+        runtime._response_snapshot_v1_locked = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("carried snapshot error must not trigger a second read-set")
+        )
+
+        with self.assertRaises(SessionResponseSnapshotError) as raised:
+            runtime.handle_text(
+                session_id,
+                "继续",
+                task_state_capabilities=TaskStateEntryCapabilities(
+                    reset_session_available=True,
+                ),
+            )
+
+        self.assertIs(
+            raised.exception.response_task_state_snapshot,
+            frozen.task_state,
+        )
+        self.assertEqual(
+            raised.exception.response_snapshot,
+            {"session_valid": False},
         )
 
     def test_a3_cost_runs_keep_identity_and_workflow_search_id(self):
@@ -2284,6 +2434,579 @@ class A3RuntimeTests(unittest.TestCase):
             captured.task_state.to_dict()["workflow"]["phase"],
             A3_PHASE_A2_ACTIVE,
         )
+
+    def test_clear_failure_captures_post_attempt_orphan_under_parent_lock(self):
+        session_id = "a3-clear-post-attempt-orphan"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u1")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
+        )
+        events: list[str] = []
+        parent_store = _CountingStoreProxy(
+            self.runtime.store,
+            "a3_store",
+            events,
+        )
+        child_store = _CountingStoreProxy(
+            self.a2.store,
+            "a2_store",
+            events,
+        )
+        parent_lock = _TracingRLock("a3_lock", events)
+        child_lock = _TracingRLock("a2_lock", events)
+        self.runtime.store = parent_store
+        self.a2.store = child_store
+        self.runtime._lock = lambda _session_id: parent_lock
+        self.a2._lock = lambda _session_id: child_lock
+        secret = "private-child-clear-secret:F:/sensitive/session.json"
+        failure = RuntimeError(secret)
+
+        def fail_child_clear(observed_session_id, *, preserve_artifacts=False):
+            self.assertEqual(observed_session_id, session_id)
+            self.assertFalse(preserve_artifacts)
+            self.assertTrue(parent_lock.held)
+            with self.a2._lock(observed_session_id):
+                events.append("a2_clear:fail")
+                raise failure
+
+        self.a2.clear = fail_child_clear
+
+        with self.assertRaises(RuntimeError) as raised:
+            self.runtime.clear(
+                session_id,
+                task_state_capabilities=TaskStateEntryCapabilities(
+                    reset_session_available=True,
+                ),
+            )
+
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(parent_store.load_count, 1)
+        self.assertEqual(child_store.load_count, 1)
+        self.assertIsNone(parent_store.delegate.load(session_id))
+        self.assertIsNotNone(child_store.delegate.load(session_id))
+        self.assertFalse(parent_lock.held)
+        self.assertFalse(child_lock.held)
+        self.assertEqual(
+            events,
+            [
+                "a3_lock:acquire",
+                "a2_lock:acquire",
+                "a2_clear:fail",
+                "a2_lock:release",
+                "a2_lock:acquire",
+                "a3_store:load",
+                "a2_store:load",
+                "a2_lock:release",
+                "a3_lock:release",
+            ],
+        )
+        self.assertFalse(raised.exception.response_snapshot["session_valid"])
+        task_state = raised.exception.response_task_state_snapshot
+        self.assertIs(type(task_state), TaskStateSnapshotV1)
+        self.assertEqual(task_state.consistency.status, "INCONSISTENT")
+        self.assertEqual(task_state.consistency.codes, ("ORPHAN_CHILD_TASK",))
+        serialized = json.dumps(
+            {
+                "session": raised.exception.response_snapshot,
+                "task_state": task_state.to_dict(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn("private-child-clear-secret", serialized)
+
+    def test_clear_failure_with_real_a2_runtime_defers_child_capture(self):
+        """A real nested A2 clear must leave one combined orphan read-set."""
+
+        session_id = "a3-real-a2-clear-post-attempt-orphan"
+        failure = RuntimeError("private real child clear failure")
+        events: list[str] = []
+
+        class FailingChildStore(SQLiteSessionStore):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.load_count = 0
+
+            def load(self, observed_session_id):
+                self.load_count += 1
+                events.append("a2_store:load")
+                return super().load(observed_session_id)
+
+            def clear(self, _session_id):
+                events.append("a2_store:clear")
+                raise failure
+
+        class ObservingA2Runtime(AgentSessionRuntime):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.child_capture_attempts = 0
+
+            def _capture_error_response_snapshot_locked(self, *args, **kwargs):
+                self.child_capture_attempts += 1
+                return super()._capture_error_response_snapshot_locked(*args, **kwargs)
+
+        parent_store_delegate = SQLiteA3SessionStore(
+            self.root / "real-nested-clear-parent.sqlite3"
+        )
+        parent_store = _CountingStoreProxy(parent_store_delegate, "a3_store", events)
+        child_store = FailingChildStore(self.root / "real-nested-clear-child.sqlite3")
+        parent_artifacts = SessionArtifacts(self.root / "real-nested-clear-parent-sessions")
+        child_artifacts = SessionArtifacts(self.root / "real-nested-clear-child-sessions")
+        self.addCleanup(lambda: parent_artifacts.clear_session(session_id))
+        self.addCleanup(lambda: child_artifacts.clear_session(session_id))
+
+        source = self.root / "real-nested-clear-source.jpg"
+        Image.new("RGB", (8, 8), "white").save(source)
+        parent_state = A3SessionState(
+            session_id=session_id,
+            entry_route="A3",
+            phase=A3_PHASE_A2_ACTIVE,
+            source_page_path=str(source),
+            page_understanding={"page_disposition": "has_searchable_candidates"},
+            units=[
+                {
+                    "unit_id": "g1-u1",
+                    "page_index": 1,
+                    "display_label": "四-1",
+                    "searchability": "searchable_candidate",
+                }
+            ],
+            selected_unit_id="g1-u1",
+            task_revision=1,
+            current_search_id="search_child_real_parent_01",
+            workflow_search_id="search_workflow_real_parent_01",
+        )
+        parent_store_delegate.save(parent_state)
+        child_state = AgentState(
+            session_id=session_id,
+            phase="WAIT_CHAPTER",
+            current_image_path=str(source),
+            current_search_id="search_child_real_01",
+            task_revision=1,
+        )
+        child_store.save(child_state)
+
+        child_runtime = ObservingA2Runtime(
+            child_store,
+            artifacts=child_artifacts,
+            task_logger=self.logger if hasattr(self, "logger") else None,
+        )
+        runtime = A3MvpRuntime(
+            store=parent_store,
+            artifacts=parent_artifacts,
+            a2_runtime=child_runtime,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+        )
+
+        with self.assertRaises(RuntimeError) as raised:
+            runtime.clear(
+                session_id,
+                task_state_capabilities=TaskStateEntryCapabilities(
+                    reset_session_available=True,
+                ),
+            )
+
+        self.assertIs(raised.exception, failure)
+        self.assertIsNone(parent_store_delegate.load(session_id))
+        self.assertIsNotNone(SQLiteSessionStore.load(child_store, session_id))
+        self.assertEqual(parent_store.load_count, 1)
+        self.assertEqual(child_store.load_count, 1)
+        self.assertEqual(child_runtime.child_capture_attempts, 0)
+        self.assertEqual(events, ["a2_store:clear", "a3_store:load", "a2_store:load"])
+
+        task_state = raised.exception.response_task_state_snapshot
+        self.assertIs(type(task_state), TaskStateSnapshotV1)
+        self.assertEqual(task_state.consistency.status, "INCONSISTENT")
+        self.assertEqual(task_state.consistency.codes, ("ORPHAN_CHILD_TASK",))
+        self.assertEqual(task_state.active_child_task.status, "INCONSISTENT")
+        self.assertEqual(raised.exception.response_snapshot["session_valid"], False)
+
+    def test_purge_failure_with_real_a2_runtime_captures_post_attempt_orphan_once(self):
+        """Expired parent + failed child clear yields one combined error read-set."""
+
+        session_id = "a3-real-a2-purge-post-attempt-orphan"
+        failure = RuntimeError("private expired child clear failure")
+        events: list[str] = []
+
+        class ExpiringParentStore:
+            def __init__(self, delegate):
+                self.delegate = delegate
+                self.load_count = 0
+
+            def __getattr__(self, name):
+                return getattr(self.delegate, name)
+
+            def purge_expired(self):
+                events.append("a3_store:purge")
+                self.delegate.clear(session_id)
+                return [session_id]
+
+            def load(self, observed_session_id):
+                self.load_count += 1
+                events.append("a3_store:load")
+                return self.delegate.load(observed_session_id)
+
+        class FailingChildStore(SQLiteSessionStore):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.load_count = 0
+
+            def load(self, observed_session_id):
+                self.load_count += 1
+                events.append("a2_store:load")
+                return super().load(observed_session_id)
+
+            def clear(self, _session_id):
+                events.append("a2_store:clear")
+                raise failure
+
+        class ObservingA2Runtime(AgentSessionRuntime):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.child_capture_attempts = 0
+
+            def _capture_error_response_snapshot_locked(self, *args, **kwargs):
+                self.child_capture_attempts += 1
+                return super()._capture_error_response_snapshot_locked(*args, **kwargs)
+
+        parent_delegate = SQLiteA3SessionStore(
+            self.root / "real-nested-purge-parent.sqlite3"
+        )
+        parent_store = ExpiringParentStore(parent_delegate)
+        child_store = FailingChildStore(
+            self.root / "real-nested-purge-child.sqlite3"
+        )
+        parent_artifacts = SessionArtifacts(
+            self.root / "real-nested-purge-parent-sessions"
+        )
+        child_artifacts = SessionArtifacts(
+            self.root / "real-nested-purge-child-sessions"
+        )
+        self.addCleanup(lambda: parent_artifacts.clear_session(session_id))
+        self.addCleanup(lambda: child_artifacts.clear_session(session_id))
+
+        source = self.root / "real-nested-purge-source.jpg"
+        Image.new("RGB", (8, 8), "white").save(source)
+        parent_delegate.save(
+            A3SessionState(
+                session_id=session_id,
+                entry_route="A3",
+                phase=A3_PHASE_A2_ACTIVE,
+                source_page_path=str(source),
+                page_understanding={"page_disposition": "has_searchable_candidates"},
+                units=[
+                    {
+                        "unit_id": "g1-u1",
+                        "page_index": 1,
+                        "display_label": "四-1",
+                        "searchability": "searchable_candidate",
+                    }
+                ],
+                selected_unit_id="g1-u1",
+                task_revision=1,
+                current_search_id="search_child_purge_parent_01",
+                workflow_search_id="search_workflow_purge_parent_01",
+            )
+        )
+        child_store.save(
+            AgentState(
+                session_id=session_id,
+                phase="WAIT_CHAPTER",
+                current_image_path=str(source),
+                current_search_id="search_child_purge_01",
+                task_revision=1,
+            )
+        )
+        child_runtime = ObservingA2Runtime(
+            child_store,
+            artifacts=child_artifacts,
+        )
+        runtime = A3MvpRuntime(
+            store=parent_store,
+            artifacts=parent_artifacts,
+            a2_runtime=child_runtime,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+        )
+
+        with self.assertRaises(RuntimeError) as raised:
+            runtime.session_response_snapshot_v1(
+                session_id,
+                capabilities=TaskStateEntryCapabilities(
+                    reset_session_available=True,
+                ),
+                response_frozen=True,
+            )
+
+        self.assertIs(raised.exception, failure)
+        self.assertIsNone(parent_delegate.load(session_id))
+        self.assertIsNotNone(SQLiteSessionStore.load(child_store, session_id))
+        self.assertEqual(parent_store.load_count, 1)
+        self.assertEqual(child_store.load_count, 1)
+        self.assertEqual(child_runtime.child_capture_attempts, 0)
+        self.assertEqual(
+            events,
+            [
+                "a3_store:purge",
+                "a2_store:clear",
+                "a3_store:load",
+                "a2_store:load",
+            ],
+        )
+        task_state = failure.response_task_state_snapshot
+        self.assertIs(type(task_state), TaskStateSnapshotV1)
+        self.assertEqual(task_state.consistency.status, "INCONSISTENT")
+        self.assertEqual(task_state.consistency.codes, ("ORPHAN_CHILD_TASK",))
+        self.assertEqual(task_state.active_child_task.status, "INCONSISTENT")
+        self.assertFalse(failure.response_snapshot["session_valid"])
+        self.assertTrue(getattr(failure, "_response_snapshot_attempted", False))
+
+    def test_parent_store_purge_failure_uses_zero_read_unreadable_pair(self):
+        session_id = "a3-parent-purge-unreadable"
+        failure = RuntimeError("private parent purge failure")
+
+        class FailingParentStore:
+            def __init__(self):
+                self.load_count = 0
+                self.purge_count = 0
+
+            def purge_expired(self):
+                self.purge_count += 1
+                raise failure
+
+            def load(self, observed_session_id):
+                del observed_session_id
+                self.load_count += 1
+                raise AssertionError("failed parent purge must not be followed by load")
+
+        parent_store = FailingParentStore()
+        child_store = _CountingStoreProxy(self.a2.store, "a2_store", [])
+        self.runtime.store = parent_store
+        self.a2.store = child_store
+
+        with self.assertRaises(RuntimeError) as raised:
+            self.runtime.session_response_snapshot_v1(
+                session_id,
+                capabilities=TaskStateEntryCapabilities(
+                    reset_session_available=True,
+                ),
+                response_frozen=True,
+            )
+
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(parent_store.purge_count, 1)
+        self.assertEqual(parent_store.load_count, 0)
+        self.assertEqual(child_store.load_count, 0)
+        task_state = failure.response_task_state_snapshot
+        self.assertIs(type(task_state), TaskStateSnapshotV1)
+        self.assertEqual(task_state.consistency.status, "INCONSISTENT")
+        self.assertEqual(
+            task_state.consistency.codes,
+            ("WORKFLOW_STATE_UNREADABLE", "CHILD_STATE_UNREADABLE"),
+        )
+        self.assertTrue(getattr(failure, "_response_snapshot_attempted", False))
+
+    def test_child_purge_failure_uses_zero_read_unreadable_pair(self):
+        session_id = "a3-child-purge-unreadable"
+        failure = RuntimeError("private child purge failure")
+        parent_store = _CountingStoreProxy(self.runtime.store, "a3_store", [])
+        child_store = _CountingStoreProxy(self.a2.store, "a2_store", [])
+        self.runtime.store = parent_store
+        self.a2.store = child_store
+
+        def fail_child_purge():
+            raise failure
+
+        self.a2.purge_expired = fail_child_purge
+
+        with self.assertRaises(RuntimeError) as raised:
+            self.runtime.session_response_snapshot_v1(
+                session_id,
+                capabilities=TaskStateEntryCapabilities(
+                    reset_session_available=True,
+                ),
+                response_frozen=True,
+            )
+
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(parent_store.load_count, 0)
+        self.assertEqual(child_store.load_count, 0)
+        task_state = failure.response_task_state_snapshot
+        self.assertIs(type(task_state), TaskStateSnapshotV1)
+        self.assertEqual(task_state.consistency.status, "INCONSISTENT")
+        self.assertEqual(
+            task_state.consistency.codes,
+            ("WORKFLOW_STATE_UNREADABLE", "CHILD_STATE_UNREADABLE"),
+        )
+        self.assertTrue(getattr(failure, "_response_snapshot_attempted", False))
+
+    def test_nested_a2_business_purge_failure_skips_combined_recapture(self):
+        session_id = "a3-nested-a2-business-purge-unreadable"
+        failure = RuntimeError("private nested child purge failure")
+        events: list[str] = []
+
+        class FailingChildStore:
+            def __init__(self):
+                self.load_count = 0
+                self.purge_count = 0
+
+            def purge_expired(self):
+                self.purge_count += 1
+                events.append("a2_store:purge")
+                raise failure
+
+            def load(self, observed_session_id):
+                del observed_session_id
+                self.load_count += 1
+                events.append("a2_store:load")
+                raise AssertionError("failed nested purge must not be followed by load")
+
+        parent_delegate = self.runtime.store
+        parent_delegate.save(
+            A3SessionState(
+                session_id=session_id,
+                entry_route="A2",
+                phase=A3_PHASE_A2_ACTIVE,
+                task_revision=1,
+            )
+        )
+        parent_store = _CountingStoreProxy(parent_delegate, "a3_store", events)
+        child_store = FailingChildStore()
+        child_runtime = AgentSessionRuntime(
+            child_store,
+            artifacts=SessionArtifacts(self.root / "nested-purge-child-sessions"),
+        )
+        self.runtime.store = parent_store
+        self.runtime.a2_runtime = child_runtime
+
+        with self.assertRaises(RuntimeError) as raised:
+            self.runtime.handle_text(
+                session_id,
+                "继续",
+                request_id="req_nested_purge_failure",
+                task_state_capabilities=TaskStateEntryCapabilities(
+                    reset_session_available=True,
+                ),
+            )
+
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(parent_store.load_count, 1)
+        self.assertEqual(child_store.purge_count, 1, events)
+        self.assertEqual(child_store.load_count, 0)
+        self.assertEqual(events, ["a3_store:load", "a2_store:purge"])
+        task_state = failure.response_task_state_snapshot
+        self.assertIs(type(task_state), TaskStateSnapshotV1)
+        self.assertEqual(task_state.consistency.status, "INCONSISTENT")
+        self.assertEqual(
+            task_state.consistency.codes,
+            ("WORKFLOW_STATE_UNREADABLE", "CHILD_STATE_UNREADABLE"),
+        )
+        self.assertTrue(getattr(failure, "_response_snapshot_attempted", False))
+
+    def test_parent_business_load_failure_skips_combined_recapture(self):
+        session_id = "a3-parent-business-load-unreadable"
+        failure = RuntimeError("private parent load failure")
+
+        class FailingParentStore:
+            def __init__(self):
+                self.load_count = 0
+
+            def load(self, observed_session_id):
+                del observed_session_id
+                self.load_count += 1
+                raise failure
+
+        parent_store = FailingParentStore()
+        child_store = _CountingStoreProxy(self.a2.store, "a2_store", [])
+        self.runtime.store = parent_store
+        self.a2.store = child_store
+
+        with self.assertRaises(RuntimeError) as raised:
+            self.runtime.handle_text(
+                session_id,
+                "继续",
+                request_id="req_parent_load_failure",
+                task_state_capabilities=TaskStateEntryCapabilities(
+                    reset_session_available=True,
+                ),
+            )
+
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(parent_store.load_count, 1)
+        self.assertEqual(child_store.load_count, 0)
+        task_state = failure.response_task_state_snapshot
+        self.assertIs(type(task_state), TaskStateSnapshotV1)
+        self.assertEqual(
+            task_state.consistency.codes,
+            ("WORKFLOW_STATE_UNREADABLE", "CHILD_STATE_UNREADABLE"),
+        )
+        self.assertTrue(getattr(failure, "_response_snapshot_attempted", False))
+
+    def test_child_trace_load_failure_skips_business_and_combined_recapture(self):
+        session_id = "a3-child-trace-load-unreadable"
+        failure = RuntimeError("private child load failure")
+        events: list[str] = []
+
+        class FailingChildStore:
+            def __init__(self):
+                self.load_count = 0
+                self.purge_count = 0
+
+            def purge_expired(self):
+                self.purge_count += 1
+                events.append("a2_store:purge")
+                return []
+
+            def load(self, observed_session_id):
+                del observed_session_id
+                self.load_count += 1
+                events.append("a2_store:load")
+                raise failure
+
+        parent_delegate = self.runtime.store
+        parent_delegate.save(
+            A3SessionState(
+                session_id=session_id,
+                entry_route="A2",
+                phase=A3_PHASE_A2_ACTIVE,
+                task_revision=1,
+            )
+        )
+        parent_store = _CountingStoreProxy(parent_delegate, "a3_store", events)
+        child_store = FailingChildStore()
+        child_runtime = AgentSessionRuntime(
+            child_store,
+            artifacts=SessionArtifacts(self.root / "nested-load-child-sessions"),
+        )
+        self.runtime.store = parent_store
+        self.runtime.a2_runtime = child_runtime
+
+        with self.assertRaises(RuntimeError) as raised:
+            self.runtime.handle_text(
+                session_id,
+                "继续",
+                request_id="req_child_load_failure",
+                task_state_capabilities=TaskStateEntryCapabilities(
+                    reset_session_available=True,
+                ),
+            )
+
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(parent_store.load_count, 1)
+        self.assertEqual(child_store.purge_count, 1)
+        self.assertEqual(child_store.load_count, 1)
+        self.assertEqual(events, ["a3_store:load", "a2_store:purge", "a2_store:load"])
+        task_state = failure.response_task_state_snapshot
+        self.assertIs(type(task_state), TaskStateSnapshotV1)
+        self.assertEqual(
+            task_state.consistency.codes,
+            ("WORKFLOW_STATE_UNREADABLE", "CHILD_STATE_UNREADABLE"),
+        )
+        self.assertTrue(getattr(failure, "_response_snapshot_attempted", False))
 
     def test_media_failure_v1_reopens_under_parent_child_locks_and_reads_once(self):
         session_id = "a3-media-reopen-v1-lock-order"
