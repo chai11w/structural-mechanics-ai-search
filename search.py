@@ -55,6 +55,7 @@ def load_local_config():
     return cfg
 
 cfg = load_local_config()
+_BANK_EXCEL_CACHE: dict[str, tuple[int, int, pd.DataFrame]] = {}
 ROOT = Path(cfg.get("root", r"D:\桌面\答疑、帮做\结构力学\帮做"))
 ANSWER_OUTPUT = Path(cfg.get("answer_output", r"D:\桌面\答疑、帮做\答案输出"))
 LAST_SEARCH_FILE = ROOT / "_last_search.json"
@@ -702,29 +703,20 @@ def apply_length_tie_break(
     if len(perfect) <= 1:
         return scored
 
-    for item in perfect:
-        path = Path(item["path"])
+    def score_one(item):
         try:
-            pair_options = {
-                "prompt": LENGTH_TIE_PROMPT,
-                "timeout_seconds": timeout_seconds,
-                "model": model,
-            }
+            pair_options = {"prompt": LENGTH_TIE_PROMPT, "timeout_seconds": timeout_seconds, "model": model}
             if provider != "zhipu" or endpoint is not None or enable_thinking is not None:
-                pair_options.update(
-                    provider=provider,
-                    endpoint=endpoint,
-                    enable_thinking=enable_thinking,
-                )
-            length_score, length_reason = score_candidate_pair(
-                client,
-                query_image_path,
-                str(path),
-                **pair_options,
-            )
+                pair_options.update(provider=provider, endpoint=endpoint, enable_thinking=enable_thinking)
+            return score_candidate_pair(client, query_image_path, str(Path(item["path"])), **pair_options)
         except Exception as exc:  # noqa: BLE001
             print(f"WARNING: 候选 {item['rank']} 杆长复核失败: {exc}")
-            length_score, length_reason = 0.0, "杆长复核失败"
+            return 0.0, "杆长复核失败"
+
+    workers = max(1, min(RERANK_CONCURRENT_MAX_WORKERS, len(perfect)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        scored_pairs = list(executor.map(score_one, perfect))
+    for item, (length_score, length_reason) in zip(perfect, scored_pairs):
         item["length_score"] = length_score
         item["length_reason"] = length_reason
         item["final_score"] = LENGTH_TIE_FINAL_FLOOR + (1.0 - LENGTH_TIE_FINAL_FLOOR) * length_score
@@ -1325,7 +1317,15 @@ def load_bank_excel(excel_root, chapter_name):
             xlsx_path = matches[0]
         else:
             return None
-    return pd.read_excel(xlsx_path)
+    stat = xlsx_path.stat()
+    cache_key = str(xlsx_path.resolve()).casefold()
+    signature = (int(stat.st_mtime_ns), int(stat.st_size))
+    cached = _BANK_EXCEL_CACHE.get(cache_key)
+    if cached is not None and cached[:2] == signature:
+        return cached[2]
+    frame = pd.read_excel(xlsx_path)
+    _BANK_EXCEL_CACHE[cache_key] = (signature[0], signature[1], frame)
+    return frame
 
 
 def load_chapter_excel(chapter_name):

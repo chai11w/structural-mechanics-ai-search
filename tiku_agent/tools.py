@@ -802,14 +802,19 @@ def _collect_global_perfect_candidates(
     filter_type = normalize_structure_type(structure_type)
     by_content: dict[str, dict[str, Any]] = {}
 
-    for chapter in CHAPTERS:
-        scan = search.scan_chapter_candidates(
-            loads,
-            chapter,
-            excel_root,
+    def scan_one(chapter):
+        return chapter, search.scan_chapter_candidates(
+            loads, chapter, excel_root,
             structure_type=filter_type if route == "symbolic" else "",
             load_excel=load_bank_excel,
         )
+
+    workers = max(1, min(len(CHAPTERS), 7))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        scans = dict(executor.map(scan_one, CHAPTERS))
+
+    for chapter in CHAPTERS:
+        scan = scans.get(chapter)
         if scan is None:
             continue
         dimensions_by_name = getattr(scan, "dimensions_by_name", {})
