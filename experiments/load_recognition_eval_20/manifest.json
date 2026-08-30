@@ -1,0 +1,203 @@
+{
+  "schema_version": "load-recognition-eval-v1",
+  "name": "8790 A2 荷载识别分层压力集 20",
+  "description": "2026-08-30 因 ql 被误识别为弯矩而建立。预期荷载来自 live Excel 索引，属于待视觉复核的暂定真值；模型不会收到预期答案。",
+  "image_root": "live-question-bank",
+  "coverage": {
+    "ql_first_power_concentrated": 8,
+    "symbolic_moment": 4,
+    "other_symbolic": 3,
+    "numeric_or_mixed": 5,
+    "chapters": [
+      "2静定结构",
+      "3静定结构位移",
+      "4力法",
+      "5位移法",
+      "6力矩分配",
+      "7矩阵位移",
+      "8影响线"
+    ]
+  },
+  "samples": [
+    {
+      "id": "load20_01",
+      "stratum": "ql_first_power_concentrated",
+      "bank": "symbolic",
+      "book": "2静定结构.xlsx",
+      "excel_row": 3,
+      "path": "2静定结构/2多跨梁/内力图/题目2/2跨/1力/39.jpg",
+      "expected_loads": [{"type": "集中", "raw": "ql"}, {"type": "均布", "raw": "q"}]
+    },
+    {
+      "id": "load20_02",
+      "stratum": "ql_first_power_concentrated",
+      "bank": "symbolic",
+      "book": "2静定结构.xlsx",
+      "excel_row": 4,
+      "path": "2静定结构/2多跨梁/内力图/题目2/2跨/1力/45.jpg",
+      "expected_loads": [{"type": "集中", "raw": "ql"}, {"type": "均布", "raw": "q"}]
+    },
+    {
+      "id": "load20_03",
+      "stratum": "ql_first_power_concentrated",
+      "bank": "symbolic",
+      "book": "3静定结构位移.xlsx",
+      "excel_row": 5,
+      "path": "3静定结构位移/1梁/题目a/1跨/15.jpg",
+      "expected_loads": [{"type": "集中", "raw": "ql"}, {"type": "均布", "raw": "q"}]
+    },
+    {
+      "id": "load20_04",
+      "stratum": "ql_first_power_concentrated",
+      "bank": "symbolic",
+      "book": "3静定结构位移.xlsx",
+      "excel_row": 17,
+      "path": "3静定结构位移/3钢架/题目aa/2L形式/12.jpg",
+      "expected_loads": [{"type": "集中", "raw": "qL"}, {"type": "均布", "raw": "q"}]
+    },
+    {
+      "id": "load20_05",
+      "stratum": "ql_first_power_concentrated",
+      "bank": "symbolic",
+      "book": "4力法.xlsx",
+      "excel_row": 11,
+      "path": "4力法/1梁/1单未知量/题目/2跨/8.jpg",
+      "expected_loads": [{"type": "均布", "raw": "q"}, {"type": "集中", "raw": "ql/2"}]
+    },
+    {
+      "id": "load20_06",
+      "stratum": "ql_first_power_concentrated",
+      "bank": "symbolic",
+      "book": "4力法.xlsx",
+      "excel_row": 63,
+      "path": "4力法/3对称性/题目1/2梁/5.jpg",
+      "expected_loads": [{"type": "集中", "raw": "ql"}, {"type": "均布", "raw": "q"}, {"type": "集中", "raw": "ql"}]
+    },
+    {
+      "id": "load20_07",
+      "stratum": "ql_first_power_concentrated",
+      "bank": "symbolic",
+      "book": "5位移法.xlsx",
+      "excel_row": 55,
+      "path": "5位移法/题目/7.jpg",
+      "expected_loads": [{"type": "均布", "raw": "q"}, {"type": "集中", "raw": "2ql"}]
+    },
+    {
+      "id": "load20_08",
+      "stratum": "ql_first_power_concentrated",
+      "bank": "symbolic",
+      "book": "6力矩分配.xlsx",
+      "excel_row": 4,
+      "path": "6力矩分配/1单节点分配/题目aa/2钢架/2L/18.jpg",
+      "expected_loads": [{"type": "集中", "raw": "ql"}, {"type": "均布", "raw": "q"}]
+    },
+    {
+      "id": "load20_09",
+      "stratum": "symbolic_moment",
+      "bank": "symbolic",
+      "book": "2静定结构.xlsx",
+      "excel_row": 5,
+      "path": "2静定结构/2多跨梁/内力图/题目2/2跨/均/38f.jpg",
+      "expected_loads": [{"type": "均布", "raw": "q"}, {"type": "弯矩", "raw": "ql²"}]
+    },
+    {
+      "id": "load20_10",
+      "stratum": "symbolic_moment",
+      "bank": "symbolic",
+      "book": "2静定结构.xlsx",
+      "excel_row": 6,
+      "path": "2静定结构/2多跨梁/内力图/题目2/3跨/1力/34.jpg",
+      "expected_loads": [{"type": "集中", "raw": "2P"}, {"type": "弯矩", "raw": "Pa"}, {"type": "集中", "raw": "4P"}, {"type": "均布", "raw": "2P/a"}]
+    },
+    {
+      "id": "load20_11",
+      "stratum": "symbolic_moment",
+      "bank": "symbolic",
+      "book": "3静定结构位移.xlsx",
+      "excel_row": 9,
+      "path": "3静定结构位移/1梁/题目a/2跨/4.jpg",
+      "expected_loads": [{"type": "均布", "raw": "q"}, {"type": "弯矩", "raw": "ql²"}]
+    },
+    {
+      "id": "load20_12",
+      "stratum": "symbolic_moment",
+      "bank": "symbolic",
+      "book": "5位移法.xlsx",
+      "excel_row": 7,
+      "path": "5位移法/2钢架/1单未知量/题目aa/1T/1左固/21.jpg",
+      "expected_loads": [{"type": "均布", "raw": "q"}, {"type": "弯矩", "raw": "ql²"}]
+    },
+    {
+      "id": "load20_13",
+      "stratum": "other_symbolic",
+      "bank": "symbolic",
+      "book": "2静定结构.xlsx",
+      "excel_row": 2,
+      "path": "2静定结构/1单跨梁/题目a/1均/1.jpg",
+      "expected_loads": [{"type": "均布", "raw": "2q"}, {"type": "均布", "raw": "q"}]
+    },
+    {
+      "id": "load20_14",
+      "stratum": "other_symbolic",
+      "bank": "symbolic",
+      "book": "4力法.xlsx",
+      "excel_row": 3,
+      "path": "4力法/1梁/1单未知量/题目/1跨/1.jpg",
+      "expected_loads": [{"type": "集中", "raw": "F"}]
+    },
+    {
+      "id": "load20_15",
+      "stratum": "other_symbolic",
+      "bank": "symbolic",
+      "book": "6力矩分配.xlsx",
+      "excel_row": 6,
+      "path": "6力矩分配/3无剪力分配/单层/不可简化/题目/1.jpg",
+      "expected_loads": [{"type": "集中", "raw": "FP"}, {"type": "集中", "raw": "FP"}]
+    },
+    {
+      "id": "load20_16",
+      "stratum": "numeric_or_mixed",
+      "bank": "main",
+      "book": "2静定结构.xlsx",
+      "excel_row": 4,
+      "path": "2静定结构/1单跨梁/题目a/1力/16.jpg",
+      "expected_loads": [{"type": "集中", "raw": "10"}, {"type": "均布", "raw": "8"}, {"type": "弯矩", "raw": "30"}]
+    },
+    {
+      "id": "load20_17",
+      "stratum": "numeric_or_mixed",
+      "bank": "main",
+      "book": "3静定结构位移.xlsx",
+      "excel_row": 3,
+      "path": "3静定结构位移/1梁/题目a/1跨/14.jpg",
+      "expected_loads": [{"type": "集中", "raw": "8"}, {"type": "均布", "raw": "4"}, {"type": "弯矩", "raw": "24"}, {"type": "弯矩", "raw": "8"}]
+    },
+    {
+      "id": "load20_18",
+      "stratum": "numeric_or_mixed",
+      "bank": "main",
+      "book": "5位移法.xlsx",
+      "excel_row": 6,
+      "path": "5位移法/1梁/2多未知量/题目/3.jpg",
+      "expected_loads": [{"type": "集中", "raw": "32"}, {"type": "弯矩", "raw": "8"}]
+    },
+    {
+      "id": "load20_19",
+      "stratum": "numeric_or_mixed",
+      "bank": "main",
+      "book": "7矩阵位移.xlsx",
+      "excel_row": 6,
+      "path": "7矩阵位移/3全部步骤/题目aa/1固铰铰/1.jpg",
+      "expected_loads": [{"type": "均布", "raw": "12"}, {"type": "弯矩", "raw": "40"}]
+    },
+    {
+      "id": "load20_20",
+      "stratum": "numeric_or_mixed",
+      "bank": "main",
+      "book": "8影响线.xlsx",
+      "excel_row": 3,
+      "path": "8影响线/2数值计算/题目a/1跨/6.jpg",
+      "expected_loads": [{"type": "集中", "raw": "P=30"}, {"type": "均布", "raw": "q=20"}]
+    }
+  ]
+}

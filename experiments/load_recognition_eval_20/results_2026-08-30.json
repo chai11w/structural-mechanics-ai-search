@@ -1,0 +1,787 @@
+{
+  "schema_version": "load-recognition-eval-v1",
+  "manifest": "experiments/load_recognition_eval_20/manifest.json",
+  "model": "qwen3.7-plus",
+  "cache_enabled": false,
+  "duration_seconds": 33.095,
+  "summary": {
+    "total": 20,
+    "completed": 20,
+    "failures": 0,
+    "exact_matches": 20,
+    "retrieval_matches": 20,
+    "type_matches": 20,
+    "strata": {
+      "ql_first_power_concentrated": {
+        "total": 8,
+        "completed": 8,
+        "exact_matches": 8,
+        "retrieval_matches": 8,
+        "type_matches": 8
+      },
+      "symbolic_moment": {
+        "total": 4,
+        "completed": 4,
+        "exact_matches": 4,
+        "retrieval_matches": 4,
+        "type_matches": 4
+      },
+      "other_symbolic": {
+        "total": 3,
+        "completed": 3,
+        "exact_matches": 3,
+        "retrieval_matches": 3,
+        "type_matches": 3
+      },
+      "numeric_or_mixed": {
+        "total": 5,
+        "completed": 5,
+        "exact_matches": 5,
+        "retrieval_matches": 5,
+        "type_matches": 5
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "load20_01",
+      "stratum": "ql_first_power_concentrated",
+      "bank": "symbolic",
+      "book": "2静定结构.xlsx",
+      "excel_row": 3,
+      "path": "2静定结构/2多跨梁/内力图/题目2/2跨/1力/39.jpg",
+      "expected_loads": [
+        {
+          "type": "集中",
+          "raw": "ql"
+        },
+        {
+          "type": "均布",
+          "raw": "q"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "集中",
+          "raw": "ql"
+        },
+        {
+          "type": "均布",
+          "raw": "q"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 3.034,
+      "error": ""
+    },
+    {
+      "id": "load20_02",
+      "stratum": "ql_first_power_concentrated",
+      "bank": "symbolic",
+      "book": "2静定结构.xlsx",
+      "excel_row": 4,
+      "path": "2静定结构/2多跨梁/内力图/题目2/2跨/1力/45.jpg",
+      "expected_loads": [
+        {
+          "type": "集中",
+          "raw": "ql"
+        },
+        {
+          "type": "均布",
+          "raw": "q"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "集中",
+          "raw": "ql"
+        },
+        {
+          "type": "均布",
+          "raw": "q"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 2.888,
+      "error": ""
+    },
+    {
+      "id": "load20_03",
+      "stratum": "ql_first_power_concentrated",
+      "bank": "symbolic",
+      "book": "3静定结构位移.xlsx",
+      "excel_row": 5,
+      "path": "3静定结构位移/1梁/题目a/1跨/15.jpg",
+      "expected_loads": [
+        {
+          "type": "集中",
+          "raw": "ql"
+        },
+        {
+          "type": "均布",
+          "raw": "q"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "集中",
+          "raw": "ql"
+        },
+        {
+          "type": "均布",
+          "raw": "q"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 2.893,
+      "error": ""
+    },
+    {
+      "id": "load20_04",
+      "stratum": "ql_first_power_concentrated",
+      "bank": "symbolic",
+      "book": "3静定结构位移.xlsx",
+      "excel_row": 17,
+      "path": "3静定结构位移/3钢架/题目aa/2L形式/12.jpg",
+      "expected_loads": [
+        {
+          "type": "集中",
+          "raw": "qL"
+        },
+        {
+          "type": "均布",
+          "raw": "q"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "集中",
+          "raw": "qL"
+        },
+        {
+          "type": "均布",
+          "raw": "q"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 3.456,
+      "error": ""
+    },
+    {
+      "id": "load20_05",
+      "stratum": "ql_first_power_concentrated",
+      "bank": "symbolic",
+      "book": "4力法.xlsx",
+      "excel_row": 11,
+      "path": "4力法/1梁/1单未知量/题目/2跨/8.jpg",
+      "expected_loads": [
+        {
+          "type": "均布",
+          "raw": "q"
+        },
+        {
+          "type": "集中",
+          "raw": "ql/2"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "均布",
+          "raw": "q"
+        },
+        {
+          "type": "集中",
+          "raw": "ql/2"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 2.822,
+      "error": ""
+    },
+    {
+      "id": "load20_06",
+      "stratum": "ql_first_power_concentrated",
+      "bank": "symbolic",
+      "book": "4力法.xlsx",
+      "excel_row": 63,
+      "path": "4力法/3对称性/题目1/2梁/5.jpg",
+      "expected_loads": [
+        {
+          "type": "集中",
+          "raw": "ql"
+        },
+        {
+          "type": "均布",
+          "raw": "q"
+        },
+        {
+          "type": "集中",
+          "raw": "ql"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "集中",
+          "raw": "ql"
+        },
+        {
+          "type": "均布",
+          "raw": "q"
+        },
+        {
+          "type": "集中",
+          "raw": "ql"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 3.578,
+      "error": ""
+    },
+    {
+      "id": "load20_07",
+      "stratum": "ql_first_power_concentrated",
+      "bank": "symbolic",
+      "book": "5位移法.xlsx",
+      "excel_row": 55,
+      "path": "5位移法/题目/7.jpg",
+      "expected_loads": [
+        {
+          "type": "均布",
+          "raw": "q"
+        },
+        {
+          "type": "集中",
+          "raw": "2ql"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "均布",
+          "raw": "q"
+        },
+        {
+          "type": "集中",
+          "raw": "2ql"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 2.921,
+      "error": ""
+    },
+    {
+      "id": "load20_08",
+      "stratum": "ql_first_power_concentrated",
+      "bank": "symbolic",
+      "book": "6力矩分配.xlsx",
+      "excel_row": 4,
+      "path": "6力矩分配/1单节点分配/题目aa/2钢架/2L/18.jpg",
+      "expected_loads": [
+        {
+          "type": "集中",
+          "raw": "ql"
+        },
+        {
+          "type": "均布",
+          "raw": "q"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "均布",
+          "raw": "q"
+        },
+        {
+          "type": "集中",
+          "raw": "ql"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 2.88,
+      "error": ""
+    },
+    {
+      "id": "load20_09",
+      "stratum": "symbolic_moment",
+      "bank": "symbolic",
+      "book": "2静定结构.xlsx",
+      "excel_row": 5,
+      "path": "2静定结构/2多跨梁/内力图/题目2/2跨/均/38f.jpg",
+      "expected_loads": [
+        {
+          "type": "均布",
+          "raw": "q"
+        },
+        {
+          "type": "弯矩",
+          "raw": "ql²"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "均布",
+          "raw": "q"
+        },
+        {
+          "type": "弯矩",
+          "raw": "ql²"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 2.941,
+      "error": ""
+    },
+    {
+      "id": "load20_10",
+      "stratum": "symbolic_moment",
+      "bank": "symbolic",
+      "book": "2静定结构.xlsx",
+      "excel_row": 6,
+      "path": "2静定结构/2多跨梁/内力图/题目2/3跨/1力/34.jpg",
+      "expected_loads": [
+        {
+          "type": "集中",
+          "raw": "2P"
+        },
+        {
+          "type": "弯矩",
+          "raw": "Pa"
+        },
+        {
+          "type": "集中",
+          "raw": "4P"
+        },
+        {
+          "type": "均布",
+          "raw": "2P/a"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "集中",
+          "raw": "2P"
+        },
+        {
+          "type": "弯矩",
+          "raw": "Pa"
+        },
+        {
+          "type": "集中",
+          "raw": "4P"
+        },
+        {
+          "type": "均布",
+          "raw": "2P/a"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 4.422,
+      "error": ""
+    },
+    {
+      "id": "load20_11",
+      "stratum": "symbolic_moment",
+      "bank": "symbolic",
+      "book": "3静定结构位移.xlsx",
+      "excel_row": 9,
+      "path": "3静定结构位移/1梁/题目a/2跨/4.jpg",
+      "expected_loads": [
+        {
+          "type": "均布",
+          "raw": "q"
+        },
+        {
+          "type": "弯矩",
+          "raw": "ql²"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "均布",
+          "raw": "q"
+        },
+        {
+          "type": "弯矩",
+          "raw": "ql²"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 3.376,
+      "error": ""
+    },
+    {
+      "id": "load20_12",
+      "stratum": "symbolic_moment",
+      "bank": "symbolic",
+      "book": "5位移法.xlsx",
+      "excel_row": 7,
+      "path": "5位移法/2钢架/1单未知量/题目aa/1T/1左固/21.jpg",
+      "expected_loads": [
+        {
+          "type": "均布",
+          "raw": "q"
+        },
+        {
+          "type": "弯矩",
+          "raw": "ql²"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "均布",
+          "raw": "q"
+        },
+        {
+          "type": "弯矩",
+          "raw": "ql²"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 3.026,
+      "error": ""
+    },
+    {
+      "id": "load20_13",
+      "stratum": "other_symbolic",
+      "bank": "symbolic",
+      "book": "2静定结构.xlsx",
+      "excel_row": 2,
+      "path": "2静定结构/1单跨梁/题目a/1均/1.jpg",
+      "expected_loads": [
+        {
+          "type": "均布",
+          "raw": "2q"
+        },
+        {
+          "type": "均布",
+          "raw": "q"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "均布",
+          "raw": "2q"
+        },
+        {
+          "type": "均布",
+          "raw": "q"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 2.986,
+      "error": ""
+    },
+    {
+      "id": "load20_14",
+      "stratum": "other_symbolic",
+      "bank": "symbolic",
+      "book": "4力法.xlsx",
+      "excel_row": 3,
+      "path": "4力法/1梁/1单未知量/题目/1跨/1.jpg",
+      "expected_loads": [
+        {
+          "type": "集中",
+          "raw": "F"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "集中",
+          "raw": "F"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 2.351,
+      "error": ""
+    },
+    {
+      "id": "load20_15",
+      "stratum": "other_symbolic",
+      "bank": "symbolic",
+      "book": "6力矩分配.xlsx",
+      "excel_row": 6,
+      "path": "6力矩分配/3无剪力分配/单层/不可简化/题目/1.jpg",
+      "expected_loads": [
+        {
+          "type": "集中",
+          "raw": "FP"
+        },
+        {
+          "type": "集中",
+          "raw": "FP"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "集中",
+          "raw": "FP"
+        },
+        {
+          "type": "集中",
+          "raw": "FP"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "6力矩分配",
+      "from_cache": false,
+      "duration_seconds": 3.831,
+      "error": ""
+    },
+    {
+      "id": "load20_16",
+      "stratum": "numeric_or_mixed",
+      "bank": "main",
+      "book": "2静定结构.xlsx",
+      "excel_row": 4,
+      "path": "2静定结构/1单跨梁/题目a/1力/16.jpg",
+      "expected_loads": [
+        {
+          "type": "集中",
+          "raw": "10"
+        },
+        {
+          "type": "均布",
+          "raw": "8"
+        },
+        {
+          "type": "弯矩",
+          "raw": "30"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "集中",
+          "raw": "10"
+        },
+        {
+          "type": "均布",
+          "raw": "8"
+        },
+        {
+          "type": "弯矩",
+          "raw": "30"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 4.002,
+      "error": ""
+    },
+    {
+      "id": "load20_17",
+      "stratum": "numeric_or_mixed",
+      "bank": "main",
+      "book": "3静定结构位移.xlsx",
+      "excel_row": 3,
+      "path": "3静定结构位移/1梁/题目a/1跨/14.jpg",
+      "expected_loads": [
+        {
+          "type": "集中",
+          "raw": "8"
+        },
+        {
+          "type": "均布",
+          "raw": "4"
+        },
+        {
+          "type": "弯矩",
+          "raw": "24"
+        },
+        {
+          "type": "弯矩",
+          "raw": "8"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "弯矩",
+          "raw": "24"
+        },
+        {
+          "type": "集中",
+          "raw": "8"
+        },
+        {
+          "type": "均布",
+          "raw": "4"
+        },
+        {
+          "type": "弯矩",
+          "raw": "8"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 4.462,
+      "error": ""
+    },
+    {
+      "id": "load20_18",
+      "stratum": "numeric_or_mixed",
+      "bank": "main",
+      "book": "5位移法.xlsx",
+      "excel_row": 6,
+      "path": "5位移法/1梁/2多未知量/题目/3.jpg",
+      "expected_loads": [
+        {
+          "type": "集中",
+          "raw": "32"
+        },
+        {
+          "type": "弯矩",
+          "raw": "8"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "弯矩",
+          "raw": "8"
+        },
+        {
+          "type": "集中",
+          "raw": "32"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "5位移法",
+      "from_cache": false,
+      "duration_seconds": 3.601,
+      "error": ""
+    },
+    {
+      "id": "load20_19",
+      "stratum": "numeric_or_mixed",
+      "bank": "main",
+      "book": "7矩阵位移.xlsx",
+      "excel_row": 6,
+      "path": "7矩阵位移/3全部步骤/题目aa/1固铰铰/1.jpg",
+      "expected_loads": [
+        {
+          "type": "均布",
+          "raw": "12"
+        },
+        {
+          "type": "弯矩",
+          "raw": "40"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "均布",
+          "raw": "12"
+        },
+        {
+          "type": "弯矩",
+          "raw": "40"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 2.904,
+      "error": ""
+    },
+    {
+      "id": "load20_20",
+      "stratum": "numeric_or_mixed",
+      "bank": "main",
+      "book": "8影响线.xlsx",
+      "excel_row": 3,
+      "path": "8影响线/2数值计算/题目a/1跨/6.jpg",
+      "expected_loads": [
+        {
+          "type": "集中",
+          "raw": "P=30"
+        },
+        {
+          "type": "均布",
+          "raw": "q=20"
+        }
+      ],
+      "predicted_loads": [
+        {
+          "type": "集中",
+          "raw": "P=30"
+        },
+        {
+          "type": "均布",
+          "raw": "q=20"
+        }
+      ],
+      "exact_match": true,
+      "retrieval_match": true,
+      "type_match": true,
+      "chapter_hint": "unknown",
+      "from_cache": false,
+      "duration_seconds": 2.744,
+      "error": ""
+    }
+  ]
+}
