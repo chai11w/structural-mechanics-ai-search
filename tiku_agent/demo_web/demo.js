@@ -1,4 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
+const taskStateV1 = globalThis.TikuTaskStateV1;
+if (!taskStateV1) throw new Error('Task-state frontend model unavailable.');
 const chat = $('#chat');
 const empty = $('#empty');
 const conversation = $('#conversation');
@@ -138,6 +140,7 @@ let sessionContext = {
   session_valid: false, phase: 'IDLE', has_active_image: false,
   task_revision: 0, candidate_generation: '', candidate_count: 0, search_id: '',
 };
+let taskStateContext = taskStateV1.createTaskStateModel();
 let a3SourceUrl = '';
 let a3Bounds = null;
 let a3Pointer = null;

@@ -7,8 +7,8 @@
 - 8790 读取 8795 控制库认证；A1/A2/A3 与子 A2 统一计费。队列默认 1 个运行、2 个排队、55 秒等待，支持 FIFO、防插队、流关闭撤队和同锁分片去重。
 - 8795 是可替换的过渡后台；Trace/Response 主链独立于它。live 已核对 Response、反馈、费用、Trace、身份与时间顺序，未增加 Trace 页面。
 - 8 个 live SQLite 库在发布前后均通过 `quick_check`、`integrity_check`；A2、A3、追问、反馈、费用展示和停用烟测通过，4 条新反馈均绑定服务端 Response。
-- 阶段 3.3 已在代码中整体完成但未部署：session、HTTP success/error 与五条任务 stream 返回 exact typed V1；busy/queue、progress 和非任务路径保持无状态。3.4 前端及 3.5 启用门未开始。
-- 当前开发基线：73 项 task-state、179 项 FastAPI/A3/Response Store 直接相关及全仓 1147 项测试全部通过。
+- 阶段 3.3 已在代码中整体完成但未部署；3.4.1 前端 V1 解析、结构/拓扑校验和 fail-closed 状态模型已完成但尚未接入响应信封或按钮，3.4.2 及 3.5 启用门未开始。
+- 当前验证：93 项前端/FastAPI（含 3 项新模型测试）及 73 项 task-state 均通过；全仓 1150 项有 1 项既有 SQLite WAL 顺序波动，基线同样复现。
 - 已创建 3 个独立、7 天、每日 3 元模型估算额度的内测邀请码并验证；明文只经 8795 受控复制，不进入日志或项目文件。
 
 ## Implemented
@@ -25,17 +25,18 @@
 - 阶段 3.1 与 3.2 已完成：冻结 `TaskStateSnapshotV1`，实现纯构造器、A3→A2 双锁父子各单读、standalone A2 单锁单读、frozen-state 零重读及异常/矩阵 fail-closed；完成时 51 项 task-state、全仓 1035 项通过。
 - 3.3.1～3.3.4 已完成 exact typed V1 公共映射及 session、HTTP 200 业务 JSON 和五个受控 HTTP error 出口；响应时冻结，missing/expired、不可读、stale、取消、reset、媒体重开和 A3 部分清理均按契约 fail-closed，不在边界事后重读。
 - 3.3.5～3.3.6 已完成五条任务 stream result/error 及跨出口验收：success 位于 `event.data.task_state`，error 位于 `event.task_state`；非空 A2/A3 V1、完整/不完整 pair、Response Store/序列化失败、session/reset 和 legacy prepare/crop 均已覆盖。busy/queue/progress 保持无状态，3.3 整体 DONE。
+- 3.4.1 已完成独立前端 `task_state.js`：exact V1 结构、枚举、phase/action、里程碑、candidate generation 与父子/unit 拓扑校验后深冻结；missing、unsupported、invalid 和服务端 `INCONSISTENT` 均关闭动作，WeakSet 品牌阻止伪造 model 绕过 helper。浏览器已先加载模块并初始化 closed context，尚未消费任何响应或改写旧按钮授权。
 
 ## In Progress
 
-- 主阶段 3 仍进行中：3.1～3.3 服务端已 DONE 且尚未部署；3.4 前端消费和 3.5 启用门待独立实施。
+- 主阶段 3 仍进行中：3.1～3.3 服务端已 DONE，3.4.1 前端模型 DONE；3.4.2 响应信封接线、后续 A2/A3 动作迁移及 3.5 启用门待实施。
 - 本地内测发布已完成；待账户侧配置 Cloudflare Access 与边缘登录限速后，再向 2～3 名测试者发放邀请码并观察 24～48 小时。
 
 ## Not Implemented
 
 - Cloudflare Access、边缘登录限速和测试者邮箱名单仍需账户侧配置；应用内限速不能替代边缘策略。
 - 8795 尚无 Trace/Response 诊断 UI；未来若需要，只能作为可选只读消费者。
-- 3.4 前端消费、3.5 启用门与阶段 4～6 尚未实现。
+- 3.4.2 响应信封接线及后续 A2/A3 动作迁移、3.5 启用门与阶段 4～6 尚未实现。
 - Paddle splitter、全自动裁剪及自动/人工回退属于 A3 V2，暂不继续。
 - 8890 影子期费用报表、桁架高度几何计算、视觉重排和候选二次位置复筛仍未完成。
 - retention 未安装周期调度、未真实 apply；运行日志仍只有 `policy_missing` 报告。
@@ -60,6 +61,7 @@
 - 旧 `parse_chapter` 会把“第4章”映射为内部 `4力法`；严格入口对纯数字返回 `uncertain`，其他未迁移入口仍可能误搜。
 - 邀请码转发会共享额度；签名 Cookie 不能阻止持码人主动共享，完成后落账也可能让最后一个在途任务略超阈值。
 - Trace 写入为 fail-open，只以健康计数暴露丢失；WAL 双副本和只读检查降低风险，但不是绝对线性化快照。
+- 全仓顺序运行时，诊断 evidence 只读测试会因 `model_costs.sqlite3` WAL 自动 checkpoint 观察到文件变化；`0f4bd8e` 基线同样失败且该项单独通过，3.4.1 不改无关诊断链。
 
 ## Do Not Do
 
@@ -74,7 +76,7 @@
 
 ## Next Best Step
 
-1. 独立复核并实施 3.4 前端消费；完成前不进入 3.5，也不把阶段 3 标为 DONE。
+1. 实施 3.4.2：按任务/非任务信封区分，原子消费 session、JSON、stream result/error 与 reset 的 `task_state`；progress、busy/queue 等合法无状态出口保持 no-update。完成前不迁移按钮、不进入 3.5。
 2. 账户侧为 8790/8795 配置独立 Cloudflare Access 与窄范围边缘限速后，再受控发放 3 个邀请码。
 3. 观察 24～48 小时，以成功率、排队、裁图、候选质量、反馈错绑和估算费用决定后续；异常时先停用邀请码再撤销 Access。
 
@@ -82,6 +84,7 @@
 
 - `python -m unittest discover -s tests -p 'test_*.py'`
 - `python -m unittest discover -v -s tests -p 'test_task_state_*.py'`
+- `python -m unittest -v tests.test_demo_web_task_state`
 - `powershell -ExecutionPolicy Bypass -File scripts/tiku_admin_watchdog_8795.ps1`
 - `powershell -ExecutionPolicy Bypass -File scripts/tiku_agent_watchdog_8790.ps1`
 - `python scripts/run_tiku_agent_8790.py --help`

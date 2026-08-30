@@ -64,6 +64,11 @@ from tiku_shared.trace_events import (
 )
 
 
+_TASK_STATE_SCRIPT = (
+    Path(__file__).resolve().parents[1] / "tiku_agent" / "demo_web" / "task_state.js"
+).read_text(encoding="utf-8")
+
+
 class FakeRuntime:
     def __init__(self, image_path: Path):
         self.image_path = image_path
@@ -5134,14 +5139,16 @@ class FastApiDemoTest(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for JavaScript syntax validation")
     def test_javascript_has_valid_syntax(self):
-        result = subprocess.run(
-            [shutil.which("node"), "--check", "-"],
-            input=_SCRIPT,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        for name, source in (("task_state.js", _TASK_STATE_SCRIPT), ("demo.js", _SCRIPT)):
+            with self.subTest(name=name):
+                result = subprocess.run(
+                    [shutil.which("node"), "--check", "-"],
+                    input=source,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_stream_result_stops_timeout_and_does_not_wait_for_eof(self):
         stream_block = _SCRIPT.split("async function requestStream(", 1)[1].split(
@@ -5176,9 +5183,15 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertIn("frame-ancestors 'none'", page.headers["content-security-policy"])
         self.assertEqual(client.get("/openapi.json").status_code, 404)
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
+        self.assertEqual(
+            client.get("/assets/task_state.js").text.replace("\r\n", "\n"),
+            _TASK_STATE_SCRIPT,
+        )
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260822-feedback-v1"', 'src="/assets/demo.js?v=20260827-queue-timeout-v1"',
+            'href="/assets/demo.css?v=20260822-feedback-v1"',
+            'src="/assets/task_state.js?v=20260830-task-state-3-4-1"',
+            'src="/assets/demo.js?v=20260830-task-state-3-4-1"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -5189,6 +5202,8 @@ class FastApiDemoTest(unittest.TestCase):
         ):
             self.assertIn(expected, page.text)
         for expected in (
+            "const taskStateV1 = globalThis.TikuTaskStateV1",
+            "let taskStateContext = taskStateV1.createTaskStateModel()",
             "URL.createObjectURL(selected)", "URL.revokeObjectURL", "function validateImage",
             "function uploadImage", "document.addEventListener('dragenter'", "document.addEventListener('drop'",
             "new AbortController()", "activeController.abort('new-chat')", "function resetConversation",
