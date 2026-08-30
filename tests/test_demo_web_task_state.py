@@ -529,8 +529,8 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         page = (ROOT / "tiku_agent" / "demo_web" / "index.html").read_text(encoding="utf-8")
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
-        task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-2"'
-        demo_asset = 'src="/assets/demo.js?v=20260830-task-state-3-4-2"'
+        task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-3"'
+        demo_asset = 'src="/assets/demo.js?v=20260830-task-state-3-4-3"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
@@ -591,11 +591,41 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         self.assertIn("envelope?.layer === 'queue'", demo)
         self.assertEqual(demo.count("finishTaskStateRequest(taskStateRequest);"), 2)
 
+    def test_a2_buttons_use_branded_child_actions_and_recheck_on_click(self):
+        demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
+
+        candidate_block = demo.split("function createMediaCard(", 1)[1].split(
+            "function addMessage(", 1
+        )[0]
+        self.assertIn("taskStateAllowsChildAction('select_candidate', actionTarget)", candidate_block)
+        self.assertIn("bindChildActionButton(choose, 'select_candidate', actionTarget)", candidate_block)
+        self.assertNotIn("sessionContext.phase", candidate_block)
+        self.assertNotIn("workflow_next_stage", candidate_block)
+        click_guard = "if (!taskStateAllowsChildAction('select_candidate', actionTarget)) return;"
+        self.assertLess(candidate_block.index(click_guard), candidate_block.index("sendTextValue("))
+
+        recovery_block = demo.split("function createRecoveryActions(", 1)[1].split(
+            "function normalizeAuthorContact(", 1
+        )[0]
+        self.assertIn("recoveryChildActionBinding(action, retryAction, item)", recovery_block)
+        self.assertIn("const childAction = childBinding?.action || ''", recovery_block)
+        self.assertIn("taskStateAllowsChildAction(childAction, childActionTarget)", recovery_block)
+        self.assertIn("taskStateAllowsChildAction(action, childActionTarget)", recovery_block)
+        self.assertNotIn("child_next_stage", recovery_block)
+
+        send_block = demo.split("async function sendTextValue(", 1)[1].split(
+            "async function sendText()", 1
+        )[0]
+        self.assertIn("actionContext?.type === 'select_candidate'", send_block)
+        self.assertIn("taskStateAllowsChildAction('select_candidate', childActionTarget)", send_block)
+        self.assertIn("syncA2ActionButtons();", demo)
+
     def test_response_wiring_preserves_no_update_and_latest_request(self):
         fixtures = {
             "empty": contract.empty_task_state_snapshot().to_dict(),
             "a2": _a2_snapshot().to_dict(),
             "a3": _a3_snapshot().to_dict(),
+            "inconsistent": _inconsistent_snapshot().to_dict(),
         }
         node_test = r"""
 const assert = require('node:assert/strict');
@@ -616,7 +646,11 @@ const helpers = source.slice(
   source.indexOf('function taskStateApiPath'),
   source.indexOf('function protocolFields'),
 );
-const createHarness = new Function('taskStateV1', `
+const actionButtons = [];
+const fakeDocument = {
+  querySelectorAll: () => actionButtons,
+};
+const createHarness = new Function('taskStateV1', 'document', `
   ${constants}
   ${initialization}
   ${helpers}
@@ -625,9 +659,14 @@ const createHarness = new Function('taskStateV1', `
     consume: consumeTaskStateResponse,
     finish: finishTaskStateRequest,
     current: () => taskStateContext,
+    allowsChild: taskStateAllowsChildAction,
+    childTarget: currentChildActionTarget,
+    candidateBinding: candidateChildActionBinding,
+    recoveryBinding: recoveryChildActionBinding,
+    syncA2: syncA2ActionButtons,
   });
 `);
-const wiring = createHarness(taskStateV1);
+const wiring = createHarness(taskStateV1, fakeDocument);
 
 for (const path of ['/api/session', '/api/message', '/api/image', '/api/a3/select', '/api/reset']) {
   const request = wiring.begin(`${path}?request=1`, 'json');
@@ -649,6 +688,85 @@ let request = wiring.begin('/api/session', 'json');
 wiring.consume(request, { task_state: fixtures.a2 });
 assert.equal(wiring.current().reason, 'OK');
 assert.equal(wiring.current().snapshot.active_child_task.task_revision, 7);
+const candidateTarget = {
+  childTaskId: 'search_frontend_child_12345678',
+  childTaskRevision: 7,
+  childCandidateGeneration: '7:1',
+  candidateRank: 1,
+};
+assert.equal(wiring.allowsChild('select_candidate', candidateTarget), true);
+assert.equal(wiring.allowsChild('select_candidate', { ...candidateTarget, childTaskId: 'search_stale_child_12345678' }), false);
+assert.equal(wiring.allowsChild('select_candidate', { ...candidateTarget, childTaskRevision: 8 }), false);
+assert.equal(wiring.allowsChild('select_candidate', { ...candidateTarget, childCandidateGeneration: '7:2' }), false);
+assert.equal(wiring.allowsChild('select_candidate', { ...candidateTarget, candidateRank: 3 }), false);
+assert.equal(wiring.allowsChild('retry_search', candidateTarget), false);
+assert.equal(wiring.allowsChild('select_candidate', null), false);
+
+const contradictoryItem = {
+  taskRevision: 99,
+  candidateGeneration: '99:9',
+  childTaskId: candidateTarget.childTaskId,
+  childTaskRevision: candidateTarget.childTaskRevision,
+  childCandidateGeneration: candidateTarget.childCandidateGeneration,
+};
+const candidateBinding = wiring.candidateBinding(contradictoryItem, 0);
+assert.deepEqual(candidateBinding.actionContext, {
+  type: 'select_candidate', rank: 1, task_revision: 7, candidate_generation: '7:1',
+});
+assert.deepEqual(candidateBinding.actionTarget, candidateTarget);
+const retryBinding = wiring.recoveryBinding('retry_search', null, contradictoryItem);
+assert.deepEqual(retryBinding, {
+  action: 'retry_search',
+  target: { childTaskId: candidateTarget.childTaskId, childTaskRevision: 7 },
+});
+const candidateRetryBinding = wiring.recoveryBinding('retry_request', {
+  actionContext: {
+    type: 'select_candidate', rank: 2, task_revision: 7, candidate_generation: '7:1',
+  },
+}, contradictoryItem);
+assert.deepEqual(candidateRetryBinding, {
+  action: 'select_candidate',
+  target: { ...candidateTarget, candidateRank: 2 },
+});
+
+const candidateButton = {
+  dataset: {
+    childAction: 'select_candidate', childTaskId: candidateTarget.childTaskId,
+    childTaskRevision: '7', childCandidateGeneration: '7:1', candidateRank: '1',
+    mediaAvailable: 'true',
+  },
+  classList: { contains: (name) => name === 'select-candidate' },
+  disabled: true, hidden: false, textContent: '',
+};
+const retryButton = {
+  dataset: {
+    childAction: 'retry_search', childTaskId: candidateTarget.childTaskId,
+    childTaskRevision: '7',
+  },
+  classList: { contains: (name) => name === 'message-recovery' },
+  disabled: false, hidden: false, textContent: '重试搜索',
+};
+const legacyButton = {
+  dataset: {
+    childAction: 'select_candidate', childTaskId: '', childTaskRevision: '0',
+    childCandidateGeneration: '', candidateRank: '1', mediaAvailable: 'true',
+  },
+  classList: { contains: (name) => name === 'select-candidate' },
+  disabled: false, hidden: false, textContent: '选择',
+};
+actionButtons.push(candidateButton, retryButton, legacyButton);
+wiring.syncA2();
+assert.equal(candidateButton.disabled, false);
+assert.equal(candidateButton.textContent, '选择');
+assert.equal(retryButton.disabled, true);
+assert.equal(retryButton.hidden, true);
+assert.equal(legacyButton.disabled, true);
+candidateButton.dataset.mediaAvailable = 'false';
+wiring.syncA2();
+assert.equal(candidateButton.disabled, true);
+candidateButton.dataset.mediaAvailable = 'true';
+wiring.syncA2();
+assert.equal(candidateButton.disabled, false);
 const sessionModel = wiring.current();
 for (const path of ['/api/feedback', '/api/feedback/resp_1', '/health', '/api/media/image.jpg']) {
   const nonTask = wiring.begin(path, 'json');
@@ -661,6 +779,7 @@ for (const path of ['/api/feedback', '/api/feedback/resp_1', '/health', '/api/me
 for (const code of ['QUEUE_FULL', 'QUEUE_TIMEOUT']) {
   request = wiring.begin('/api/message/stream', 'stream');
   const closed = wiring.current();
+  assert.equal(wiring.allowsChild('select_candidate', candidateTarget), false);
   wiring.consume(request, {
     type: 'error', layer: 'queue', code, task_state: fixtures.a3,
   }, { error: true });
@@ -669,6 +788,62 @@ for (const code of ['QUEUE_FULL', 'QUEUE_TIMEOUT']) {
   wiring.consume(request, { task_state: fixtures.a3 });
   assert.strictEqual(wiring.current(), closed);
 }
+
+request = wiring.begin('/api/session', 'json');
+const nextStageOnly = structuredClone(fixtures.a2);
+nextStageOnly.active_child_task.allowed_actions = [];
+wiring.consume(request, { task_state: nextStageOnly });
+assert.equal(wiring.current().child_next_stage, 'SELECT_CANDIDATE');
+assert.equal(wiring.allowsChild('select_candidate', candidateTarget), false);
+
+for (const [phase, status, nextStage] of [
+  ['ANSWERED', 'COMPLETED', 'DONE'],
+  ['ERROR', 'FAILED', 'RETRY'],
+]) {
+  request = wiring.begin('/api/session', 'json');
+  const actionDriven = structuredClone(fixtures.a2);
+  actionDriven.active_child_task.phase = phase;
+  actionDriven.active_child_task.status = status;
+  actionDriven.active_child_task.next_stage = nextStage;
+  actionDriven.active_child_task.allowed_actions = ['select_candidate'];
+  wiring.consume(request, { task_state: actionDriven });
+  assert.equal(wiring.current().reason, 'OK');
+  assert.equal(wiring.allowsChild('select_candidate', candidateTarget), true);
+}
+
+request = wiring.begin('/api/session', 'json');
+const retryable = structuredClone(fixtures.a2);
+retryable.active_child_task.phase = 'ERROR';
+retryable.active_child_task.status = 'FAILED';
+retryable.active_child_task.next_stage = 'RETRY';
+retryable.active_child_task.allowed_actions = ['retry_search'];
+wiring.consume(request, { task_state: retryable });
+const retryTarget = {
+  childTaskId: candidateTarget.childTaskId,
+  childTaskRevision: candidateTarget.childTaskRevision,
+};
+assert.equal(wiring.allowsChild('retry_search', retryTarget), true);
+assert.equal(wiring.allowsChild('retry_search', { ...retryTarget, childTaskRevision: 8 }), false);
+assert.equal(retryButton.disabled, false);
+assert.equal(retryButton.hidden, false);
+assert.equal(candidateButton.disabled, true);
+
+request = wiring.begin('/api/session', 'json');
+wiring.consume(request, { task_state: fixtures.inconsistent });
+assert.equal(wiring.current().reason, 'SERVER_INCONSISTENT');
+assert.equal(wiring.allowsChild('select_candidate', candidateTarget), false);
+
+request = wiring.begin('/api/session', 'json');
+wiring.consume(request, { task_state: { schema_version: 1 } });
+assert.equal(wiring.current().reason, 'INVALID');
+assert.equal(wiring.allowsChild('select_candidate', candidateTarget), false);
+
+request = wiring.begin('/api/session', 'json');
+const unsupported = structuredClone(fixtures.a2);
+unsupported.schema_version = 2;
+wiring.consume(request, { task_state: unsupported });
+assert.equal(wiring.current().reason, 'UNSUPPORTED_SCHEMA');
+assert.equal(wiring.allowsChild('select_candidate', candidateTarget), false);
 
 const slowSession = wiring.begin('/api/session', 'json');
 const latestStream = wiring.begin('/api/image/stream', 'stream');

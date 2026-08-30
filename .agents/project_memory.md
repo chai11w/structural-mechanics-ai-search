@@ -7,8 +7,8 @@
 - 8790 读取 8795 控制库认证；A1/A2/A3 与子 A2 统一计费。队列默认 1 个运行、2 个排队、55 秒等待，支持 FIFO、防插队、流关闭撤队和同锁分片去重。
 - 8795 是可替换的过渡后台；Trace/Response 主链独立于它。live 已核对 Response、反馈、费用、Trace、身份与时间顺序，未增加 Trace 页面。
 - 8 个 live SQLite 库在发布前后均通过 `quick_check`、`integrity_check`；A2、A3、追问、反馈、费用展示和停用烟测通过，4 条新反馈均绑定服务端 Response。
-- 阶段 3.3、3.4.1～3.4.2 已在代码中完成但未部署；前端已消费权威状态信封，A2/A3 按钮仍沿用旧授权，3.5 启用门未开始。
-- 当前验证：95 项前端/FastAPI 及 73 项 task-state 均通过；全仓 1152 项有 1 项既有 SQLite WAL 顺序波动，该项单独通过。
+- 阶段 3.3、3.4.1～3.4.3 已在代码中完成但未部署；前端已消费权威状态信封，A2 按钮已迁移到 child `allowed_actions`，A3 按钮仍沿用旧授权，3.5 启用门未开始。
+- 当前验证：96 项前端/FastAPI 通过；最近 73 项 task-state 通过。全仓基线 1152 项有 1 项既有 SQLite WAL 顺序波动，该项单独通过。
 - 已创建 3 个独立、7 天、每日 3 元模型估算额度的内测邀请码并验证；明文只经 8795 受控复制，不进入日志或项目文件。
 
 ## Implemented
@@ -25,18 +25,18 @@
 - 阶段 3.1 与 3.2 已完成：冻结 `TaskStateSnapshotV1`，实现纯构造器、A3→A2 双锁父子各单读、standalone A2 单锁单读、frozen-state 零重读及异常/矩阵 fail-closed；完成时 51 项 task-state、全仓 1035 项通过。
 - 3.3.1～3.3.4 已完成 exact typed V1 公共映射及 session、HTTP 200 业务 JSON 和五个受控 HTTP error 出口；响应时冻结，missing/expired、不可读、stale、取消、reset、媒体重开和 A3 部分清理均按契约 fail-closed，不在边界事后重读。
 - 3.3.5～3.3.6 已完成五条任务 stream result/error 及跨出口验收：success 位于 `event.data.task_state`，error 位于 `event.task_state`；非空 A2/A3 V1、完整/不完整 pair、Response Store/序列化失败、session/reset 和 legacy prepare/crop 均已覆盖。busy/queue/progress 保持无状态，3.3 整体 DONE。
-- 3.4.1～3.4.2 已完成：`task_state.js` exact 校验、深冻结、品牌与 fail-closed model 后，consumer 原子接入 session/JSON/reset 根级及 stream result/error 正确层级；请求开始关闭旧状态，一次性 token 拒绝乱序/重复终态，progress、queue 和非任务响应 no-update，重连不抢占 busy 任务。尚未改写旧按钮授权。
+- 3.4.1～3.4.3 已完成：exact、深冻结、品牌与 fail-closed model 原子消费全部权威信封；A2 候选、`retry_search` 和候选 transport retry 只经 branded child action 授权，并绑定 V1 task ID/revision/generation/rank，旧历史、媒体失效、busy、非法/不一致或 stale 参数均关闭。A3 旧授权尚未迁移。
 
 ## In Progress
 
-- 主阶段 3 仍进行中：3.1～3.3 服务端、3.4.1 前端模型和 3.4.2 信封接线 DONE；后续 A2/A3 动作迁移及 3.5 启用门待实施。
+- 主阶段 3 仍进行中：3.1～3.3 服务端、3.4.1～3.4.3 前端模型/信封/A2 动作迁移 DONE；后续 A3 动作迁移及 3.5 启用门待实施。
 - 本地内测发布已完成；待账户侧配置 Cloudflare Access 与边缘登录限速后，再向 2～3 名测试者发放邀请码并观察 24～48 小时。
 
 ## Not Implemented
 
 - Cloudflare Access、边缘登录限速和测试者邮箱名单仍需账户侧配置；应用内限速不能替代边缘策略。
 - 8795 尚无 Trace/Response 诊断 UI；未来若需要，只能作为可选只读消费者。
-- A2/A3 动作迁移、3.5 启用门与阶段 4～6 尚未实现。
+- A3 动作迁移、3.5 启用门与阶段 4～6 尚未实现。
 - Paddle splitter、全自动裁剪及自动/人工回退属于 A3 V2，暂不继续。
 - 8890 影子期费用报表、桁架高度几何计算、视觉重排和候选二次位置复筛仍未完成。
 - retention 未安装周期调度、未真实 apply；运行日志仍只有 `policy_missing` 报告。
@@ -76,7 +76,7 @@
 
 ## Next Best Step
 
-1. 实施下一独立批次的 A2 子题动作迁移：只用 branded model 的 `allowed_actions` 授权，不用 `next_stage` 放行动作；本批不迁移 A3、不进入 3.5。
+1. 实施下一独立批次的 A3 workflow/unit 动作迁移：只用 branded model 的 `allowed_actions` 授权并用 V1 unit/revision 校验具体参数，不用 `next_stage` 放行动作；不进入 3.5。
 2. 账户侧为 8790/8795 配置独立 Cloudflare Access 与窄范围边缘限速后，再受控发放 3 个邀请码。
 3. 观察 24～48 小时，以成功率、排队、裁图、候选质量、反馈错绑和估算费用决定后续；异常时先停用邀请码再撤销 Access。
 

@@ -5190,8 +5190,8 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
             'href="/assets/demo.css?v=20260822-feedback-v1"',
-            'src="/assets/task_state.js?v=20260830-task-state-3-4-2"',
-            'src="/assets/demo.js?v=20260830-task-state-3-4-2"',
+            'src="/assets/task_state.js?v=20260830-task-state-3-4-3"',
+            'src="/assets/demo.js?v=20260830-task-state-3-4-3"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -5210,7 +5210,9 @@ class FastApiDemoTest(unittest.TestCase):
             "new AbortController()", "activeController.abort('new-chat')", "function resetConversation",
             "function openDrawer", "function openLightbox", "className = 'select-candidate'",
             "action_context: actionContext", "function invalidateCandidateActions()",
-            "['WAIT_CANDIDATE_CHOICE', 'ANSWERED'].includes(sessionContext.phase)",
+            "taskStateV1.allowsChildAction(taskStateContext, action)",
+            "taskStateAllowsChildAction('select_candidate', actionTarget)",
+            "childTaskId: String(item.childTaskId || '')",
             "event.key === 'Enter'", "!event.shiftKey", "!event.isComposing", "event.keyCode !== 229",
             "HISTORY_TTL_MS = 2 * 60 * 60 * 1000", "HISTORY_LIMIT = 50", "repairUploadedImageHistory()",
             "lastActivityAt: historyLastActivityAt", "saveHistory({ refreshActivity: true })",

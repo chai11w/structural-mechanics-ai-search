@@ -801,11 +801,27 @@ refresh 不能抢占正在执行任务的 post-media-reopen 最终状态。
 前端/FastAPI 与 73 项 task-state 回归通过；全仓 1152 项仅既有 SQLite WAL 顺序测试
 失败，该项单独通过。未迁移任何按钮，未部署、启动、停止或重启服务。
 
+## 3.4.3 A2 子题动作授权迁移（DONE；尚未部署）
+
+候选卡 `select_candidate`、业务 `retry_search` 及携带候选 action context 的 transport
+retry 只经 branded `allowsChildAction()` 放行，不再使用 legacy session phase 授权。
+按钮保存 V1 child 的 `task_id`、`task_revision` 和 candidate generation；候选再绑定
+rank，并按 V1 candidate count 校验。候选请求的 revision/generation 也直接来自同一
+V1 binding，legacy session 投影仅保留展示和兼容用途。动作在渲染、状态同步和点击前
+均重验；旧历史缺 binding、跨 child/revision/generation、越界 rank、媒体失效、busy、
+missing/invalid/未知 schema/`INCONSISTENT` 以及只有 `next_stage` 均 fail-closed。
+
+`begin()`、终态消费、`finally`、busy 和消息渲染会同步已有 A2 按钮；未授权的业务恢复
+按钮隐藏，普通文本 retry、登录、上传、反馈及本地媒体查看不进入 child 动作命名空间。
+Python typed fixture 驱动的 Node 动态矩阵同时覆盖 V1/legacy token 矛盾、candidate retry
+binding、按钮恢复/关闭和 queue no-update；96 项前端/FastAPI 回归通过。A3 控件、自动
+打开逻辑和服务端状态机未改，未部署、启动、停止或重启服务。
+
 ## 后续批次
 
 1. **3.2.1 纯构造器（DONE）**：已完成从冻结 read-set 和可信入口证据到 V1 快照的无 I/O 投影，实现与定向测试见 `tiku_agent/task_state_builder.py` 和 `tests/test_task_state_builder.py`。
 2. **3.2.2 锁内权威读取（DONE）**：已在 A3→A2 锁序内一次读取父子状态，在 standalone A2 锁内单读 child，并为已持锁调用方提供零重锁、零 store 读取的 frozen-state 入口；缺失/不可读/稳定未知分类、受控文件与入口能力证据及回归测试见 `tiku_agent/task_state_runtime.py`、两个 runtime 类和 `tests/test_task_state_runtime.py`。项目 Python 3.12 下 47 项 task-state 定向测试及全仓 1031 项回归通过。
 3. **3.2.3 异常与矩阵测试（DONE）**：父 route/phase 与 child phase/topology 的实际构造矩阵、A3 active/组合读取异常、脱敏及旧 revision 动作证据均已补齐；阶段 3.2 整体完成。项目 Python 3.12 下 51 项 task-state 定向测试及全仓 1035 项回归通过。
 4. **3.3 出口一致性（DONE；尚未部署）**：3.3.1～3.3.6 已完成；跨 session、JSON success/error、stream result/error 和 reset 的 exact V1 parity、失败后处理、零重读及 legacy 兼容均已验收，阶段最终全仓 1147 项通过。
-5. **3.4 前端消费（IN_PROGRESS；尚未部署）**：3.4.1 纯解析/model 与 3.4.2 原子信封接线已完成；下一步按 A2/A3 分批只用服务端 `allowed_actions` 替换父子 phase 和 unit flag 动作授权，`next_stage` 仅供展示/引导，不授权动作。
+5. **3.4 前端消费（IN_PROGRESS；尚未部署）**：3.4.1 纯解析/model、3.4.2 原子信封接线与 3.4.3 A2 动作迁移已完成；下一步迁移 A3 workflow/unit 控件，只用服务端 `allowed_actions` 授权，`next_stage` 仅供展示/引导，不授权动作。
 6. **3.5 启用门（尚未实现）**：定向/全量回归、8896 契约烟测、只读 live 对照后再精确启用 8790；不触碰 8788/8794/8795。

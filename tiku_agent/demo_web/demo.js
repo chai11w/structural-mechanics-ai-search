@@ -210,6 +210,7 @@ function beginTaskStateRequest(url, responseMode) {
   if (!paths.has(taskStateApiPath(url))) return null;
   const request = taskStateConsumer.begin();
   taskStateContext = taskStateConsumer.current();
+  syncA2ActionButtons();
   return request;
 }
 
@@ -220,11 +221,122 @@ function isTaskStateQueueNoUpdate(envelope) {
 function consumeTaskStateResponse(request, envelope, { error = false } = {}) {
   if (request === null || (error && isTaskStateQueueNoUpdate(envelope))) return;
   taskStateContext = taskStateConsumer.consume(request, envelope);
+  syncA2ActionButtons();
 }
 
 function finishTaskStateRequest(request) {
   if (request === null) return;
   taskStateContext = taskStateConsumer.finish(request);
+  syncA2ActionButtons();
+}
+
+function currentChildActionTarget() {
+  const child = taskStateContext?.snapshot?.active_child_task;
+  if (!child) return null;
+  return {
+    childTaskId: String(child.task_id || ''),
+    childTaskRevision: Number(child.task_revision || 0),
+    childCandidateGeneration: String(child.candidate_generation || ''),
+  };
+}
+
+function candidateChildActionBinding(item, index) {
+  const actionTarget = {
+    childTaskId: String(item.childTaskId || ''),
+    childTaskRevision: Number(item.childTaskRevision || 0),
+    childCandidateGeneration: String(item.childCandidateGeneration || ''),
+    candidateRank: Number(index) + 1,
+  };
+  return {
+    actionTarget,
+    actionContext: {
+      type: 'select_candidate',
+      rank: actionTarget.candidateRank,
+      task_revision: actionTarget.childTaskRevision,
+      candidate_generation: actionTarget.childCandidateGeneration,
+    },
+  };
+}
+
+function recoveryChildActionBinding(action, retryAction, item) {
+  if (action === 'retry_search') {
+    return {
+      action: 'retry_search',
+      target: {
+        childTaskId: String(item.childTaskId || ''),
+        childTaskRevision: Number(item.childTaskRevision || 0),
+      },
+    };
+  }
+  if (action !== 'retry_request' || retryAction?.actionContext?.type !== 'select_candidate') {
+    return null;
+  }
+  return {
+    action: 'select_candidate',
+    target: {
+      childTaskId: String(item.childTaskId || ''),
+      childTaskRevision: Number(retryAction.actionContext.task_revision || 0),
+      childCandidateGeneration: String(retryAction.actionContext.candidate_generation || ''),
+      candidateRank: Number(retryAction.actionContext.rank || 0),
+    },
+  };
+}
+
+function taskStateAllowsChildAction(action, target = null) {
+  if (!taskStateV1.allowsChildAction(taskStateContext, action)) return false;
+  if (!target || typeof target !== 'object') return false;
+  const child = taskStateContext.snapshot?.active_child_task;
+  const taskId = String(target.childTaskId || '');
+  const taskRevision = Number(target.childTaskRevision || 0);
+  if (!child || !taskId || taskId !== child.task_id || taskRevision !== child.task_revision) return false;
+  if (Object.hasOwn(target, 'childCandidateGeneration')) {
+    const generation = String(target.childCandidateGeneration || '');
+    if (!generation || generation !== child.candidate_generation) return false;
+  }
+  if (Object.hasOwn(target, 'candidateRank')) {
+    const rank = Number(target.candidateRank || 0);
+    if (!Number.isInteger(rank) || rank < 1 || rank > child.candidate_count) return false;
+  }
+  return true;
+}
+
+function childActionTargetFromButton(button) {
+  const target = {
+    childTaskId: String(button.dataset.childTaskId || ''),
+    childTaskRevision: Number(button.dataset.childTaskRevision || 0),
+  };
+  if (button.dataset.childAction === 'select_candidate') {
+    target.childCandidateGeneration = String(button.dataset.childCandidateGeneration || '');
+    target.candidateRank = Number(button.dataset.candidateRank || 0);
+  }
+  return target;
+}
+
+function bindChildActionButton(button, action, target) {
+  button.dataset.childAction = action;
+  button.dataset.childTaskId = String(target?.childTaskId || '');
+  button.dataset.childTaskRevision = String(Number(target?.childTaskRevision || 0));
+  if (Object.hasOwn(target || {}, 'childCandidateGeneration')) {
+    button.dataset.childCandidateGeneration = String(target.childCandidateGeneration || '');
+  }
+  if (Object.hasOwn(target || {}, 'candidateRank')) {
+    button.dataset.candidateRank = String(Number(target.candidateRank || 0));
+  }
+}
+
+function syncA2ActionButtons() {
+  if (typeof document !== 'object') return;
+  document.querySelectorAll('[data-child-action]').forEach((button) => {
+    const action = String(button.dataset.childAction || '');
+    const allowed = !(typeof isBusy === 'boolean' && isBusy)
+      && button.dataset.mediaAvailable !== 'false'
+      && taskStateAllowsChildAction(action, childActionTargetFromButton(button));
+    button.disabled = !allowed;
+    if (button.classList.contains('select-candidate')) {
+      button.textContent = allowed ? '选择' : '候选已失效';
+    }
+    if (button.classList.contains('message-recovery')) button.hidden = !allowed;
+  });
 }
 
 function protocolFields(source = {}) {
@@ -305,6 +417,9 @@ function remember(item) {
     taskRevision: Number(item.taskRevision || 0),
     candidateCount: Number(item.candidateCount || 0),
     candidateGeneration: String(item.candidateGeneration || ''),
+    childTaskId: String(item.childTaskId || ''),
+    childTaskRevision: Number(item.childTaskRevision || 0),
+    childCandidateGeneration: String(item.childCandidateGeneration || ''),
     messageId: String(item.messageId || ''),
     responseId: String(item.responseId || ''),
     noticeKey: String(item.noticeKey || ''),
@@ -605,13 +720,24 @@ function createRecoveryActions(actions, item = {}) {
     button.type = 'button';
     button.className = 'message-recovery';
     button.textContent = RECOVERY_ACTION_LABELS[action];
+    const childBinding = recoveryChildActionBinding(action, retryAction, item);
+    const childAction = childBinding?.action || '';
+    const childActionTarget = childBinding?.target || null;
+    if (childBinding) {
+      bindChildActionButton(button, childAction, childActionTarget);
+      const allowed = taskStateAllowsChildAction(childAction, childActionTarget);
+      button.disabled = !allowed;
+      button.hidden = !allowed;
+    }
     button.addEventListener('click', () => {
       if (action === 'relogin') window.location.assign('/invite');
       else if (action === 'reupload') fileInput.click();
       else if (action === 'new_chat') resetConversation();
       else if (action === 'retry_connection') retryConnection();
-      else if (action === 'retry_request') retryTextAction(retryAction);
-      else if (action === 'retry_search') sendTextValue('重试');
+      else if (action === 'retry_request') retryTextAction(retryAction, childActionTarget);
+      else if (action === 'retry_search' && taskStateAllowsChildAction(action, childActionTarget)) {
+        sendTextValue('重试');
+      }
     });
     host.append(button);
   });
@@ -841,6 +967,7 @@ function createMediaCard(url, index, item) {
     openButton.replaceWith(note);
     const candidateButton = card.querySelector('.select-candidate');
     if (candidateButton) {
+      candidateButton.dataset.mediaAvailable = 'false';
       candidateButton.disabled = true;
       candidateButton.textContent = '候选已失效';
     }
@@ -863,19 +990,21 @@ function createMediaCard(url, index, item) {
     const choose = document.createElement('button');
     choose.type = 'button';
     choose.className = 'select-candidate';
-    const actionContext = {
-      type: 'select_candidate', rank: index + 1,
-      task_revision: Number(item.taskRevision || 0),
-      candidate_generation: String(item.candidateGeneration || ''),
-    };
-    const isCurrent = sessionContext.session_valid
-      && ['WAIT_CANDIDATE_CHOICE', 'ANSWERED'].includes(sessionContext.phase)
-      && actionContext.task_revision === Number(sessionContext.task_revision || 0)
-      && actionContext.candidate_generation
-      && actionContext.candidate_generation === String(sessionContext.candidate_generation || '');
+    const { actionContext, actionTarget } = candidateChildActionBinding(item, index);
+    bindChildActionButton(choose, 'select_candidate', actionTarget);
+    choose.dataset.mediaAvailable = 'true';
+    const isCurrent = taskStateAllowsChildAction('select_candidate', actionTarget);
     choose.disabled = !isCurrent;
     choose.textContent = isCurrent ? '选择' : '候选已失效';
-    choose.addEventListener('click', () => sendTextValue(`选择候选 ${index + 1}`, `选择候选 ${index + 1}`, actionContext));
+    choose.addEventListener('click', () => {
+      if (!taskStateAllowsChildAction('select_candidate', actionTarget)) return;
+      sendTextValue(
+        `选择候选 ${index + 1}`,
+        `选择候选 ${index + 1}`,
+        actionContext,
+        actionTarget,
+      );
+    });
     footer.append(label, choose);
     card.append(footer);
   }
@@ -884,6 +1013,18 @@ function createMediaCard(url, index, item) {
 
 function addMessage(item, persist = true) {
   item = { ...item, createdAt: Number(item.createdAt || Date.now()) };
+  const retryAction = normalizeRetryAction(item.retryAction);
+  if (
+    persist
+    && (
+      normalizeRecoveryActions(item.recoveryActions).includes('retry_search')
+      || retryAction?.actionContext?.type === 'select_candidate'
+    )
+    && !item.childTaskId
+  ) {
+    const childTarget = currentChildActionTarget();
+    if (childTarget) item = { ...item, ...childTarget };
+  }
   const inferredAuthorContact = normalizeAuthorContact(item.authorContact)
     || (!item.me && String(item.message || '').includes('联系作者手搓')
       ? AUTHOR_CONTACT_FALLBACK
@@ -951,6 +1092,7 @@ function addMessage(item, persist = true) {
   if (feedbackEligible) content.append(createMessageActions(item, article));
   article.append(content);
   chat.append(article);
+  syncA2ActionButtons();
   syncA3ActionButtons();
   if (persist) remember(item);
   scrollToLatest();
@@ -1153,6 +1295,7 @@ function setBusy(value) {
   fileInput.disabled = value;
   form.setAttribute('aria-busy', String(value));
   updateComposer();
+  syncA2ActionButtons();
   if (!a3CropWorkspace.hidden) renderA3Selection();
 }
 
@@ -1398,6 +1541,7 @@ async function requestStream(
 
 function responseItem(data) {
   updateSessionContext(data);
+  const childTarget = currentChildActionTarget() || {};
   const failure = data?.failure && typeof data.failure === 'object' ? data.failure : null;
   const protocol = protocolFields(data);
   const recoveryAction = protocolRecoveryAction(data?.action)
@@ -1411,6 +1555,7 @@ function responseItem(data) {
     taskRevision: Number(data.session?.task_revision || 0),
     candidateCount: Number(data.session?.candidate_count || 0),
     candidateGeneration: String(data.session?.candidate_generation || ''),
+    ...childTarget,
     variant: protocol.status === 'ERROR' || failure
       ? 'error'
       : protocol.status === 'PARTIAL' ? 'partial' : '',
@@ -2052,9 +2197,13 @@ function closeA3Example() {
   if (a3ExampleBackdrop) a3ExampleBackdrop.hidden = true;
 }
 
-async function sendTextValue(value, displayValue = value, actionContext = null) {
+async function sendTextValue(value, displayValue = value, actionContext = null, childActionTarget = null) {
   const clean = String(value || '').trim();
   if (!clean || isBusy) return;
+  if (
+    actionContext?.type === 'select_candidate'
+    && !taskStateAllowsChildAction('select_candidate', childActionTarget)
+  ) return;
   addMessage({ message: displayValue, me: true });
   textInput.value = '';
   resizeComposer();
@@ -2131,10 +2280,10 @@ function addLocalUploadPreview(preview) {
   return row;
 }
 
-async function retryTextAction(action) {
+async function retryTextAction(action, childActionTarget = null) {
   const retry = normalizeRetryAction(action);
   if (!retry || isBusy) return;
-  await sendTextValue(retry.value, retry.displayValue, retry.actionContext);
+  await sendTextValue(retry.value, retry.displayValue, retry.actionContext, childActionTarget);
 }
 
 function setUploadRowStatus(row, message, variant = '') {
