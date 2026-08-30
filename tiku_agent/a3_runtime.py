@@ -1259,8 +1259,9 @@ class A3MvpRuntime:
         identity_key: str = "",
         progress: ProgressReporter | None = None,
         request_id: str = "",
+        task_state_capabilities: TaskStateEntryCapabilities | None = None,
     ) -> AgentResponse:
-        del request_id
+        del request_id, task_state_capabilities
         clean = _clean_session_id(session_id)
         requested = list(dict.fromkeys(str(value or "").strip() for value in unit_ids))
         if not requested or any(not value for value in requested):
@@ -1473,7 +1474,9 @@ class A3MvpRuntime:
         identity_key: str = "",
         progress: ProgressReporter | None = None,
         request_id: str = "",
+        task_state_capabilities: TaskStateEntryCapabilities | None = None,
     ) -> AgentResponse:
+        del task_state_capabilities
         clean = _clean_session_id(session_id)
         with self._lock(clean):
             self._ensure_budget(identity_key)

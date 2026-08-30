@@ -111,10 +111,12 @@ _SESSION_TASK_STATE_CAPABILITIES = TaskStateEntryCapabilities(
     reset_session_available=True,
 )
 _JSON_TASK_STATE_CAPABILITIES = _SESSION_TASK_STATE_CAPABILITIES
+_STREAM_TASK_STATE_CAPABILITIES = _SESSION_TASK_STATE_CAPABILITIES
 _IMAGE_JSON_TASK_STATE_CAPABILITIES = TaskStateEntryCapabilities(
     trusted_image_event=True,
     reset_session_available=True,
 )
+_IMAGE_STREAM_TASK_STATE_CAPABILITIES = _IMAGE_JSON_TASK_STATE_CAPABILITIES
 FEEDBACK_MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 MAX_FEEDBACK_BYTES = 128 * 1024
 FEEDBACK_TAGS = {
@@ -212,6 +214,7 @@ class _AgentPayload(dict[str, object]):
     def __init__(self, values: Mapping[str, object]) -> None:
         super().__init__(values)
         self.authoritative_draft: _AuthoritativeResponseDraft | None = None
+        self.response_task_state_snapshot: TaskStateSnapshotV1 | None = None
 
 _PUBLIC_STATE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$")
 _PUBLIC_STATE_PHASE_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
@@ -373,17 +376,24 @@ def create_app(
             or ""
         ).strip()
         snapshot = response_snapshot if isinstance(response_snapshot, Mapping) else {}
+        has_exact_task_state_pair = _has_exact_response_task_state_pair(
+            snapshot,
+            response_task_state_snapshot,
+        )
         if (
             task_state_allowed
             and session_id
             and capture_missing_task_state
-            and type(response_task_state_snapshot) is not TaskStateSnapshotV1
+            and not has_exact_task_state_pair
         ):
-            if snapshot or response_snapshot_attempted:
-                # A carried legacy projection proves that execution already
-                # established a response-time read-set. The attempted marker
-                # covers projection failure before either half could be
-                # attached. Never replace either case with a later live read.
+            if (
+                snapshot
+                or response_snapshot_attempted
+                or type(response_task_state_snapshot) is TaskStateSnapshotV1
+            ):
+                # Any carried half proves that execution already established
+                # or attempted its response-time read-set. Never repair an
+                # incomplete pair with a later live read.
                 if not snapshot:
                     snapshot = {"session_valid": False}
                 response_task_state_snapshot = _unreadable_http_error_task_state(
@@ -1132,10 +1142,43 @@ def create_app(
     @app.get("/api/session")
     def session(request: Request) -> JSONResponse:
         session_id = _session_id(request, cookie_name=session_cookie)
-        captured = runtime.session_response_snapshot_v1(
-            session_id,
-            capabilities=_SESSION_TASK_STATE_CAPABILITIES,
+        try:
+            captured = runtime.session_response_snapshot_v1(
+                session_id,
+                capabilities=_SESSION_TASK_STATE_CAPABILITIES,
+            )
+        except Exception as exc:
+            setattr(exc, "_response_snapshot_attempted", True)
+            _carry_frozen_task_state_failure(
+                exc,
+                runtime,
+                legacy_snapshot=_exception_response_snapshot(exc),
+                task_state=_exception_task_state_snapshot(exc),
+            )
+            raise
+        captured_legacy = (
+            captured.legacy_session
+            if type(captured) is SessionResponseSnapshotV1
+            else None
         )
+        captured_task_state = (
+            captured.task_state
+            if type(captured) is SessionResponseSnapshotV1
+            else None
+        )
+        if not _has_exact_response_task_state_pair(
+            captured_legacy,
+            captured_task_state,
+        ):
+            exc = RuntimeError("session endpoint returned an incomplete response snapshot")
+            setattr(exc, "_response_snapshot_attempted", True)
+            _carry_frozen_task_state_failure(
+                exc,
+                runtime,
+                legacy_snapshot=captured_legacy,
+                task_state=captured_task_state,
+            )
+            raise exc
         path = captured.uploaded_image_path
         try:
             payload = with_public_task_state(
@@ -1244,6 +1287,7 @@ def create_app(
                 session_id,
                 payload.get("action_context"),
                 request_id=request_id,
+                task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
             )
             if stale is not None:
                 return _agent_payload(
@@ -1254,6 +1298,8 @@ def create_app(
                     identity_key=identity_key or "local",
                     response_mode="stream",
                     defer_authoritative=True,
+                    include_task_state=True,
+                    task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
                 )
             response = _handle_text(
                 runtime,
@@ -1262,6 +1308,7 @@ def create_app(
                 request_id=request_id,
                 identity_key=identity_key,
                 progress=progress,
+                task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
             )
             return _agent_payload(
                 response,
@@ -1271,13 +1318,14 @@ def create_app(
                 identity_key=identity_key or "local",
                 response_mode="stream",
                 defer_authoritative=True,
+                include_task_state=True,
+                task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
             )
 
         result = StreamingResponse(
             _stream_agent_events(
                 execute,
                 request_id=request_id,
-                search_id=str(runtime.session_snapshot(session_id).get("search_id") or ""),
                 trace_context=trace_context,
                 trace_event_session=current_trace_event_session(),
                 trace_meta=_current_public_trace_meta(),
@@ -1285,6 +1333,7 @@ def create_app(
                 response_store=response_store,
                 session_id=session_id,
                 identity_key=identity_key or "local",
+                task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
             ),
             media_type="application/x-ndjson",
         )
@@ -1301,17 +1350,46 @@ def create_app(
         session_id = str(request.cookies.get(session_cookie) or "").strip()
         search_id = ""
         if session_id:
-            captured = runtime.session_response_snapshot_v1(
-                session_id,
-                capabilities=_JSON_TASK_STATE_CAPABILITIES,
-                response_frozen=True,
+            try:
+                captured = runtime.session_response_snapshot_v1(
+                    session_id,
+                    capabilities=_JSON_TASK_STATE_CAPABILITIES,
+                    response_frozen=True,
+                )
+            except Exception as exc:
+                setattr(exc, "_response_snapshot_attempted", True)
+                _carry_frozen_task_state_failure(
+                    exc,
+                    runtime,
+                    legacy_snapshot=_exception_response_snapshot(exc),
+                    task_state=_exception_task_state_snapshot(exc),
+                )
+                raise
+            captured_legacy = (
+                captured.legacy_session
+                if type(captured) is SessionResponseSnapshotV1
+                else None
             )
-            if (
-                type(captured) is not SessionResponseSnapshotV1
-                or type(captured.legacy_session) is not dict
-                or type(captured.task_state) is not TaskStateSnapshotV1
+            captured_task_state = (
+                captured.task_state
+                if type(captured) is SessionResponseSnapshotV1
+                else None
+            )
+            if not _has_exact_response_task_state_pair(
+                captured_legacy,
+                captured_task_state,
             ):
-                raise RuntimeError("reset preflight returned an invalid response snapshot")
+                exc = RuntimeError(
+                    "reset preflight returned an incomplete response snapshot"
+                )
+                setattr(exc, "_response_snapshot_attempted", True)
+                _carry_frozen_task_state_failure(
+                    exc,
+                    runtime,
+                    legacy_snapshot=captured_legacy,
+                    task_state=captured_task_state,
+                )
+                raise exc
             search_id = str(captured.legacy_session.get("search_id") or "")
             clear_kwargs: dict[str, object] = {}
             try:
@@ -1330,22 +1408,23 @@ def create_app(
                 # pre-clear pair: a parent or child store may already be gone.
                 error_legacy = _exception_response_snapshot(exc)
                 error_task_state = _exception_task_state_snapshot(exc)
-                if not error_legacy or error_task_state is None:
-                    if _exception_response_snapshot_attempted(exc):
-                        fallback_legacy = {"session_valid": False}
-                        fallback_task_state = _unreadable_http_error_task_state(
-                            runtime
-                        )
+                if not _has_exact_response_task_state_pair(
+                    error_legacy,
+                    error_task_state,
+                ):
+                    if (
+                        error_legacy
+                        or type(error_task_state) is TaskStateSnapshotV1
+                        or _exception_response_snapshot_attempted(exc)
+                    ):
+                        error_legacy = error_legacy or {"session_valid": False}
+                        error_task_state = _unreadable_http_error_task_state(runtime)
                     else:
-                        fallback_legacy, fallback_task_state = _safe_error_snapshot(
+                        error_legacy, error_task_state = _safe_error_snapshot(
                             runtime,
                             session_id,
                             capabilities=_JSON_TASK_STATE_CAPABILITIES,
                         )
-                    if not error_legacy:
-                        error_legacy = fallback_legacy
-                    if error_task_state is None:
-                        error_task_state = fallback_task_state
                 if error_legacy:
                     try:
                         setattr(exc, "response_snapshot", dict(error_legacy))
@@ -1416,11 +1495,7 @@ def create_app(
                     identity_key=identity_key,
                     task_state_capabilities=_IMAGE_JSON_TASK_STATE_CAPABILITIES,
                 )
-                uploaded_image = (
-                    response.uploaded_image_path
-                    if response.response_media_snapshot_captured
-                    else runtime.current_image_path(session_id)
-                )
+                uploaded_image = _task_state_uploaded_image(response, runtime)
             finally:
                 incoming.unlink(missing_ok=True)
             return _agent_json(
@@ -1460,12 +1535,9 @@ def create_app(
                     request_id=request_id,
                     identity_key=identity_key,
                     progress=progress,
+                    task_state_capabilities=_IMAGE_STREAM_TASK_STATE_CAPABILITIES,
                 )
-                uploaded_image = (
-                    response.uploaded_image_path
-                    if response.response_media_snapshot_captured
-                    else runtime.current_image_path(session_id)
-                )
+                uploaded_image = _task_state_uploaded_image(response, runtime)
                 return _agent_payload(
                     response,
                     runtime,
@@ -1475,6 +1547,8 @@ def create_app(
                     identity_key=identity_key or "local",
                     response_mode="stream",
                     defer_authoritative=True,
+                    include_task_state=True,
+                    task_state_capabilities=_IMAGE_STREAM_TASK_STATE_CAPABILITIES,
                 )
             finally:
                 incoming.unlink(missing_ok=True)
@@ -1490,6 +1564,7 @@ def create_app(
                 response_store=response_store,
                 session_id=session_id,
                 identity_key=identity_key or "local",
+                task_state_capabilities=_IMAGE_STREAM_TASK_STATE_CAPABILITIES,
             ),
             media_type="application/x-ndjson",
         )
@@ -1585,6 +1660,7 @@ def create_app(
                     "task_revision": task_revision,
                     "progress": progress,
                     "request_id": request_id,
+                    "task_state_capabilities": _STREAM_TASK_STATE_CAPABILITIES,
                 }
                 if identity_key:
                     kwargs["identity_key"] = identity_key
@@ -1602,13 +1678,14 @@ def create_app(
                     identity_key=identity_key or "local",
                     response_mode="stream",
                     defer_authoritative=True,
+                    include_task_state=True,
+                    task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
                 )
 
             result = StreamingResponse(
                 _stream_agent_events(
                     execute,
                     request_id=request_id,
-                    search_id=str(runtime.session_snapshot(session_id).get("search_id") or ""),
                     trace_context=trace_context,
                     trace_event_session=current_trace_event_session(),
                     trace_meta=_current_public_trace_meta(),
@@ -1616,6 +1693,7 @@ def create_app(
                     response_store=response_store,
                     session_id=session_id,
                     identity_key=identity_key or "local",
+                    task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
                 ),
                 media_type="application/x-ndjson",
             )
@@ -1652,6 +1730,7 @@ def create_app(
                     "task_revision": task_revision,
                     "progress": progress,
                     "request_id": request_id,
+                    "task_state_capabilities": _STREAM_TASK_STATE_CAPABILITIES,
                 }
                 if identity_key:
                     kwargs["identity_key"] = identity_key
@@ -1668,13 +1747,14 @@ def create_app(
                     identity_key=identity_key or "local",
                     response_mode="stream",
                     defer_authoritative=True,
+                    include_task_state=True,
+                    task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
                 )
 
             result = StreamingResponse(
                 _stream_agent_events(
                     execute,
                     request_id=request_id,
-                    search_id=str(runtime.session_snapshot(session_id).get("search_id") or ""),
                     trace_context=trace_context,
                     trace_event_session=current_trace_event_session(),
                     trace_meta=_current_public_trace_meta(),
@@ -1682,6 +1762,7 @@ def create_app(
                     response_store=response_store,
                     session_id=session_id,
                     identity_key=identity_key or "local",
+                    task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
                 ),
                 media_type="application/x-ndjson",
             )
@@ -1717,6 +1798,7 @@ def create_app(
                 kwargs: dict[str, object] = {
                     "progress": progress,
                     "request_id": request_id,
+                    "task_state_capabilities": _STREAM_TASK_STATE_CAPABILITIES,
                 }
                 if identity_key:
                     kwargs["identity_key"] = identity_key
@@ -1736,13 +1818,14 @@ def create_app(
                     identity_key=identity_key or "local",
                     response_mode="stream",
                     defer_authoritative=True,
+                    include_task_state=True,
+                    task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
                 )
 
             result = StreamingResponse(
                 _stream_agent_events(
                     execute,
                     request_id=request_id,
-                    search_id=str(runtime.session_snapshot(session_id).get("search_id") or ""),
                     trace_context=trace_context,
                     trace_event_session=current_trace_event_session(),
                     trace_meta=_current_public_trace_meta(),
@@ -1750,6 +1833,7 @@ def create_app(
                     response_store=response_store,
                     session_id=session_id,
                     identity_key=identity_key or "local",
+                    task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
                 ),
                 media_type="application/x-ndjson",
             )
@@ -2515,7 +2599,72 @@ def _agent_json(
     return result
 
 
-def _agent_payload(
+def _task_state_uploaded_image(
+    response: AgentResponse,
+    runtime: object,
+) -> Path | None:
+    """Return only the media path frozen with a typed task-state response."""
+
+    if response.response_media_snapshot_captured:
+        return response.uploaded_image_path
+    exc = RuntimeError("task-state response is missing its frozen media snapshot")
+    legacy = response.response_snapshot
+    task_state = response.response_task_state_snapshot
+    _carry_frozen_task_state_failure(
+        exc,
+        runtime,
+        legacy_snapshot=legacy,
+        task_state=task_state,
+    )
+    raise exc
+
+
+def _has_exact_response_task_state_pair(
+    legacy_snapshot: object,
+    task_state: object,
+) -> bool:
+    """Return whether both public views came from one complete frozen read-set."""
+
+    return (
+        isinstance(legacy_snapshot, Mapping)
+        and bool(legacy_snapshot)
+        and type(task_state) is TaskStateSnapshotV1
+    )
+
+
+def _carry_frozen_task_state_failure(
+    exc: Exception,
+    runtime: object,
+    *,
+    legacy_snapshot: object = None,
+    task_state: object = None,
+) -> None:
+    """Keep a task-state error on its established read-set without new I/O."""
+
+    try:
+        setattr(exc, "_response_snapshot_attempted", True)
+        carried_legacy = _exception_response_snapshot(exc)
+        carried_task_state = _exception_task_state_snapshot(exc)
+        if not carried_legacy and isinstance(legacy_snapshot, Mapping):
+            carried_legacy = dict(legacy_snapshot)
+        if type(carried_task_state) is not TaskStateSnapshotV1:
+            carried_task_state = task_state
+        if not _has_exact_response_task_state_pair(
+            carried_legacy,
+            carried_task_state,
+        ):
+            carried_task_state = _unreadable_http_error_task_state(runtime)
+        setattr(
+            exc,
+            "response_snapshot",
+            carried_legacy or {"session_valid": False},
+        )
+        setattr(exc, "response_task_state_snapshot", carried_task_state)
+    except Exception:  # noqa: BLE001 - preserve the original response failure.
+        pass
+
+
+def _build_agent_payload(
     response: AgentResponse,
     runtime: AgentSessionRuntime,
     session_id: str,
@@ -2544,16 +2693,16 @@ def _agent_payload(
     if type(include_task_state) is not bool:
         raise ValueError("include_task_state must be boolean")
     if include_task_state and type(task_state_capabilities) is not TaskStateEntryCapabilities:
-        raise ValueError("JSON task-state capabilities are required")
+        raise ValueError("task-state capabilities are required")
     response_task_state = response.response_task_state_snapshot
     if include_task_state and (
         not attached_public_snapshot or not attached_projection_snapshot
     ):
-        raise RuntimeError("JSON response is missing its frozen session snapshot")
+        raise RuntimeError("task-state response is missing its frozen session snapshot")
     if include_task_state and type(response_task_state) is not TaskStateSnapshotV1:
-        raise RuntimeError("JSON response is missing its exact frozen task-state snapshot")
+        raise RuntimeError("task-state response is missing its exact frozen task-state snapshot")
     if not attached_projection_snapshot:
-        # Preserve the legacy stream/internal fallback. JSON task-state exits
+        # Preserve the legacy internal fallback. Typed task-state exits
         # were validated above and may never synthesize a missing projection.
         attached_projection_snapshot = attached_public_snapshot
     live_snapshot: Mapping[str, object] = {}
@@ -2574,16 +2723,23 @@ def _agent_payload(
             reopen_v1 = getattr(runtime, "mark_media_delivery_failed_v1", None)
             legacy_reopen = getattr(runtime, "mark_media_delivery_failed", None)
             if callable(reopen_v1):
-                captured = reopen_v1(
-                    session_id,
-                    expected_unit_id=media_guard["expected_unit_id"],
-                    expected_task_revision=media_guard["expected_task_revision"],
-                    expected_candidate_generation=media_guard[
-                        "expected_candidate_generation"
-                    ],
-                    kind=str(media.get("kind") or "answer"),
-                    capabilities=task_state_capabilities,
-                )
+                try:
+                    captured = reopen_v1(
+                        session_id,
+                        expected_unit_id=media_guard["expected_unit_id"],
+                        expected_task_revision=media_guard["expected_task_revision"],
+                        expected_candidate_generation=media_guard[
+                            "expected_candidate_generation"
+                        ],
+                        kind=str(media.get("kind") or "answer"),
+                        capabilities=task_state_capabilities,
+                    )
+                except Exception as exc:
+                    _carry_frozen_task_state_failure(
+                        exc,
+                        runtime,
+                    )
+                    raise
                 if captured is not None:
                     if (
                         type(captured) is not SessionResponseSnapshotV1
@@ -2591,9 +2747,21 @@ def _agent_payload(
                         or not captured.legacy_session
                         or type(captured.task_state) is not TaskStateSnapshotV1
                     ):
-                        raise RuntimeError("media reopen returned an invalid response snapshot")
+                        exc = RuntimeError(
+                            "media reopen returned an invalid response snapshot"
+                        )
+                        _carry_frozen_task_state_failure(
+                            exc,
+                            runtime,
+                        )
+                        raise exc
                     media_failure_snapshot.update(captured.legacy_session)
                     response_task_state = captured.task_state
+                    response.response_snapshot = dict(captured.legacy_session)
+                    response.response_projection_snapshot = dict(
+                        captured.legacy_session
+                    )
+                    response.response_task_state_snapshot = captured.task_state
             elif callable(legacy_reopen):
                 raise RuntimeError(
                     "runtime cannot freeze task state after reopening media delivery"
@@ -2726,6 +2894,7 @@ def _agent_payload(
             )
             setattr(exc, "response_task_state_snapshot", response_task_state)
             raise
+        payload.response_task_state_snapshot = response_task_state
     image_route = str(media_snapshot.get("image_route") or "").strip().upper()
     if image_route not in {"A1", "A2", "A3"}:
         image_route = ""
@@ -2806,6 +2975,45 @@ def _agent_payload(
     bind_trace_event_dimensions(**dimensions)
 
     return payload
+
+
+def _agent_payload(
+    response: AgentResponse,
+    runtime: AgentSessionRuntime,
+    session_id: str,
+    *,
+    uploaded_image: Path | None = None,
+    submitted_crop: Path | None = None,
+    response_store: SQLiteResponseStore | None = None,
+    identity_key: str = "local",
+    response_mode: str = "json",
+    defer_authoritative: bool = False,
+    include_task_state: bool = False,
+    task_state_capabilities: TaskStateEntryCapabilities | None = None,
+) -> dict[str, object]:
+    try:
+        return _build_agent_payload(
+            response,
+            runtime,
+            session_id,
+            uploaded_image=uploaded_image,
+            submitted_crop=submitted_crop,
+            response_store=response_store,
+            identity_key=identity_key,
+            response_mode=response_mode,
+            defer_authoritative=defer_authoritative,
+            include_task_state=include_task_state,
+            task_state_capabilities=task_state_capabilities,
+        )
+    except Exception as exc:
+        if include_task_state:
+            _carry_frozen_task_state_failure(
+                exc,
+                runtime,
+                legacy_snapshot=response.response_snapshot,
+                task_state=response.response_task_state_snapshot,
+            )
+        raise
 
 
 def _finalize_authoritative_response(
@@ -3269,7 +3477,7 @@ def _safe_error_snapshot(
     *,
     capabilities: TaskStateEntryCapabilities,
 ) -> tuple[dict[str, object], TaskStateSnapshotV1 | None]:
-    """Capture one response-frozen legacy/V1 pair for an HTTP validation error."""
+    """Capture one response-frozen legacy/V1 pair for a controlled error."""
 
     fallback_task_state = _unreadable_http_error_task_state(runtime)
     capture = getattr(runtime, "session_response_snapshot_v1", None)
@@ -3290,10 +3498,10 @@ def _safe_error_snapshot(
     except Exception as exc:  # noqa: BLE001 - preserve the original HTTP error.
         legacy = _exception_response_snapshot(exc)
         task_state = _exception_task_state_snapshot(exc)
-        if task_state is None:
-            logger.warning("runtime response snapshot unavailable during HTTP error handling")
-            task_state = fallback_task_state
-        return legacy or {"session_valid": False}, task_state
+        if _has_exact_response_task_state_pair(legacy, task_state):
+            return legacy, task_state
+        logger.warning("runtime response snapshot unavailable during HTTP error handling")
+        return legacy or {"session_valid": False}, fallback_task_state
     if type(captured) is not SessionResponseSnapshotV1:
         logger.warning("runtime returned an invalid response snapshot during HTTP error handling")
         return {"session_valid": False}, fallback_task_state
@@ -3307,10 +3515,10 @@ def _safe_error_snapshot(
         if type(captured.task_state) is TaskStateSnapshotV1
         else None
     )
-    if task_state is None:
-        logger.warning("runtime response snapshot omitted its exact task-state value")
-        task_state = fallback_task_state
-    return legacy or {"session_valid": False}, task_state
+    if not _has_exact_response_task_state_pair(legacy, task_state):
+        logger.warning("runtime response snapshot omitted a complete task-state pair")
+        return legacy or {"session_valid": False}, fallback_task_state
+    return legacy, task_state
 
 
 def _public_a3_snapshot(value: object) -> dict[str, object] | None:
@@ -3546,7 +3754,14 @@ async def _stream_agent_events(
     response_store: SQLiteResponseStore | None = None,
     session_id: str = "",
     identity_key: str = "local",
+    task_state_capabilities: TaskStateEntryCapabilities | None = None,
 ):
+    if (
+        task_state_capabilities is not None
+        and type(task_state_capabilities) is not TaskStateEntryCapabilities
+    ):
+        raise ValueError("stream task-state capabilities are invalid")
+    include_task_state = task_state_capabilities is not None
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[_QueuedStreamEvent | None] = asyncio.Queue()
     delivery_cancelled = threading.Event()
@@ -3574,6 +3789,68 @@ async def _stream_agent_events(
         if runtime is None or not session_id:
             return {}
         return _safe_runtime_snapshot(runtime, session_id)
+
+    def error_response_state(
+        exc: Exception,
+        attached: object = None,
+    ) -> tuple[dict[str, object], TaskStateSnapshotV1 | None]:
+        """Resolve one stream error read-set without observing later live state."""
+
+        if not include_task_state:
+            return dict(error_snapshot(attached)), None
+
+        carried_legacy = _exception_response_snapshot(exc)
+        if not carried_legacy and isinstance(attached, Mapping) and attached:
+            carried_legacy = dict(attached)
+
+        # Admission rejection precedes the authoritative session read-set.
+        # Preserve the existing zero-I/O exception and never manufacture state.
+        if isinstance(exc, AgentRuntimeBusyError):
+            return carried_legacy, None
+
+        carried_task_state = _exception_task_state_snapshot(exc)
+        if _has_exact_response_task_state_pair(
+            carried_legacy,
+            carried_task_state,
+        ):
+            return carried_legacy, carried_task_state
+
+        if (
+            carried_legacy
+            or type(carried_task_state) is TaskStateSnapshotV1
+            or _exception_response_snapshot_attempted(exc)
+        ):
+            return (
+                carried_legacy or {"session_valid": False},
+                _unreadable_http_error_task_state(runtime),
+            )
+
+        if runtime is None or not session_id:
+            return {}, None
+        return _safe_error_snapshot(
+            runtime,
+            session_id,
+            capabilities=task_state_capabilities,
+        )
+
+    def with_stream_error_task_state(
+        payload: dict[str, object],
+        task_state: TaskStateSnapshotV1 | None,
+    ) -> dict[str, object]:
+        """Attach an exact error snapshot, falling closed without another read."""
+
+        if type(task_state) is not TaskStateSnapshotV1:
+            return payload
+        try:
+            return with_public_task_state(payload, task_state)
+        except Exception:
+            fallback = (
+                _unreadable_http_error_task_state(runtime)
+                if runtime is not None
+                else _unreadable_task_state_like(task_state)
+            )
+            payload[PUBLIC_TASK_STATE_FIELD] = public_task_state_snapshot(fallback)
+            return payload
 
     async def finalize_stream_response(
         payload: dict[str, object],
@@ -3695,23 +3972,51 @@ async def _stream_agent_events(
         ):
             try:
                 payload = await asyncio.to_thread(execute, progress)
-                response_record = None
                 draft = getattr(payload, "authoritative_draft", None)
-                if (
-                    response_store is not None
-                    and not str(payload.get("response_id") or "").strip()
-                    and isinstance(draft, _AuthoritativeResponseDraft)
-                ):
-                    response_record = await finalize_stream_response(
+                response_task_state: object = None
+                try:
+                    response_task_state = getattr(
                         payload,
-                        snapshot=draft.snapshot,
-                        workflow_search_id=draft.workflow_search_id,
-                        search_id=draft.search_id,
-                        unit_id=draft.unit_id,
-                        image_route=draft.image_route,
-                        intent=draft.intent,
+                        "response_task_state_snapshot",
+                        None,
                     )
-                line = serialized_event({"type": "result", "data": payload})
+                    if include_task_state and (
+                        type(response_task_state) is not TaskStateSnapshotV1
+                        or PUBLIC_TASK_STATE_FIELD not in payload
+                    ):
+                        raise RuntimeError(
+                            "stream result is missing its exact frozen task-state snapshot"
+                        )
+                    response_record = None
+                    if (
+                        response_store is not None
+                        and not str(payload.get("response_id") or "").strip()
+                        and isinstance(draft, _AuthoritativeResponseDraft)
+                    ):
+                        response_record = await finalize_stream_response(
+                            payload,
+                            snapshot=draft.snapshot,
+                            workflow_search_id=draft.workflow_search_id,
+                            search_id=draft.search_id,
+                            unit_id=draft.unit_id,
+                            image_route=draft.image_route,
+                            intent=draft.intent,
+                        )
+                    line = serialized_event({"type": "result", "data": payload})
+                except Exception as exc:
+                    # The business result already owns its response-time pair.
+                    # Carry it into a terminal stream error instead of reading
+                    # a newer state after persistence or serialization fails.
+                    setattr(exc, "_response_snapshot_attempted", True)
+                    if isinstance(draft, _AuthoritativeResponseDraft):
+                        setattr(exc, "response_snapshot", dict(draft.snapshot))
+                    if type(response_task_state) is TaskStateSnapshotV1:
+                        setattr(
+                            exc,
+                            "response_task_state_snapshot",
+                            response_task_state,
+                        )
+                    raise
                 await queue.put(
                     _QueuedStreamEvent(
                         line,
@@ -3725,7 +4030,10 @@ async def _stream_agent_events(
             except _ExecutionCancelled as exc:
                 raise asyncio.CancelledError() from exc
             except AgentProtocolError as exc:
-                snapshot = error_snapshot(exc.response_snapshot)
+                snapshot, error_task_state = error_response_state(
+                    exc,
+                    exc.response_snapshot,
+                )
                 protocol = _public_response_protocol(
                     exc.bind(
                         request_id=request_id or exc.request_id or new_request_id(),
@@ -3739,6 +4047,10 @@ async def _stream_agent_events(
                     "message": _public_protocol_message(protocol),
                     **protocol.to_dict(),
                 }
+                error_payload = with_stream_error_task_state(
+                    error_payload,
+                    error_task_state,
+                )
                 response_record = await finalize_error_event(
                     error_payload,
                     snapshot=snapshot,
@@ -3759,7 +4071,10 @@ async def _stream_agent_events(
                 )
             except Exception as exc:  # noqa: BLE001 - keep internal failures out of the public stream.
                 logger.exception("streamed Agent request failed")
-                snapshot = error_snapshot(getattr(exc, "response_snapshot", None))
+                snapshot, error_task_state = error_response_state(
+                    exc,
+                    getattr(exc, "response_snapshot", None),
+                )
                 protocol = _public_response_protocol(
                     RequestProtocol.from_code(
                         "SERVICE_UNAVAILABLE",
@@ -3772,6 +4087,10 @@ async def _stream_agent_events(
                     "message": "服务端处理失败，请稍后重试。",
                     **protocol.to_dict(),
                 }
+                error_payload = with_stream_error_task_state(
+                    error_payload,
+                    error_task_state,
+                )
                 response_record = await finalize_error_event(
                     error_payload,
                     snapshot=snapshot,

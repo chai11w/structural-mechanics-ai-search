@@ -412,7 +412,7 @@ class FastApiDemoTest(unittest.TestCase):
 
         self.assertIn("task_state", session_payload)
         self.assertIn("task_state", json_payload)
-        self.assertNotIn("task_state", stream_payload)
+        self.assertEqual(stream_payload["task_state"], json_payload["task_state"])
 
         for payload in (session_payload, json_payload, stream_payload):
             encoded = json.dumps(payload, ensure_ascii=False)
@@ -646,7 +646,10 @@ class FastApiDemoTest(unittest.TestCase):
             stream_events = [
                 json.loads(line) for line in stream.text.splitlines() if line
             ]
-            self.assertNotIn("task_state", stream_events[-1]["data"])
+            self.assertEqual(
+                stream_events[-1]["data"]["task_state"],
+                empty_task_state_snapshot().to_dict(),
+            )
 
     def test_session_endpoint_maps_direct_a2_and_active_a3_without_legacy_drift(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2456,6 +2459,7 @@ class FastApiDemoTest(unittest.TestCase):
             image_path = root / "result.jpg"
             Image.new("RGB", (4, 4), "white").save(image_path)
             secret = "raw-secret-unserializable-value"
+            frozen_task_state = self._http_error_task_state()
 
             class UnserializableRuntime(FakeRuntime):
                 def handle_text(
@@ -2466,9 +2470,9 @@ class FastApiDemoTest(unittest.TestCase):
                     progress=None,
                     task_state_capabilities=None,
                 ):
-                    del session_id, text, progress
-                    return self._freeze_response(
-                        "serialization-session",
+                    del text, progress
+                    response = self._freeze_response(
+                        session_id,
                         AgentResponse(
                             text="即将序列化。",
                             intent="public_response",
@@ -2476,12 +2480,15 @@ class FastApiDemoTest(unittest.TestCase):
                         ),
                         task_state_capabilities=task_state_capabilities,
                     )
+                    response.response_task_state_snapshot = frozen_task_state
+                    return response
 
             store = SQLiteTraceEventStore(root / "trace_events.sqlite3")
             recorder = TraceEventRecorder(store)
+            runtime = UnserializableRuntime(image_path)
             client = TestClient(
                 create_app(
-                    runtime=UnserializableRuntime(image_path),
+                    runtime=runtime,
                     trace_event_recorder=recorder,
                 ),
                 raise_server_exceptions=False,
@@ -2494,6 +2501,8 @@ class FastApiDemoTest(unittest.TestCase):
                     json={"text": "json"},
                     headers={"X-Request-ID": request_ids[0]},
                 )
+                runtime.session_capture_calls.clear()
+                runtime.session_capture_frozen_flags.clear()
                 stream_response = client.post(
                     "/api/message/stream",
                     json={"text": "stream"},
@@ -2505,6 +2514,11 @@ class FastApiDemoTest(unittest.TestCase):
             stream_payload = json.loads(stream_response.text.splitlines()[0])
             self.assertEqual(stream_payload["type"], "error")
             self.assertEqual(stream_payload["code"], "SERVICE_UNAVAILABLE")
+            self.assertEqual(
+                stream_payload["task_state"],
+                frozen_task_state.to_dict(),
+            )
+            self.assertEqual(runtime.session_capture_calls, [])
             for request_id, mode, status in zip(
                 request_ids, ("json", "stream"), (500, 200), strict=True
             ):
@@ -3217,7 +3231,7 @@ class FastApiDemoTest(unittest.TestCase):
             self.assertFalse(payload["retryable"])
             self.assertEqual(payload["action"], "")
 
-    def test_http_200_business_statuses_include_task_state_only_in_json(self):
+    def test_http_200_business_statuses_include_task_state_in_json_and_stream(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
         image_path = runtime_dir / f"business_task_state_{uuid4().hex}.jpg"
         self.addCleanup(lambda: image_path.unlink(missing_ok=True))
@@ -3261,7 +3275,851 @@ class FastApiDemoTest(unittest.TestCase):
                 ]
                 stream_payload = stream_events[-1]["data"]
                 self.assertEqual(stream_payload["status"], expected_status)
-                self.assertNotIn("task_state", stream_payload)
+                self.assertEqual(
+                    stream_payload["task_state"],
+                    json_payload["task_state"],
+                )
+
+    def test_all_task_stream_result_routes_publish_exact_v1_without_live_reread(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"stream_result_matrix_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (8, 8), "white").save(image_path)
+        frozen_task_state = self._http_error_task_state()
+
+        class StreamMatrixRuntime(FakeRuntime):
+            a3_enabled = True
+
+            def __init__(self, path: Path):
+                super().__init__(path)
+                self.live_snapshot_reads = 0
+                self.combined_capture_calls = 0
+
+            def _freeze_response(
+                self,
+                session_id,
+                response,
+                *,
+                task_state_capabilities=None,
+            ):
+                response = super()._freeze_response(
+                    session_id,
+                    response,
+                    task_state_capabilities=task_state_capabilities,
+                )
+                if task_state_capabilities is not None:
+                    response.response_task_state_snapshot = frozen_task_state
+                return response
+
+            def session_snapshot(self, session_id: str):
+                del session_id
+                self.live_snapshot_reads += 1
+                raise AssertionError("stream result must use its response-time frozen pair")
+
+            def session_response_snapshot_v1(self, *args, **kwargs):
+                del args, kwargs
+                self.combined_capture_calls += 1
+                raise AssertionError("stream result must not recapture task state")
+
+            def select_unit(
+                self,
+                session_id: str,
+                unit_id: str,
+                *,
+                task_revision=None,
+                identity_key="",
+                progress=None,
+                request_id="",
+                task_state_capabilities=None,
+            ):
+                del unit_id, task_revision, identity_key, progress, request_id
+                return self._freeze_response(
+                    session_id,
+                    AgentResponse(text="已选择。", intent="search_image"),
+                    task_state_capabilities=task_state_capabilities,
+                )
+
+            def prepare_units(
+                self,
+                session_id: str,
+                unit_ids,
+                *,
+                task_revision=None,
+                identity_key="",
+                progress=None,
+                request_id="",
+                task_state_capabilities=None,
+            ):
+                del unit_ids, task_revision, identity_key, progress, request_id
+                return self._freeze_response(
+                    session_id,
+                    AgentResponse(text="已准备。", intent="a3_units_prepared"),
+                    task_state_capabilities=task_state_capabilities,
+                )
+
+            def handle_crop(
+                self,
+                session_id: str,
+                bounds,
+                *,
+                unit_id="",
+                task_revision=None,
+                identity_key="",
+                progress=None,
+                request_id="",
+                task_state_capabilities=None,
+            ):
+                del bounds, unit_id, task_revision, identity_key, progress, request_id
+                return self._freeze_response(
+                    session_id,
+                    AgentResponse(text="已裁剪。", intent="search_image"),
+                    task_state_capabilities=task_state_capabilities,
+                )
+
+        runtime = StreamMatrixRuntime(image_path)
+        client = TestClient(create_app(runtime=runtime))
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(image_buffer, format="JPEG")
+        calls = (
+            (
+                "message",
+                lambda: client.post("/api/message/stream", json={"text": "继续"}),
+                False,
+            ),
+            (
+                "image",
+                lambda: client.post(
+                    "/api/image/stream",
+                    files={"file": ("question.jpg", image_buffer.getvalue(), "image/jpeg")},
+                ),
+                True,
+            ),
+            (
+                "a3_select",
+                lambda: client.post(
+                    "/api/a3/select/stream",
+                    json={"unit_id": "g1-u1", "task_revision": 1},
+                ),
+                False,
+            ),
+            (
+                "a3_prepare",
+                lambda: client.post(
+                    "/api/a3/prepare/stream",
+                    json={"unit_ids": ["g1-u1"], "task_revision": 1},
+                ),
+                False,
+            ),
+            (
+                "a3_crop",
+                lambda: client.post(
+                    "/api/a3/crop/stream",
+                    json={
+                        "bounds": {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
+                        "unit_id": "g1-u1",
+                        "task_revision": 1,
+                    },
+                ),
+                False,
+            ),
+        )
+
+        expected_state = frozen_task_state.to_dict()
+        for name, send, _trusted_image_event in calls:
+            with self.subTest(route=name):
+                response = send()
+                self.assertEqual(response.status_code, 200, response.text)
+                events = [
+                    json.loads(line)
+                    for line in response.text.splitlines()
+                    if line
+                ]
+                terminals = [
+                    event for event in events if event["type"] in {"result", "error"}
+                ]
+                self.assertEqual(len(terminals), 1, events)
+                self.assertIs(terminals[0], events[-1])
+                self.assertEqual(terminals[0]["type"], "result")
+                self.assertNotIn("task_state", terminals[0])
+                self.assertEqual(terminals[0]["data"]["task_state"], expected_state)
+                for progress_event in events[:-1]:
+                    self.assertEqual(progress_event["type"], "progress")
+                    self.assertNotIn("task_state", progress_event)
+
+        self.assertEqual(runtime.live_snapshot_reads, 0)
+        self.assertEqual(runtime.combined_capture_calls, 0)
+        self.assertEqual(len(runtime.response_capture_calls), len(calls))
+        for (_name, _send, trusted_image_event), (_session_id, capabilities) in zip(
+            calls,
+            runtime.response_capture_calls,
+            strict=True,
+        ):
+            self.assertEqual(
+                capabilities.trusted_image_event,
+                trusted_image_event,
+            )
+            self.assertTrue(capabilities.reset_session_available)
+
+    def test_all_task_stream_error_routes_reuse_exact_carried_v1_without_reread(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"stream_error_matrix_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (8, 8), "white").save(image_path)
+        frozen = self._http_error_task_state()
+        legacy = {
+            "session_valid": True,
+            "phase": "WAIT_CHAPTER",
+            "has_active_image": True,
+            "task_revision": 7,
+            "candidate_generation": "",
+            "candidate_count": 0,
+            "search_id": "search_stream_error_matrix_01",
+        }
+
+        class ExactErrorRuntime(FakeRuntime):
+            a3_enabled = True
+
+            def __init__(self, path: Path):
+                super().__init__(path)
+                self.live_snapshot_reads = 0
+                self.combined_capture_calls = 0
+                self.error_capabilities = []
+
+            def session_snapshot(self, session_id: str):
+                del session_id
+                self.live_snapshot_reads += 1
+                raise AssertionError("carried stream error must not reread live state")
+
+            def session_response_snapshot_v1(self, *args, **kwargs):
+                del args, kwargs
+                self.combined_capture_calls += 1
+                raise AssertionError("carried stream error must not recapture state")
+
+            def _raise(self, task_state_capabilities):
+                self.error_capabilities.append(task_state_capabilities)
+                error = AgentProtocolError(
+                    "secret carried stream failure",
+                    code="UPLOAD_PERSIST_FAILED",
+                )
+                error.response_snapshot = dict(legacy)
+                error.response_task_state_snapshot = frozen
+                raise error
+
+            def handle_text(self, session_id, text, **kwargs):
+                del session_id, text
+                self._raise(kwargs.get("task_state_capabilities"))
+
+            def handle_image(self, session_id, image_path, **kwargs):
+                del session_id, image_path
+                self._raise(kwargs.get("task_state_capabilities"))
+
+            def select_unit(self, session_id, unit_id, **kwargs):
+                del session_id, unit_id
+                self._raise(kwargs.get("task_state_capabilities"))
+
+            def prepare_units(self, session_id, unit_ids, **kwargs):
+                del session_id, unit_ids
+                self._raise(kwargs.get("task_state_capabilities"))
+
+            def handle_crop(self, session_id, bounds, **kwargs):
+                del session_id, bounds
+                self._raise(kwargs.get("task_state_capabilities"))
+
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(image_buffer, format="JPEG")
+        cases = (
+            (
+                "message",
+                lambda client: client.post("/api/message/stream", json={"text": "继续"}),
+                False,
+            ),
+            (
+                "image",
+                lambda client: client.post(
+                    "/api/image/stream",
+                    files={"file": ("question.jpg", image_buffer.getvalue(), "image/jpeg")},
+                ),
+                True,
+            ),
+            (
+                "a3_select",
+                lambda client: client.post(
+                    "/api/a3/select/stream",
+                    json={"unit_id": "g1-u1", "task_revision": 1},
+                ),
+                False,
+            ),
+            (
+                "a3_prepare",
+                lambda client: client.post(
+                    "/api/a3/prepare/stream",
+                    json={"unit_ids": ["g1-u1"], "task_revision": 1},
+                ),
+                False,
+            ),
+            (
+                "a3_crop",
+                lambda client: client.post(
+                    "/api/a3/crop/stream",
+                    json={
+                        "bounds": {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
+                        "unit_id": "g1-u1",
+                        "task_revision": 1,
+                    },
+                ),
+                False,
+            ),
+        )
+        for name, send, trusted_image_event in cases:
+            with self.subTest(route=name):
+                runtime = ExactErrorRuntime(image_path)
+                client = TestClient(create_app(runtime=runtime))
+                response = send(client)
+                self.assertEqual(response.status_code, 200, response.text)
+                events = [
+                    json.loads(line)
+                    for line in response.text.splitlines()
+                    if line
+                ]
+                self.assertEqual([event["type"] for event in events], ["error"])
+                terminal = events[0]
+                self.assertNotIn("data", terminal)
+                self.assertEqual(terminal["code"], "UPLOAD_PERSIST_FAILED")
+                self.assertEqual(terminal["search_id"], legacy["search_id"])
+                self.assertEqual(terminal["task_state"], frozen.to_dict())
+                self.assertNotIn("secret carried", response.text)
+                self.assertEqual(runtime.live_snapshot_reads, 0)
+                self.assertEqual(runtime.combined_capture_calls, 0)
+                self.assertEqual(len(runtime.error_capabilities), 1)
+                capabilities = runtime.error_capabilities[0]
+                self.assertIsNotNone(capabilities)
+                self.assertEqual(
+                    capabilities.trusted_image_event,
+                    trusted_image_event,
+                )
+                self.assertTrue(capabilities.reset_session_available)
+
+    def test_stream_error_missing_and_unreadable_state_use_one_combined_capture(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"stream_error_capture_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (8, 8), "white").save(image_path)
+        unreadable = self._unreadable_http_error_task_state()
+
+        class CaptureRuntime(FakeRuntime):
+            def __init__(self, path: Path, mode: str):
+                super().__init__(path)
+                self.mode = mode
+                self.live_snapshot_reads = 0
+                self.capture_count = 0
+                self.capture_args = None
+
+            def handle_text(
+                self,
+                session_id,
+                text,
+                *,
+                progress=None,
+                task_state_capabilities=None,
+            ):
+                del session_id, text, progress, task_state_capabilities
+                raise RuntimeError("secret stream execution failure")
+
+            def session_snapshot(self, session_id):
+                del session_id
+                self.live_snapshot_reads += 1
+                raise AssertionError("stream error fallback must not use legacy snapshot")
+
+            def session_response_snapshot_v1(
+                self,
+                session_id,
+                *,
+                capabilities=None,
+                response_frozen=False,
+            ):
+                self.capture_count += 1
+                self.capture_args = (session_id, capabilities, response_frozen)
+                if self.mode == "unreadable":
+                    raise SessionResponseSnapshotError(
+                        "secret unreadable stream state",
+                        task_state=unreadable,
+                    )
+                return SessionResponseSnapshotV1(
+                    uploaded_image_path=None,
+                    legacy_session={"session_valid": False},
+                    task_state=empty_task_state_snapshot(),
+                )
+
+        for mode, expected in (
+            ("missing", empty_task_state_snapshot()),
+            ("unreadable", unreadable),
+        ):
+            with self.subTest(mode=mode):
+                runtime = CaptureRuntime(image_path, mode)
+                client = TestClient(create_app(runtime=runtime))
+                with self.assertLogs("tiku_agent.fastapi_demo", level="ERROR"):
+                    response = client.post(
+                        "/api/message/stream",
+                        json={"text": "继续"},
+                    )
+                self.assertEqual(response.status_code, 200, response.text)
+                events = [
+                    json.loads(line)
+                    for line in response.text.splitlines()
+                    if line
+                ]
+                self.assertEqual([event["type"] for event in events], ["error"])
+                self.assertEqual(events[0]["task_state"], expected.to_dict())
+                self.assertNotIn("secret", response.text)
+                self.assertEqual(runtime.capture_count, 1)
+                self.assertEqual(runtime.live_snapshot_reads, 0)
+                _session_id, capabilities, response_frozen = runtime.capture_args
+                self.assertFalse(capabilities.trusted_image_event)
+                self.assertTrue(capabilities.reset_session_available)
+                self.assertTrue(response_frozen)
+
+    def test_stream_error_with_carried_legacy_but_no_typed_state_is_zero_io_inconsistent(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"stream_error_carried_legacy_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (8, 8), "white").save(image_path)
+        legacy = {
+            "session_valid": True,
+            "phase": "WAIT_CHAPTER",
+            "has_active_image": True,
+            "task_revision": 3,
+            "candidate_generation": "",
+            "candidate_count": 0,
+            "search_id": "search_stream_carried_legacy_01",
+        }
+
+        class LegacyOnlyErrorRuntime(FakeRuntime):
+            def __init__(self, path: Path):
+                super().__init__(path)
+                self.live_snapshot_reads = 0
+                self.capture_count = 0
+
+            def handle_text(self, session_id, text, **kwargs):
+                del session_id, text, kwargs
+                error = AgentProtocolError(
+                    "secret legacy-only failure",
+                    code="UPLOAD_PERSIST_FAILED",
+                )
+                error.response_snapshot = dict(legacy)
+                raise error
+
+            def session_snapshot(self, session_id):
+                del session_id
+                self.live_snapshot_reads += 1
+                raise AssertionError("carried legacy must prevent a live reread")
+
+            def session_response_snapshot_v1(self, *args, **kwargs):
+                del args, kwargs
+                self.capture_count += 1
+                raise AssertionError("carried legacy must prevent a later recapture")
+
+        runtime = LegacyOnlyErrorRuntime(image_path)
+        response = TestClient(create_app(runtime=runtime)).post(
+            "/api/message/stream",
+            json={"text": "继续"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        events = [json.loads(line) for line in response.text.splitlines() if line]
+        self.assertEqual([event["type"] for event in events], ["error"])
+        self.assertEqual(events[0]["search_id"], legacy["search_id"])
+        self.assertEqual(
+            events[0]["task_state"]["consistency"],
+            {
+                "status": "INCONSISTENT",
+                "codes": ["CHILD_STATE_UNREADABLE"],
+            },
+        )
+        self.assertNotEqual(
+            events[0]["task_state"],
+            empty_task_state_snapshot().to_dict(),
+        )
+        self.assertEqual(runtime.live_snapshot_reads, 0)
+        self.assertEqual(runtime.capture_count, 0)
+        self.assertNotIn("secret legacy-only", response.text)
+
+    def test_stream_busy_error_drops_even_forged_typed_state_without_any_read(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"stream_busy_zero_read_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (8, 8), "white").save(image_path)
+
+        class BusyRuntime(FakeRuntime):
+            a3_enabled = True
+
+            def __init__(self, path: Path, busy_code: str):
+                super().__init__(path)
+                self.busy_code = busy_code
+                self.live_snapshot_reads = 0
+                self.capture_count = 0
+
+            def _raise(self):
+                error = AgentRuntimeBusyError(
+                    "secret queue rejection",
+                    code=self.busy_code,
+                )
+                error.response_snapshot = {"session_valid": False}
+                error.response_task_state_snapshot = self_task_state
+                raise error
+
+            def handle_text(self, session_id, text, **kwargs):
+                del session_id, text, kwargs
+                self._raise()
+
+            def handle_image(self, session_id, image_path, **kwargs):
+                del session_id, image_path, kwargs
+                self._raise()
+
+            def select_unit(self, session_id, unit_id, **kwargs):
+                del session_id, unit_id, kwargs
+                self._raise()
+
+            def prepare_units(self, session_id, unit_ids, **kwargs):
+                del session_id, unit_ids, kwargs
+                self._raise()
+
+            def handle_crop(self, session_id, bounds, **kwargs):
+                del session_id, bounds, kwargs
+                self._raise()
+
+            def session_snapshot(self, session_id):
+                del session_id
+                self.live_snapshot_reads += 1
+                raise AssertionError("queue rejection must stay before state reads")
+
+            def session_response_snapshot_v1(self, *args, **kwargs):
+                del args, kwargs
+                self.capture_count += 1
+                raise AssertionError("queue rejection must not capture task state")
+
+        self_task_state = self._http_error_task_state()
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(image_buffer, format="JPEG")
+        cases = (
+            (
+                "message",
+                lambda client: client.post(
+                    "/api/message/stream",
+                    json={"text": "继续"},
+                ),
+            ),
+            (
+                "image",
+                lambda client: client.post(
+                    "/api/image/stream",
+                    files={
+                        "file": (
+                            "question.jpg",
+                            image_buffer.getvalue(),
+                            "image/jpeg",
+                        )
+                    },
+                ),
+            ),
+            (
+                "a3_select",
+                lambda client: client.post(
+                    "/api/a3/select/stream",
+                    json={"unit_id": "g1-u1", "task_revision": 1},
+                ),
+            ),
+            (
+                "a3_prepare",
+                lambda client: client.post(
+                    "/api/a3/prepare/stream",
+                    json={"unit_ids": ["g1-u1"], "task_revision": 1},
+                ),
+            ),
+            (
+                "a3_crop",
+                lambda client: client.post(
+                    "/api/a3/crop/stream",
+                    json={
+                        "bounds": {
+                            "x": 0.1,
+                            "y": 0.1,
+                            "width": 0.8,
+                            "height": 0.8,
+                        },
+                        "unit_id": "g1-u1",
+                        "task_revision": 1,
+                    },
+                ),
+            ),
+        )
+        for busy_code in ("QUEUE_FULL", "QUEUE_TIMEOUT"):
+            for route, send in cases:
+                with self.subTest(route=route, busy_code=busy_code):
+                    runtime = BusyRuntime(image_path, busy_code)
+                    response = send(TestClient(create_app(runtime=runtime)))
+                    self.assertEqual(response.status_code, 200, response.text)
+                    events = [
+                        json.loads(line)
+                        for line in response.text.splitlines()
+                        if line
+                    ]
+                    self.assertEqual([event["type"] for event in events], ["error"])
+                    self.assertEqual(events[0]["code"], busy_code)
+                    self.assertNotIn("task_state", events[0])
+                    self.assertEqual(runtime.live_snapshot_reads, 0)
+                    self.assertEqual(runtime.capture_count, 0)
+                    self.assertNotIn("secret queue", response.text)
+
+    def test_stream_mapping_failure_uses_zero_io_inconsistent_fallback(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"stream_mapping_failure_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (8, 8), "white").save(image_path)
+
+        class MappingRuntime(FakeRuntime):
+            def __init__(self, path: Path, *, a3_enabled: bool):
+                super().__init__(path)
+                self.a3_enabled = a3_enabled
+                self.live_snapshot_reads = 0
+
+            def session_snapshot(self, session_id):
+                del session_id
+                self.live_snapshot_reads += 1
+                raise AssertionError("stream mapping failure must keep its frozen pair")
+
+        cases = (
+            (False, ["CHILD_STATE_UNREADABLE"]),
+            (
+                True,
+                ["WORKFLOW_STATE_UNREADABLE", "CHILD_STATE_UNREADABLE"],
+            ),
+        )
+        for a3_enabled, expected_codes in cases:
+            with self.subTest(a3_enabled=a3_enabled):
+                runtime = MappingRuntime(image_path, a3_enabled=a3_enabled)
+                client = TestClient(create_app(runtime=runtime))
+                with patch(
+                    "tiku_agent.fastapi_demo.with_public_task_state",
+                    side_effect=RuntimeError("secret stream mapper failure"),
+                ), self.assertLogs("tiku_agent.fastapi_demo", level="ERROR"):
+                    response = client.post(
+                        "/api/message/stream",
+                        json={"text": "继续"},
+                    )
+
+                self.assertEqual(response.status_code, 200, response.text)
+                events = [
+                    json.loads(line) for line in response.text.splitlines() if line
+                ]
+                terminals = [
+                    event for event in events if event["type"] in {"result", "error"}
+                ]
+                self.assertEqual(len(terminals), 1, events)
+                self.assertIs(terminals[0], events[-1])
+                self.assertEqual(terminals[0]["type"], "error")
+                for progress_event in events[:-1]:
+                    self.assertEqual(progress_event["type"], "progress")
+                    self.assertNotIn("task_state", progress_event)
+                error_event = terminals[0]
+                self.assertEqual(error_event["code"], "SERVICE_UNAVAILABLE")
+                self.assertEqual(
+                    error_event["task_state"]["consistency"],
+                    {"status": "INCONSISTENT", "codes": expected_codes},
+                )
+                self.assertEqual(runtime.live_snapshot_reads, 0)
+                self.assertEqual(len(runtime.response_capture_calls), 1)
+                self.assertEqual(runtime.session_capture_calls, [])
+                self.assertNotIn("secret stream mapper", response.text)
+
+    def test_stream_media_reopen_uses_frozen_result_or_zero_io_a3_error(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"stream_reopen_source_{uuid4().hex}.jpg"
+        missing_answer = runtime_dir / f"stream_reopen_missing_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (8, 8), "white").save(image_path)
+        reopened_task_state = self._http_error_task_state()
+        reopened_legacy = {
+            "session_valid": True,
+            "phase": "WAIT_CANDIDATE_CHOICE",
+            "has_active_image": True,
+            "task_revision": 8,
+            "candidate_generation": "8:1",
+            "candidate_count": 1,
+            "search_id": "search_after_media_reopen_02",
+        }
+
+        class ReopenRuntime(FakeRuntime):
+            a3_enabled = True
+
+            def __init__(self, path: Path, mode: str):
+                super().__init__(path)
+                self.mode = mode
+                self.live_snapshot_reads = 0
+                self.combined_capture_calls = 0
+
+            def handle_text(
+                self,
+                session_id,
+                text,
+                *,
+                identity_key="",
+                progress=None,
+                task_state_capabilities=None,
+            ):
+                del text, identity_key, progress
+                self.snapshot.update({
+                    "session_valid": True,
+                    "phase": "ANSWERED",
+                    "has_active_image": True,
+                    "task_revision": 7,
+                    "candidate_generation": "7:1",
+                    "candidate_count": 1,
+                    "search_id": "search_before_failed_reopen_01",
+                })
+                return self._freeze_response(
+                    session_id,
+                    AgentResponse(
+                        text="答案如下。",
+                        images=[str(missing_answer)],
+                        intent="select_candidate",
+                        media_kind="answer",
+                        state={
+                            "_a3_media_guard": {
+                                "unit_id": "g1-u1",
+                                "task_revision": 7,
+                                "candidate_generation": "7:1",
+                            }
+                        },
+                    ),
+                    task_state_capabilities=task_state_capabilities,
+                )
+
+            def mark_media_delivery_failed_v1(self, session_id, **kwargs):
+                self.media_failure_calls.append((session_id, kwargs))
+                if self.mode == "raise":
+                    raise RuntimeError("secret media reopen failure")
+                if self.mode == "stale":
+                    return None
+                if self.mode == "success":
+                    return SessionResponseSnapshotV1(
+                        uploaded_image_path=None,
+                        legacy_session=dict(reopened_legacy),
+                        task_state=reopened_task_state,
+                    )
+                return SessionResponseSnapshotV1(
+                    uploaded_image_path=None,
+                    legacy_session={},
+                    task_state=empty_task_state_snapshot(),
+                )
+
+            def session_snapshot(self, session_id):
+                del session_id
+                self.live_snapshot_reads += 1
+                raise AssertionError("failed media reopen must not read live legacy state")
+
+            def session_response_snapshot_v1(self, *args, **kwargs):
+                del args, kwargs
+                self.combined_capture_calls += 1
+                raise AssertionError("failed media reopen must not recapture task state")
+
+        cases = (
+            ("success", "result", reopened_task_state.to_dict()),
+            ("stale", "result", empty_task_state_snapshot().to_dict()),
+            ("raise", "error", None),
+            ("invalid", "error", None),
+        )
+        for mode, terminal_type, expected_state in cases:
+            with self.subTest(mode=mode):
+                runtime = ReopenRuntime(image_path, mode)
+                client = TestClient(create_app(runtime=runtime))
+                log_context = (
+                    self.assertLogs("tiku_agent.fastapi_demo", level="ERROR")
+                    if terminal_type == "error"
+                    else nullcontext()
+                )
+                with log_context:
+                    response = client.post(
+                        "/api/message/stream",
+                        json={"text": "选择候选 1"},
+                    )
+
+                self.assertEqual(response.status_code, 200, response.text)
+                events = [
+                    json.loads(line) for line in response.text.splitlines() if line
+                ]
+                terminals = [
+                    event for event in events if event["type"] in {"result", "error"}
+                ]
+                self.assertEqual(len(terminals), 1, events)
+                self.assertEqual(terminals[0]["type"], terminal_type)
+                if terminal_type == "result":
+                    self.assertEqual(
+                        terminals[0]["data"]["task_state"],
+                        expected_state,
+                    )
+                    expected_search_id = (
+                        reopened_legacy["search_id"]
+                        if mode == "success"
+                        else "search_before_failed_reopen_01"
+                    )
+                    self.assertEqual(
+                        terminals[0]["data"]["session"]["search_id"],
+                        expected_search_id,
+                    )
+                else:
+                    self.assertEqual(
+                        terminals[0]["task_state"]["consistency"],
+                        {
+                            "status": "INCONSISTENT",
+                            "codes": [
+                                "WORKFLOW_STATE_UNREADABLE",
+                                "CHILD_STATE_UNREADABLE",
+                            ],
+                        },
+                    )
+                self.assertEqual(runtime.live_snapshot_reads, 0)
+                self.assertEqual(runtime.combined_capture_calls, 0)
+                self.assertEqual(len(runtime.media_failure_calls), 1)
+                self.assertNotIn("secret media reopen", response.text)
+
+    def test_image_stream_rejects_missing_frozen_media_without_live_path_read(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"stream_frozen_media_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (8, 8), "white").save(image_path)
+
+        class MissingMediaSnapshotRuntime(FakeRuntime):
+            def handle_image(self, session_id, image_path, **kwargs):
+                kwargs.pop("request_id", None)
+                response = super().handle_image(session_id, image_path, **kwargs)
+                response.response_media_snapshot_captured = False
+                return response
+
+            def current_image_path(self, session_id):
+                del session_id
+                raise AssertionError("typed image stream must not read a live media path")
+
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(image_buffer, format="JPEG")
+        runtime = MissingMediaSnapshotRuntime(image_path)
+        client = TestClient(create_app(runtime=runtime))
+        with self.assertLogs("tiku_agent.fastapi_demo", level="ERROR"):
+            response = client.post(
+                "/api/image/stream",
+                files={"file": ("question.jpg", image_buffer.getvalue(), "image/jpeg")},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        events = [json.loads(line) for line in response.text.splitlines() if line]
+        terminals = [event for event in events if event["type"] in {"result", "error"}]
+        self.assertEqual(len(terminals), 1, events)
+        self.assertEqual(terminals[0]["type"], "error")
+        self.assertEqual(
+            terminals[0]["task_state"],
+            empty_task_state_snapshot().to_dict(),
+        )
+        self.assertEqual(len(runtime.response_capture_calls), 1)
+        self.assertEqual(runtime.session_capture_calls, [])
 
     def test_json_task_state_rejects_a_missing_frozen_projection(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
@@ -3289,7 +4147,7 @@ class FastApiDemoTest(unittest.TestCase):
         with self.assertRaisesRegex(
             RuntimeError,
             "missing its frozen session snapshot",
-        ):
+        ) as raised:
             _agent_payload(
                 response,
                 runtime,
@@ -3299,6 +4157,14 @@ class FastApiDemoTest(unittest.TestCase):
                     reset_session_available=True,
                 ),
             )
+        self.assertTrue(
+            getattr(raised.exception, "_response_snapshot_attempted", False)
+        )
+        self.assertEqual(raised.exception.response_snapshot, frozen)
+        self.assertEqual(
+            raised.exception.response_task_state_snapshot,
+            empty_task_state_snapshot(),
+        )
 
         legacy_payload = _agent_payload(
             response,
@@ -4774,7 +5640,11 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual([event["type"] for event in text_events], ["progress", "result"])
         self.assertEqual(text_events[0]["stage"], "searching")
         self.assertIn("力法", text_events[0]["message"])
-        self.assertNotIn("task_state", text_events[-1]["data"])
+        self.assertNotIn("task_state", text_events[0])
+        self.assertEqual(
+            text_events[-1]["data"]["task_state"],
+            empty_task_state_snapshot().to_dict(),
+        )
 
         buffer = io.BytesIO()
         Image.new("RGB", (4, 4), "white").save(buffer, format="JPEG")
@@ -4785,7 +5655,11 @@ class FastApiDemoTest(unittest.TestCase):
         image_events = [json.loads(line) for line in image_response.text.splitlines() if line]
         self.assertEqual([event["type"] for event in image_events], ["progress", "result"])
         self.assertTrue(image_events[-1]["data"]["uploaded_image"].startswith("/api/upload/"))
-        self.assertNotIn("task_state", image_events[-1]["data"])
+        self.assertNotIn("task_state", image_events[0])
+        self.assertEqual(
+            image_events[-1]["data"]["task_state"],
+            empty_task_state_snapshot().to_dict(),
+        )
 
     def test_streaming_progress_uses_stage_catalog_instead_of_dynamic_text(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
@@ -4839,7 +5713,16 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual([event["type"] for event in events], ["result"])
         self.assertIn("上一道题", events[0]["data"]["text"])
         self.assertEqual(events[0]["data"]["intent"], "stale_candidate")
+        self.assertEqual(
+            events[0]["data"]["task_state"],
+            empty_task_state_snapshot().to_dict(),
+        )
         self.assertEqual(runtime.calls, [])
+        self.assertEqual(len(runtime.session_capture_calls), 1)
+        self.assertEqual(runtime.session_capture_frozen_flags, [True])
+        capabilities = runtime.session_capture_calls[0][1]
+        self.assertFalse(capabilities.trusted_image_event)
+        self.assertTrue(capabilities.reset_session_available)
 
     def test_json_stale_actions_use_one_response_frozen_capture(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"

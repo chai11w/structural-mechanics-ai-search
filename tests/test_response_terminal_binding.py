@@ -193,7 +193,10 @@ class ResponseTerminalBindingTest(unittest.TestCase):
                     "/api/message/stream", json={"text": "stream-success"}
                 )
             self.assertEqual(response.status_code, 200, response.text)
-            self.assertNotIn("task_state", self._stream_payload(response, "result"))
+            self.assertEqual(
+                self._stream_payload(response, "result")["task_state"],
+                empty_task_state_snapshot().to_dict(),
+            )
             self._assert_ids_match(
                 payload=self._stream_payload(response, "result"),
                 recorder=recorder,

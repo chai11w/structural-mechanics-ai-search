@@ -134,7 +134,10 @@ class OutputWatchdogTest(unittest.TestCase):
             stream_events = [
                 json.loads(line) for line in stream_response.text.splitlines() if line
             ]
-            self.assertNotIn("task_state", stream_events[-1]["data"])
+            self.assertEqual(
+                stream_events[-1]["data"]["task_state"],
+                empty_task_state_snapshot().to_dict(),
+            )
             self.assertGreaterEqual(len(observer.samples), 2)
             self.assertTrue(all(item["text"] == "用户可见回复。" for item in observer.samples))
             self.assertTrue(all(item["endpoint"] == "web_a3" for item in observer.samples))
