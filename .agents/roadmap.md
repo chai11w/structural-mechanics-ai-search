@@ -6,8 +6,8 @@
 
 ## Current Priority
 
-- 工程化梳理优先于新增自主功能：阶段 3.1～3.3 服务端已完成；3.4.1 前端 exact V1 解析、结构/拓扑校验和 fail-closed 模型已完成，但尚未消费响应信封或替换旧 phase/unit flag 按钮授权。busy/queue 拒绝保持无状态，仍不动 8788/8794，也不提前混入阶段结果或暂停/继续。
-- 3.4.1 已完成且尚未部署；93 项前端/FastAPI 与 73 项 task-state 回归通过。全仓 1150 项唯一失败为基线可复现、单独通过的 SQLite WAL 顺序波动。主阶段 3 仍为 `IN_PROGRESS`，下一步是 3.4.2 响应信封接线，再按 A2/A3 分批迁移动作，之后才进入含 8896/live/8790 的 3.5 启用门。
+- 工程化梳理优先于新增自主功能：阶段 3.1～3.3 服务端及 3.4.1～3.4.2 前端模型/信封接线已完成，但尚未替换旧 phase/unit flag 按钮授权。busy/queue 拒绝保持无状态，仍不动 8788/8794，也不提前混入阶段结果或暂停/继续。
+- 3.4.2 已完成且尚未部署；95 项前端/FastAPI 与 73 项 task-state 回归通过。全仓 1152 项唯一失败为基线可复现、单独通过的 SQLite WAL 顺序波动。主阶段 3 仍为 `IN_PROGRESS`，下一独立批次先迁移 A2 动作，再迁移 A3，之后才进入含 8896/live/8790 的 3.5 启用门。
 - 8790 网页已由 A3-V1 接管业务内核并继续使用 8795 控制库邀请码；费用、反馈汇总、动态额度和旧并发队列下一轮恢复。
 - 8896 保留同内核验收，8897 暂留独立回退；当前重点是 8790 真实样本验收和失败记录收集。Paddle 试验结论保留，不再作为当前阻塞项。
 - 8794 影子规划及有限自主阶段暂停排期；待 8892 固定流程、取消语义和验收样本稳定，且真实失败记录证明固定编排不足后再恢复。
@@ -61,7 +61,7 @@
    - 3.2.2 锁内权威读取：DONE；A3 wrapper 按 A3→A2 锁序让父子 store 各读取一次，standalone A2 只获取 A2 锁，已持 A2 锁的调用方可传 frozen state 而不重锁/重读；缺失、不可读、稳定未知状态和受控文件/入口证据均已收口。47 项 task-state 定向测试及全仓 1031 项回归通过；当前只新增 runtime 内部入口，未改公共出口。
    - 3.2.3 异常与矩阵测试：DONE；实际构造结果已覆盖空记录与全部可持久化父 route/phase 合法/非法组合、九个 live child phase × standalone/direct A2/A3 active、特殊 child 边界、A3 active/父子组合读取异常、脱敏和旧 revision 动作证据。51 项 task-state 定向测试及全仓 1035 项回归通过；阶段 3.2 整体 DONE，未改生产代码或公共出口。
    - 3.3 JSON/stream 出口一致性：DONE，尚未部署。3.3.1～3.3.5 完成公共映射及 session、HTTP success/error、五条任务 stream 接入；3.3.6 已用非空 A2/A3 V1 验证跨出口 exact parity、完整 pair、失败后处理、零重读和 legacy 兼容，并修复 session/reset 不完整组合可能发布原 typed 或跨 read-set 拼接的问题。73 项 task-state、179 项 FastAPI/A3/Response Store 直接相关及全仓 1147 项回归通过。
-   - 3.4 前端消费：IN_PROGRESS，尚未部署。3.4.1 已完成 `task_state.js` 纯解析/校验与 branded fail-closed model，浏览器先于 `demo.js` 加载并初始化 closed context；Python typed fixture 覆盖全部父/子 phase/action、关键合法/非法拓扑、Unicode、exact descriptor、浏览器/CommonJS 分支和伪造 model。93 项前端/FastAPI 与 73 项 task-state 回归通过；全仓 1150 项中 1 项无关 WAL 顺序测试失败，已在 1147 项基线复现且单独通过。3.4.2 响应信封接线、后续 A2/A3 动作迁移仍为 PLANNED，主阶段 3 保持 IN_PROGRESS。
+   - 3.4 前端消费：IN_PROGRESS，尚未部署。3.4.1 exact 校验、branded fail-closed model 与 3.4.2 响应信封接线已完成；consumer 原子消费 session/JSON/reset、stream result/error，任务开始关闭旧状态，一次性 token 防乱序/重复，progress、queue、非任务 no-update，busy 时禁止 session refresh 抢占终态。95 项前端/FastAPI 与 73 项 task-state 通过；全仓 1152 项中仅既有 WAL 顺序测试失败且单独通过。后续 A2/A3 动作迁移仍为 PLANNED，主阶段 3 保持 IN_PROGRESS。
 4. **关键阶段结构化保存中间结果（PLANNED）**：保存识图、裁图、章节、荷载、分层候选数、失败原因及版本；以 `artifact_id` 受控关联短期原图、裁图和 overlay，查看、延长保留、删除均审计，路径不进 trace/公共输出，支持诊断、复用和 checkpoint。
 5. **幂等执行与父子任务控制（PLANNED）**：统一任务版本、幂等键、执行锁和 A3→A2 父子生命周期，避免重复点击、网络重试或恢复造成重复执行和重复计费。
 6. **长任务与 HTTP 流逐步解耦（PLANNED）**：让后台任务持有执行生命周期，HTTP/updates 流只负责提交、观察和控制；页面刷新或连接断开不再等于任务状态丢失。

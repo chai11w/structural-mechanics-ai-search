@@ -91,6 +91,14 @@ const A3_CROP_REVIEW_MESSAGES = Object.freeze({
   LOAD_CHECK_UNAVAILABLE: '裁剪结果暂时无法确认外荷载，请重新提交裁剪。',
   EXTERNAL_LOADS_NOT_FOUND: '裁剪结果未通过，未识别到结构荷载，请重新选择区域裁剪。',
 });
+const TASK_STATE_JSON_PATHS = new Set([
+  '/api/session', '/api/message', '/api/image', '/api/a3/select', '/api/reset',
+]);
+const TASK_STATE_STREAM_PATHS = new Set([
+  '/api/message/stream', '/api/image/stream', '/api/a3/select/stream',
+  '/api/a3/prepare/stream', '/api/a3/crop/stream',
+]);
+const TASK_STATE_QUEUE_CODES = new Set(['QUEUE_FULL', 'QUEUE_TIMEOUT']);
 const a3PrepareSelection = new Set();
 const ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp']);
 const ALLOWED_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp']);
@@ -140,7 +148,8 @@ let sessionContext = {
   session_valid: false, phase: 'IDLE', has_active_image: false,
   task_revision: 0, candidate_generation: '', candidate_count: 0, search_id: '',
 };
-let taskStateContext = taskStateV1.createTaskStateModel();
+const taskStateConsumer = taskStateV1.createTaskStateConsumer();
+let taskStateContext = taskStateConsumer.current();
 let a3SourceUrl = '';
 let a3Bounds = null;
 let a3Pointer = null;
@@ -190,6 +199,32 @@ function scheduleHistoryExpiry() {
 function createRequestId() {
   const value = globalThis.crypto?.randomUUID?.().replaceAll('-', '');
   return `req_${value || `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`.padEnd(32, '0').slice(0, 32)}`;
+}
+
+function taskStateApiPath(url) {
+  return String(url || '').split('?', 1)[0];
+}
+
+function beginTaskStateRequest(url, responseMode) {
+  const paths = responseMode === 'stream' ? TASK_STATE_STREAM_PATHS : TASK_STATE_JSON_PATHS;
+  if (!paths.has(taskStateApiPath(url))) return null;
+  const request = taskStateConsumer.begin();
+  taskStateContext = taskStateConsumer.current();
+  return request;
+}
+
+function isTaskStateQueueNoUpdate(envelope) {
+  return envelope?.layer === 'queue' && TASK_STATE_QUEUE_CODES.has(envelope?.code);
+}
+
+function consumeTaskStateResponse(request, envelope, { error = false } = {}) {
+  if (request === null || (error && isTaskStateQueueNoUpdate(envelope))) return;
+  taskStateContext = taskStateConsumer.consume(request, envelope);
+}
+
+function finishTaskStateRequest(request) {
+  if (request === null) return;
+  taskStateContext = taskStateConsumer.finish(request);
 }
 
 function protocolFields(source = {}) {
@@ -1240,6 +1275,7 @@ function streamedError(event) {
 }
 
 async function request(url, options, timeoutMs, timeoutMessage, track = true, networkMessage = '') {
+  const taskStateRequest = beginTaskStateRequest(url, 'json');
   const controller = new AbortController();
   const requestId = createRequestId();
   const headers = new Headers(options?.headers || {});
@@ -1255,8 +1291,12 @@ async function request(url, options, timeoutMs, timeoutMessage, track = true, ne
     } else {
       await response.text();
     }
-    if (!response.ok) throw safeHttpError(response.status, data, requestId);
+    if (!response.ok) {
+      consumeTaskStateResponse(taskStateRequest, data, { error: true });
+      throw safeHttpError(response.status, data, requestId);
+    }
     if (!contentType.includes('application/json')) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
+    consumeTaskStateResponse(taskStateRequest, data);
     return data;
   } catch (error) {
     if (error.name === 'AbortError') {
@@ -1271,6 +1311,7 @@ async function request(url, options, timeoutMs, timeoutMessage, track = true, ne
     });
     throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
   } finally {
+    finishTaskStateRequest(taskStateRequest);
     clearTimeout(timer);
     if (activeController === controller) activeController = null;
   }
@@ -1285,6 +1326,7 @@ async function requestStream(
   networkMessage = '',
   { renewTimeoutOnProgress = false } = {},
 ) {
+  const taskStateRequest = beginTaskStateRequest(url, 'stream');
   const controller = new AbortController();
   const requestId = createRequestId();
   const headers = new Headers(options?.headers || {});
@@ -1321,12 +1363,16 @@ async function requestStream(
         }
         if (event.type === 'result') {
           const terminalResult = event.data;
+          consumeTaskStateResponse(taskStateRequest, terminalResult);
           clearTimeout(timer);
           try { await reader.cancel(); } catch (_error) { /* terminal result already won */ }
           if (!terminalResult) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
           return terminalResult;
         }
-        if (event.type === 'error') throw streamedError(event);
+        if (event.type === 'error') {
+          consumeTaskStateResponse(taskStateRequest, event, { error: true });
+          throw streamedError(event);
+        }
       }
       if (done) break;
     }
@@ -1344,6 +1390,7 @@ async function requestStream(
     });
     throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
   } finally {
+    finishTaskStateRequest(taskStateRequest);
     clearTimeout(timer);
     if (activeController === controller) activeController = null;
   }
@@ -2315,8 +2362,9 @@ async function checkHealth() {
 }
 
 async function retryConnection() {
+  if (isBusy) return;
   const healthy = await checkHealth();
-  if (healthy) await repairUploadedImageHistory();
+  if (healthy && !isBusy) await repairUploadedImageHistory();
 }
 
 form.addEventListener('submit', (event) => { event.preventDefault(); sendText(); });

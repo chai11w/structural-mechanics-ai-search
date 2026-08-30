@@ -604,6 +604,45 @@
     return model;
   }
 
+  function createTaskStateModelFromEnvelope(envelope) {
+    if (typeof envelope === 'undefined') return MISSING_MODEL;
+    try {
+      if (!isPlainObject(envelope)) return INVALID_MODEL;
+      const descriptor = Object.getOwnPropertyDescriptor(envelope, 'task_state');
+      if (!descriptor) return MISSING_MODEL;
+      if (!Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) return INVALID_MODEL;
+      return createTaskStateModel(descriptor.value);
+    } catch (_error) {
+      return INVALID_MODEL;
+    }
+  }
+
+  function createTaskStateConsumer() {
+    let activeRequest = null;
+    let currentModel = MISSING_MODEL;
+    return Object.freeze({
+      begin() {
+        activeRequest = Symbol('task-state-request');
+        currentModel = MISSING_MODEL;
+        return activeRequest;
+      },
+      consume(request, envelope) {
+        if (typeof request !== 'symbol' || request !== activeRequest) return currentModel;
+        activeRequest = null;
+        const nextModel = createTaskStateModelFromEnvelope(envelope);
+        currentModel = nextModel;
+        return currentModel;
+      },
+      finish(request) {
+        if (typeof request === 'symbol' && request === activeRequest) activeRequest = null;
+        return currentModel;
+      },
+      current() {
+        return currentModel;
+      },
+    });
+  }
+
   function allowsWorkflowAction(model, action) {
     return Boolean(
       model && typeof model === 'object'
@@ -628,6 +667,8 @@
     TaskStateValidationError,
     parseTaskStateSnapshotV1,
     createTaskStateModel,
+    createTaskStateModelFromEnvelope,
+    createTaskStateConsumer,
     allowsWorkflowAction,
     allowsChildAction,
   });

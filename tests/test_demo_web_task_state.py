@@ -329,6 +329,78 @@ assert.equal(missingModel.snapshot, null);
 assert.equal(missingModel.actions_enabled, false);
 assertDeepFrozen(missingModel);
 
+const envelopeModel = api.createTaskStateModelFromEnvelope({ task_state: fixtures.a2 });
+assert.equal(envelopeModel.reason, 'OK');
+assert.equal(api.allowsChildAction(envelopeModel, 'select_candidate'), true);
+assert.equal(api.createTaskStateModelFromEnvelope({}).reason, 'MISSING');
+assert.equal(api.createTaskStateModelFromEnvelope().reason, 'MISSING');
+assert.equal(api.createTaskStateModelFromEnvelope(null).reason, 'INVALID');
+assert.equal(
+  api.createTaskStateModelFromEnvelope({ task_state: { ...fixtures.a2, schema_version: 2 } }).reason,
+  'UNSUPPORTED_SCHEMA',
+);
+let envelopeGetterReads = 0;
+const getterEnvelope = {};
+Object.defineProperty(getterEnvelope, 'task_state', {
+  enumerable: true,
+  get() {
+    envelopeGetterReads += 1;
+    return fixtures.a2;
+  },
+});
+assert.equal(api.createTaskStateModelFromEnvelope(getterEnvelope).reason, 'INVALID');
+assert.equal(envelopeGetterReads, 0);
+const hiddenEnvelope = {};
+Object.defineProperty(hiddenEnvelope, 'task_state', { value: fixtures.a2, enumerable: false });
+assert.equal(api.createTaskStateModelFromEnvelope(hiddenEnvelope).reason, 'INVALID');
+
+const consumer = api.createTaskStateConsumer();
+assert.equal(Object.isFrozen(consumer), true);
+assert.equal(consumer.current().reason, 'MISSING');
+assert.equal(consumer.consume(null, { task_state: fixtures.a2 }).reason, 'MISSING');
+const firstRequest = consumer.begin();
+assert.equal(consumer.current().reason, 'MISSING');
+assert.equal(consumer.consume(firstRequest, { task_state: fixtures.a2 }).reason, 'OK');
+assert.equal(api.allowsChildAction(consumer.current(), 'select_candidate'), true);
+assert.equal(consumer.consume(firstRequest, { task_state: fixtures.a3 }).snapshot.active_child_task.task_revision, 7);
+const secondRequest = consumer.begin();
+assert.equal(consumer.current().reason, 'MISSING');
+let staleEnvelopeReads = 0;
+const staleEnvelope = {};
+Object.defineProperty(staleEnvelope, 'task_state', {
+  enumerable: true,
+  get() {
+    staleEnvelopeReads += 1;
+    return fixtures.a2;
+  },
+});
+assert.strictEqual(consumer.consume(firstRequest, staleEnvelope), consumer.current());
+assert.equal(consumer.current().reason, 'MISSING');
+assert.equal(staleEnvelopeReads, 0);
+assert.equal(consumer.consume(secondRequest, { task_state: fixtures.a3 }).reason, 'OK');
+assert.equal(api.allowsWorkflowAction(consumer.current(), 'cancel_current_unit'), true);
+const thirdRequest = consumer.begin();
+assert.equal(consumer.consume(thirdRequest, {}).reason, 'MISSING');
+const fourthRequest = consumer.begin();
+assert.equal(consumer.consume(fourthRequest, { task_state: null }).reason, 'INVALID');
+const noUpdateRequest = consumer.begin();
+const noUpdateModel = consumer.current();
+assert.strictEqual(consumer.finish(noUpdateRequest), noUpdateModel);
+let retiredEnvelopeReads = 0;
+const retiredEnvelope = {};
+Object.defineProperty(retiredEnvelope, 'task_state', {
+  enumerable: true,
+  get() {
+    retiredEnvelopeReads += 1;
+    return fixtures.a2;
+  },
+});
+assert.strictEqual(consumer.consume(noUpdateRequest, retiredEnvelope), noUpdateModel);
+assert.equal(retiredEnvelopeReads, 0);
+const finalRequest = consumer.begin();
+consumer.finish(noUpdateRequest);
+assert.equal(consumer.consume(finalRequest, { task_state: fixtures.a2 }).reason, 'OK');
+
 function assertInvalid(mutator, reason = 'INVALID') {
   const raw = clone(fixtures.a3);
   mutator(raw);
@@ -457,13 +529,214 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         page = (ROOT / "tiku_agent" / "demo_web" / "index.html").read_text(encoding="utf-8")
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
-        task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-1"'
-        demo_asset = 'src="/assets/demo.js?v=20260830-task-state-3-4-1"'
+        task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-2"'
+        demo_asset = 'src="/assets/demo.js?v=20260830-task-state-3-4-2"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
         self.assertIn("const taskStateV1 = globalThis.TikuTaskStateV1", demo)
-        self.assertIn("let taskStateContext = taskStateV1.createTaskStateModel()", demo)
+        self.assertIn("const taskStateConsumer = taskStateV1.createTaskStateConsumer()", demo)
+        self.assertIn("let taskStateContext = taskStateConsumer.current()", demo)
+
+    def test_demo_consumes_only_authoritative_task_state_envelopes(self):
+        demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
+
+        for path in (
+            "/api/session", "/api/message", "/api/image", "/api/a3/select", "/api/reset",
+            "/api/message/stream", "/api/image/stream", "/api/a3/select/stream",
+            "/api/a3/prepare/stream", "/api/a3/crop/stream",
+        ):
+            self.assertIn(f"'{path}'", demo)
+        json_paths = demo.split("const TASK_STATE_JSON_PATHS", 1)[1].split("]);", 1)[0]
+        stream_paths = demo.split("const TASK_STATE_STREAM_PATHS", 1)[1].split("]);", 1)[0]
+        for non_task_path in ("/api/feedback", "/health"):
+            self.assertNotIn(non_task_path, json_paths)
+            self.assertNotIn(non_task_path, stream_paths)
+
+        request_block = demo.split("async function request(", 1)[1].split(
+            "async function requestStream(", 1
+        )[0]
+        self.assertLess(
+            request_block.index("beginTaskStateRequest(url, 'json')"),
+            request_block.index("await fetch(url"),
+        )
+        error_consume = "consumeTaskStateResponse(taskStateRequest, data, { error: true })"
+        self.assertLess(request_block.index(error_consume), request_block.index("throw safeHttpError"))
+        success_consume = "consumeTaskStateResponse(taskStateRequest, data);"
+        self.assertLess(request_block.index(success_consume), request_block.index("return data;"))
+
+        stream_block = demo.split("async function requestStream(", 1)[1].split(
+            "function responseItem(", 1
+        )[0]
+        self.assertLess(
+            stream_block.index("beginTaskStateRequest(url, 'stream')"),
+            stream_block.index("await fetch(url"),
+        )
+        progress_branch = stream_block.split("if (event.type === 'progress')", 1)[1].split(
+            "if (event.type === 'result')", 1
+        )[0]
+        self.assertNotIn("consumeTaskStateResponse", progress_branch)
+        result_branch = stream_block.split("if (event.type === 'result')", 1)[1].split(
+            "if (event.type === 'error')", 1
+        )[0]
+        self.assertLess(
+            result_branch.index("consumeTaskStateResponse(taskStateRequest, terminalResult)"),
+            result_branch.index("await reader.cancel()"),
+        )
+        error_branch = stream_block.split("if (event.type === 'error')", 1)[1].split(
+            "if (done) break;", 1
+        )[0]
+        self.assertIn("consumeTaskStateResponse(taskStateRequest, event, { error: true })", error_branch)
+        self.assertIn("TASK_STATE_QUEUE_CODES", demo)
+        self.assertIn("envelope?.layer === 'queue'", demo)
+        self.assertEqual(demo.count("finishTaskStateRequest(taskStateRequest);"), 2)
+
+    def test_response_wiring_preserves_no_update_and_latest_request(self):
+        fixtures = {
+            "empty": contract.empty_task_state_snapshot().to_dict(),
+            "a2": _a2_snapshot().to_dict(),
+            "a3": _a3_snapshot().to_dict(),
+        }
+        node_test = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const taskStateV1 = require('./tiku_agent/demo_web/task_state.js');
+const fixtures = JSON.parse(fs.readFileSync(0, 'utf8'));
+const source = fs.readFileSync('./tiku_agent/demo_web/demo.js', 'utf8');
+
+const constants = source.slice(
+  source.indexOf('const TASK_STATE_JSON_PATHS'),
+  source.indexOf('const a3PrepareSelection'),
+);
+const initialization = source.slice(
+  source.indexOf('const taskStateConsumer ='),
+  source.indexOf('let a3SourceUrl ='),
+);
+const helpers = source.slice(
+  source.indexOf('function taskStateApiPath'),
+  source.indexOf('function protocolFields'),
+);
+const createHarness = new Function('taskStateV1', `
+  ${constants}
+  ${initialization}
+  ${helpers}
+  return Object.freeze({
+    begin: beginTaskStateRequest,
+    consume: consumeTaskStateResponse,
+    finish: finishTaskStateRequest,
+    current: () => taskStateContext,
+  });
+`);
+const wiring = createHarness(taskStateV1);
+
+for (const path of ['/api/session', '/api/message', '/api/image', '/api/a3/select', '/api/reset']) {
+  const request = wiring.begin(`${path}?request=1`, 'json');
+  assert.equal(typeof request, 'symbol');
+  assert.equal(wiring.current().reason, 'MISSING');
+  wiring.finish(request);
+}
+for (const path of [
+  '/api/message/stream', '/api/image/stream', '/api/a3/select/stream',
+  '/api/a3/prepare/stream', '/api/a3/crop/stream',
+]) {
+  const request = wiring.begin(path, 'stream');
+  assert.equal(typeof request, 'symbol');
+  assert.equal(wiring.current().reason, 'MISSING');
+  wiring.finish(request);
+}
+
+let request = wiring.begin('/api/session', 'json');
+wiring.consume(request, { task_state: fixtures.a2 });
+assert.equal(wiring.current().reason, 'OK');
+assert.equal(wiring.current().snapshot.active_child_task.task_revision, 7);
+const sessionModel = wiring.current();
+for (const path of ['/api/feedback', '/api/feedback/resp_1', '/health', '/api/media/image.jpg']) {
+  const nonTask = wiring.begin(path, 'json');
+  assert.equal(nonTask, null);
+  wiring.consume(nonTask, { task_state: fixtures.a3 });
+  wiring.finish(nonTask);
+  assert.strictEqual(wiring.current(), sessionModel);
+}
+
+for (const code of ['QUEUE_FULL', 'QUEUE_TIMEOUT']) {
+  request = wiring.begin('/api/message/stream', 'stream');
+  const closed = wiring.current();
+  wiring.consume(request, {
+    type: 'error', layer: 'queue', code, task_state: fixtures.a3,
+  }, { error: true });
+  assert.strictEqual(wiring.current(), closed);
+  wiring.finish(request);
+  wiring.consume(request, { task_state: fixtures.a3 });
+  assert.strictEqual(wiring.current(), closed);
+}
+
+const slowSession = wiring.begin('/api/session', 'json');
+const latestStream = wiring.begin('/api/image/stream', 'stream');
+wiring.consume(latestStream, { task_state: fixtures.a3 });
+const latestModel = wiring.current();
+wiring.consume(slowSession, { task_state: fixtures.a2 });
+assert.strictEqual(wiring.current(), latestModel);
+assert.equal(wiring.current().snapshot.workflow.task_revision, 9);
+
+request = wiring.begin('/api/message/stream', 'stream');
+wiring.consume(request, { data: { task_state: fixtures.a2 } }, { error: true });
+assert.equal(wiring.current().reason, 'MISSING');
+request = wiring.begin('/api/reset', 'json');
+wiring.consume(request, { task_state: fixtures.empty });
+assert.equal(wiring.current().reason, 'OK');
+assert.equal(wiring.current().snapshot.workflow.exists, false);
+
+const retryConnectionSource = source.slice(
+  source.indexOf('async function retryConnection()'),
+  source.indexOf("form.addEventListener('submit'"),
+);
+const createRetryHarness = new Function(`
+  let isBusy = false;
+  let becomeBusyDuringHealth = false;
+  let healthChecks = 0;
+  let sessionRepairs = 0;
+  async function checkHealth() {
+    healthChecks += 1;
+    if (becomeBusyDuringHealth) isBusy = true;
+    return true;
+  }
+  async function repairUploadedImageHistory() { sessionRepairs += 1; }
+  ${retryConnectionSource}
+  return Object.freeze({
+    retryConnection,
+    setBusy: (value) => { isBusy = value; },
+    setBecomeBusyDuringHealth: (value) => { becomeBusyDuringHealth = value; },
+    counts: () => ({ healthChecks, sessionRepairs }),
+  });
+`);
+const retryHarness = createRetryHarness();
+(async () => {
+  retryHarness.setBusy(true);
+  await retryHarness.retryConnection();
+  assert.deepEqual(retryHarness.counts(), { healthChecks: 0, sessionRepairs: 0 });
+  retryHarness.setBusy(false);
+  retryHarness.setBecomeBusyDuringHealth(true);
+  await retryHarness.retryConnection();
+  assert.deepEqual(retryHarness.counts(), { healthChecks: 1, sessionRepairs: 0 });
+  retryHarness.setBusy(false);
+  retryHarness.setBecomeBusyDuringHealth(false);
+  await retryHarness.retryConnection();
+  assert.deepEqual(retryHarness.counts(), { healthChecks: 2, sessionRepairs: 1 });
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", node_test],
+            cwd=ROOT,
+            input=json.dumps(fixtures, ensure_ascii=False),
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_task_state_module_has_valid_syntax(self):
         result = subprocess.run(

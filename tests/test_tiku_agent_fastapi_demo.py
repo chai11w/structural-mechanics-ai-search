@@ -5190,8 +5190,8 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
             'href="/assets/demo.css?v=20260822-feedback-v1"',
-            'src="/assets/task_state.js?v=20260830-task-state-3-4-1"',
-            'src="/assets/demo.js?v=20260830-task-state-3-4-1"',
+            'src="/assets/task_state.js?v=20260830-task-state-3-4-2"',
+            'src="/assets/demo.js?v=20260830-task-state-3-4-2"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -5203,7 +5203,8 @@ class FastApiDemoTest(unittest.TestCase):
             self.assertIn(expected, page.text)
         for expected in (
             "const taskStateV1 = globalThis.TikuTaskStateV1",
-            "let taskStateContext = taskStateV1.createTaskStateModel()",
+            "const taskStateConsumer = taskStateV1.createTaskStateConsumer()",
+            "let taskStateContext = taskStateConsumer.current()",
             "URL.createObjectURL(selected)", "URL.revokeObjectURL", "function validateImage",
             "function uploadImage", "document.addEventListener('dragenter'", "document.addEventListener('drop'",
             "new AbortController()", "activeController.abort('new-chat')", "function resetConversation",

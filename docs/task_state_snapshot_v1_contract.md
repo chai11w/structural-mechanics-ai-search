@@ -4,7 +4,7 @@
 
 阶段 3.1 完成父 workflow、当前子题任务和题目单元的权威状态契约定稿。本文件冻结 V1 的字段、词汇、字段来源、派生谓词、拓扑边界、一致性错误和冲突策略，是后续实现的权威规范。阶段 3.2.1 已实现从“已冻结 read-set + 可信入口证据”到 `TaskStateSnapshotV1` 的纯构造器，落在 `tiku_agent/task_state_builder.py`；阶段 3.2.2 已实现 `tiku_agent/task_state_runtime.py` 的锁内读取与证据包装，并由 `A3MvpRuntime.task_state_snapshot_v1()`、`AgentSessionRuntime.task_state_snapshot_v1()` 和 `AgentSessionRuntime.task_state_snapshot_v1_from_frozen_state()` 提供内部运行时入口；阶段 3.2.3 已用实际构造结果矩阵和组合读取异常完成边界验收。阶段 3.3.1 冻结 exact typed 公共映射，3.3.2～3.3.5 分别接入 `/api/session`、HTTP 200 业务 JSON、受控非 stream HTTP 4xx/5xx 和五条任务 stream 终态；3.3.6 已完成跨出口 parity、失败后处理、兼容入口和全仓回归验收。
 
-**阶段 3.3 出口一致性及 3.4.1 前端解析/model 已在代码中完成，但尚未部署启用到 8790。** 当前受控 HTTP 出口在根级返回 `task_state`，五条任务 stream 的 success 在 `event.data.task_state`、非准入 error 在 `event.task_state` 返回 exact typed V1；busy/queue 拒绝和 progress 不带状态。浏览器已加载独立 V1 校验与 fail-closed model，但尚未把 session/JSON/stream 信封写入该 model，也未替换旧按钮授权。3.4 后续消费和 3.5 启用门仍未完成，因此主阶段 3 仍为 `IN_PROGRESS`，不能声称已经上线。既有内部 `session_snapshot()` 仍是兼容投影，不等同于统一快照。
+**阶段 3.3 出口一致性及 3.4.1～3.4.2 前端 model/信封接线已在代码中完成，但尚未部署启用到 8790。** 当前受控 HTTP 出口在根级返回 `task_state`，五条任务 stream 的 success 在 `event.data.task_state`、非准入 error 在 `event.task_state` 返回 exact typed V1；浏览器已按这些权威层级原子消费，busy/queue、progress 和非任务响应保持 no-update。旧按钮授权尚未迁移，3.5 启用门仍未完成，因此主阶段 3 仍为 `IN_PROGRESS`，不能声称已经上线。既有内部 `session_snapshot()` 仍是兼容投影，不等同于统一快照。
 
 以下内容不属于阶段 3.1：
 
@@ -769,9 +769,9 @@ descriptor 一次性捕获值后再解析，避免同一字段重复求值造成
 
 敏感文本是否可公开仍以 Python typed/public mapper 为唯一边界；浏览器只重复两端语义
 稳定的 Unicode code-point 长度和控制字符检查，不手抄 Python `re` 的 Unicode
-`\b`/`\s` 规则。脚本以 classic `defer` 先于 `demo.js` 加载，当前仅初始化 MISSING/
-closed context；本批次没有消费 `/api/session`、JSON、stream 或 reset，没有改变任何
-A2/A3 按钮、自动打开、旧 phase/unit flag 或 `a3:null` 兼容行为。
+`\b`/`\s` 规则。脚本以 classic `defer` 先于 `demo.js` 加载；3.4.1 收口时仅初始化
+MISSING/closed context，没有消费信封或改变 A2/A3 按钮、自动打开、旧 phase/unit flag
+及 `a3:null` 兼容行为。信封消费由下一批 3.4.2 独立完成。
 
 `tests/test_demo_web_task_state.py` 使用 Python typed contract 生成 canonical empty、
 standalone A2、A3 active、父/子 `INCONSISTENT` 及全部合法 phase/action 矩阵，再由真实
@@ -781,11 +781,31 @@ action、非法里程碑、revision/generation、unit 排序/重复/双 ACTIVE�
 task-state 回归通过；全仓发现的 1150 项中 1 项无关诊断 WAL 顺序测试失败，该失败在
 `0f4bd8e` 的 1147 项基线中同样复现且单独运行通过。未部署、未重启任何服务。
 
+## 3.4.2 前端响应信封接线（DONE；尚未部署）
+
+`demo.js` 以精确 JSON/stream 任务路径白名单在两个公共请求包装器集中接线：session、
+普通 JSON success/error 与 reset 从根级读取，stream result 只从 `event.data` 读取，
+stream error 只从事件根级读取。响应先由 `task_state.js` 从可枚举 data property 捕获并
+完整校验、重建 model，成功后才单次替换 context；缺失、未知 schema、非法 descriptor/
+shape/topology 及合法 `INCONSISTENT` 均保持 fail-closed，不回退寻找错层字段。
+
+每个任务状态请求开始即切到 MISSING/closed，并取得一次性 Symbol token；只有最新请求
+可提交一个终态，旧请求、重复终态和已结束 token 均不能读取或覆盖新 model。两个包装器
+在 `finally` 统一退休 token。`QUEUE_FULL`/`QUEUE_TIMEOUT`、progress 与非任务响应严格
+no-update；queue 即使意外夹带状态也忽略。重连在 health 前后检查 busy，观察型 session
+refresh 不能抢占正在执行任务的 post-media-reopen 最终状态。
+
+测试以 Python typed fixture 驱动真实 Node 模块，并动态执行 `demo.js` 的实际白名单与消费
+函数，覆盖 session、JSON、五条 stream、reset、missing/invalid、queue、非任务、错层、
+乱序、重复终态、getter 零读取和 busy 重连竞态；对抗复核未发现遗留高/中风险。95 项
+前端/FastAPI 与 73 项 task-state 回归通过；全仓 1152 项仅既有 SQLite WAL 顺序测试
+失败，该项单独通过。未迁移任何按钮，未部署、启动、停止或重启服务。
+
 ## 后续批次
 
 1. **3.2.1 纯构造器（DONE）**：已完成从冻结 read-set 和可信入口证据到 V1 快照的无 I/O 投影，实现与定向测试见 `tiku_agent/task_state_builder.py` 和 `tests/test_task_state_builder.py`。
 2. **3.2.2 锁内权威读取（DONE）**：已在 A3→A2 锁序内一次读取父子状态，在 standalone A2 锁内单读 child，并为已持锁调用方提供零重锁、零 store 读取的 frozen-state 入口；缺失/不可读/稳定未知分类、受控文件与入口能力证据及回归测试见 `tiku_agent/task_state_runtime.py`、两个 runtime 类和 `tests/test_task_state_runtime.py`。项目 Python 3.12 下 47 项 task-state 定向测试及全仓 1031 项回归通过。
 3. **3.2.3 异常与矩阵测试（DONE）**：父 route/phase 与 child phase/topology 的实际构造矩阵、A3 active/组合读取异常、脱敏及旧 revision 动作证据均已补齐；阶段 3.2 整体完成。项目 Python 3.12 下 51 项 task-state 定向测试及全仓 1035 项回归通过。
 4. **3.3 出口一致性（DONE；尚未部署）**：3.3.1～3.3.6 已完成；跨 session、JSON success/error、stream result/error 和 reset 的 exact V1 parity、失败后处理、零重读及 legacy 兼容均已验收，阶段最终全仓 1147 项通过。
-5. **3.4 前端消费（IN_PROGRESS；尚未部署）**：3.4.1 纯解析/校验与 fail-closed model 已完成；下一步 3.4.2 原子接入任务信封并区分合法 no-update，之后按 A2/A3 分批用服务端 `allowed_actions/next_stage` 替换父子 phase 和 unit flag 动作拼装。
+5. **3.4 前端消费（IN_PROGRESS；尚未部署）**：3.4.1 纯解析/model 与 3.4.2 原子信封接线已完成；下一步按 A2/A3 分批只用服务端 `allowed_actions` 替换父子 phase 和 unit flag 动作授权，`next_stage` 仅供展示/引导，不授权动作。
 6. **3.5 启用门（尚未实现）**：定向/全量回归、8896 契约烟测、只读 live 对照后再精确启用 8790；不触碰 8788/8794/8795。
