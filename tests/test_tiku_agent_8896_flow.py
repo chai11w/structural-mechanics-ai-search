@@ -19,6 +19,25 @@ from tiku_agent.state import AgentState
 
 
 class TikuAgent8896FlowTest(unittest.TestCase):
+    def test_app_enables_orientation_before_routing(self):
+        with tempfile.TemporaryDirectory() as temp, patch(
+            "scripts.run_tiku_agent_8896.build_runtime",
+            return_value=object(),
+        ) as runtime_builder, patch(
+            "scripts.run_tiku_agent_8896.build_a3_page_orienter",
+            return_value="orienter",
+        ):
+            app = build_app(Path(temp))
+
+        self.assertIsNotNone(app)
+        self.assertEqual(
+            runtime_builder.call_args.kwargs["a3_page_orienter"],
+            "orienter",
+        )
+        self.assertTrue(
+            runtime_builder.call_args.kwargs["orient_before_routing"]
+        )
+
     def test_launcher_enables_full_triage_by_default(self):
         defaults = build_argument_parser().parse_args([])
 

@@ -124,6 +124,9 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
                 build_runtime.call_args.kwargs["a3_page_orienter"],
                 "orienter",
             )
+            self.assertFalse(
+                build_runtime.call_args.kwargs["orient_before_routing"]
+            )
             self.assertEqual(build_runtime.call_args.kwargs["max_concurrent_tasks"], 3)
             self.assertEqual(build_runtime.call_args.kwargs["max_queued_tasks"], 4)
             self.assertEqual(build_runtime.call_args.kwargs["queue_wait_seconds"], 66)

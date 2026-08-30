@@ -21,6 +21,7 @@ from tiku_agent.a3_runtime import A3MvpRuntime, SQLiteA3SessionStore
 from tiku_agent.external_load_screen import QwenExternalLoadScreen
 from tiku_agent.fastapi_demo import create_app
 from tiku_agent.feedback_store import SQLiteFeedbackStore
+from tiku_agent.frontdoor_orientation_runtime import FrontdoorOrientationA3Runtime
 from tiku_agent.image_triage import QwenImageTriage
 from tiku_agent.image_triage_8897 import (
     build_handoff_8897_v1,
@@ -93,6 +94,7 @@ def build_runtime(
     enable_three_scope_cancel_clarification: bool = True,
     preserve_a2_artifacts_on_cancel: bool = True,
     a3_page_orienter=None,
+    orient_before_routing: bool = False,
     max_concurrent_tasks: int = 0,
     max_queued_tasks: int = 0,
     queue_wait_seconds: float = 90.0,
@@ -138,7 +140,7 @@ def build_runtime(
             prompt,
             timeout=max(1, int(reply_timeout_seconds)),
         )
-    return A3MvpRuntime(
+    runtime_kwargs = dict(
         store=SQLiteA3SessionStore(root / "a3_sessions.sqlite3"),
         artifacts=SessionArtifacts(root / "a3_sessions"),
         a2_runtime=a2_runtime,
@@ -163,10 +165,18 @@ def build_runtime(
             else None
         ),
         enable_three_scope_cancel_clarification=enable_three_scope_cancel_clarification,
-        a3_page_orienter=a3_page_orienter,
         max_concurrent_tasks=max_concurrent_tasks,
         max_queued_tasks=max_queued_tasks,
         queue_wait_seconds=queue_wait_seconds,
+    )
+    if orient_before_routing and a3_page_orienter is not None:
+        return FrontdoorOrientationA3Runtime(
+            frontdoor_orienter=a3_page_orienter,
+            **runtime_kwargs,
+        )
+    return A3MvpRuntime(
+        a3_page_orienter=a3_page_orienter,
+        **runtime_kwargs,
     )
 
 
@@ -211,6 +221,7 @@ def build_app(
             enable_a3_intent_v1=enable_a3_intent_v1,
             enable_a3_intent_model_fallback=enable_a3_intent_model_fallback,
             a3_page_orienter=a3_page_orienter,
+            orient_before_routing=True,
         )
     return create_app(
         runtime=resolved_runtime,

@@ -138,6 +138,7 @@ def build_app(
             enable_three_scope_cancel_clarification=True,
             preserve_a2_artifacts_on_cancel=True,
             a3_page_orienter=a3_page_orienter,
+            orient_before_routing=False,
             max_concurrent_tasks=max_concurrent_tasks,
             max_queued_tasks=max_queued_tasks,
             queue_wait_seconds=queue_wait_seconds,
