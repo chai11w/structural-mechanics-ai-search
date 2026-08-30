@@ -8,7 +8,7 @@
 - 8795 是可替换的过渡后台；Trace/Response 主链独立于它。live 已核对 Response、反馈、费用、Trace、身份与时间顺序，未增加 Trace 页面。
 - 8 个 live SQLite 库在发布前后均通过 `quick_check`、`integrity_check`；A2、A3、追问、反馈、费用展示和停用烟测通过，4 条新反馈均绑定服务端 Response。
 - 阶段 3.3 已在代码中整体完成但未部署：session、HTTP success/error 与五条任务 stream 返回 exact typed V1；busy/queue、progress 和非任务路径保持无状态。3.4 前端及 3.5 启用门未开始。
-- 当前开发基线：73 项 task-state、179 项 FastAPI/A3/Response Store 直接相关及全仓 1137 项测试全部通过。
+- 当前开发基线：73 项 task-state、179 项 FastAPI/A3/Response Store 直接相关及全仓 1147 项测试全部通过。
 - 已创建 3 个独立、7 天、每日 3 元模型估算额度的内测邀请码并验证；明文只经 8795 受控复制，不进入日志或项目文件。
 
 ## Implemented
