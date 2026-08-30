@@ -15,6 +15,7 @@ from collections import OrderedDict
 import json
 import os
 import re
+import site
 import ssl
 import sys
 import threading
@@ -61,6 +62,7 @@ from scripts.feishu_store_flow import (  # noqa: E402
     format_store_success,
     is_store_entry_command,
 )
+from tiku_agent.a3_text_orientation import RapidOcrTextPageOrienter  # noqa: E402
 from tiku_shared.multi_question import (  # noqa: E402
     build_block_contact_sheet as _build_block_contact_sheet,
     chinese_question_number_to_int as _chinese_question_number_to_int,
@@ -84,6 +86,24 @@ CHAPTER_MODE_MANUAL = "manual"
 CHAPTER_MODE_TOGGLE = "toggle"
 STORE_STATES = {"store_waiting_question", "store_waiting_chapter", "store_waiting_answers", "store_confirm"}
 DELETE_CONFIRM_STATE = "confirm_delete"
+DEFAULT_STORE_ORIENTATION_DEPENDENCY_DIR = Path(
+    r"F:\ruanjian\tiku-a3-orientation-8790"
+)
+
+
+def build_store_question_orienter(
+    dependency_dir: str | Path = DEFAULT_STORE_ORIENTATION_DEPENDENCY_DIR,
+) -> RapidOcrTextPageOrienter:
+    dependency_path = Path(dependency_dir).resolve()
+    if not dependency_path.is_dir():
+        raise RuntimeError(
+            f"store orientation dependency directory not found: {dependency_path}"
+        )
+    site.addsitedir(str(dependency_path))
+    return RapidOcrTextPageOrienter(
+        worker_count=4,
+        onnx_threads_per_engine=1,
+    )
 
 @dataclass
 class FeishuTikuOptions:
@@ -1807,6 +1827,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-message-age-minutes", type=int, default=15)
     parser.add_argument("--top", type=int, default=3)
     parser.add_argument("--rerank-top", type=int, default=DISPLAY_MAX_RESULTS)
+    parser.add_argument(
+        "--store-orientation-dependency-dir",
+        type=Path,
+        default=DEFAULT_STORE_ORIENTATION_DEPENDENCY_DIR,
+        help="新增题目入库前使用的隔离 RapidOCR 依赖目录",
+    )
+    parser.add_argument(
+        "--disable-store-text-orientation",
+        dest="enable_store_text_orientation",
+        action="store_false",
+        help="临时关闭新增题目入库前的文字方向校正",
+    )
     dimension_filter_group = parser.add_mutually_exclusive_group()
     dimension_filter_group.add_argument(
         "--enable-dimension-filter",
@@ -1820,7 +1852,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="临时关闭尺寸复筛",
     )
-    parser.set_defaults(enable_dimension_filter=None)
+    parser.set_defaults(
+        enable_dimension_filter=None,
+        enable_store_text_orientation=True,
+    )
     parser.add_argument("--working-reaction", default="OK", help="收到图片后给原消息添加的 emoji_type；留空则关闭")
     parser.add_argument(
         "--enroll-admin-sender-once",
@@ -1877,7 +1912,18 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("missing Feishu app id/secret; set env vars or use --dry-run")
 
     client = FeishuClient(options.app_id, options.app_secret, dry_run=options.dry_run)
-    bot = TikuBot(options=options)
+    store_question_orienter = (
+        build_store_question_orienter(args.store_orientation_dependency_dir)
+        if args.enable_store_text_orientation
+        else None
+    )
+    bot = TikuBot(
+        options=options,
+        store_service=FeishuStoreService(
+            dry_run=options.dry_run,
+            question_orienter=store_question_orienter,
+        ),
+    )
     FeishuHandler.bridge = FeishuTikuBridge(bot=bot, client=client, options=options)
     server = ThreadingHTTPServer((args.host, args.port), FeishuHandler)
     print(f"Feishu tiku bot listening on http://{args.host}:{args.port}/feishu/events", flush=True)

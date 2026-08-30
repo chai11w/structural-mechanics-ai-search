@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PIL import Image
 
@@ -93,14 +93,19 @@ class FeishuStoreService:
         root: Path | None = None,
         symbolic: Path | None = None,
         dry_run: bool = False,
+        question_orienter: Callable[[str | Path], Path] | None = None,
     ) -> None:
         self.root = Path(root or search.ROOT)
         self.symbolic = Path(symbolic or symbolic_root(self.root))
         self.router = RuleRouter()
         self.dry_run = dry_run
+        self.question_orienter = question_orienter
 
     def classify_question(self, image_path: Path, coordinator: MultiAgentCoordinator) -> StoreDraft:
-        classified = coordinator.qwen.classify_image(image_path)
+        prepared_path = Path(image_path).resolve()
+        if self.question_orienter is not None:
+            prepared_path = Path(self.question_orienter(prepared_path)).resolve()
+        classified = coordinator.qwen.classify_image(prepared_path)
         loads = [
             normalize_load_item(item)
             for item in search.normalize_query_loads(classified.get("loads", []))
@@ -109,7 +114,7 @@ class FeishuStoreService:
         route, _load_details = self.router.route(loads)
         chapter = resolve_effective_chapter("auto", classified)
         draft = StoreDraft(
-            question_image_path=str(image_path),
+            question_image_path=str(prepared_path),
             chapter=chapter,
             loads=loads,
             category=route.category,
@@ -124,8 +129,16 @@ class FeishuStoreService:
             draft.stored_loads = loads_for_main(draft.question_rel_placeholder(), loads, route.category)
         elif route.route == "symbolic" and route.category == "symbolic_unassigned":
             draft.stored_loads = mapped_symbolic_loads(loads)
-            draft.structure_type = classify_store_structure_type(image_path, classified, coordinator)
-            dimensions = classify_store_dimensions(image_path, draft.structure_type, coordinator)
+            draft.structure_type = classify_store_structure_type(
+                prepared_path,
+                classified,
+                coordinator,
+            )
+            dimensions = classify_store_dimensions(
+                prepared_path,
+                draft.structure_type,
+                coordinator,
+            )
             draft.long_width = dimensions["long_width"]
             draft.single_side = dimensions["single_side"]
             draft.dimension_state = dimensions["dimension_state"]
