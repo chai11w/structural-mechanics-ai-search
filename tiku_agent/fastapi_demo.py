@@ -376,17 +376,24 @@ def create_app(
             or ""
         ).strip()
         snapshot = response_snapshot if isinstance(response_snapshot, Mapping) else {}
+        has_exact_task_state_pair = _has_exact_response_task_state_pair(
+            snapshot,
+            response_task_state_snapshot,
+        )
         if (
             task_state_allowed
             and session_id
             and capture_missing_task_state
-            and type(response_task_state_snapshot) is not TaskStateSnapshotV1
+            and not has_exact_task_state_pair
         ):
-            if snapshot or response_snapshot_attempted:
-                # A carried legacy projection proves that execution already
-                # established a response-time read-set. The attempted marker
-                # covers projection failure before either half could be
-                # attached. Never replace either case with a later live read.
+            if (
+                snapshot
+                or response_snapshot_attempted
+                or type(response_task_state_snapshot) is TaskStateSnapshotV1
+            ):
+                # Any carried half proves that execution already established
+                # or attempted its response-time read-set. Never repair an
+                # incomplete pair with a later live read.
                 if not snapshot:
                     snapshot = {"session_valid": False}
                 response_task_state_snapshot = _unreadable_http_error_task_state(
@@ -1135,10 +1142,43 @@ def create_app(
     @app.get("/api/session")
     def session(request: Request) -> JSONResponse:
         session_id = _session_id(request, cookie_name=session_cookie)
-        captured = runtime.session_response_snapshot_v1(
-            session_id,
-            capabilities=_SESSION_TASK_STATE_CAPABILITIES,
+        try:
+            captured = runtime.session_response_snapshot_v1(
+                session_id,
+                capabilities=_SESSION_TASK_STATE_CAPABILITIES,
+            )
+        except Exception as exc:
+            setattr(exc, "_response_snapshot_attempted", True)
+            _carry_frozen_task_state_failure(
+                exc,
+                runtime,
+                legacy_snapshot=_exception_response_snapshot(exc),
+                task_state=_exception_task_state_snapshot(exc),
+            )
+            raise
+        captured_legacy = (
+            captured.legacy_session
+            if type(captured) is SessionResponseSnapshotV1
+            else None
         )
+        captured_task_state = (
+            captured.task_state
+            if type(captured) is SessionResponseSnapshotV1
+            else None
+        )
+        if not _has_exact_response_task_state_pair(
+            captured_legacy,
+            captured_task_state,
+        ):
+            exc = RuntimeError("session endpoint returned an incomplete response snapshot")
+            setattr(exc, "_response_snapshot_attempted", True)
+            _carry_frozen_task_state_failure(
+                exc,
+                runtime,
+                legacy_snapshot=captured_legacy,
+                task_state=captured_task_state,
+            )
+            raise exc
         path = captured.uploaded_image_path
         try:
             payload = with_public_task_state(
@@ -1310,17 +1350,46 @@ def create_app(
         session_id = str(request.cookies.get(session_cookie) or "").strip()
         search_id = ""
         if session_id:
-            captured = runtime.session_response_snapshot_v1(
-                session_id,
-                capabilities=_JSON_TASK_STATE_CAPABILITIES,
-                response_frozen=True,
+            try:
+                captured = runtime.session_response_snapshot_v1(
+                    session_id,
+                    capabilities=_JSON_TASK_STATE_CAPABILITIES,
+                    response_frozen=True,
+                )
+            except Exception as exc:
+                setattr(exc, "_response_snapshot_attempted", True)
+                _carry_frozen_task_state_failure(
+                    exc,
+                    runtime,
+                    legacy_snapshot=_exception_response_snapshot(exc),
+                    task_state=_exception_task_state_snapshot(exc),
+                )
+                raise
+            captured_legacy = (
+                captured.legacy_session
+                if type(captured) is SessionResponseSnapshotV1
+                else None
             )
-            if (
-                type(captured) is not SessionResponseSnapshotV1
-                or type(captured.legacy_session) is not dict
-                or type(captured.task_state) is not TaskStateSnapshotV1
+            captured_task_state = (
+                captured.task_state
+                if type(captured) is SessionResponseSnapshotV1
+                else None
+            )
+            if not _has_exact_response_task_state_pair(
+                captured_legacy,
+                captured_task_state,
             ):
-                raise RuntimeError("reset preflight returned an invalid response snapshot")
+                exc = RuntimeError(
+                    "reset preflight returned an incomplete response snapshot"
+                )
+                setattr(exc, "_response_snapshot_attempted", True)
+                _carry_frozen_task_state_failure(
+                    exc,
+                    runtime,
+                    legacy_snapshot=captured_legacy,
+                    task_state=captured_task_state,
+                )
+                raise exc
             search_id = str(captured.legacy_session.get("search_id") or "")
             clear_kwargs: dict[str, object] = {}
             try:
@@ -1339,22 +1408,23 @@ def create_app(
                 # pre-clear pair: a parent or child store may already be gone.
                 error_legacy = _exception_response_snapshot(exc)
                 error_task_state = _exception_task_state_snapshot(exc)
-                if not error_legacy or error_task_state is None:
-                    if _exception_response_snapshot_attempted(exc):
-                        fallback_legacy = {"session_valid": False}
-                        fallback_task_state = _unreadable_http_error_task_state(
-                            runtime
-                        )
+                if not _has_exact_response_task_state_pair(
+                    error_legacy,
+                    error_task_state,
+                ):
+                    if (
+                        error_legacy
+                        or type(error_task_state) is TaskStateSnapshotV1
+                        or _exception_response_snapshot_attempted(exc)
+                    ):
+                        error_legacy = error_legacy or {"session_valid": False}
+                        error_task_state = _unreadable_http_error_task_state(runtime)
                     else:
-                        fallback_legacy, fallback_task_state = _safe_error_snapshot(
+                        error_legacy, error_task_state = _safe_error_snapshot(
                             runtime,
                             session_id,
                             capabilities=_JSON_TASK_STATE_CAPABILITIES,
                         )
-                    if not error_legacy:
-                        error_legacy = fallback_legacy
-                    if error_task_state is None:
-                        error_task_state = fallback_task_state
                 if error_legacy:
                     try:
                         setattr(exc, "response_snapshot", dict(error_legacy))
@@ -2539,20 +2609,27 @@ def _task_state_uploaded_image(
         return response.uploaded_image_path
     exc = RuntimeError("task-state response is missing its frozen media snapshot")
     legacy = response.response_snapshot
-    projection = response.response_projection_snapshot
     task_state = response.response_task_state_snapshot
-    if (
-        (isinstance(legacy, Mapping) and bool(legacy))
-        or (isinstance(projection, Mapping) and bool(projection))
-        or type(task_state) is TaskStateSnapshotV1
-    ):
-        _carry_frozen_task_state_failure(
-            exc,
-            runtime,
-            legacy_snapshot=legacy,
-            task_state=task_state,
-        )
+    _carry_frozen_task_state_failure(
+        exc,
+        runtime,
+        legacy_snapshot=legacy,
+        task_state=task_state,
+    )
     raise exc
+
+
+def _has_exact_response_task_state_pair(
+    legacy_snapshot: object,
+    task_state: object,
+) -> bool:
+    """Return whether both public views came from one complete frozen read-set."""
+
+    return (
+        isinstance(legacy_snapshot, Mapping)
+        and bool(legacy_snapshot)
+        and type(task_state) is TaskStateSnapshotV1
+    )
 
 
 def _carry_frozen_task_state_failure(
@@ -2561,7 +2638,6 @@ def _carry_frozen_task_state_failure(
     *,
     legacy_snapshot: object = None,
     task_state: object = None,
-    unreadable: bool = False,
 ) -> None:
     """Keep a task-state error on its established read-set without new I/O."""
 
@@ -2571,19 +2647,18 @@ def _carry_frozen_task_state_failure(
         carried_task_state = _exception_task_state_snapshot(exc)
         if not carried_legacy and isinstance(legacy_snapshot, Mapping):
             carried_legacy = dict(legacy_snapshot)
+        if type(carried_task_state) is not TaskStateSnapshotV1:
+            carried_task_state = task_state
+        if not _has_exact_response_task_state_pair(
+            carried_legacy,
+            carried_task_state,
+        ):
+            carried_task_state = _unreadable_http_error_task_state(runtime)
         setattr(
             exc,
             "response_snapshot",
             carried_legacy or {"session_valid": False},
         )
-        if type(carried_task_state) is not TaskStateSnapshotV1:
-            carried_task_state = (
-                _unreadable_http_error_task_state(runtime)
-                if unreadable
-                else task_state
-        )
-        if type(carried_task_state) is not TaskStateSnapshotV1:
-            return
         setattr(exc, "response_task_state_snapshot", carried_task_state)
     except Exception:  # noqa: BLE001 - preserve the original response failure.
         pass
@@ -2663,7 +2738,6 @@ def _build_agent_payload(
                     _carry_frozen_task_state_failure(
                         exc,
                         runtime,
-                        unreadable=True,
                     )
                     raise
                 if captured is not None:
@@ -2679,7 +2753,6 @@ def _build_agent_payload(
                         _carry_frozen_task_state_failure(
                             exc,
                             runtime,
-                            unreadable=True,
                         )
                         raise exc
                     media_failure_snapshot.update(captured.legacy_session)
@@ -2918,20 +2991,6 @@ def _agent_payload(
     include_task_state: bool = False,
     task_state_capabilities: TaskStateEntryCapabilities | None = None,
 ) -> dict[str, object]:
-    response_read_set_established = (
-        include_task_state is True
-        and (
-            (
-                isinstance(response.response_snapshot, Mapping)
-                and bool(response.response_snapshot)
-            )
-            or (
-                isinstance(response.response_projection_snapshot, Mapping)
-                and bool(response.response_projection_snapshot)
-            )
-            or type(response.response_task_state_snapshot) is TaskStateSnapshotV1
-        )
-    )
     try:
         return _build_agent_payload(
             response,
@@ -2947,7 +3006,7 @@ def _agent_payload(
             task_state_capabilities=task_state_capabilities,
         )
     except Exception as exc:
-        if response_read_set_established:
+        if include_task_state:
             _carry_frozen_task_state_failure(
                 exc,
                 runtime,
@@ -3439,10 +3498,10 @@ def _safe_error_snapshot(
     except Exception as exc:  # noqa: BLE001 - preserve the original HTTP error.
         legacy = _exception_response_snapshot(exc)
         task_state = _exception_task_state_snapshot(exc)
-        if task_state is None:
-            logger.warning("runtime response snapshot unavailable during HTTP error handling")
-            task_state = fallback_task_state
-        return legacy or {"session_valid": False}, task_state
+        if _has_exact_response_task_state_pair(legacy, task_state):
+            return legacy, task_state
+        logger.warning("runtime response snapshot unavailable during HTTP error handling")
+        return legacy or {"session_valid": False}, fallback_task_state
     if type(captured) is not SessionResponseSnapshotV1:
         logger.warning("runtime returned an invalid response snapshot during HTTP error handling")
         return {"session_valid": False}, fallback_task_state
@@ -3456,10 +3515,10 @@ def _safe_error_snapshot(
         if type(captured.task_state) is TaskStateSnapshotV1
         else None
     )
-    if task_state is None:
-        logger.warning("runtime response snapshot omitted its exact task-state value")
-        task_state = fallback_task_state
-    return legacy or {"session_valid": False}, task_state
+    if not _has_exact_response_task_state_pair(legacy, task_state):
+        logger.warning("runtime response snapshot omitted a complete task-state pair")
+        return legacy or {"session_valid": False}, fallback_task_state
+    return legacy, task_state
 
 
 def _public_a3_snapshot(value: object) -> dict[str, object] | None:
@@ -3750,10 +3809,17 @@ async def _stream_agent_events(
             return carried_legacy, None
 
         carried_task_state = _exception_task_state_snapshot(exc)
-        if type(carried_task_state) is TaskStateSnapshotV1:
-            return carried_legacy or {"session_valid": False}, carried_task_state
+        if _has_exact_response_task_state_pair(
+            carried_legacy,
+            carried_task_state,
+        ):
+            return carried_legacy, carried_task_state
 
-        if carried_legacy or _exception_response_snapshot_attempted(exc):
+        if (
+            carried_legacy
+            or type(carried_task_state) is TaskStateSnapshotV1
+            or _exception_response_snapshot_attempted(exc)
+        ):
             return (
                 carried_legacy or {"session_valid": False},
                 _unreadable_http_error_task_state(runtime),

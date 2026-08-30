@@ -1,10 +1,10 @@
-# 统一任务状态快照 V1 契约（阶段 3.1 / 3.2 / 3.3.1～3.3.5）
+# 统一任务状态快照 V1 契约（阶段 3.1 / 3.2 / 3.3）
 
 ## 结论与范围
 
-阶段 3.1 完成父 workflow、当前子题任务和题目单元的权威状态契约定稿。本文件冻结 V1 的字段、词汇、字段来源、派生谓词、拓扑边界、一致性错误和冲突策略，是后续实现的权威规范。阶段 3.2.1 已实现从“已冻结 read-set + 可信入口证据”到 `TaskStateSnapshotV1` 的纯构造器，落在 `tiku_agent/task_state_builder.py`；阶段 3.2.2 已实现 `tiku_agent/task_state_runtime.py` 的锁内读取与证据包装，并由 `A3MvpRuntime.task_state_snapshot_v1()`、`AgentSessionRuntime.task_state_snapshot_v1()` 和 `AgentSessionRuntime.task_state_snapshot_v1_from_frozen_state()` 提供内部运行时入口；阶段 3.2.3 已用实际构造结果矩阵和组合读取异常完成边界验收。阶段 3.3.1 冻结 exact typed 公共映射，阶段 3.3.2 已用 runtime 组合捕获把它接入 `/api/session`，阶段 3.3.3 已把同一权威 V1 接入受控 HTTP 200 业务 JSON 出口，阶段 3.3.4 已接入具有既有会话上下文的受控非 stream HTTP 4xx/5xx，阶段 3.3.5 已接入五条任务 stream 的 result/error 终态。
+阶段 3.1 完成父 workflow、当前子题任务和题目单元的权威状态契约定稿。本文件冻结 V1 的字段、词汇、字段来源、派生谓词、拓扑边界、一致性错误和冲突策略，是后续实现的权威规范。阶段 3.2.1 已实现从“已冻结 read-set + 可信入口证据”到 `TaskStateSnapshotV1` 的纯构造器，落在 `tiku_agent/task_state_builder.py`；阶段 3.2.2 已实现 `tiku_agent/task_state_runtime.py` 的锁内读取与证据包装，并由 `A3MvpRuntime.task_state_snapshot_v1()`、`AgentSessionRuntime.task_state_snapshot_v1()` 和 `AgentSessionRuntime.task_state_snapshot_v1_from_frozen_state()` 提供内部运行时入口；阶段 3.2.3 已用实际构造结果矩阵和组合读取异常完成边界验收。阶段 3.3.1 冻结 exact typed 公共映射，3.3.2～3.3.5 分别接入 `/api/session`、HTTP 200 业务 JSON、受控非 stream HTTP 4xx/5xx 和五条任务 stream 终态；3.3.6 已完成跨出口 parity、失败后处理、兼容入口和全仓回归验收。
 
-**当前受控 HTTP 出口已在根级返回 `task_state`，五条任务 stream 的 success 已在 `event.data.task_state`、非准入 error 已在 `event.task_state` 返回同一 exact typed V1，尚未部署启用到 8790。** busy/queue 拒绝和 progress 不带状态，且没有尾随状态事件；3.3.6 跨出口验收、前端和启用门仍未完成，不能因此声称阶段 3.3 整体完成或已经上线。既有内部 `session_snapshot()` 仍是兼容投影，不等同于统一快照。
+**阶段 3.3 出口一致性已在代码中整体完成，但尚未部署启用到 8790。** 当前受控 HTTP 出口在根级返回 `task_state`，五条任务 stream 的 success 在 `event.data.task_state`、非准入 error 在 `event.task_state` 返回 exact typed V1；busy/queue 拒绝和 progress 不带状态，且没有尾随状态事件。阶段 3.4 前端消费和 3.5 启用门仍未完成，因此主阶段 3 仍为 `IN_PROGRESS`，不能声称已经上线。既有内部 `session_snapshot()` 仍是兼容投影，不等同于统一快照。
 
 以下内容不属于阶段 3.1：
 
@@ -728,11 +728,35 @@ A3 wrapper 误判为 standalone A2，也不得从异常正文或 live store 拼�
 分类、单次冻结读取和 A3→A2 锁序。项目 Python 3.12 下 65 项 task-state 定向测试、
 189 项直接相关 HTTP/stream/A3/反馈测试及全仓 1129 项回归通过。
 
+## 3.3.6 跨出口 parity 与回归验收（DONE；尚未部署）
+
+3.3.6 用非空 standalone A2/A3 V1 验证 `/api/session`、HTTP 200 业务 JSON、
+受控 HTTP error、五条 stream 的 result/error 和 reset。相同入口能力下，JSON 与
+stream 必须返回完整 `to_dict()` 同值快照，而不是只比较 phase；JSON/session/error
+位于根级，stream result 位于 `event.data`，stream error 位于事件根级。图片成功入口
+保留 `trusted_image_event=true` 的能力差异，其他入口为 false。
+
+公开状态只接受“非空 legacy + exact `TaskStateSnapshotV1`”这一完整冻结 pair。
+all-missing、legacy-only、projection-only、typed-only 及其他不完整组合一旦证明 read-set
+已尝试，就不得事后读取 live state 或拼接不同时间点的两半；应按可信 runtime 拓扑
+零读取降级为脱敏 `INCONSISTENT`。该规则同时覆盖业务 JSON/stream、`/api/session`
+和 reset 清理异常。业务结果缺 projection 仍使成功出口 fail-closed；若错误终态已持有
+可信 legacy/V1 pair，可复用该 pair，但不得把 projection 当成新的状态来源。
+
+Response Store finalization 或结果序列化在非空业务 V1 形成后失败时，JSON error 与
+stream error 复用同一冻结 V1，且不再捕获。未传 `task_state_capabilities` 的
+`prepare_units()` / `handle_crop()` 保持 legacy 行为，明确零 V1 capture；busy/queue、
+progress、无会话输入拒绝和非任务路径继续不增加状态。
+
+验收新增独立 `tests/test_task_state_exit_parity.py`，并补 A3 legacy 兼容断言。项目
+Python 3.12 下 73 项 task-state 定向测试、179 项 FastAPI/A3/Response Store 直接
+相关测试及全仓 1137 项回归全部通过。未部署、未重启任何服务。
+
 ## 后续批次
 
 1. **3.2.1 纯构造器（DONE）**：已完成从冻结 read-set 和可信入口证据到 V1 快照的无 I/O 投影，实现与定向测试见 `tiku_agent/task_state_builder.py` 和 `tests/test_task_state_builder.py`。
 2. **3.2.2 锁内权威读取（DONE）**：已在 A3→A2 锁序内一次读取父子状态，在 standalone A2 锁内单读 child，并为已持锁调用方提供零重锁、零 store 读取的 frozen-state 入口；缺失/不可读/稳定未知分类、受控文件与入口能力证据及回归测试见 `tiku_agent/task_state_runtime.py`、两个 runtime 类和 `tests/test_task_state_runtime.py`。项目 Python 3.12 下 47 项 task-state 定向测试及全仓 1031 项回归通过。
 3. **3.2.3 异常与矩阵测试（DONE）**：父 route/phase 与 child phase/topology 的实际构造矩阵、A3 active/组合读取异常、脱敏及旧 revision 动作证据均已补齐；阶段 3.2 整体完成。项目 Python 3.12 下 51 项 task-state 定向测试及全仓 1035 项回归通过。
-4. **3.3 出口一致性（进行中）**：拆为 6 个可独立回退小步：3.3.1～3.3.5 已完成且尚未部署；下一步只做尚未开始的 3.3.6 跨出口 parity 与回归验收。
+4. **3.3 出口一致性（DONE；尚未部署）**：3.3.1～3.3.6 已完成；跨 session、JSON success/error、stream result/error 和 reset 的 exact V1 parity、失败后处理、零重读及 legacy 兼容均已验收，全仓 1137 项通过。
 5. **3.4 前端消费（尚未实现）**：浏览器消费服务端 `allowed_actions/next_stage`，逐步删除对父子 phase 和 unit flag 的动作拼装。
 6. **3.5 启用门（尚未实现）**：定向/全量回归、8896 契约烟测、只读 live 对照后再精确启用 8790；不触碰 8788/8794/8795。

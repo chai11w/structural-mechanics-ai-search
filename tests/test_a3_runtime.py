@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -1599,12 +1600,19 @@ class A3RuntimeTests(unittest.TestCase):
         )
         runtime.handle_image("prepare-page", self.source)
 
-        prepared = runtime.prepare_units(
-            "prepare-page",
-            ["g1-u1"],
-            task_revision=1,
-        )
+        with mock.patch.object(
+            runtime,
+            "_response_snapshot_v1_locked",
+            wraps=runtime._response_snapshot_v1_locked,
+        ) as capture:
+            prepared = runtime.prepare_units(
+                "prepare-page",
+                ["g1-u1"],
+                task_revision=1,
+            )
 
+        capture.assert_not_called()
+        self.assertIsNone(prepared.response_task_state_snapshot)
         self.assertEqual(prepared.intent, "a3_units_prepared")
         snapshot = runtime.session_snapshot("prepare-page")["a3"]
         self.assertEqual(snapshot["units"][0]["validation_status"], "auto_ready")
@@ -1715,10 +1723,17 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(selected.intent, "a3_unit_selected")
         self.assertEqual(self.runtime.session_snapshot(session_id)["a3"]["selected_unit"]["unit_id"], "g1-u2")
 
-        searched = self.runtime.handle_crop(
-            session_id,
-            {"x": 0.25, "y": 0.2, "width": 0.5, "height": 0.5},
-        )
+        with mock.patch.object(
+            self.runtime,
+            "_response_snapshot_v1_locked",
+            wraps=self.runtime._response_snapshot_v1_locked,
+        ) as capture:
+            searched = self.runtime.handle_crop(
+                session_id,
+                {"x": 0.25, "y": 0.2, "width": 0.5, "height": 0.5},
+            )
+        capture.assert_not_called()
+        self.assertIsNone(searched.response_task_state_snapshot)
         self.assertEqual(searched.intent, "search_image")
         self.assertEqual(
             searched.text,
