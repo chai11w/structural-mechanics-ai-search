@@ -7,8 +7,8 @@
 - 8790 读取 8795 控制库认证；A1/A2/A3 与子 A2 统一计费。队列默认 1 个运行、2 个排队、55 秒等待，支持 FIFO、防插队、流关闭撤队和同锁分片去重。
 - 8795 是可替换的过渡后台；Trace/Response 主链独立于它。live 已核对 Response、反馈、费用、Trace、身份与时间顺序，未增加 Trace 页面。
 - 8 个 live SQLite 库在发布前后均通过 `quick_check`、`integrity_check`；A2、A3、追问、反馈、费用展示和停用烟测通过，4 条新反馈均绑定服务端 Response。
-- 阶段 3.3.4 已在代码中完成但未部署：HTTP 200 与精确五路径的受控非 stream HTTP error 返回根级 `task_state`；stream、前端和 8790 启用尚未进入。
-- 当前开发基线：65 项 task-state、206 项相关 HTTP/runtime 出口及全仓 1116 项测试全部通过。
+- 阶段 3.3.5 已在代码中完成但未部署：HTTP 出口及五条任务 stream 的 result/非准入 error 已返回 exact typed V1 `task_state`；busy/queue 拒绝、progress、前端和 8790 启用保持不变。
+- 当前开发基线：65 项 task-state、189 项直接相关 HTTP/stream/A3/反馈及全仓 1129 项测试全部通过。
 - 已创建 3 个独立、7 天、每日 3 元模型估算额度的内测邀请码并验证；明文只经 8795 受控复制，不进入日志或项目文件。
 
 ## Implemented
@@ -26,17 +26,18 @@
 - 3.3.1 已冻结 exact typed V1 公共映射；3.3.2 已接入 `GET /api/session`，成功载荷保留旧字段并新增根级 `task_state`，不可读状态不二次读取。
 - 3.3.3 已接入 `POST /api/message`、`POST /api/image`、启用 A3 时的 `POST /api/a3/select` 及 `POST /api/reset`。正常、stale、取消及 HTTP 200 业务状态都使用响应时冻结快照；空任务取消和 reset 返回 canonical empty，活跃任务取消在清库前冻结 `CANCELLED`。JSON 缺 legacy/projection/exact typed V1 即 fail-closed；媒体重开要求完整 guard，并原子校验新的 legacy+typed 组合。
 - 3.3.4 已把 exact typed V1 接入具有既有会话上下文的 `/api/session`、`/api/message`、`/api/image`、`/api/a3/select` 和 `/api/reset` 受控非 stream HTTP 4xx/5xx。错误点冻结并携带 legacy/V1，边界不事后重读；missing/expired 返回 canonical empty，不可读、purge 或映射失败返回脱敏 `INCONSISTENT`，A3 部分清理失败按 post-attempt read-set 暴露 `ORPHAN_CHILD_TASK`。无会话、队列准入拒绝及非精确五路径保持零补读。
+- 3.3.5 已把 exact typed V1 接入 `/api/message/stream`、`/api/image/stream`、`/api/a3/select/stream`、`/api/a3/prepare/stream` 和 `/api/a3/crop/stream`：success 位于 `event.data.task_state`，error 位于 `event.task_state`，保持 `progress* -> result/error` 且 progress 不带状态。成功与后处理失败复用响应点冻结组合；错误优先复用异常携带的 exact pair，否则最多一次组合捕获；媒体重开失败按可信 runtime 拓扑零读取 fail-closed，busy/queue 拒绝零读取且不返回 `task_state`。
 
 ## In Progress
 
-- 阶段 3.3 出口一致性进行中：3.3.1～3.3.4 DONE 且尚未部署；下一步依次完成 3.3.5 stream result/error 和 3.3.6 跨出口验收，仍不进入 3.4。
+- 阶段 3.3 出口一致性进行中：3.3.1～3.3.5 DONE 且尚未部署；下一步只完成 3.3.6 跨出口验收，仍不进入 3.4。
 - 本地内测发布已完成；待账户侧配置 Cloudflare Access 与边缘登录限速后，再向 2～3 名测试者发放邀请码并观察 24～48 小时。
 
 ## Not Implemented
 
 - Cloudflare Access、边缘登录限速和测试者邮箱名单仍需账户侧配置；应用内限速不能替代边缘策略。
 - 8795 尚无 Trace/Response 诊断 UI；未来若需要，只能作为可选只读消费者。
-- 3.3.5～3.3.6 的 stream result/error 和跨出口验收，以及 3.4 前端消费、3.5 启用门与阶段 4～6 尚未实现。
+- 3.3.6 跨出口验收，以及 3.4 前端消费、3.5 启用门与阶段 4～6 尚未实现。
 - Paddle splitter、全自动裁剪及自动/人工回退属于 A3 V2，暂不继续。
 - 8890 影子期费用报表、桁架高度几何计算、视觉重排和候选二次位置复筛仍未完成。
 - retention 未安装周期调度、未真实 apply；运行日志仍只有 `policy_missing` 报告。
@@ -75,7 +76,7 @@
 
 ## Next Best Step
 
-1. 从 3.3.5 stream result/error 开始，再完成 3.3.6 parity/文档验收；形成 3.3 完成门后仍不进入 3.4 或部署。
+1. 完成 3.3.6 parity/文档验收；形成 3.3 完成门后仍不进入 3.4 或部署。
 2. 账户侧为 8790/8795 配置独立 Cloudflare Access 与窄范围边缘限速后，再受控发放 3 个邀请码。
 3. 观察 24～48 小时，以成功率、排队、裁图、候选质量、反馈错绑和估算费用决定后续；异常时先停用邀请码再撤销 Access。
 

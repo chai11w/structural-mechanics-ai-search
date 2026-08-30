@@ -2276,7 +2276,14 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(events[-1]["type"], "result")
         crop_data = events[-1]["data"]
         self.assertEqual(crop_data["session"]["a3"]["phase"], A3_PHASE_A2_ACTIVE)
-        self.assertNotIn("task_state", crop_data)
+        self.assertEqual(
+            crop_data["task_state"]["workflow"]["phase"],
+            A3_PHASE_A2_ACTIVE,
+        )
+        self.assertEqual(
+            crop_data["task_state"]["consistency"],
+            {"status": "OK", "codes": []},
+        )
         self.assertTrue(crop_data["submitted_crop"].startswith("/api/media/"))
         self.assertEqual(client.get(crop_data["submitted_crop"]).status_code, 200)
 
@@ -3186,8 +3193,16 @@ class A3RuntimeTests(unittest.TestCase):
         )
         events = [json.loads(line) for line in prepared.text.splitlines() if line]
         self.assertEqual(events[-1]["type"], "result")
-        self.assertNotIn("task_state", events[-1]["data"])
-        units = events[-1]["data"]["session"]["a3"]["units"]
+        prepare_data = events[-1]["data"]
+        self.assertEqual(
+            prepare_data["task_state"]["workflow"]["phase"],
+            A3_PHASE_WAIT_SELECTION,
+        )
+        self.assertEqual(
+            prepare_data["task_state"]["consistency"],
+            {"status": "OK", "codes": []},
+        )
+        units = prepare_data["session"]["a3"]["units"]
         self.assertTrue(all(unit["preparation_status"] == "ready" for unit in units))
 
         selected = client.post(
@@ -3197,7 +3212,14 @@ class A3RuntimeTests(unittest.TestCase):
         select_events = [json.loads(line) for line in selected.text.splitlines() if line]
         self.assertEqual(select_events[-1]["type"], "result")
         select_data = select_events[-1]["data"]
-        self.assertNotIn("task_state", select_data)
+        self.assertEqual(
+            select_data["task_state"]["workflow"]["phase"],
+            A3_PHASE_A2_ACTIVE,
+        )
+        self.assertEqual(
+            select_data["task_state"]["consistency"],
+            {"status": "OK", "codes": []},
+        )
         self.assertEqual(select_data["intent"], "search_image")
         self.assertEqual(select_data["session"]["a3"]["phase"], A3_PHASE_A2_ACTIVE)
         self.assertTrue(select_data["submitted_crop"].startswith("/api/media/"))
@@ -3225,7 +3247,14 @@ class A3RuntimeTests(unittest.TestCase):
         upload_events = [json.loads(line) for line in uploaded.text.splitlines() if line]
         self.assertEqual(upload_events[-1]["type"], "result")
         upload_data = upload_events[-1]["data"]
-        self.assertNotIn("task_state", upload_data)
+        self.assertEqual(
+            upload_data["task_state"]["workflow"]["phase"],
+            A3_PHASE_WAIT_SELECTION,
+        )
+        self.assertEqual(
+            upload_data["task_state"]["consistency"],
+            {"status": "OK", "codes": []},
+        )
         self.assertEqual(upload_data["intent"], "a3_units_prepared")
         a3 = upload_data["session"]["a3"]
         self.assertTrue(a3["auto_prepare_all_units"])
@@ -3244,7 +3273,14 @@ class A3RuntimeTests(unittest.TestCase):
         )
         select_events = [json.loads(line) for line in selected.text.splitlines() if line]
         select_data = select_events[-1]["data"]
-        self.assertNotIn("task_state", select_data)
+        self.assertEqual(
+            select_data["task_state"]["workflow"]["phase"],
+            A3_PHASE_A2_ACTIVE,
+        )
+        self.assertEqual(
+            select_data["task_state"]["consistency"],
+            {"status": "OK", "codes": []},
+        )
         self.assertEqual(select_data["intent"], "search_image")
 
     def test_feedback_overlay_persists_before_real_a2_session_exists(self):

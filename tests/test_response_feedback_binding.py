@@ -346,7 +346,10 @@ class ResponseFeedbackBindingTest(unittest.TestCase):
         )
         self.assertEqual(child_response.status_code, 200, child_response.text)
         child_payload = self.result_event(child_response)
-        self.assertNotIn("task_state", child_payload)
+        self.assertEqual(
+            child_payload["task_state"],
+            empty_task_state_snapshot().to_dict(),
+        )
         self.assertRegex(child_payload["response_id"], r"^resp_[0-9a-f]{32}$")
         self.assertNotEqual(child_payload["response_id"], parent_payload["response_id"])
         child_record = response_store.get(child_payload["response_id"])
@@ -448,7 +451,17 @@ class ResponseFeedbackBindingTest(unittest.TestCase):
         )
         self.assertEqual(stream_response.status_code, 200, stream_response.text)
         stream_payload = self.error_event(stream_response)
-        self.assertNotIn("task_state", stream_payload)
+        self.assertEqual(
+            stream_payload["task_state"]["consistency"],
+            {
+                "status": "INCONSISTENT",
+                "codes": ["CHILD_STATE_UNREADABLE"],
+            },
+        )
+        self.assertNotEqual(
+            stream_payload["task_state"],
+            empty_task_state_snapshot().to_dict(),
+        )
         self.assertRegex(stream_payload["response_id"], r"^resp_[0-9a-f]{32}$")
         stream_record = response_store.get(stream_payload["response_id"])
         self.assertIsNotNone(stream_record)
@@ -713,6 +726,10 @@ class ResponseFeedbackBindingTest(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertEqual(results, [])
         self.assertEqual(errors[0]["code"], "SERVICE_UNAVAILABLE")
+        self.assertEqual(
+            errors[0]["task_state"],
+            empty_task_state_snapshot().to_dict(),
+        )
         self.assertNotIn("response_id", errors[0])
         self.assertEqual(failing_store.finalize_calls, 2)
 
