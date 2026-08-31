@@ -260,6 +260,72 @@ Write-Output $failedClosed
         self.assertEqual(result.stdout.strip().splitlines()[-1], "True")
 
     @unittest.skipUnless(POWERSHELL, "Windows PowerShell is required")
+    def test_scoped_listener_query_only_accepts_net_tcp_no_match_errors(self):
+        safety = str(self.safety_path).replace("'", "''")
+        result = self._run_powershell(
+            f"""
+. '{safety}'
+$acceptedIds = @(
+  'CmdletizationQuery_NotFound,Get-NetTCPConnection',
+  'CmdletizationQuery_NotFound_LocalPort,Get-NetTCPConnection'
+)
+$accepted = foreach ($errorId in $acceptedIds) {{
+  $record = [System.Management.Automation.ErrorRecord]::new(
+    [System.InvalidOperationException]::new('no matching listener'),
+    $errorId,
+    [System.Management.Automation.ErrorCategory]::ObjectNotFound,
+    'MSFT_NetTCPConnection'
+  )
+  $ids = @(Get-Tiku8896ScopedListeningProcessIds `
+    -Port 8896 `
+    -PrimaryQuery {{ throw $record }})
+  $ids.Count -eq 0
+}}
+$rejectedCases = @(
+  @(
+    'CimJob_AccessDenied,Get-NetTCPConnection',
+    [System.Management.Automation.ErrorCategory]::PermissionDenied
+  ),
+  @(
+    'CimJob_BrokenCimSession,Get-NetTCPConnection',
+    [System.Management.Automation.ErrorCategory]::ResourceUnavailable
+  ),
+  @(
+    'CmdletizationQuery_NotFound_LocalPort,Get-OtherCommand',
+    [System.Management.Automation.ErrorCategory]::ObjectNotFound
+  ),
+  @(
+    'CmdletizationQuery_NotFound_LocalPort,Get-NetTCPConnection',
+    [System.Management.Automation.ErrorCategory]::PermissionDenied
+  )
+)
+$rejected = foreach ($case in $rejectedCases) {{
+  $record = [System.Management.Automation.ErrorRecord]::new(
+    [System.InvalidOperationException]::new('query failed'),
+    [string]$case[0],
+    [System.Management.Automation.ErrorCategory]$case[1],
+    'MSFT_NetTCPConnection'
+  )
+  $failedClosed = $false
+  try {{
+    Get-Tiku8896ScopedListeningProcessIds `
+      -Port 8896 `
+      -PrimaryQuery {{ throw $record }}
+  }} catch {{
+    $failedClosed = `
+      $_.Exception.Message -like 'Unable to verify port 8896 ownership*' -and `
+      $_.Exception.Message -like '*Broad listener fallback is disabled*'
+  }}
+  $failedClosed
+}}
+Write-Output "$(-not ($accepted -contains $false))|$(-not ($rejected -contains $false))"
+"""
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "True|True")
+
+    @unittest.skipUnless(POWERSHELL, "Windows PowerShell is required")
     def test_process_identity_rejects_a_different_checkout(self):
         guard = str(self.guard_path).replace("'", "''")
         result = self._run_powershell(

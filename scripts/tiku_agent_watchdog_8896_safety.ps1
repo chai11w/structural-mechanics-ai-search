@@ -70,6 +70,22 @@ function ConvertTo-Tiku8896CommandLineArgument {
     return $builder.ToString()
 }
 
+function Test-Tiku8896NetTcpNoMatchError {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    if ($ErrorRecord.CategoryInfo.Category -ne `
+        [System.Management.Automation.ErrorCategory]::ObjectNotFound) {
+        return $false
+    }
+    return [regex]::IsMatch(
+        [string]$ErrorRecord.FullyQualifiedErrorId,
+        "^CmdletizationQuery_NotFound(?:_[^,]+)?,Get-NetTCPConnection$"
+    )
+}
+
 function Get-Tiku8896ListeningProcessIds {
     param(
         [Parameter(Mandatory = $true)][int]$Port,
@@ -99,6 +115,9 @@ function Get-Tiku8896ListeningProcessIds {
                 Sort-Object -Unique
         )
     } catch {
+        if (Test-Tiku8896NetTcpNoMatchError -ErrorRecord $_) {
+            return @()
+        }
         $primaryFailure = $_.Exception.Message
     }
 
