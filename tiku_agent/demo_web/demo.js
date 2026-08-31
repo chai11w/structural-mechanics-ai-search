@@ -1964,14 +1964,31 @@ async function repairUploadedImageHistory() {
       }
     }
     return true;
-  } catch (_error) {
+  } catch (error) {
     flushStartupNotices();
-    showFailureNotice(
-      'connection',
-      '暂时无法连接服务。当前对话仍保留在本机，请检查网络后重新连接。',
-      ['retry_connection'],
-      { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: createRequestId(), search_id: sessionContext.search_id || '' },
-    );
+    const coordinationFailed = ['RESPONSE_INVALID', 'STALE_ACTION'].includes(
+      String(error?.code || ''),
+    ) && Boolean(storedSessionRequestFenceId());
+    if (coordinationFailed) {
+      resolveFailureNotice('connection');
+      setStatus('error', '需要开始新对话');
+      showFailureNotice(
+        'session-recovery',
+        '服务可以连接，但上次请求结果无法安全确认，当前对话不能继续。请开始新对话后重新上传题图。',
+        ['new_chat'],
+        {
+          status: 'ERROR', layer: 'session', code: 'STALE_ACTION', retryable: false,
+          action: 'new_chat', request_id: createRequestId(), search_id: sessionContext.search_id || '',
+        },
+      );
+    } else {
+      showFailureNotice(
+        'connection',
+        '暂时无法连接服务。当前对话仍保留在本机，请检查网络后重新连接。',
+        ['retry_connection'],
+        { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: createRequestId(), search_id: sessionContext.search_id || '' },
+      );
+    }
     return false;
   }
 }

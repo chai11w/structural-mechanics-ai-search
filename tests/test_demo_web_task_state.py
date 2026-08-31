@@ -594,7 +594,7 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260831-resource-bootstrap-v1"'
+        demo_asset = 'src="/assets/demo.js?v=20260831-session-recovery-v1"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
@@ -1317,6 +1317,8 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
   const resetEvents = [];
   const fetchPlans = [];
   const fetchUrls = [];
+  const failureNotices = [];
+  const statusUpdates = [];
 
   function setTimeout(callback) {
     const id = ++timerId;
@@ -1326,7 +1328,7 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
   function clearTimeout() {}
   function syncTaskStateActionButtons() {}
   function setBusy(value) { isBusy = Boolean(value); }
-  function setStatus() {}
+  function setStatus(state, message) { statusUpdates.push({ state, message }); }
   function syncA3Interface() { syncA3Count += 1; }
   function resolveFailureNotice() {}
   function renderHistory() {}
@@ -1347,7 +1349,9 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
   function closeLightbox() {}
   function showSessionExpiredNotice() {}
   function flushStartupNotices() {}
-  function showFailureNotice() {}
+  function showFailureNotice(key, message, recoveryActions = [], protocol = {}) {
+    failureNotices.push({ key, message, recoveryActions, protocol });
+  }
   function saveHistory() {}
   function isLegacyInlineOnlyMessage() { return false; }
   function currentChildActionTarget() { return null; }
@@ -1572,6 +1576,8 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
     sourceState: () => ({ url: a3SourceUrl, workflowKey: a3SourceWorkflowKey }),
     resetEvents: () => [...resetEvents],
     requestFenceId: () => sharedStorage.requestFenceId,
+    failureNotices: () => structuredClone(failureNotices),
+    statusUpdates: () => structuredClone(statusUpdates),
     commitExternalReset: (eventId) => {
       localStorage.setItem(SESSION_RESET_EVENT_KEY, eventId);
       localStorage.removeItem(SESSION_ACTIVITY_KEY);
@@ -2009,6 +2015,28 @@ const harness = createHarness(taskStateV1);
   assert.deepEqual(failedResetHarness.fetchUrls(), ['/api/reset']);
   assert.equal(failedResetHarness.resetEvents().length, 0);
   assert.ok(failedResetHarness.requestFenceId());
+
+  const unreconciledHarness = createHarness(taskStateV1);
+  unreconciledHarness.queueJson({ ok: true });
+  assert.equal(await unreconciledHarness.runSessionBootstrap(), false);
+  assert.deepEqual(unreconciledHarness.fetchUrls(), ['/api/session']);
+  assert.ok(unreconciledHarness.requestFenceId());
+  const unreconciledNotice = unreconciledHarness.failureNotices().at(-1);
+  assert.equal(unreconciledNotice.key, 'session-recovery');
+  assert.equal(
+    unreconciledNotice.message,
+    '服务可以连接，但上次请求结果无法安全确认，当前对话不能继续。请开始新对话后重新上传题图。',
+  );
+  assert.deepEqual(unreconciledNotice.recoveryActions, ['new_chat']);
+  assert.equal(unreconciledNotice.protocol.status, 'ERROR');
+  assert.equal(unreconciledNotice.protocol.layer, 'session');
+  assert.equal(unreconciledNotice.protocol.code, 'STALE_ACTION');
+  assert.equal(unreconciledNotice.protocol.retryable, false);
+  assert.equal(unreconciledNotice.protocol.action, 'new_chat');
+  assert.match(unreconciledNotice.protocol.request_id, /^req_[A-Za-z0-9_-]+$/);
+  assert.deepEqual(unreconciledHarness.statusUpdates().at(-1), {
+    state: 'error', message: '需要开始新对话',
+  });
 
   const activeTabHarness = createHarness(taskStateV1);
   const staleActivityAt = Date.now() - (2 * 60 * 60 * 1000) - 1;
