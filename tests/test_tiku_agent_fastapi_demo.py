@@ -5424,10 +5424,16 @@ class FastApiDemoTest(unittest.TestCase):
             _TASK_STATE_SCRIPT,
         )
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
+        with patch(
+            "tiku_agent.fastapi_demo._read_demo_page",
+            return_value="<!doctype html><title>live-page-version</title>",
+        ):
+            refreshed_page = client.get("/")
+        self.assertIn("live-page-version", refreshed_page.text)
         for expected in (
             'href="/assets/demo.css?v=20260822-feedback-v1"',
             'src="/assets/task_state.js?v=20260830-task-state-3-4-5"',
-            'src="/assets/demo.js?v=20260830-task-state-3-4-5"',
+            'src="/assets/demo.js?v=20260831-resource-bootstrap-v1"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',

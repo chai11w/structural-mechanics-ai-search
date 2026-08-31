@@ -1,6 +1,46 @@
+const TASK_STATE_ASSET_URL = '/assets/task_state.js?v=20260830-task-state-3-4-5';
+const TASK_STATE_BOOTSTRAP_ATTRIBUTE = 'data-tiku-task-state-bootstrap';
+
+function showTaskStateBootstrapFailure() {
+  const message = '页面资源加载不完整，请刷新页面或稍后重试。';
+  const status = document.querySelector('#status-text');
+  const runtime = document.querySelector('#runtime-status');
+  if (status) status.textContent = message;
+  if (runtime) runtime.dataset.state = 'error';
+  console.error('Task-state frontend model unavailable.');
+}
+
+(function bootstrapTaskStateFrontend() {
+  const start = () => {
+    const taskStateV1 = globalThis.TikuTaskStateV1;
+    if (!taskStateV1) {
+      showTaskStateBootstrapFailure();
+      return;
+    }
+    if (globalThis.__tikuDemoStarted) return;
+    globalThis.__tikuDemoStarted = true;
+    startDemo(taskStateV1);
+  };
+  if (globalThis.TikuTaskStateV1) {
+    start();
+    return;
+  }
+  const existing = document.querySelector(`script[${TASK_STATE_BOOTSTRAP_ATTRIBUTE}]`);
+  if (existing) {
+    existing.addEventListener('load', start, { once: true });
+    existing.addEventListener('error', showTaskStateBootstrapFailure, { once: true });
+    return;
+  }
+  const script = document.createElement('script');
+  script.src = TASK_STATE_ASSET_URL;
+  script.setAttribute(TASK_STATE_BOOTSTRAP_ATTRIBUTE, '');
+  script.addEventListener('load', start, { once: true });
+  script.addEventListener('error', showTaskStateBootstrapFailure, { once: true });
+  document.head.appendChild(script);
+})();
+
+function startDemo(taskStateV1) {
 const $ = (selector) => document.querySelector(selector);
-const taskStateV1 = globalThis.TikuTaskStateV1;
-if (!taskStateV1) throw new Error('Task-state frontend model unavailable.');
 const chat = $('#chat');
 const empty = $('#empty');
 const conversation = $('#conversation');
@@ -3899,3 +3939,4 @@ runSessionBootstrap();
 resizeComposer();
 updateComposer();
 checkHealth();
+}
