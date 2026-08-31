@@ -18,7 +18,11 @@ class TikuAgentWatchdog8790Test(unittest.TestCase):
             self.root / "scripts" / "tiku_agent_watchdog_8790_safety.ps1"
         )
         self.guard_path = self.root / "scripts" / "watchdog_process_guard.ps1"
+        self.switch_path = (
+            self.root / "scripts" / "switch_tiku_agent_8790_control.ps1"
+        )
         self.script = self.script_path.read_text(encoding="utf-8")
+        self.switch_script = self.switch_path.read_text(encoding="utf-8")
 
     def _run_powershell(self, command: str) -> subprocess.CompletedProcess[str]:
         assert POWERSHELL is not None
@@ -137,6 +141,64 @@ class TikuAgentWatchdog8790Test(unittest.TestCase):
         self.assertIn("$ownsWatchdogPidFile", finally_body)
         self.assertIn("Remove-WatchdogPidFileIfOwned", finally_body)
         self.assertIn("Exit-WatchdogInstanceLock", finally_body)
+
+    def test_control_switch_is_release_bound_and_apply_gated(self):
+        script = self.switch_script
+
+        for parameter in ("ReleaseManifest", "ExpectedCommit", "BackupProjectRoot"):
+            self.assertIn(
+                "[Parameter(Mandatory = $true)][string]$" + parameter,
+                script,
+            )
+        self.assertIn("watchdog_process_guard.ps1", script)
+        self.assertIn("tiku_agent_watchdog_8790_safety.ps1", script)
+
+        first_release_check = (
+            "$ReleaseIdentity = Assert-Tiku8790ReleaseIdentity "
+            "@releaseIdentityParameters"
+        )
+        self.assertIn(first_release_check, script)
+        self.assertLess(
+            script.index(first_release_check),
+            script.index("function Test-Health"),
+        )
+
+        start_body = script[
+            script.index("function Start-Watchdog") : script.index(
+                "function Stop-ExactProcess"
+            )
+        ]
+        self.assertIn(
+            "$verifiedRelease = Assert-Tiku8790ReleaseIdentity "
+            "@releaseIdentityParameters",
+            start_body,
+        )
+        self.assertIn('"-ReleaseManifest", $verifiedRelease.manifest', start_body)
+        self.assertIn('"-ExpectedCommit", $verifiedRelease.commit', start_body)
+        self.assertIn('"-PythonExe", $verifiedRelease.python', start_body)
+        self.assertIn("ConvertTo-Tiku8790CommandLineArgument", start_body)
+        self.assertIn("FilePath = $PowerShellExe", start_body)
+        self.assertNotIn("Start-Process powershell.exe", start_body)
+        self.assertLess(
+            start_body.index("$verifiedRelease = Assert-Tiku8790ReleaseIdentity"),
+            start_body.index("Start-Process @startParameters"),
+        )
+
+        apply_gate = script.index("if (-not $Apply)")
+        manage_import = script.index('Join-Path $PSScriptRoot "manage_tiku_admin.py"')
+        backup = script.index("source.backup(destination)")
+        revalidate = script.index(
+            "$revalidatedListenerPid = Assert-CurrentProcesses"
+        )
+        first_stop = script.index("Stop-ExactProcess $detectedWatchdogPid")
+        self.assertLess(apply_gate, backup)
+        self.assertLess(backup, manage_import)
+        self.assertLess(manage_import, revalidate)
+        self.assertLess(revalidate, first_stop)
+        self.assertIn("--apply-import", script)
+        pre_apply = script[:apply_gate]
+        self.assertNotIn("manage_tiku_admin.py", pre_apply)
+        self.assertNotIn("http://127.0.0.1:8795/health", pre_apply)
 
     @unittest.skipUnless(POWERSHELL, "Windows PowerShell is required")
     def test_release_identity_requires_matching_clean_manifest(self):

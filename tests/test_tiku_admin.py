@@ -447,6 +447,38 @@ class TikuAdminTest(unittest.TestCase):
         self.assertEqual(self.control.invite_cookie_secret, original_secret)
         self.assertEqual(self.control.list_invitations(include_archived=True), [])
 
+    def test_manage_command_applies_import_when_explicit(self):
+        self.control.initialize_admin("a-secure-admin-password")
+        legacy_data, legacy_codes = build_invitation_config(1)
+        legacy_path = self.root / "legacy_invites_apply.json"
+        legacy_path.write_text(json.dumps(legacy_data), encoding="utf-8")
+        legacy_access = InviteAccess(legacy_path, auth_max_age_seconds=60)
+        legacy_identity = legacy_access.authenticate_code(legacy_codes[0][1])
+        legacy_cookie = legacy_access.issue_cookie(legacy_identity, now=100)
+        arguments = [
+            "manage_tiku_admin.py",
+            "--control-db",
+            str(self.control.path),
+            "--import-invites",
+            str(legacy_path),
+            "--require-status-match",
+            "--apply-import",
+        ]
+
+        output = io.StringIO()
+        with patch.object(sys, "argv", arguments), redirect_stdout(output):
+            result = manage_tiku_admin.main()
+
+        invitations = self.control.list_invitations(include_archived=True)
+        self.assertEqual(result, 0)
+        self.assertIn("imported 1 hash-only invitations", output.getvalue())
+        self.assertEqual(len(invitations), 1)
+        control_access = SQLiteInviteAccess(self.control, auth_max_age_seconds=60)
+        self.assertEqual(
+            control_access.verify_cookie(legacy_cookie, now=120),
+            legacy_identity,
+        )
+
     def test_feedback_case_copies_visible_media_and_can_be_reviewed_and_purged(self):
         source = self.root / "question.png"
         source.write_bytes(b"fake-image")
