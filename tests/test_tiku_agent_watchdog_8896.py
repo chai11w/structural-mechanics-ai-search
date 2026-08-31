@@ -65,6 +65,8 @@ class TikuAgentWatchdog8896Test(unittest.TestCase):
         self.assertIn("Assert-WatchdogPidFileAvailable", self.script)
         self.assertIn("Get-ManagedAgentProcess", self.script)
         self.assertIn("Get-Tiku8896ListeningProcessIds", self.script)
+        self.assertIn("Get-Tiku8896ScopedListeningProcessIds", self.script)
+        self.assertIn("[switch]$RequireScopedListenerQuery", self.script)
         self.assertIn("Test-WatchdogProcessEvidence", self.script)
         self.assertIn("Test-AgentProcess -ProcessId $agentProcess.Id", self.script)
         self.assertIn("Test-AgentProcess -ProcessId $candidate.Id", self.script)
@@ -233,6 +235,29 @@ Write-Output "$($empty.Count),$($fallback[0]),$failedClosed"
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip().splitlines()[-1], "0,321,True")
+
+    @unittest.skipUnless(POWERSHELL, "Windows PowerShell is required")
+    def test_scoped_listener_query_never_uses_the_broad_fallback(self):
+        safety = str(self.safety_path).replace("'", "''")
+        result = self._run_powershell(
+            f"""
+. '{safety}'
+$failedClosed = $false
+try {{
+  Get-Tiku8896ScopedListeningProcessIds `
+    -Port 8896 `
+    -PrimaryQuery {{ throw 'scoped query failed' }}
+}} catch {{
+  $failedClosed = `
+    $_.Exception.Message -like 'Unable to verify port 8896 ownership*' -and `
+    $_.Exception.Message -like '*Broad listener fallback is disabled*'
+}}
+Write-Output $failedClosed
+"""
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "True")
 
     @unittest.skipUnless(POWERSHELL, "Windows PowerShell is required")
     def test_process_identity_rejects_a_different_checkout(self):

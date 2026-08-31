@@ -5,7 +5,8 @@ param(
     [switch]$DisableAutoCrop,
     [switch]$DisableA3TextOrientation,
     [switch]$DisableMediaCache,
-    [switch]$DisableOutputWatchdog
+    [switch]$DisableOutputWatchdog,
+    [switch]$RequireScopedListenerQuery
 )
 
 $ErrorActionPreference = "Stop"
@@ -89,10 +90,17 @@ function Start-Agent {
     return $process
 }
 
+function Get-8896ListenerProcessIds {
+    if ($RequireScopedListenerQuery) {
+        return @(Get-Tiku8896ScopedListeningProcessIds -Port $Port)
+    }
+    return @(Get-Tiku8896ListeningProcessIds -Port $Port)
+}
+
 function Test-AgentProcess {
     param([Parameter(Mandatory = $true)][int]$ProcessId)
     try {
-        $owners = @(Get-Tiku8896ListeningProcessIds -Port $Port)
+        $owners = @(Get-8896ListenerProcessIds)
         $record = Get-CimInstance `
             Win32_Process `
             -Filter "ProcessId = $ProcessId" `
@@ -121,7 +129,7 @@ function Test-AgentLaunch {
 }
 
 function Get-ManagedAgentProcess {
-    $owners = @(Get-Tiku8896ListeningProcessIds -Port $Port)
+    $owners = @(Get-8896ListenerProcessIds)
     if ($owners.Count -eq 0) {
         return $null
     }
@@ -190,7 +198,7 @@ try {
                 Wait-Process -InputObject $agentProcess -Timeout 5 -ErrorAction SilentlyContinue
                 $agentProcess = $null
             }
-            $remainingOwners = @(Get-Tiku8896ListeningProcessIds -Port $Port)
+            $remainingOwners = @(Get-8896ListenerProcessIds)
             if ($remainingOwners.Count -gt 0) {
                 throw "Refusing to start 8896 while an unverified process still owns port $Port."
             }

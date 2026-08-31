@@ -134,3 +134,28 @@ function Get-Tiku8896ListeningProcessIds {
             Sort-Object -Unique
     )
 }
+
+function Get-Tiku8896ScopedListeningProcessIds {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [scriptblock]$PrimaryQuery
+    )
+
+    $blockedFallback = {
+        param($QueryPort)
+        throw "Broad listener fallback is disabled for scoped port $QueryPort verification."
+    }
+    if ($PrimaryQuery) {
+        return @(
+            Get-Tiku8896ListeningProcessIds `
+                -Port $Port `
+                -PrimaryQuery $PrimaryQuery `
+                -FallbackQuery $blockedFallback
+        )
+    }
+    return @(
+        Get-Tiku8896ListeningProcessIds `
+            -Port $Port `
+            -FallbackQuery $blockedFallback
+    )
+}
