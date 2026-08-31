@@ -2,7 +2,7 @@
 
 ## Current State
 
-- A3-V1 已在 `8790` 生产：Qwen 整页理解 → GLM 全题框选 → Pillow 裁图 → Qwen 并发完整性/外荷载门禁 → 单题自动下行或多题选择 → A2/人工裁剪；OpenCV/Paddle 不在主线启动链。
+- A3-V1 已在 `8790` 生产：前置方向校正 → Qwen 整页理解 → GLM 全题框选 → Pillow 裁图 → Qwen 门禁 → A2/人工裁剪；当前默认方向校正仍是四方向 RapidOCR，已决定改用单次 ONNX RapidOrientation，尚未接入。
 - 端口隔离保持：8788 飞书、8790 生产、8795 后台、8896 验收当前监听；8794 无监听，8891/8897 为分流/回退端口。
 - 8790 读取 8795 控制库认证；A1/A2/A3 与子 A2 统一计费。队列默认 1 个运行、2 个排队、55 秒等待，支持 FIFO、防插队、流关闭撤队和同锁分片去重。
 - 8795 是可替换的过渡后台；Trace/Response 主链独立于它。live 已核对 Response、反馈、费用、Trace、身份与时间顺序，未增加 Trace 页面。
@@ -23,12 +23,13 @@
 - Trace Store 使用严格白名单、唯一终态和有界异步写入；Response Store 按 trace 幂等保存隐私受限投影，冲突或写失败 fail-closed。诊断 CLI 支持 trace/response/feedback/稳定身份只读查询，retention 默认 dry-run。
 - 8790/8795 看门狗精确核对端口、PID、Python 和完整参数；使用单实例锁、活 PID 保护与候选启动验证，禁止按端口杀未知进程。
 - 阶段 3.1 与 3.2 已完成：冻结 `TaskStateSnapshotV1`，实现纯构造器、A3→A2 双锁父子各单读、standalone A2 单锁单读、frozen-state 零重读及异常/矩阵 fail-closed；完成时 51 项 task-state、全仓 1035 项通过。
-- 3.3 已完成 exact typed V1 公共映射及 session、HTTP JSON/error、五条 stream result/error 和跨出口验收；响应时冻结，success 位于 `event.data.task_state`、error 位于 `event.task_state`，失败处理与 legacy 兼容均 fail-closed，busy/queue/progress 保持无状态。
-- 3.4.1～3.4.5 已完成：exact/branded fail-closed model 原子消费权威信封；A2 候选动作绑定 child ID/revision/generation/rank，A3 选择、准备和裁剪绑定 workflow ID/revision/unit(s)，前后端均拒绝 stale/ABA 错绑，`next_stage` 不授权。
+- 3.3 已完成 typed V1 公共映射及 session、HTTP/stream 跨出口验收；success/error 使用固定 task-state 位置，失败与 legacy 兼容均 fail-closed，busy/queue/progress 无状态。
+- 3.4.1～3.4.5 已完成：模型原子消费权威信封；A2/A3 动作绑定 ID、revision 及必要 generation/rank/unit，前后端拒绝 stale/ABA 错绑，`next_stage` 不授权。
 - A3 网络/队列失败不自动重放；历史动作、题图、裁剪和 dismissal 绑定 workflow。过期 reset 以共享 activity、默认 pending request fence、committed tombstone 和 Web Lock 协调；只有可信确定终态或 queue no-update 清 fence，只有 exact empty 提交 reset，未知结果/提交失败后排队旧请求不触网。
 
 ## In Progress
 
+- 方向选型完成、实现未开始：9 张 A3 × 4 方向中，RapidOrientation 0.0.11 与 PP-LCNet 均为 `33/36`，都败在 `6.jpg`；前者约 `0.017～0.021s/张`，将替代四方向 OCR。
 - 主阶段 3 仍进行中：3.1～3.4 DONE、已合入主线且尚未部署；下一独立批次为 3.5 启用门。
 - 本地内测发布已完成；待账户侧配置 Cloudflare Access 与边缘登录限速后，再向 2～3 名测试者发放邀请码并观察 24～48 小时。
 
@@ -37,6 +38,7 @@
 - Cloudflare Access、边缘登录限速和测试者邮箱名单仍需账户侧配置；应用内限速不能替代边缘策略。
 - 8795 尚无 Trace/Response 诊断 UI；未来若需要，只能作为可选只读消费者。
 - 3.5 启用门与阶段 4～6 尚未实现。
+- RapidOrientation 封装、阈值、8896 影子和 8790 发布未实现；需提取 ONNX 置信度并固定版本/模型哈希。
 - Paddle splitter、全自动裁剪及自动/人工回退属于 A3 V2，暂不继续。
 - 8890 影子期费用报表、桁架高度几何计算、视觉重排和候选二次位置复筛仍未完成。
 - retention 未安装周期调度、未真实 apply；运行日志仍只有 `policy_missing` 报告。
@@ -48,14 +50,15 @@
 - 控制库与 AES-GCM 密钥必须成对迁移和备份；迁移前核对 ID、哈希、状态和认证版本，冲突禁止写入。
 - 费用归属稳定邀请码，不按临时 Cookie；预算准入前检查、完成后落账，保留单码额度和全站上限。
 - 工具内部诊断与公共输出分层；新 Agent HTTP/Web 只接受注册错误码和白名单字段，个人飞书入口不纳入该边界。
-- 8790/8896 的 A3-V1 固定为 GLM bbox + Pillow；OpenCV/Paddle 是遗留实验，不恢复为生产依赖。
+- A3 裁剪固定为 GLM bbox + Pillow；方向预处理独立使用 ONNX RapidOrientation，不恢复 Paddle 主链或默认四方向 OCR。
 - live 题库根为 `D:\桌面\答疑、帮做\结构力学\帮做`，字母库为相邻 `帮做_字母库`；仓库 Excel 是历史副本。
 - 题库写操作必须 plan → confirm → backup → execute；服务端口、Cookie、状态、媒体和日志保持隔离。
 
 ## Known Risks
 
 - Cloudflare Access 和边缘登录限速尚未从账户侧核验；完成前不应把公网地址和邀请码同时发给测试者。
-- 真实烟测样本仍少；观察期需关注错绑、跨题费用归属、客户端时间异常、多题混排、裁剪边界、小荷载、低清和旋转。
+- 真实烟测样本仍少；观察期需关注错绑、跨题费用归属、客户端时间异常、多题混排、裁剪边界、小荷载和低清。
+- 方向阈值未校准：错误置信度为 `0.686/0.665/0.897`；`0.90` 虽全拒错误，但保持原图仅 `30/36`，低于无阈值 `33/36`，不能直接上线。
 - 主费用库有 10 条早期 `glm-5v-turbo` 成功调用缺价格；原库保留 0 元，8795 以当前价目表重估，均不等同供应商实扣。
 - Qwen 冷调用有长尾；1/2/55 队列保护额度，但第 4 个同时任务会直接繁忙，排队超过 55 秒需重试。
 - 旧 `parse_chapter` 会把“第4章”映射为内部 `4力法`；严格入口对纯数字返回 `uncertain`，其他未迁移入口仍可能误搜。
@@ -77,9 +80,9 @@
 
 ## Next Best Step
 
-1. 下一独立批次执行 3.5 启用门：定向/全量回归后做 8896 契约烟测和只读 live 对照，再精确启用 8790；不触碰 8788/8794/8795。
-2. 账户侧为 8790/8795 配置独立 Cloudflare Access 与窄范围边缘限速后，再受控发放 3 个邀请码。
-3. 观察 24～48 小时，以成功率、排队、裁图、候选质量、反馈错绑和估算费用决定后续；异常时先停用邀请码再撤销 Access。
+1. 小步实现 RapidOrientation 封装与方向/置信度日志，先跑 36 项方向集并在 8896 影子验证；阈值评测后再定，保留回退开关。
+2. 下一独立批次执行 3.5 启用门：定向/全量回归后做 8896 契约烟测和只读 live 对照，再精确启用 8790；不触碰 8788/8794/8795。
+3. 账户侧为 8790/8795 配置独立 Cloudflare Access 与窄范围边缘限速后，再受控发放 3 个邀请码。
 
 ## Important Commands
 
