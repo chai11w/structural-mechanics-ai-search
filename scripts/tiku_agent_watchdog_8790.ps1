@@ -8,26 +8,33 @@ param(
     [double]$PerInviteDailyBudgetCny = 0,
     [string]$InviteConfig,
     [string]$ControlDb,
-    [switch]$DisableExternalLoadScreen,
     [switch]$DisableAutoCrop,
     [switch]$DisableA3TextOrientation,
     [switch]$DisableOutputWatchdog,
+    [Parameter(Mandatory = $true)][string]$ReleaseManifest,
+    [Parameter(Mandatory = $true)][string]$ExpectedCommit,
     [string]$PythonExe = "python"
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "watchdog_process_guard.ps1")
+. (Join-Path $PSScriptRoot "tiku_agent_watchdog_8790_safety.ps1")
 
 if ($Port -ne 8790) {
     throw "This watchdog is restricted to port 8790."
 }
 
 $ProjectDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$AgentEntrypoint = (Resolve-Path `
+    -LiteralPath (Join-Path $ProjectDir "scripts\run_tiku_agent_8790.py") `
+    -ErrorAction Stop
+).Path
 if (-not $RuntimeDir) {
     $RuntimeDir = Join-Path $ProjectDir ".tmp_tiku_agent_v2_prod_8790"
 } elseif (-not [System.IO.Path]::IsPathRooted($RuntimeDir)) {
     $RuntimeDir = Join-Path $ProjectDir $RuntimeDir
 }
+$RuntimeDir = [System.IO.Path]::GetFullPath($RuntimeDir)
 if (-not $ControlDb -and -not $InviteConfig) {
     $ControlDb = Join-Path $ProjectDir ".tmp_tiku_admin_8795\control.sqlite3"
 }
@@ -36,6 +43,16 @@ if ($InviteConfig -and -not [System.IO.Path]::IsPathRooted($InviteConfig)) {
 }
 if ($ControlDb -and -not [System.IO.Path]::IsPathRooted($ControlDb)) {
     $ControlDb = Join-Path $ProjectDir $ControlDb
+}
+$InviteConfig = if ($InviteConfig) {
+    [System.IO.Path]::GetFullPath($InviteConfig)
+} else {
+    ""
+}
+$ControlDb = if ($ControlDb) {
+    [System.IO.Path]::GetFullPath($ControlDb)
+} else {
+    ""
 }
 if ($ControlDb -and $InviteConfig) {
     throw "Use either -ControlDb or -InviteConfig, not both."
@@ -53,8 +70,16 @@ if ($ControlDb -and -not (Test-Path -LiteralPath $ControlDb -PathType Leaf)) {
     throw "Administrator control database not found: $ControlDb"
 }
 $ExpectedPythonPath = Resolve-WatchdogExecutablePath -Executable $PythonExe
+$ReleaseIdentity = Assert-Tiku8790ReleaseIdentity `
+    -ManifestPath $ReleaseManifest `
+    -ExpectedCommit $ExpectedCommit `
+    -ProjectDirectory $ProjectDir `
+    -AgentEntrypoint $AgentEntrypoint `
+    -PythonExecutable $ExpectedPythonPath `
+    -RuntimeDirectory $RuntimeDir
 $BotArguments = @(
-    "scripts\run_tiku_agent_8790.py",
+    "-B",
+    $AgentEntrypoint,
     "--host", "127.0.0.1",
     "--port", "$Port",
     "--runtime-dir", "$RuntimeDir",
@@ -77,6 +102,10 @@ if ($DisableA3TextOrientation) {
 if ($DisableOutputWatchdog) {
     $BotArguments += "--disable-output-watchdog"
 }
+$BotLaunchArguments = @(
+    $BotArguments |
+        ForEach-Object { ConvertTo-Tiku8790CommandLineArgument -Argument ([string]$_) }
+)
 $LogDir = $RuntimeDir
 $StatusFile = Join-Path $LogDir "watchdog_8790.status"
 $WatchdogPidFile = Join-Path $LogDir "watchdog_8790.pid"
@@ -102,8 +131,15 @@ function Test-Health {
 }
 
 function Start-Bot {
-    $process = Start-Process $PythonExe `
-        -ArgumentList $BotArguments `
+    $script:ReleaseIdentity = Assert-Tiku8790ReleaseIdentity `
+        -ManifestPath $ReleaseManifest `
+        -ExpectedCommit $ExpectedCommit `
+        -ProjectDirectory $ProjectDir `
+        -AgentEntrypoint $AgentEntrypoint `
+        -PythonExecutable $ExpectedPythonPath `
+        -RuntimeDirectory $RuntimeDir
+    $process = Start-Process -FilePath $ExpectedPythonPath `
+        -ArgumentList $BotLaunchArguments `
         -WorkingDirectory $ProjectDir `
         -RedirectStandardOutput $BotOutLog `
         -RedirectStandardError $BotErrLog `
@@ -147,7 +183,12 @@ try {
     $botProcess = Get-ManagedBotProcess
     Set-Content -LiteralPath $WatchdogPidFile -Value $PID -Encoding ASCII
     $ownsWatchdogPidFile = $true
-    Set-Content -LiteralPath $StatusFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Watchdog started. Project=$ProjectDir Port=$Port RuntimeDir=$RuntimeDir" -Encoding UTF8
+    $releaseStatus = if ($ReleaseIdentity) {
+        " ReleaseCommit=$($ReleaseIdentity.commit) ReleaseCheckout=$($ReleaseIdentity.checkout) AgentEntrypoint=$($ReleaseIdentity.agent_entrypoint) Python=$($ReleaseIdentity.python)"
+    } else {
+        ""
+    }
+    Set-Content -LiteralPath $StatusFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Watchdog started. Project=$ProjectDir Port=$Port RuntimeDir=$RuntimeDir$releaseStatus" -Encoding UTF8
     foreach ($path in @($BotOutLog, $BotErrLog)) {
         if (-not (Test-Path -LiteralPath $path)) { New-Item -ItemType File -Path $path -Force | Out-Null }
     }
