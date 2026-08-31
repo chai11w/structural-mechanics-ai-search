@@ -3,11 +3,11 @@
 ## Current State
 
 - A3-V1 已在 `8790` 生产：整页理解 → GLM 框选/Pillow 裁图 → Qwen 双门禁 → 单题自动下行或多题选择 → A2/人工裁剪；OpenCV/Paddle 不在主线。
-- 端口隔离保持：8788 飞书、8790 生产、8795 后台、8896 验收当前监听；8794 无监听，8891/8897 为分流/回退端口。
+- 端口隔离保持：8788 飞书、8790 生产、8795 后台；8896 仅用于隔离验收且验收后已停服，8794 无监听，8891/8897 为分流/回退端口。
 - 8790 读取 8795 控制库认证；A1/A2/A3 与子 A2 统一计费。队列默认 1 个运行、2 个排队、55 秒等待，支持 FIFO、防插队、流关闭撤队和同锁分片去重。
 - 8795 是可替换的过渡后台，Trace/Response 主链独立于它；8 个 live SQLite 库及 A2/A3、追问、反馈、费用和停用闭环已验收，4 条新反馈均绑定服务端 Response。
-- 阶段 3.3、3.4 已完成并合入 `codex/mainline-bounded-autonomy-v1`，但尚未部署；3.5.1 离线回归与静态安全预检已在 `codex/task-state-stage-3-5-1` 完成，8896/live/8790 尚未进入。
-- 当前验证：28 项前端聚焦、220 项本批次定向、73 项 task-state、13 项 watchdog 聚焦及全仓 1178 项全部通过；Node/Python/PowerShell 语法、依赖与差异检查通过。
+- 阶段 3.3、3.4 已完成并合入 `codex/mainline-bounded-autonomy-v1`，但尚未部署；3.5.1～3.5.2 已在 `codex/task-state-stage-3-5-1` 完成，8790 未部署或操作。
+- 当前验证：18 项 3.5.2 runner/watchdog 聚焦及全仓 1216 项通过；固定 checkout 的 8896 gate 得到 `http_sqlite_ok`，14 个 evidence request 对应 28 条 trace event 和 3 条 Response Store 记录，浏览器无控制台错误或横向溢出，停服后 listener 与阶段进程均为零。
 - 已创建 3 个独立、7 天、每日 3 元模型估算额度的内测邀请码并验证；明文只经 8795 受控复制，不进入日志或项目文件。
 
 ## Implemented
@@ -22,17 +22,18 @@
 - 3.1～3.2 已冻结 `TaskStateSnapshotV1` 并实现纯构造、锁内单读、frozen-state 零重读及异常 fail-closed。
 - 3.3～3.4 已统一 session/JSON/error/stream 快照；前端只由 branded `allowed_actions` 授权，动作绑定任务 identity/revision/target，拒绝 stale/ABA，网络未知结果不自动重放。
 - 3.5.1 已完成：干净 worktree fixture、8896 精确进程管理和 external-load deadline 锁内失权均已回归；未运行服务/watchdog、访问端口、读取 live 数据或部署。
+- 3.5.2 已完成且未部署：固定 linked checkout、完整提交、绝对 Git/Python/PowerShell/runtime 运行 8896 契约烟测；HTTP、SQLite、浏览器和精确清理均通过。空 listener 只接受 `Get-NetTCPConnection` 的结构化 no-match，权限、CIM 和其他错误继续 fail-closed。
 
 ## In Progress
 
-- 主阶段 3 仍进行中：3.1～3.4 DONE、已合入主线且尚未部署，3.5.1 DONE；下一独立批次为 3.5.2 8896 契约烟测。
+- 主阶段 3 仍进行中：3.1～3.4 DONE、已合入主线且尚未部署，3.5.1～3.5.2 DONE；下一独立批次为须另行确认的 3.5.3 只读 live 对照。
 - 本地内测发布已完成；待账户侧配置 Cloudflare Access 与边缘登录限速后，再向 2～3 名测试者发放邀请码并观察 24～48 小时。
 
 ## Not Implemented
 
 - Cloudflare Access、边缘登录限速和测试者邮箱名单仍需账户侧配置；应用内限速不能替代边缘策略。
 - 8795 尚无 Trace/Response 诊断 UI；未来若需要，只能作为可选只读消费者。
-- 3.5.2～3.5.4 启用门与阶段 4～6 尚未实现。
+- 3.5.3～3.5.4 启用门与阶段 4～6 尚未实现。
 - Paddle splitter、全自动裁剪及自动/人工回退属于 A3 V2，暂不继续。
 - 8890 影子期费用报表、桁架高度几何计算、视觉重排和候选二次位置复筛仍未完成。
 - retention 未安装周期调度、未真实 apply；运行日志仍只有 `policy_missing` 报告。
@@ -58,8 +59,7 @@
 - 邀请码转发会共享额度；签名 Cookie 不能阻止持码人主动共享，完成后落账也可能让最后一个在途任务略超阈值。
 - Trace 写入为 fail-open，只以健康计数暴露丢失；WAL 双副本和只读检查降低风险，但不是绝对线性化快照。
 - 全仓顺序回归曾因费用库 WAL checkpoint 使诊断测试观察到文件变化；单跑和复跑通过，仍属时序风险。
-- 无 Web Lock 时自动过期 reset 与全部任务入口均在触网前 fail-closed，只允许 `/api/session`、`/api/reset` 对账；3.5 启用门需核验目标浏览器支持并给出升级提示。
-- 8896 watchdog 已把绝对入口绑定脚本 checkout；3.5.2 仍须显式固定该 checkout 与绝对 runtime，不能把仓库 HEAD 当作运行版本证据。
+- 无 Web Lock 时自动过期 reset 与全部任务入口均在触网前 fail-closed，只允许 `/api/session`、`/api/reset` 对账；3.5.3～3.5.4 启用门仍需核验目标浏览器支持并给出升级提示。
 
 ## Do Not Do
 
@@ -75,8 +75,8 @@
 
 ## Next Best Step
 
-1. 用户确认后执行 3.5.2：只在 8896 做 task-state 契约烟测；先固定代码 checkout 与绝对 runtime，使用已硬化的 8896 watchdog，不触碰 8788/8790/8794/8795。
-2. 3.5.2 通过后单独汇报；3.5.3/3.5.4 仍须再次确认，只能从 8790 侧静态证据核对 control 引用，不连接、读取或探测 8795；若无法在该边界内证明或启用则阻断并重新确认。
+1. 用户另行确认后执行 3.5.3 只读 live 对照；只能从 8790 侧静态启动证据核对 control 引用，不连接、读取或探测 8795，也不触碰 8788/8794。
+2. 3.5.3 通过后单独汇报；3.5.4 精确启用 8790 仍须再次确认，并先核对实际运行提交、固定 checkout、live runtime、回退版本和运行数据备份。
 3. 账户侧为 8790/8795 配置独立 Cloudflare Access 与窄范围边缘限速后，再受控发放 3 个邀请码并观察 24～48 小时。
 
 ## Important Commands
