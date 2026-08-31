@@ -263,6 +263,14 @@ class FakeRuntime:
 
 
 class FastApiDemoTest(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        # Ignored runtime directories are absent in a clean worktree.
+        (Path(__file__).resolve().parents[1] / ".tmp_tiku_agent").mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
     @staticmethod
     def _http_error_task_state():
         return task_state_contract.TaskStateSnapshotV1(
