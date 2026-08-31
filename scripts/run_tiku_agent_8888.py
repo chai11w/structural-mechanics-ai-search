@@ -26,11 +26,6 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--runtime-dir", type=Path, default=DEFAULT_RUNTIME_DIR)
-    parser.add_argument(
-        "--invite-config",
-        type=Path,
-        help="Optional isolated invitation config; omitted for an open local demo",
-    )
     parser.add_argument("--model-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--grounding-timeout-seconds", type=float, default=180.0)
     parser.add_argument("--triage-timeout-seconds", type=float, default=120.0)
@@ -49,7 +44,6 @@ def main() -> int:
     uvicorn.run(
         build_demo_app(
             args.runtime_dir,
-            invite_config=args.invite_config,
             model_timeout_seconds=args.model_timeout_seconds,
             grounding_timeout_seconds=args.grounding_timeout_seconds,
             enable_auto_crop=not args.disable_auto_crop,
