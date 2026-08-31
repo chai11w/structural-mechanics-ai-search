@@ -1223,10 +1223,11 @@ def create_app(
         secure_cookie = _is_secure_request(request)
 
         def execute() -> Response:
+            action_context = payload.get("action_context")
             stale = _validate_action_context(
                 runtime,
                 session_id,
-                payload.get("action_context"),
+                action_context,
                 request_id=request_id,
                 task_state_capabilities=_JSON_TASK_STATE_CAPABILITIES,
             )
@@ -1241,10 +1242,12 @@ def create_app(
                     cookie_name=session_cookie,
                     task_state_capabilities=_JSON_TASK_STATE_CAPABILITIES,
                 )
+            authorized_text = _authorized_action_text(action_context) or text
             response = _handle_text(
                 runtime,
                 session_id,
-                text,
+                authorized_text,
+                action_context=action_context,
                 request_id=request_id,
                 identity_key=identity_key,
                 task_state_capabilities=_JSON_TASK_STATE_CAPABILITIES,
@@ -1282,10 +1285,11 @@ def create_app(
         trace_context = _request_trace_context(request)
 
         def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
+            action_context = payload.get("action_context")
             stale = _validate_action_context(
                 runtime,
                 session_id,
-                payload.get("action_context"),
+                action_context,
                 request_id=request_id,
                 task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
             )
@@ -1301,10 +1305,12 @@ def create_app(
                     include_task_state=True,
                     task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
                 )
+            authorized_text = _authorized_action_text(action_context) or text
             response = _handle_text(
                 runtime,
                 session_id,
-                text,
+                authorized_text,
+                action_context=action_context,
                 request_id=request_id,
                 identity_key=identity_key,
                 progress=progress,
@@ -1594,6 +1600,15 @@ def create_app(
 
     if bool(getattr(runtime, "a3_enabled", False)):
 
+        def required_a3_task_revision(payload: Mapping[str, object]) -> int:
+            value = payload.get("task_revision")
+            if type(value) is not int or value <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="task_revision is required",
+                )
+            return value
+
         @app.post("/api/a3/select")
         async def a3_select(request: Request) -> Response:
             try:
@@ -1605,14 +1620,15 @@ def create_app(
             unit_id = str(payload.get("unit_id") or "").strip()
             if not unit_id:
                 raise HTTPException(status_code=400, detail="unit_id is required")
-            try:
-                task_revision = int(payload.get("task_revision"))
-            except (TypeError, ValueError) as exc:
-                raise HTTPException(status_code=400, detail="task_revision is required") from exc
+            workflow_search_id = str(payload.get("workflow_id") or "").strip()
+            if not workflow_search_id:
+                raise HTTPException(status_code=400, detail="workflow_id is required")
+            task_revision = required_a3_task_revision(payload)
             session_id = _session_id(request, cookie_name=session_cookie)
             identity_key = _identity_key(request)
             kwargs: dict[str, object] = {
                 "task_revision": task_revision,
+                "workflow_search_id": workflow_search_id,
                 "request_id": _request_id(request),
                 "task_state_capabilities": _JSON_TASK_STATE_CAPABILITIES,
             }
@@ -1646,10 +1662,10 @@ def create_app(
             unit_id = str(payload.get("unit_id") or "").strip()
             if not unit_id:
                 raise HTTPException(status_code=400, detail="unit_id is required")
-            try:
-                task_revision = int(payload.get("task_revision"))
-            except (TypeError, ValueError) as exc:
-                raise HTTPException(status_code=400, detail="task_revision is required") from exc
+            workflow_search_id = str(payload.get("workflow_id") or "").strip()
+            if not workflow_search_id:
+                raise HTTPException(status_code=400, detail="workflow_id is required")
+            task_revision = required_a3_task_revision(payload)
             session_id = _session_id(request, cookie_name=session_cookie)
             request_id = _request_id(request)
             identity_key = _identity_key(request)
@@ -1658,6 +1674,7 @@ def create_app(
             def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
                 kwargs: dict[str, object] = {
                     "task_revision": task_revision,
+                    "workflow_search_id": workflow_search_id,
                     "progress": progress,
                     "request_id": request_id,
                     "task_state_capabilities": _STREAM_TASK_STATE_CAPABILITIES,
@@ -1716,10 +1733,10 @@ def create_app(
             unit_ids = [str(value or "").strip() for value in payload["unit_ids"]]
             if not unit_ids or any(not value for value in unit_ids):
                 raise HTTPException(status_code=400, detail="unit_ids are required")
-            try:
-                task_revision = int(payload.get("task_revision"))
-            except (TypeError, ValueError) as exc:
-                raise HTTPException(status_code=400, detail="task_revision is required") from exc
+            workflow_search_id = str(payload.get("workflow_id") or "").strip()
+            if not workflow_search_id:
+                raise HTTPException(status_code=400, detail="workflow_id is required")
+            task_revision = required_a3_task_revision(payload)
             session_id = _session_id(request, cookie_name=session_cookie)
             request_id = _request_id(request)
             identity_key = _identity_key(request)
@@ -1728,6 +1745,7 @@ def create_app(
             def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
                 kwargs: dict[str, object] = {
                     "task_revision": task_revision,
+                    "workflow_search_id": workflow_search_id,
                     "progress": progress,
                     "request_id": request_id,
                     "task_state_capabilities": _STREAM_TASK_STATE_CAPABILITIES,
@@ -1783,10 +1801,10 @@ def create_app(
             if not isinstance(payload, dict) or not isinstance(payload.get("bounds"), dict):
                 raise HTTPException(status_code=400, detail="crop bounds are required")
             unit_id = str(payload.get("unit_id") or "").strip()
-            try:
-                task_revision = int(payload.get("task_revision"))
-            except (TypeError, ValueError) as exc:
-                raise HTTPException(status_code=400, detail="task_revision is required") from exc
+            workflow_search_id = str(payload.get("workflow_id") or "").strip()
+            if not workflow_search_id:
+                raise HTTPException(status_code=400, detail="workflow_id is required")
+            task_revision = required_a3_task_revision(payload)
             if not unit_id:
                 raise HTTPException(status_code=400, detail="unit_id is required")
             session_id = _session_id(request, cookie_name=session_cookie)
@@ -1807,6 +1825,7 @@ def create_app(
                     payload["bounds"],
                     unit_id=unit_id,
                     task_revision=task_revision,
+                    workflow_search_id=workflow_search_id,
                     **kwargs,
                 )
                 return _agent_payload(
@@ -1846,10 +1865,23 @@ def create_app(
             return result
 
         @app.get("/api/a3/crop/{unit_id}")
-        def get_a3_crop(unit_id: str, request: Request) -> FileResponse:
+        def get_a3_crop(
+            unit_id: str,
+            request: Request,
+            workflow_id: str,
+            task_revision: int,
+        ) -> FileResponse:
             session_id = str(request.cookies.get(session_cookie) or "").strip()
+            clean_workflow_id = str(workflow_id or "").strip()
+            if not clean_workflow_id or type(task_revision) is not int or task_revision <= 0:
+                raise HTTPException(status_code=400, detail="invalid media identity")
             path = (
-                runtime.current_crop_path(session_id, unit_id)  # type: ignore[attr-defined]
+                runtime.current_crop_path(  # type: ignore[attr-defined]
+                    session_id,
+                    unit_id,
+                    expected_workflow_id=clean_workflow_id,
+                    expected_task_revision=task_revision,
+                )
                 if session_id
                 else None
             )
@@ -1858,10 +1890,21 @@ def create_app(
             return FileResponse(path, headers={"Cache-Control": "private, no-store"})
 
         @app.get("/api/a3/overlay")
-        def get_a3_overlay(request: Request) -> FileResponse:
+        def get_a3_overlay(
+            request: Request,
+            workflow_id: str,
+            task_revision: int,
+        ) -> FileResponse:
             session_id = str(request.cookies.get(session_cookie) or "").strip()
+            clean_workflow_id = str(workflow_id or "").strip()
+            if not clean_workflow_id or type(task_revision) is not int or task_revision <= 0:
+                raise HTTPException(status_code=400, detail="invalid media identity")
             path = (
-                runtime.current_auto_crop_overlay_path(session_id)  # type: ignore[attr-defined]
+                runtime.current_auto_crop_overlay_path(  # type: ignore[attr-defined]
+                    session_id,
+                    expected_workflow_id=clean_workflow_id,
+                    expected_task_revision=task_revision,
+                )
                 if session_id
                 else None
             )
@@ -2404,6 +2447,7 @@ def _handle_text(
     session_id: str,
     text: str,
     *,
+    action_context: object | None = None,
     request: Request | None = None,
     request_id: str = "",
     identity_key: str = "",
@@ -2416,6 +2460,11 @@ def _handle_text(
     kwargs: dict[str, object] = {"progress": progress}
     if _accepts_keyword(runtime.handle_text, "request_id"):
         kwargs["request_id"] = request_id
+    if action_context is not None and _accepts_keyword(
+        runtime.handle_text,
+        "action_context",
+    ):
+        kwargs["action_context"] = action_context
     if identity_key:
         kwargs["identity_key"] = identity_key
     if task_state_capabilities is not None and _accepts_keyword(
@@ -3662,6 +3711,18 @@ def _public_positive_int(value: object) -> int:
     return value if type(value) is int and 0 < value <= 10_000 else 0
 
 
+def _authorized_action_text(raw_context: object) -> str:
+    if type(raw_context) is not dict:
+        return ""
+    action = raw_context.get("type")
+    if action == task_state_contract.ACTION_SELECT_CANDIDATE:
+        rank = raw_context.get("rank")
+        return f"选择候选 {rank}" if type(rank) is int and rank > 0 else ""
+    if action == task_state_contract.ACTION_RETRY_SEARCH:
+        return "重试搜索"
+    return ""
+
+
 def _validate_action_context(
     runtime: AgentSessionRuntime,
     session_id: str,
@@ -3670,7 +3731,7 @@ def _validate_action_context(
     request_id: str = "",
     task_state_capabilities: TaskStateEntryCapabilities | None = None,
 ) -> AgentResponse | None:
-    """Reject a button action when it belongs to an older question/candidate list."""
+    """Reject a button action unless the frozen V1 child explicitly authorizes it."""
     if raw_context is None:
         return None
     captured = (
@@ -3686,6 +3747,17 @@ def _validate_action_context(
         dict(captured.legacy_session)
         if captured is not None
         else runtime.session_snapshot(session_id)
+    )
+    task_state = (
+        captured.task_state
+        if captured is not None and type(captured.task_state) is TaskStateSnapshotV1
+        else None
+    )
+    child = (
+        task_state.active_child_task
+        if task_state is not None
+        and task_state.consistency.status == task_state_contract.CONSISTENCY_OK
+        else None
     )
 
     def stale_response(text: str, *, intent: str, code: str) -> AgentResponse:
@@ -3706,29 +3778,64 @@ def _validate_action_context(
             response.uploaded_image_path = captured.uploaded_image_path
         return response
 
-    if not isinstance(raw_context, dict) or raw_context.get("type") != "select_candidate":
+    try:
+        supports_atomic_context = _accepts_keyword(
+            runtime.handle_text,
+            "action_context",
+        )
+    except (TypeError, ValueError):
+        supports_atomic_context = False
+    if not supports_atomic_context:
         return stale_response(
             "这个操作已经失效，请使用当前页面中的操作。",
             intent="stale_action",
             code="STALE_ACTION",
         )
-    try:
-        rank = int(raw_context.get("rank") or 0)
-        task_revision = int(raw_context.get("task_revision") or 0)
-    except (TypeError, ValueError):
-        rank = 0
-        task_revision = -1
-    generation = str(raw_context.get("candidate_generation") or "")
-    valid = (
-        snapshot.get("session_valid") is True
-        and snapshot.get("phase") in {"WAIT_CANDIDATE_CHOICE", "ANSWERED"}
-        and task_revision == snapshot.get("task_revision")
-        and generation
-        and generation == snapshot.get("candidate_generation")
-        and 1 <= rank <= int(snapshot.get("candidate_count") or 0)
+
+    if type(raw_context) is not dict or raw_context.get("type") not in {
+        "select_candidate",
+        "retry_search",
+    }:
+        return stale_response(
+            "这个操作已经失效，请使用当前页面中的操作。",
+            intent="stale_action",
+            code="STALE_ACTION",
+        )
+    action = str(raw_context["type"])
+    task_id = raw_context.get("task_id")
+    task_revision = raw_context.get("task_revision")
+    expected_keys = {"type", "task_id", "task_revision"}
+    common_valid = (
+        child is not None
+        and type(task_id) is str
+        and task_id == child.task_id
+        and type(task_revision) is int
+        and task_revision == child.task_revision
+        and action in child.allowed_actions
     )
+    if action == "retry_search":
+        valid = set(raw_context) == expected_keys and common_valid
+    else:
+        expected_keys.update({"rank", "candidate_generation"})
+        rank = raw_context.get("rank")
+        generation = raw_context.get("candidate_generation")
+        valid = (
+            set(raw_context) == expected_keys
+            and common_valid
+            and type(rank) is int
+            and 1 <= rank <= child.candidate_count
+            and type(generation) is str
+            and bool(generation)
+            and generation == child.candidate_generation
+        )
     if valid:
         return None
+    if action == "retry_search":
+        return stale_response(
+            "这个重试操作已经失效，请使用当前页面中的操作。",
+            intent="stale_action",
+            code="STALE_ACTION",
+        )
     has_image = snapshot.get("has_active_image") is True
     message = (
         "这是上一道题或上一轮搜索的候选，已经不能选择。请继续完成当前题目的章节确认和搜索。"

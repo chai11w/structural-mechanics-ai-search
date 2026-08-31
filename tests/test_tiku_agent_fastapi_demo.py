@@ -64,6 +64,40 @@ from tiku_shared.trace_events import (
 )
 
 
+_TASK_STATE_SCRIPT = (
+    Path(__file__).resolve().parents[1] / "tiku_agent" / "demo_web" / "task_state.js"
+).read_text(encoding="utf-8")
+
+
+def _standalone_child_task_state(
+    *,
+    task_id: str,
+    task_revision: int,
+    phase: str,
+    allowed_actions: tuple[str, ...],
+    candidate_count: int = 0,
+    candidate_generation: str = "",
+) -> task_state_contract.TaskStateSnapshotV1:
+    phase_spec = task_state_contract.CHILD_PHASE_CONTRACTS[phase]
+    return task_state_contract.TaskStateSnapshotV1(
+        workflow=empty_task_state_snapshot().workflow,
+        active_child_task=task_state_contract.ChildTaskStateView(
+            task_id=task_id,
+            kind=task_state_contract.CHILD_KIND_A2_QUESTION,
+            unit_id="",
+            task_revision=task_revision,
+            phase=phase,
+            status=phase_spec.status,
+            completed_steps=(),
+            allowed_actions=allowed_actions,
+            next_stage=phase_spec.next_stage,
+            chapter="",
+            candidate_count=candidate_count,
+            candidate_generation=candidate_generation,
+        ),
+    )
+
+
 class FakeRuntime:
     def __init__(self, image_path: Path):
         self.image_path = image_path
@@ -78,6 +112,7 @@ class FakeRuntime:
         self.session_capture_calls = []
         self.session_capture_frozen_flags = []
         self.response_capture_calls = []
+        self.task_state_snapshot = empty_task_state_snapshot()
         self.snapshot = {
             "session_valid": False,
             "phase": "IDLE",
@@ -99,7 +134,7 @@ class FakeRuntime:
         frozen = dict(self.snapshot)
         response.response_snapshot = frozen
         response.response_projection_snapshot = dict(frozen)
-        response.response_task_state_snapshot = empty_task_state_snapshot()
+        response.response_task_state_snapshot = self.task_state_snapshot
         response.response_media_snapshot_captured = True
         response.uploaded_image_path = (
             self.image_path if session_id == self.upload_session else None
@@ -115,7 +150,9 @@ class FakeRuntime:
         identity_key="",
         progress=None,
         task_state_capabilities=None,
+        action_context=None,
     ) -> AgentResponse:
+        del action_context
         self.last_identity = identity_key
         self.calls.append(("text", session_id, text))
         if progress is not None:
@@ -175,6 +212,7 @@ class FakeRuntime:
             "candidate_generation": "",
             "candidate_count": 0,
         }
+        self.task_state_snapshot = empty_task_state_snapshot()
 
     def session_snapshot(self, session_id: str) -> dict[str, object]:
         return dict(self.snapshot)
@@ -196,7 +234,7 @@ class FakeRuntime:
                 self.image_path if session_id == self.upload_session else None
             ),
             legacy_session=dict(self.snapshot),
-            task_state=empty_task_state_snapshot(),
+            task_state=self.task_state_snapshot,
         )
 
     def resolve_upload(self, session_id: str, filename: str) -> Path | None:
@@ -2142,7 +2180,11 @@ class FastApiDemoTest(unittest.TestCase):
         runtime.session_snapshot = lambda session_id: dict(legacy)  # type: ignore[method-assign]
         runtime_response = client.post(
             "/api/a3/select",
-            json={"unit_id": "g1-u1", "task_revision": 7},
+            json={
+                "unit_id": "g1-u1",
+                "task_revision": 7,
+                "workflow_id": "search_http_error_a3_01",
+            },
             headers={"X-Request-ID": "req_00000000000000000000000000000337"},
         )
         self.assertEqual(runtime_response.status_code, 500, runtime_response.text)
@@ -3294,6 +3336,7 @@ class FastApiDemoTest(unittest.TestCase):
                 super().__init__(path)
                 self.live_snapshot_reads = 0
                 self.combined_capture_calls = 0
+                self.action_workflow_ids = []
 
             def _freeze_response(
                 self,
@@ -3327,11 +3370,13 @@ class FastApiDemoTest(unittest.TestCase):
                 unit_id: str,
                 *,
                 task_revision=None,
+                workflow_search_id=None,
                 identity_key="",
                 progress=None,
                 request_id="",
                 task_state_capabilities=None,
             ):
+                self.action_workflow_ids.append(("select", workflow_search_id))
                 del unit_id, task_revision, identity_key, progress, request_id
                 return self._freeze_response(
                     session_id,
@@ -3345,11 +3390,13 @@ class FastApiDemoTest(unittest.TestCase):
                 unit_ids,
                 *,
                 task_revision=None,
+                workflow_search_id=None,
                 identity_key="",
                 progress=None,
                 request_id="",
                 task_state_capabilities=None,
             ):
+                self.action_workflow_ids.append(("prepare", workflow_search_id))
                 del unit_ids, task_revision, identity_key, progress, request_id
                 return self._freeze_response(
                     session_id,
@@ -3364,11 +3411,13 @@ class FastApiDemoTest(unittest.TestCase):
                 *,
                 unit_id="",
                 task_revision=None,
+                workflow_search_id=None,
                 identity_key="",
                 progress=None,
                 request_id="",
                 task_state_capabilities=None,
             ):
+                self.action_workflow_ids.append(("crop", workflow_search_id))
                 del bounds, unit_id, task_revision, identity_key, progress, request_id
                 return self._freeze_response(
                     session_id,
@@ -3398,7 +3447,11 @@ class FastApiDemoTest(unittest.TestCase):
                 "a3_select",
                 lambda: client.post(
                     "/api/a3/select/stream",
-                    json={"unit_id": "g1-u1", "task_revision": 1},
+                    json={
+                        "unit_id": "g1-u1",
+                        "task_revision": 1,
+                        "workflow_id": "search_stream_matrix_workflow_01",
+                    },
                 ),
                 False,
             ),
@@ -3406,7 +3459,11 @@ class FastApiDemoTest(unittest.TestCase):
                 "a3_prepare",
                 lambda: client.post(
                     "/api/a3/prepare/stream",
-                    json={"unit_ids": ["g1-u1"], "task_revision": 1},
+                    json={
+                        "unit_ids": ["g1-u1"],
+                        "task_revision": 1,
+                        "workflow_id": "search_stream_matrix_workflow_01",
+                    },
                 ),
                 False,
             ),
@@ -3418,6 +3475,7 @@ class FastApiDemoTest(unittest.TestCase):
                         "bounds": {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
                         "unit_id": "g1-u1",
                         "task_revision": 1,
+                        "workflow_id": "search_stream_matrix_workflow_01",
                     },
                 ),
                 False,
@@ -3448,6 +3506,14 @@ class FastApiDemoTest(unittest.TestCase):
 
         self.assertEqual(runtime.live_snapshot_reads, 0)
         self.assertEqual(runtime.combined_capture_calls, 0)
+        self.assertEqual(
+            runtime.action_workflow_ids,
+            [
+                ("select", "search_stream_matrix_workflow_01"),
+                ("prepare", "search_stream_matrix_workflow_01"),
+                ("crop", "search_stream_matrix_workflow_01"),
+            ],
+        )
         self.assertEqual(len(runtime.response_capture_calls), len(calls))
         for (_name, _send, trusted_image_event), (_session_id, capabilities) in zip(
             calls,
@@ -3459,6 +3525,155 @@ class FastApiDemoTest(unittest.TestCase):
                 trusted_image_event,
             )
             self.assertTrue(capabilities.reset_session_available)
+
+    def test_a3_web_actions_require_workflow_id_before_runtime_call(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"workflow_id_required_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (8, 8), "white").save(image_path)
+
+        class UncalledRuntime(FakeRuntime):
+            a3_enabled = True
+
+            def select_unit(self, *args, **kwargs):
+                raise AssertionError("select must reject before runtime call")
+
+            def prepare_units(self, *args, **kwargs):
+                raise AssertionError("prepare must reject before runtime call")
+
+            def handle_crop(self, *args, **kwargs):
+                raise AssertionError("crop must reject before runtime call")
+
+        client = TestClient(create_app(runtime=UncalledRuntime(image_path)))
+        calls = (
+            ("/api/a3/select", {"unit_id": "g1-u1", "task_revision": 1}),
+            ("/api/a3/select/stream", {"unit_id": "g1-u1", "task_revision": 1}),
+            (
+                "/api/a3/prepare/stream",
+                {"unit_ids": ["g1-u1"], "task_revision": 1},
+            ),
+            (
+                "/api/a3/crop/stream",
+                {
+                    "bounds": {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
+                    "unit_id": "g1-u1",
+                    "task_revision": 1,
+                },
+            ),
+        )
+        for path, payload in calls:
+            with self.subTest(path=path):
+                response = client.post(path, json=payload)
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(response.json()["code"], "MESSAGE_INVALID")
+
+    def test_a3_web_actions_require_exact_positive_integer_revision(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"strict_a3_revision_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (8, 8), "white").save(image_path)
+
+        class UncalledRuntime(FakeRuntime):
+            a3_enabled = True
+
+            def select_unit(self, *args, **kwargs):
+                raise AssertionError("select must reject before runtime call")
+
+            def prepare_units(self, *args, **kwargs):
+                raise AssertionError("prepare must reject before runtime call")
+
+            def handle_crop(self, *args, **kwargs):
+                raise AssertionError("crop must reject before runtime call")
+
+        client = TestClient(create_app(runtime=UncalledRuntime(image_path)))
+        workflow_id = "search_strict_revision_workflow_12345678"
+        for revision in (True, 1.9, "1"):
+            calls = (
+                (
+                    "/api/a3/select",
+                    {"unit_id": "g1-u1", "task_revision": revision, "workflow_id": workflow_id},
+                ),
+                (
+                    "/api/a3/select/stream",
+                    {"unit_id": "g1-u1", "task_revision": revision, "workflow_id": workflow_id},
+                ),
+                (
+                    "/api/a3/prepare/stream",
+                    {"unit_ids": ["g1-u1"], "task_revision": revision, "workflow_id": workflow_id},
+                ),
+                (
+                    "/api/a3/crop/stream",
+                    {
+                        "bounds": {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
+                        "unit_id": "g1-u1",
+                        "task_revision": revision,
+                        "workflow_id": workflow_id,
+                    },
+                ),
+            )
+            for path, payload in calls:
+                with self.subTest(path=path, revision=revision):
+                    response = client.post(path, json=payload)
+                    self.assertEqual(response.status_code, 400, response.text)
+                    self.assertEqual(response.json()["code"], "MESSAGE_INVALID")
+
+    def test_child_action_fails_closed_for_runtime_without_atomic_context(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"no_atomic_action_context_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (8, 8), "white").save(image_path)
+        task_id = "search_no_atomic_context_child_12345678"
+
+        class CompatibilityRuntime(FakeRuntime):
+            def handle_text(
+                self,
+                session_id,
+                text,
+                *,
+                identity_key="",
+                progress=None,
+                task_state_capabilities=None,
+            ):
+                raise AssertionError("runtime without action_context must not be called")
+
+        for endpoint in ("/api/message", "/api/message/stream"):
+            with self.subTest(endpoint=endpoint):
+                runtime = CompatibilityRuntime(image_path)
+                runtime.snapshot.update({
+                    "session_valid": True,
+                    "phase": "WAIT_CANDIDATE_CHOICE",
+                    "has_active_image": True,
+                    "task_revision": 1,
+                    "candidate_generation": "1:1",
+                    "candidate_count": 1,
+                })
+                runtime.task_state_snapshot = _standalone_child_task_state(
+                    task_id=task_id,
+                    task_revision=1,
+                    phase="WAIT_CANDIDATE_CHOICE",
+                    allowed_actions=(task_state_contract.ACTION_SELECT_CANDIDATE,),
+                    candidate_count=1,
+                    candidate_generation="1:1",
+                )
+                client = TestClient(create_app(runtime=runtime))
+                response = client.post(endpoint, json={
+                    "text": "选择候选 1",
+                    "action_context": {
+                        "type": "select_candidate",
+                        "task_id": task_id,
+                        "task_revision": 1,
+                        "candidate_generation": "1:1",
+                        "rank": 1,
+                    },
+                })
+                self.assertEqual(response.status_code, 200, response.text)
+                payload = (
+                    [json.loads(line) for line in response.text.splitlines() if line][-1]["data"]
+                    if endpoint.endswith("/stream")
+                    else response.json()
+                )
+                self.assertEqual(payload["intent"], "stale_action")
+                self.assertEqual(runtime.calls, [])
 
     def test_all_task_stream_error_routes_reuse_exact_carried_v1_without_reread(self):
         runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
@@ -3545,7 +3760,11 @@ class FastApiDemoTest(unittest.TestCase):
                 "a3_select",
                 lambda client: client.post(
                     "/api/a3/select/stream",
-                    json={"unit_id": "g1-u1", "task_revision": 1},
+                    json={
+                        "unit_id": "g1-u1",
+                        "task_revision": 1,
+                        "workflow_id": "search_stream_error_workflow_01",
+                    },
                 ),
                 False,
             ),
@@ -3553,7 +3772,11 @@ class FastApiDemoTest(unittest.TestCase):
                 "a3_prepare",
                 lambda client: client.post(
                     "/api/a3/prepare/stream",
-                    json={"unit_ids": ["g1-u1"], "task_revision": 1},
+                    json={
+                        "unit_ids": ["g1-u1"],
+                        "task_revision": 1,
+                        "workflow_id": "search_stream_error_workflow_01",
+                    },
                 ),
                 False,
             ),
@@ -3565,6 +3788,7 @@ class FastApiDemoTest(unittest.TestCase):
                         "bounds": {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
                         "unit_id": "g1-u1",
                         "task_revision": 1,
+                        "workflow_id": "search_stream_error_workflow_01",
                     },
                 ),
                 False,
@@ -3825,14 +4049,22 @@ class FastApiDemoTest(unittest.TestCase):
                 "a3_select",
                 lambda client: client.post(
                     "/api/a3/select/stream",
-                    json={"unit_id": "g1-u1", "task_revision": 1},
+                    json={
+                        "unit_id": "g1-u1",
+                        "task_revision": 1,
+                        "workflow_id": "search_stream_serialize_workflow_01",
+                    },
                 ),
             ),
             (
                 "a3_prepare",
                 lambda client: client.post(
                     "/api/a3/prepare/stream",
-                    json={"unit_ids": ["g1-u1"], "task_revision": 1},
+                    json={
+                        "unit_ids": ["g1-u1"],
+                        "task_revision": 1,
+                        "workflow_id": "search_stream_serialize_workflow_01",
+                    },
                 ),
             ),
             (
@@ -3848,6 +4080,7 @@ class FastApiDemoTest(unittest.TestCase):
                         },
                         "unit_id": "g1-u1",
                         "task_revision": 1,
+                        "workflow_id": "search_stream_serialize_workflow_01",
                     },
                 ),
             ),
@@ -5134,14 +5367,16 @@ class FastApiDemoTest(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for JavaScript syntax validation")
     def test_javascript_has_valid_syntax(self):
-        result = subprocess.run(
-            [shutil.which("node"), "--check", "-"],
-            input=_SCRIPT,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        for name, source in (("task_state.js", _TASK_STATE_SCRIPT), ("demo.js", _SCRIPT)):
+            with self.subTest(name=name):
+                result = subprocess.run(
+                    [shutil.which("node"), "--check", "-"],
+                    input=source,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_stream_result_stops_timeout_and_does_not_wait_for_eof(self):
         stream_block = _SCRIPT.split("async function requestStream(", 1)[1].split(
@@ -5176,9 +5411,15 @@ class FastApiDemoTest(unittest.TestCase):
         self.assertIn("frame-ancestors 'none'", page.headers["content-security-policy"])
         self.assertEqual(client.get("/openapi.json").status_code, 404)
         self.assertEqual(client.get("/assets/demo.css").text.replace("\r\n", "\n"), _STYLE)
+        self.assertEqual(
+            client.get("/assets/task_state.js").text.replace("\r\n", "\n"),
+            _TASK_STATE_SCRIPT,
+        )
         self.assertEqual(client.get("/assets/demo.js").text.replace("\r\n", "\n"), _SCRIPT)
         for expected in (
-            'href="/assets/demo.css?v=20260822-feedback-v1"', 'src="/assets/demo.js?v=20260827-queue-timeout-v1"',
+            'href="/assets/demo.css?v=20260822-feedback-v1"',
+            'src="/assets/task_state.js?v=20260830-task-state-3-4-5"',
+            'src="/assets/demo.js?v=20260830-task-state-3-4-5"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',
@@ -5189,12 +5430,17 @@ class FastApiDemoTest(unittest.TestCase):
         ):
             self.assertIn(expected, page.text)
         for expected in (
+            "const taskStateV1 = globalThis.TikuTaskStateV1",
+            "const taskStateConsumer = taskStateV1.createTaskStateConsumer()",
+            "let taskStateContext = taskStateConsumer.current()",
             "URL.createObjectURL(selected)", "URL.revokeObjectURL", "function validateImage",
             "function uploadImage", "document.addEventListener('dragenter'", "document.addEventListener('drop'",
             "new AbortController()", "activeController.abort('new-chat')", "function resetConversation",
             "function openDrawer", "function openLightbox", "className = 'select-candidate'",
             "action_context: actionContext", "function invalidateCandidateActions()",
-            "['WAIT_CANDIDATE_CHOICE', 'ANSWERED'].includes(sessionContext.phase)",
+            "taskStateV1.allowsChildAction(taskStateContext, action)",
+            "taskStateAllowsChildAction('select_candidate', actionTarget)",
+            "childTaskId: String(item.childTaskId || '')",
             "event.key === 'Enter'", "!event.shiftKey", "!event.isComposing", "event.keyCode !== 229",
             "HISTORY_TTL_MS = 2 * 60 * 60 * 1000", "HISTORY_LIMIT = 50", "repairUploadedImageHistory()",
             "lastActivityAt: historyLastActivityAt", "saveHistory({ refreshActivity: true })",
@@ -5863,10 +6109,20 @@ class FastApiDemoTest(unittest.TestCase):
             "candidate_generation": "2:1",
             "candidate_count": 3,
         })
+        task_id = "search_demo_reselect_child_12345678"
+        runtime.task_state_snapshot = _standalone_child_task_state(
+            task_id=task_id,
+            task_revision=2,
+            phase="ANSWERED",
+            allowed_actions=(task_state_contract.ACTION_SELECT_CANDIDATE,),
+            candidate_count=3,
+            candidate_generation="2:1",
+        )
         response = client.post("/api/message/stream", json={
             "text": "选择候选 3",
             "action_context": {
                 "type": "select_candidate",
+                "task_id": task_id,
                 "rank": 3,
                 "task_revision": 2,
                 "candidate_generation": "2:1",
@@ -5896,10 +6152,20 @@ class FastApiDemoTest(unittest.TestCase):
             "candidate_generation": "2:2",
             "candidate_count": 3,
         })
+        task_id = "search_demo_reselect_stale_child_12345678"
+        runtime.task_state_snapshot = _standalone_child_task_state(
+            task_id=task_id,
+            task_revision=2,
+            phase="ANSWERED",
+            allowed_actions=(task_state_contract.ACTION_SELECT_CANDIDATE,),
+            candidate_count=3,
+            candidate_generation="2:2",
+        )
         response = client.post("/api/message/stream", json={
             "text": "选择候选 3",
             "action_context": {
                 "type": "select_candidate",
+                "task_id": task_id,
                 "rank": 3,
                 "task_revision": 2,
                 "candidate_generation": "2:1",
@@ -5909,6 +6175,278 @@ class FastApiDemoTest(unittest.TestCase):
         events = [json.loads(line) for line in response.text.splitlines() if line]
         self.assertEqual(events[-1]["data"]["intent"], "stale_candidate")
         self.assertEqual(runtime.calls, [])
+
+    def test_typed_child_action_drives_execution_instead_of_free_text(self):
+        for endpoint in ("/api/message", "/api/message/stream"):
+            for action in (
+                task_state_contract.ACTION_SELECT_CANDIDATE,
+                task_state_contract.ACTION_RETRY_SEARCH,
+            ):
+                with self.subTest(endpoint=endpoint, action=action):
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        root = Path(temp_dir)
+                        session_id = f"structured-action-{action}"
+                        task_id = f"search_structured_{action}_12345678"
+                        artifacts = SessionArtifacts(root / "sessions")
+                        upload_dir = artifacts.session_dir(session_id) / "uploads"
+                        upload_dir.mkdir(parents=True)
+                        image_path = upload_dir / "question.png"
+                        image_path.write_bytes(b"question")
+                        state_kwargs = {
+                            "session_id": session_id,
+                            "current_image_path": str(image_path),
+                            "current_search_id": task_id,
+                            "task_revision": 1,
+                        }
+                        if action == task_state_contract.ACTION_SELECT_CANDIDATE:
+                            state_kwargs.update({
+                                "phase": "WAIT_CANDIDATE_CHOICE",
+                                "candidates": [{"path": str(image_path)}],
+                                "candidate_revision": 1,
+                                "candidate_generation": "1:1",
+                            })
+                            action_context = {
+                                "type": action,
+                                "task_id": task_id,
+                                "task_revision": 1,
+                                "candidate_generation": "1:1",
+                                "rank": 1,
+                            }
+                            conflicting_text = "选择候选 2"
+                            expected_call = (action, 1)
+                        else:
+                            state_kwargs.update({
+                                "phase": "ERROR",
+                                "last_error": "search_failed",
+                            })
+                            action_context = {
+                                "type": action,
+                                "task_id": task_id,
+                                "task_revision": 1,
+                            }
+                            conflicting_text = "选择候选 1"
+                            expected_call = (action, None)
+
+                        store = SQLiteSessionStore(root / "sessions.sqlite3")
+                        store.save(AgentState(**state_kwargs))
+                        calls = []
+
+                        class RecordingAgent:
+                            def __init__(self, state: AgentState):
+                                self.state = state
+                                self.progress_reporter = None
+
+                            def handle_authorized_child_action(self, action, *, rank=None):
+                                calls.append((action, rank))
+                                return AgentResponse(
+                                    text="structured action executed",
+                                    intent=action,
+                                    state=self.state.to_dict(),
+                                )
+
+                            def handle_text(self, text):
+                                raise AssertionError(f"free text must not execute: {text}")
+
+                        runtime = AgentSessionRuntime(
+                            store,
+                            artifacts=artifacts,
+                            task_logger=object(),
+                            agent_factory=RecordingAgent,
+                        )
+                        client = TestClient(create_app(runtime=runtime))
+                        client.cookies.set(SESSION_COOKIE, session_id)
+
+                        response = client.post(endpoint, json={
+                            "text": conflicting_text,
+                            "action_context": action_context,
+                        })
+
+                        self.assertEqual(response.status_code, 200, response.text)
+                        payload = (
+                            [json.loads(line) for line in response.text.splitlines() if line][-1]["data"]
+                            if endpoint.endswith("/stream")
+                            else response.json()
+                        )
+                        self.assertEqual(payload["intent"], action)
+                        self.assertEqual(calls, [expected_call])
+
+    def test_child_action_is_revalidated_after_capture_inside_execution_lock(self):
+        for endpoint in ("/api/message", "/api/message/stream"):
+            with self.subTest(endpoint=endpoint):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    session_id = "locked-child-action-revalidation"
+                    old_task_id = "search_locked_old_child_12345678"
+                    current_task_id = "search_locked_current_child_12345678"
+                    artifacts = SessionArtifacts(root / "sessions")
+                    upload_dir = artifacts.session_dir(session_id) / "uploads"
+                    upload_dir.mkdir(parents=True)
+                    image_path = upload_dir / "question.png"
+                    image_path.write_bytes(b"question")
+
+                    def child_state(task_id: str) -> AgentState:
+                        return AgentState(
+                            session_id=session_id,
+                            phase="WAIT_CANDIDATE_CHOICE",
+                            current_image_path=str(image_path),
+                            current_search_id=task_id,
+                            task_revision=1,
+                            candidates=[{"path": str(image_path)}],
+                            candidate_revision=1,
+                            candidate_generation="1:1",
+                        )
+
+                    store = SQLiteSessionStore(root / "sessions.sqlite3")
+                    store.save(child_state(old_task_id))
+                    replacement = child_state(current_task_id)
+                    calls = []
+
+                    class RecordingAgent:
+                        def __init__(self, state: AgentState):
+                            self.state = state
+                            self.progress_reporter = None
+
+                        def handle_authorized_child_action(self, action, *, rank=None):
+                            calls.append((action, rank))
+                            return AgentResponse(text="unexpected", intent=action)
+
+                    class SwapAfterCaptureRuntime(AgentSessionRuntime):
+                        swap_pending = True
+
+                        def session_response_snapshot_v1(self, *args, **kwargs):
+                            captured = super().session_response_snapshot_v1(*args, **kwargs)
+                            if self.swap_pending:
+                                self.store.save(replacement)
+                                self.swap_pending = False
+                            return captured
+
+                    runtime = SwapAfterCaptureRuntime(
+                        store,
+                        artifacts=artifacts,
+                        task_logger=object(),
+                        agent_factory=RecordingAgent,
+                    )
+                    client = TestClient(create_app(runtime=runtime))
+                    client.cookies.set(SESSION_COOKIE, session_id)
+
+                    response = client.post(endpoint, json={
+                        "text": "选择候选 1",
+                        "action_context": {
+                            "type": "select_candidate",
+                            "task_id": old_task_id,
+                            "task_revision": 1,
+                            "candidate_generation": "1:1",
+                            "rank": 1,
+                        },
+                    })
+
+                    self.assertEqual(response.status_code, 200, response.text)
+                    payload = (
+                        [json.loads(line) for line in response.text.splitlines() if line][-1]["data"]
+                        if endpoint.endswith("/stream")
+                        else response.json()
+                    )
+                    self.assertEqual(payload["intent"], "stale_candidate")
+                    self.assertEqual(
+                        payload["task_state"]["active_child_task"]["task_id"],
+                        current_task_id,
+                    )
+                    self.assertEqual(calls, [])
+                    self.assertEqual(store.load(session_id).current_search_id, current_task_id)
+
+    def test_candidate_action_rejects_cross_child_aba_for_json_and_stream(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"demo_child_aba_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        current_task_id = "search_demo_current_child_aba_12345678"
+        old_task_id = "search_demo_old_child_aba_12345678"
+
+        for endpoint in ("/api/message", "/api/message/stream"):
+            with self.subTest(endpoint=endpoint):
+                runtime = FakeRuntime(image_path)
+                runtime.snapshot.update({
+                    "session_valid": True,
+                    "phase": "WAIT_CANDIDATE_CHOICE",
+                    "has_active_image": True,
+                    "task_revision": 1,
+                    "candidate_generation": "1:1",
+                    "candidate_count": 2,
+                })
+                runtime.task_state_snapshot = _standalone_child_task_state(
+                    task_id=current_task_id,
+                    task_revision=1,
+                    phase="WAIT_CANDIDATE_CHOICE",
+                    allowed_actions=(task_state_contract.ACTION_SELECT_CANDIDATE,),
+                    candidate_count=2,
+                    candidate_generation="1:1",
+                )
+                client = TestClient(create_app(runtime=runtime))
+                response = client.post(endpoint, json={
+                    "text": "选择候选 1",
+                    "action_context": {
+                        "type": "select_candidate",
+                        "task_id": old_task_id,
+                        "task_revision": 1,
+                        "candidate_generation": "1:1",
+                        "rank": 1,
+                    },
+                })
+                payload = (
+                    [json.loads(line) for line in response.text.splitlines() if line][-1]["data"]
+                    if endpoint.endswith("/stream")
+                    else response.json()
+                )
+                self.assertEqual(payload["intent"], "stale_candidate")
+                self.assertEqual(runtime.calls, [])
+                self.assertEqual(runtime.session_capture_frozen_flags, [True])
+
+    def test_retry_search_action_uses_typed_child_identity_for_json_and_stream(self):
+        runtime_dir = Path(__file__).resolve().parents[1] / ".tmp_tiku_agent"
+        image_path = runtime_dir / f"demo_retry_identity_{uuid4().hex}.jpg"
+        self.addCleanup(lambda: image_path.unlink(missing_ok=True))
+        Image.new("RGB", (4, 4), "white").save(image_path)
+        current_task_id = "search_demo_retry_current_12345678"
+        old_task_id = "search_demo_retry_old_12345678"
+
+        for endpoint in ("/api/message", "/api/message/stream"):
+            for task_id, expected_intent, expected_calls in (
+                (current_task_id, "select_candidate", 1),
+                (old_task_id, "stale_action", 0),
+            ):
+                with self.subTest(endpoint=endpoint, task_id=task_id):
+                    runtime = FakeRuntime(image_path)
+                    runtime.snapshot.update({
+                        "session_valid": True,
+                        "phase": "ERROR",
+                        "has_active_image": True,
+                        "task_revision": 1,
+                        "candidate_generation": "",
+                        "candidate_count": 0,
+                    })
+                    runtime.task_state_snapshot = _standalone_child_task_state(
+                        task_id=current_task_id,
+                        task_revision=1,
+                        phase="ERROR",
+                        allowed_actions=(task_state_contract.ACTION_RETRY_SEARCH,),
+                    )
+                    client = TestClient(create_app(runtime=runtime))
+                    response = client.post(endpoint, json={
+                        "text": "重试",
+                        "action_context": {
+                            "type": "retry_search",
+                            "task_id": task_id,
+                            "task_revision": 1,
+                        },
+                    })
+                    payload = (
+                        [json.loads(line) for line in response.text.splitlines() if line][-1]["data"]
+                        if endpoint.endswith("/stream")
+                        else response.json()
+                    )
+                    self.assertEqual(payload["intent"], expected_intent)
+                    self.assertEqual(len(runtime.calls), expected_calls)
+                    self.assertEqual(runtime.session_capture_frozen_flags, [True])
 
 
 if __name__ == "__main__":

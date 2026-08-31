@@ -17,6 +17,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from PIL import Image, ImageDraw, ImageOps
 
+from tiku_agent import task_state_contract as task_state_contract
 from tiku_agent.a3_intent_v1 import (
     A3ActionDecisionV1,
     A3IntentContextV1,
@@ -743,12 +744,12 @@ class A3MvpRuntime:
         session_id: str,
         text: str,
         *,
+        action_context: object | None = None,
         identity_key: str = "",
         progress: ProgressReporter | None = None,
         request_id: str = "",
         task_state_capabilities: TaskStateEntryCapabilities | None = None,
     ) -> AgentResponse:
-        del task_state_capabilities
         clean = _clean_session_id(session_id)
         with self._lock(clean):
             self._ensure_budget(identity_key)
@@ -761,6 +762,52 @@ class A3MvpRuntime:
                 )
             self._bind_trace_state(state, identity_key=identity_key)
             clean_text = str(text or "").strip()
+            if action_context is not None:
+                if state.entry_route == "A2" and state.phase == A3_PHASE_A2_ACTIVE:
+                    if not self._combined_child_action_allowed_locked(
+                        clean,
+                        state,
+                        action_context,
+                        capabilities=task_state_capabilities,
+                    ):
+                        return self._stale_nested_child_action_response(
+                            state,
+                            action_context,
+                        )
+                    return self.a2_runtime.handle_text(
+                        clean,
+                        clean_text,
+                        action_context=action_context,
+                        identity_key=identity_key,
+                        progress=progress,
+                        request_id=request_id,
+                    )
+                if state.entry_route == "A3" and state.phase == A3_PHASE_A2_ACTIVE:
+                    if not self._combined_child_action_allowed_locked(
+                        clean,
+                        state,
+                        action_context,
+                        capabilities=task_state_capabilities,
+                    ):
+                        return self._stale_nested_child_action_response(
+                            state,
+                            action_context,
+                        )
+                    response = self.a2_runtime.handle_text(
+                        clean,
+                        clean_text,
+                        action_context=action_context,
+                        identity_key=identity_key,
+                        progress=progress,
+                        request_id=request_id,
+                    )
+                    return self._after_a2_response(state, response)
+                return _response(
+                    "这个题目操作已经失效，请使用当前页面中的操作。",
+                    state,
+                    intent="stale_action",
+                    code="STALE_ACTION",
+                )
             if (
                 state.phase == A3_PHASE_A2_ACTIVE
                 and state.last_error in {
@@ -1201,6 +1248,74 @@ class A3MvpRuntime:
             code="CLARIFICATION_REQUIRED",
         )
 
+    def _combined_task_state_snapshot_v1_locked(
+        self,
+        session_id: str,
+        workflow_state: A3SessionState,
+        *,
+        capabilities: TaskStateEntryCapabilities | None,
+    ) -> TaskStateSnapshotV1:
+        """Build a combined V1 while the caller already holds the A3 lock."""
+
+        with self.a2_runtime._lock(session_id):
+            child_state, child_read_status = read_child_state_once(
+                self.a2_runtime.store,
+                session_id,
+            )
+            return self._task_state_snapshot_v1_from_read_set(
+                session_id,
+                workflow_state=workflow_state,
+                workflow_read_status=READ_OK,
+                child_state=child_state,
+                child_read_status=child_read_status,
+                capabilities=capabilities,
+            )
+
+    def _combined_child_action_allowed_locked(
+        self,
+        session_id: str,
+        workflow_state: A3SessionState,
+        action_context: object,
+        *,
+        capabilities: TaskStateEntryCapabilities | None,
+    ) -> bool:
+        snapshot = self._combined_task_state_snapshot_v1_locked(
+            session_id,
+            workflow_state,
+            capabilities=capabilities,
+        )
+        return (
+            AgentSessionRuntime._resolve_authorized_child_action(
+                snapshot,
+                action_context,
+            )
+            is not None
+        )
+
+    @staticmethod
+    def _stale_nested_child_action_response(
+        state: A3SessionState,
+        action_context: object,
+    ) -> AgentResponse:
+        action = (
+            action_context.get("type")
+            if type(action_context) is dict
+            else ""
+        )
+        if action == task_state_contract.ACTION_SELECT_CANDIDATE:
+            return _response(
+                "这是上一道题或上一轮搜索的候选，已经不能选择。请使用当前页面中的操作。",
+                state,
+                intent="stale_candidate",
+                code="STALE_CANDIDATE",
+            )
+        return _response(
+            "这个题目操作已经失效，请使用当前页面中的操作。",
+            state,
+            intent="stale_action",
+            code="STALE_ACTION",
+        )
+
     @staticmethod
     def _cancel_scope_options(state: A3SessionState) -> list[str]:
         options: list[str] = []
@@ -1218,12 +1333,12 @@ class A3MvpRuntime:
         unit_id: str,
         *,
         task_revision: int | None = None,
+        workflow_search_id: str | None = None,
         identity_key: str = "",
         progress: ProgressReporter | None = None,
         request_id: str = "",
         task_state_capabilities: TaskStateEntryCapabilities | None = None,
     ) -> AgentResponse:
-        del task_state_capabilities
         clean = _clean_session_id(session_id)
         with self._lock(clean):
             state = self._load_workflow_state(clean)
@@ -1234,13 +1349,47 @@ class A3MvpRuntime:
                     protocol=RequestProtocol.from_code("STALE_ACTION").to_dict(),
                 )
             self._bind_trace_state(state, identity_key=identity_key)
-            if task_revision is not None and int(task_revision) != state.task_revision:
+            if (
+                task_revision is not None and int(task_revision) != state.task_revision
+            ) or (
+                workflow_search_id is not None
+                and str(workflow_search_id).strip()
+                != (state.workflow_search_id or state.current_search_id)
+            ):
                 return _response(
                     "这是上一张题图的选题操作，已经失效。请使用当前题目列表。",
                     state,
                     intent="stale_action",
                     code="STALE_ACTION",
                 )
+            if workflow_search_id is not None:
+                snapshot = self._combined_task_state_snapshot_v1_locked(
+                    clean,
+                    state,
+                    capabilities=task_state_capabilities,
+                )
+                unit = next(
+                    (item for item in snapshot.units if item.unit_id == unit_id),
+                    None,
+                )
+                if (
+                    snapshot.consistency.status
+                    != task_state_contract.CONSISTENCY_OK
+                    or task_state_contract.ACTION_SELECT_UNIT
+                    not in snapshot.workflow.allowed_actions
+                    or unit is None
+                    or unit.status
+                    not in {
+                        task_state_contract.UNIT_AVAILABLE,
+                        task_state_contract.UNIT_PREPARED,
+                    }
+                ):
+                    return _response(
+                        "所选题目已经失效，请从当前列表重新选择。",
+                        state,
+                        intent="stale_action",
+                        code="STALE_ACTION",
+                    )
             return self._select_locked(
                 state,
                 str(unit_id or "").strip(),
@@ -1256,14 +1405,17 @@ class A3MvpRuntime:
         unit_ids: Sequence[str],
         *,
         task_revision: int | None = None,
+        workflow_search_id: str | None = None,
         identity_key: str = "",
         progress: ProgressReporter | None = None,
         request_id: str = "",
         task_state_capabilities: TaskStateEntryCapabilities | None = None,
     ) -> AgentResponse:
-        del request_id, task_state_capabilities
+        del request_id
         clean = _clean_session_id(session_id)
-        requested = list(dict.fromkeys(str(value or "").strip() for value in unit_ids))
+        raw_requested = [str(value or "").strip() for value in unit_ids]
+        requested = list(dict.fromkeys(raw_requested))
+        duplicate_targets = len(requested) != len(raw_requested)
         if not requested or any(not value for value in requested):
             return AgentResponse(
                 text="请至少选择一道要查询的题目。",
@@ -1280,17 +1432,49 @@ class A3MvpRuntime:
                     protocol=RequestProtocol.from_code("STALE_ACTION").to_dict(),
                 )
             self._bind_trace_state(state, identity_key=identity_key)
-            if task_revision is not None and int(task_revision) != state.task_revision:
+            if (
+                task_revision is not None and int(task_revision) != state.task_revision
+            ) or (
+                workflow_search_id is not None
+                and str(workflow_search_id).strip()
+                != (state.workflow_search_id or state.current_search_id)
+            ):
                 return _response(
                     "这是上一张题图的准备操作，已经失效。请使用当前题目列表。",
                     state,
                     intent="stale_action",
                     code="STALE_ACTION",
                 )
-            remaining_ids = {str(unit["unit_id"]) for unit in state.remaining_units}
-            if state.phase not in {A3_PHASE_WAIT_SELECTION, A3_PHASE_CROP_REQUIRED} or any(
-                value not in remaining_ids for value in requested
-            ):
+            target_is_current = True
+            if workflow_search_id is not None:
+                snapshot = self._combined_task_state_snapshot_v1_locked(
+                    clean,
+                    state,
+                    capabilities=task_state_capabilities,
+                )
+                unit_statuses = {item.unit_id: item.status for item in snapshot.units}
+                target_is_current = (
+                    snapshot.consistency.status
+                    == task_state_contract.CONSISTENCY_OK
+                    and task_state_contract.ACTION_PREPARE_UNITS
+                    in snapshot.workflow.allowed_actions
+                    and not duplicate_targets
+                    and all(
+                        unit_statuses.get(value)
+                        == task_state_contract.UNIT_AVAILABLE
+                        for value in requested
+                    )
+                )
+            else:
+                remaining_ids = {
+                    str(unit["unit_id"]) for unit in state.remaining_units
+                }
+                target_is_current = (
+                    state.phase
+                    in {A3_PHASE_WAIT_SELECTION, A3_PHASE_CROP_REQUIRED}
+                    and all(value in remaining_ids for value in requested)
+                )
+            if not target_is_current:
                 return _response(
                     "所选题目已经失效，请从当前列表重新选择。",
                     state,
@@ -1471,12 +1655,12 @@ class A3MvpRuntime:
         *,
         unit_id: str = "",
         task_revision: int | None = None,
+        workflow_search_id: str | None = None,
         identity_key: str = "",
         progress: ProgressReporter | None = None,
         request_id: str = "",
         task_state_capabilities: TaskStateEntryCapabilities | None = None,
     ) -> AgentResponse:
-        del task_state_capabilities
         clean = _clean_session_id(session_id)
         with self._lock(clean):
             self._ensure_budget(identity_key)
@@ -1490,6 +1674,11 @@ class A3MvpRuntime:
             self._bind_trace_state(state, identity_key=identity_key)
             if (
                 (task_revision is not None and int(task_revision) != state.task_revision)
+                or (
+                    workflow_search_id is not None
+                    and str(workflow_search_id).strip()
+                    != (state.workflow_search_id or state.current_search_id)
+                )
                 or (unit_id and str(unit_id).strip() != state.selected_unit_id)
             ):
                 return _response(
@@ -1498,6 +1687,26 @@ class A3MvpRuntime:
                     intent="stale_action",
                     code="STALE_ACTION",
                 )
+            if workflow_search_id is not None:
+                snapshot = self._combined_task_state_snapshot_v1_locked(
+                    clean,
+                    state,
+                    capabilities=task_state_capabilities,
+                )
+                if (
+                    snapshot.consistency.status
+                    != task_state_contract.CONSISTENCY_OK
+                    or task_state_contract.ACTION_SUBMIT_CROP
+                    not in snapshot.workflow.allowed_actions
+                    or snapshot.current_unit is None
+                    or snapshot.current_unit.unit_id != state.selected_unit_id
+                ):
+                    return _response(
+                        "这是上一次选题的裁剪操作，已经失效。请在当前裁剪页重新提交。",
+                        state,
+                        intent="stale_action",
+                        code="STALE_ACTION",
+                    )
             selected = state.unit(state.selected_unit_id)
             if selected is None:
                 raise ValueError("selected A3 unit is unavailable")
@@ -1615,9 +1824,24 @@ class A3MvpRuntime:
         path = Path(state.source_page_path).resolve()
         return path if path.is_file() else None
 
-    def current_crop_path(self, session_id: str, unit_id: str) -> Path | None:
-        state = self._load_workflow_state(_clean_session_id(session_id))
-        return self._current_crop_path_from_frozen_state(state, unit_id)
+    def current_crop_path(
+        self,
+        session_id: str,
+        unit_id: str,
+        *,
+        expected_workflow_id: str | None = None,
+        expected_task_revision: int | None = None,
+    ) -> Path | None:
+        clean = _clean_session_id(session_id)
+        with self._lock(clean):
+            state = self._load_workflow_state(clean)
+            if not self._media_identity_matches(
+                state,
+                expected_workflow_id=expected_workflow_id,
+                expected_task_revision=expected_task_revision,
+            ):
+                return None
+            return self._current_crop_path_from_frozen_state(state, unit_id)
 
     def _current_crop_path_from_frozen_state(
         self,
@@ -1632,9 +1856,48 @@ class A3MvpRuntime:
         crop_dir = (self.artifacts.session_dir(state.session_id) / "crops").resolve()
         return path if path.is_file() and path.parent == crop_dir else None
 
-    def current_auto_crop_overlay_path(self, session_id: str) -> Path | None:
-        state = self._load_workflow_state(_clean_session_id(session_id))
-        return self._auto_crop_overlay_path_from_frozen_state(state)
+    def current_auto_crop_overlay_path(
+        self,
+        session_id: str,
+        *,
+        expected_workflow_id: str | None = None,
+        expected_task_revision: int | None = None,
+    ) -> Path | None:
+        clean = _clean_session_id(session_id)
+        with self._lock(clean):
+            state = self._load_workflow_state(clean)
+            if not self._media_identity_matches(
+                state,
+                expected_workflow_id=expected_workflow_id,
+                expected_task_revision=expected_task_revision,
+            ):
+                return None
+            return self._auto_crop_overlay_path_from_frozen_state(state)
+
+    @staticmethod
+    def _media_identity_matches(
+        state: A3SessionState | None,
+        *,
+        expected_workflow_id: str | None,
+        expected_task_revision: int | None,
+    ) -> bool:
+        identity_supplied = (
+            expected_workflow_id is not None or expected_task_revision is not None
+        )
+        if not identity_supplied:
+            return True
+        if (
+            state is None
+            or type(expected_workflow_id) is not str
+            or not expected_workflow_id
+            or type(expected_task_revision) is not int
+            or expected_task_revision <= 0
+        ):
+            return False
+        return (
+            expected_workflow_id == state.workflow_search_id
+            and expected_task_revision == state.task_revision
+        )
 
     def _auto_crop_overlay_path_from_frozen_state(
         self,

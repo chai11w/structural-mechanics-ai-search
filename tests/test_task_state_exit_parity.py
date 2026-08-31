@@ -409,7 +409,11 @@ class TaskStateExitParityTest(unittest.TestCase):
                     "select",
                     lambda: client.post(
                         "/api/a3/select",
-                        json={"unit_id": "g1-u1", "task_revision": 9},
+                        json={
+                            "unit_id": "g1-u1",
+                            "task_revision": 9,
+                            "workflow_id": "search_parity_workflow_12345678",
+                        },
                     ),
                 ),
             )
@@ -440,14 +444,22 @@ class TaskStateExitParityTest(unittest.TestCase):
                     "select",
                     lambda: client.post(
                         "/api/a3/select/stream",
-                        json={"unit_id": "g1-u1", "task_revision": 9},
+                        json={
+                            "unit_id": "g1-u1",
+                            "task_revision": 9,
+                            "workflow_id": "search_parity_workflow_12345678",
+                        },
                     ),
                 ),
                 (
                     "prepare",
                     lambda: client.post(
                         "/api/a3/prepare/stream",
-                        json={"unit_ids": ["g1-u1"], "task_revision": 9},
+                        json={
+                            "unit_ids": ["g1-u1"],
+                            "task_revision": 9,
+                            "workflow_id": "search_parity_workflow_12345678",
+                        },
                     ),
                 ),
                 (
@@ -463,6 +475,7 @@ class TaskStateExitParityTest(unittest.TestCase):
                             },
                             "unit_id": "g1-u1",
                             "task_revision": 9,
+                            "workflow_id": "search_parity_workflow_12345678",
                         },
                     ),
                 ),
@@ -514,7 +527,11 @@ class TaskStateExitParityTest(unittest.TestCase):
                 "select",
                 lambda client: client.post(
                     "/api/a3/select",
-                    json={"unit_id": "g1-u1", "task_revision": 9},
+                    json={
+                        "unit_id": "g1-u1",
+                        "task_revision": 9,
+                        "workflow_id": "search_parity_workflow_12345678",
+                    },
                 ),
             ),
             ("reset", lambda client: client.post("/api/reset")),
@@ -538,14 +555,22 @@ class TaskStateExitParityTest(unittest.TestCase):
                 "select",
                 lambda client: client.post(
                     "/api/a3/select/stream",
-                    json={"unit_id": "g1-u1", "task_revision": 9},
+                    json={
+                        "unit_id": "g1-u1",
+                        "task_revision": 9,
+                        "workflow_id": "search_parity_workflow_12345678",
+                    },
                 ),
             ),
             (
                 "prepare",
                 lambda client: client.post(
                     "/api/a3/prepare/stream",
-                    json={"unit_ids": ["g1-u1"], "task_revision": 9},
+                    json={
+                        "unit_ids": ["g1-u1"],
+                        "task_revision": 9,
+                        "workflow_id": "search_parity_workflow_12345678",
+                    },
                 ),
             ),
             (
@@ -561,6 +586,7 @@ class TaskStateExitParityTest(unittest.TestCase):
                         },
                         "unit_id": "g1-u1",
                         "task_revision": 9,
+                        "workflow_id": "search_parity_workflow_12345678",
                     },
                 ),
             ),
