@@ -594,13 +594,74 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260830-task-state-3-4-5"'
+        demo_asset = 'src="/assets/demo.js?v=20260831-resource-bootstrap-v1"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
         self.assertIn("const taskStateV1 = globalThis.TikuTaskStateV1", demo)
         self.assertIn("const taskStateConsumer = taskStateV1.createTaskStateConsumer()", demo)
         self.assertIn("let taskStateContext = taskStateConsumer.current()", demo)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for bootstrap validation")
+    def test_demo_bootstraps_missing_task_state_asset_before_start(self):
+        demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
+        bootstrap = demo.split("function startDemo(taskStateV1) {", 1)[0]
+        node_test = r"""
+const assert = require('node:assert/strict');
+const bootstrap = globalThis.__bootstrapSource;
+
+function harness(initialModel = null) {
+  const scripts = [];
+  const starts = [];
+  const globalObject = { TikuTaskStateV1: initialModel };
+  const document = {
+    querySelector: () => null,
+    createElement: () => {
+      const listeners = {};
+      return {
+        src: '',
+        setAttribute(name, value) { this[name] = value; },
+        addEventListener(name, callback) { listeners[name] = callback; },
+        dispatch(name) { listeners[name]?.(); },
+      };
+    },
+    head: { appendChild(script) { scripts.push(script); } },
+  };
+  const execute = new Function('globalThis', 'document', 'startDemo', bootstrap);
+  execute(globalObject, document, (model) => starts.push(model));
+  return { globalObject, scripts, starts };
+}
+
+const readyModel = { createTaskStateConsumer() {} };
+const ready = harness(readyModel);
+assert.deepEqual(ready.starts, [readyModel]);
+assert.equal(ready.scripts.length, 0);
+
+const missing = harness();
+assert.equal(missing.starts.length, 0);
+assert.equal(missing.scripts.length, 1);
+assert.equal(
+  missing.scripts[0].src,
+  '/assets/task_state.js?v=20260830-task-state-3-4-5',
+);
+missing.globalObject.TikuTaskStateV1 = readyModel;
+missing.scripts[0].dispatch('load');
+missing.scripts[0].dispatch('load');
+assert.deepEqual(missing.starts, [readyModel]);
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-"],
+            cwd=ROOT,
+            input=(
+                f"globalThis.__bootstrapSource = {json.dumps(bootstrap)};\n"
+                f"{node_test}"
+            ),
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_demo_consumes_only_authoritative_task_state_envelopes(self):
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")

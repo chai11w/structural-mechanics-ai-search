@@ -242,7 +242,6 @@ logger = logging.getLogger(__name__)
 _ACTIVE_PUBLIC_TRACE_META: ContextVar[dict[str, object] | None] = ContextVar(
     "active_public_trace_meta", default=None
 )
-_PAGE = (WEB_DIR / "index.html").read_text(encoding="utf-8")
 _STYLE = (WEB_DIR / "demo.css").read_text(encoding="utf-8")
 _SCRIPT = (WEB_DIR / "demo.js").read_text(encoding="utf-8")
 _INVITE_PAGE = """<!doctype html>
@@ -256,6 +255,10 @@ small{display:block;margin-top:18px;color:#8a8a83;line-height:1.55}
 </style></head><body><main><h1>邀请码验证</h1><p>请输入内测邀请码。验证后，本浏览器 30 天内无需重复输入。</p>{error}
 <form method="post" action="/api/invite/login"><label for="invite-code">邀请码</label><input id="invite-code" name="code" type="password" autocomplete="one-time-code" required maxlength="128"><button type="submit">进入搜题</button></form>
 <small>每个邀请码拥有独立的每日使用额度，请勿转发。</small></main></body></html>"""
+
+
+def _read_demo_page() -> str:
+    return (WEB_DIR / "index.html").read_text(encoding="utf-8")
 
 
 def create_app(
@@ -1109,7 +1112,7 @@ def create_app(
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
         session_id = _session_id(request, cookie_name=session_cookie)
-        result = HTMLResponse(_PAGE, headers={"Cache-Control": "no-store"})
+        result = HTMLResponse(_read_demo_page(), headers={"Cache-Control": "no-store"})
         _set_session_cookie(
             result,
             session_id,
