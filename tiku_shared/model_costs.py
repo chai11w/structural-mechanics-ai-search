@@ -9,7 +9,7 @@ visual reranking.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -480,7 +480,7 @@ class SQLiteModelCostLedger:
         warnings = _warning_codes(records)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            with sqlite3.connect(self.path) as connection:
+            with closing(sqlite3.connect(self.path)) as connection, connection:
                 connection.execute("PRAGMA journal_mode=WAL")
                 _create_schema(connection)
                 connection.execute(
@@ -553,7 +553,7 @@ class SQLiteModelCostLedger:
         if not self.path.is_file():
             return 0
         with self._lock:
-            with sqlite3.connect(self.path) as connection:
+            with closing(sqlite3.connect(self.path)) as connection, connection:
                 try:
                     _create_schema(connection)
                     identity_clause = " AND identity_key = ?" if identity_key is not None else ""

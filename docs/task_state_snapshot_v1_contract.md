@@ -4,7 +4,7 @@
 
 阶段 3.1 完成父 workflow、当前子题任务和题目单元的权威状态契约定稿。本文件冻结 V1 的字段、词汇、字段来源、派生谓词、拓扑边界、一致性错误和冲突策略，是后续实现的权威规范。阶段 3.2.1 已实现从“已冻结 read-set + 可信入口证据”到 `TaskStateSnapshotV1` 的纯构造器，落在 `tiku_agent/task_state_builder.py`；阶段 3.2.2 已实现 `tiku_agent/task_state_runtime.py` 的锁内读取与证据包装，并由 `A3MvpRuntime.task_state_snapshot_v1()`、`AgentSessionRuntime.task_state_snapshot_v1()` 和 `AgentSessionRuntime.task_state_snapshot_v1_from_frozen_state()` 提供内部运行时入口；阶段 3.2.3 已用实际构造结果矩阵和组合读取异常完成边界验收。阶段 3.3.1 冻结 exact typed 公共映射，3.3.2～3.3.5 分别接入 `/api/session`、HTTP 200 业务 JSON、受控非 stream HTTP 4xx/5xx 和五条任务 stream 终态；3.3.6 已完成跨出口 parity、失败后处理、兼容入口和全仓回归验收。阶段 3.4.1～3.4.5 已完成前端 exact/branded model、信封消费、A2/A3 动作迁移及恢复生命周期收口。
 
-**阶段 3.3 出口一致性及 3.4 前端消费已在代码中完成，但尚未部署启用到 8790。** 当前受控 HTTP 出口在根级返回 `task_state`，五条任务 stream 的 success 在 `event.data.task_state`、非准入 error 在 `event.task_state` 返回 exact typed V1；浏览器按这些权威层级原子消费，A2/A3 动作只由 branded `allowed_actions` 授权，busy/queue、progress 和非任务响应保持 no-update。3.5 启用门仍未完成，因此主阶段 3 仍为 `IN_PROGRESS`，不能声称已经上线。既有内部 `session_snapshot()` 仍是兼容投影，不等同于统一快照。
+**阶段 3.3 出口一致性及 3.4 前端消费已在代码中完成，但尚未部署启用到 8790。** 当前受控 HTTP 出口在根级返回 `task_state`，五条任务 stream 的 success 在 `event.data.task_state`、非准入 error 在 `event.task_state` 返回 exact typed V1；浏览器按这些权威层级原子消费，A2/A3 动作只由 branded `allowed_actions` 授权，busy/queue、progress 和非任务响应保持 no-update。3.5.1 离线回归与静态安全预检已完成，8896/live/8790 启用门仍未执行，因此主阶段 3 仍为 `IN_PROGRESS`，不能声称已经上线。既有内部 `session_snapshot()` 仍是兼容投影，不等同于统一快照。
 
 以下内容不属于阶段 3.1：
 
@@ -855,6 +855,35 @@ FastAPI/A3/前端定向、73 项 task-state 及全仓 1173 项回归全部通过
 `git diff --check` 通过；首次全仓仅既有 WAL 时序项失败，该项单跑和第二次全仓均通过。
 未部署、启动、停止或重启任何服务。
 
+## 3.5.1 启用前离线回归与静态安全预检（DONE；未部署）
+
+3.5.1 在独立 worktree 的 `codex/task-state-stage-3-5-1` 分支中，以已合入主线的
+`2b0c7f8` 为基线执行。该批次只允许离线测试、静态差异和启动脚本安全检查；没有访问、
+启动、停止或重启任何端口，没有读取 live runtime、SQLite、日志、Cookie 或本地敏感配置，
+没有调用模型、写题库或部署。8896 契约烟测属于 3.5.2，8790 的只读 live 对照与启用
+仍须用户另行明确确认；8788、8794、8795 不在 3.5 操作范围。
+
+干净 worktree 首轮 220 项定向回归暴露 5 个测试依赖未跟踪 `.tmp_tiku_agent` 目录；
+`FastApiDemoTest` 现幂等建立被忽略的测试 runtime 根，生产代码不变。静态安全预检同时发现
+旧 8896 watchdog 可接受任意端口并按端口停止监听者。现已将其限制为固定 8896，并复用
+共享 process guard：启动前解析精确 Python，以绝对入口绑定脚本 checkout，按 Windows argv
+规则编码参数，按完整参数、唯一监听 PID 和可执行文件联合校验；使用单实例锁和活 watchdog
+PID 保护；端口枚举两条来源均失败时 fail-closed；仅在候选完整复核且健康后写 agent PID；
+只停止仍可验证的进程，移除按端口杀进程逻辑。上述脚本只经 Parser 和单元测试验证，未执行。
+
+首轮全仓回归还暴露 external-load screen 的 60ms 墙钟断言在负载下抖动。复核发现实现也有
+真实截止竞态：旧 `_ImageRace` 只由请求线程在醒来后撤销 screen 权威，若该线程在 deadline
+附近失去调度，晚到的 `no` 可能先抢占。现由 race 冻结 deadline，并在 `claim_no_load()` 的
+同一把锁内判定过期；计时从 agent 构造完成后开始，不让准备耗时侵占 screen 窗口。测试以
+事件交错证明请求可在 screen 仍阻塞时返回、晚到 `no` 不覆盖状态，并直接覆盖截止点前后
+授权，不再以放宽墙钟阈值掩盖问题。
+
+最终验收环境为项目 Python 3.12.10、Node v24.16.0，`pip check` 无冲突。28 项前端聚焦、
+220 项 FastAPI/A3/前端定向、73 项 task-state、13 项 8896/8790/shared watchdog guard 聚焦
+回归均通过；全仓共 1178 项通过。Node 双脚本语法、PowerShell
+Parser 与 `git diff --check` 通过。该结果只放行 3.5.2 的 8896 契约烟测，不证明目标真实
+浏览器支持 Web Lock，也不证明 8790 当前运行提交、runtime 或可回退版本。
+
 ## 后续批次
 
 1. **3.2.1 纯构造器（DONE）**：已完成从冻结 read-set 和可信入口证据到 V1 快照的无 I/O 投影，实现与定向测试见 `tiku_agent/task_state_builder.py` 和 `tests/test_task_state_builder.py`。
@@ -862,4 +891,4 @@ FastAPI/A3/前端定向、73 项 task-state 及全仓 1173 项回归全部通过
 3. **3.2.3 异常与矩阵测试（DONE）**：父 route/phase 与 child phase/topology 的实际构造矩阵、A3 active/组合读取异常、脱敏及旧 revision 动作证据均已补齐；阶段 3.2 整体完成。项目 Python 3.12 下 51 项 task-state 定向测试及全仓 1035 项回归通过。
 4. **3.3 出口一致性（DONE；尚未部署）**：3.3.1～3.3.6 已完成；跨 session、JSON success/error、stream result/error 和 reset 的 exact V1 parity、失败后处理、零重读及 legacy 兼容均已验收，阶段最终全仓 1147 项通过。
 5. **3.4 前端消费（DONE；尚未部署）**：3.4.1～3.4.5 已完成 exact/branded model、原子信封接线、A2/A3 动作迁移及恢复/多标签页生命周期收口；A2/A3 只由服务端 `allowed_actions` 授权，动作参数绑定 V1 identity/revision/target，`next_stage` 不授权。阶段最终全仓 1173 项通过。
-6. **3.5 启用门（尚未实现）**：定向/全量回归、8896 契约烟测、只读 live 对照后再精确启用 8790；不触碰 8788/8794/8795。
+6. **3.5 启用门（IN_PROGRESS）**：3.5.1 离线回归与静态安全预检 DONE；下一独立批次 3.5.2 只做 8896 契约烟测，并以固定代码 checkout、绝对 runtime 路径和硬化后的 watchdog 为前提。3.5.3 只读 live 对照与 3.5.4 精确启用 8790 均须用户另行确认；只能从 8790 侧静态证据核对 control 引用，不连接、读取或探测 8795，无法在该边界内证明或启用时必须阻断并重新确认。另须核对实际运行提交、runtime、回退版本和运行数据备份；全程不触碰 8788/8794/8795。

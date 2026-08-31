@@ -45,6 +45,45 @@ class ModelCostTest(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(directory, ignore_errors=True))
         return directory
 
+    def test_ledger_closes_each_sqlite_connection_before_returning(self):
+        directory = self.make_directory()
+        database = directory / "model_costs.sqlite3"
+        ledger = SQLiteModelCostLedger(database)
+        collector = ModelCostCollector(run_id="run_connection_lifecycle")
+        real_connect = sqlite3.connect
+        opened: list[sqlite3.Connection] = []
+
+        def tracked_connect(*args, **kwargs):
+            connection = real_connect(*args, **kwargs)
+            opened.append(connection)
+            return connection
+
+        with patch(
+            "tiku_shared.model_costs.sqlite3.connect",
+            side_effect=tracked_connect,
+        ):
+            ledger.write_run(
+                collector,
+                finished_at="2026-08-31T00:00:01+00:00",
+                outcome="success",
+            )
+        self.assertEqual(len(opened), 1)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            opened[0].execute("SELECT 1")
+
+        opened.clear()
+        with patch(
+            "tiku_shared.model_costs.sqlite3.connect",
+            side_effect=tracked_connect,
+        ):
+            self.assertEqual(
+                ledger.estimated_cost_micros_since("2026-08-31T00:00:00+00:00"),
+                0,
+            )
+        self.assertEqual(len(opened), 1)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            opened[0].execute("SELECT 1")
+
     def test_timed_model_call_emits_joined_start_and_finished_events(self):
         directory = self.make_directory()
         store = SQLiteTraceEventStore(directory / "trace_events.sqlite3")
