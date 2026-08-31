@@ -320,6 +320,31 @@ class TikuSearchAgent:
         )
         return self._dispatch_v2(decision, context)
 
+    def handle_authorized_child_action(
+        self,
+        action: str,
+        *,
+        rank: int | None = None,
+    ) -> AgentResponse:
+        """Execute a child action already authorized by the locked runtime state."""
+
+        self._incoming_search_id = ""
+        self._turn_protocol = {}
+        self._model_chapter_scope = None
+        if action == "select_candidate" and type(rank) is int and rank > 0:
+            return self._dispatch(
+                IntentResult(
+                    "select_candidate",
+                    data={"rank": rank},
+                    source="task_state_action",
+                )
+            )
+        if action == "retry_search" and rank is None:
+            return self._dispatch(
+                IntentResult("retry_search", source="task_state_action")
+            )
+        raise ValueError("unsupported authorized child action")
+
     def _safe_answer_response(self, text: str, category: str) -> AgentResponse:
         context, validation_facts = self._safe_answer_inputs()
         if self.safe_answer_generator_v0 is not None:

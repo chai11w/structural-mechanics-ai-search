@@ -77,6 +77,11 @@ const HISTORY_TTL_MS = 2 * 60 * 60 * 1000;
 const HISTORY_LIMIT = 50;
 const HISTORY_KEY = 'tiku-agent-current-chat-v2';
 const LEGACY_HISTORY_KEY = 'tiku-agent-current-chat-v1';
+const SESSION_ACTIVITY_KEY = 'tiku-agent-session-activity-v1';
+const SESSION_RESET_EVENT_KEY = 'tiku-agent-session-reset-v1';
+const SESSION_STORAGE_PROBE_KEY = 'tiku-agent-session-storage-probe-v1';
+const SESSION_REQUEST_FENCE_KEY = 'tiku-agent-session-request-fence-v1';
+const SESSION_REQUEST_LOCK_NAME = 'tiku-agent-session-request-v1';
 const LEGACY_EXPIRED_MEDIA_MESSAGE = '题图或结果图片已失效，请重新上传题图；如果问题反复出现，可以点踩告诉我们。';
 const A3_INLINE_ONLY_INTENTS = new Set([
   'a3_unit_selected', 'a3_unit_already_selected', 'a3_crop_review_required',
@@ -143,20 +148,35 @@ let historyStorageWarningShown = false;
 const activeFailureNotices = new Set();
 let pendingSessionExpiredNotice = false;
 let pendingHistoryStorageNotice = '';
+let sessionResetRequired = false;
+let sessionResetActivityAt = 0;
+let sessionResetEpoch = 0;
+let lastHandledSessionResetEventId = storedSessionResetEventId() || '';
+let lastHandledSessionRequestFenceId = '';
 let sessionBootstrap = null;
+let sessionBootstrapPending = false;
 let sessionContext = {
   session_valid: false, phase: 'IDLE', has_active_image: false,
   task_revision: 0, candidate_generation: '', candidate_count: 0, search_id: '',
+  a3WorkflowId: '', a3WorkflowRevision: 0,
 };
 const taskStateConsumer = taskStateV1.createTaskStateConsumer();
+const taskStateEnvelopeBindings = new WeakMap();
+const taskStateAcceptedEnvelopes = new WeakMap();
 let taskStateContext = taskStateConsumer.current();
+let activeTaskStateRequest = null;
+let taskStateRequestGeneration = 0;
+let activeTaskStateRequestGeneration = 0;
 let a3SourceUrl = '';
+let a3SourceWorkflowKey = '';
 let a3Bounds = null;
 let a3Pointer = null;
 let a3CropHistoryActive = false;
-let a3PendingDismiss = true;
+let a3CropHistoryKey = '';
+let a3PendingClose = null;
 let a3DismissedKey = '';
-let a3KnownRevision = 0;
+let a3DismissNextCrop = false;
+let a3KnownWorkflowKey = '';
 const a3LocalDrafts = new Map();
 const objectUrls = new Set();
 
@@ -201,16 +221,378 @@ function createRequestId() {
   return `req_${value || `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`.padEnd(32, '0').slice(0, 32)}`;
 }
 
+let sessionActivityFallbackAt = 0;
+
+function safeLocalStorageGet(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch (_error) {
+    return undefined;
+  }
+}
+
+function safeLocalStorageSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function safeLocalStorageRemove(key) {
+  try {
+    localStorage.removeItem(key);
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function storedHistoryActivityAt() {
+  const now = Date.now();
+  let activityAt = 0;
+  try {
+    const raw = safeLocalStorageGet(HISTORY_KEY) || safeLocalStorageGet(LEGACY_HISTORY_KEY);
+    const stored = JSON.parse(raw || 'null');
+    const storedActivityAt = Number(stored?.lastActivityAt ?? stored?.savedAt);
+    if (
+      Array.isArray(stored?.messages)
+      && Number.isFinite(storedActivityAt)
+      && storedActivityAt > 0
+      && storedActivityAt <= now + 60000
+    ) activityAt = storedActivityAt;
+  } catch (_error) { /* invalid history cannot authorize a reset */ }
+  const storedSharedActivityAt = Number(safeLocalStorageGet(SESSION_ACTIVITY_KEY) || 0);
+  const sharedActivityAt = Math.max(
+    sessionActivityFallbackAt,
+    Number.isFinite(storedSharedActivityAt) ? storedSharedActivityAt : 0,
+  );
+  if (
+    Number.isFinite(sharedActivityAt)
+    && sharedActivityAt > 0
+    && sharedActivityAt <= now + 60000
+  ) activityAt = Math.max(activityAt, sharedActivityAt);
+  return activityAt;
+}
+
+function cancelPendingExpiredReset(activityAt) {
+  if (
+    !sessionResetRequired
+    || !sessionResetActivityAt
+    || activityAt <= sessionResetActivityAt
+  ) return false;
+  sessionResetRequired = false;
+  sessionResetActivityAt = 0;
+  pendingSessionExpiredNotice = false;
+  return true;
+}
+
+function refreshHistoryActivityFromStorage() {
+  const activityAt = storedHistoryActivityAt();
+  const resetCancelled = cancelPendingExpiredReset(activityAt);
+  if (!activityAt || activityAt <= historyLastActivityAt) return resetCancelled;
+  historyLastActivityAt = activityAt;
+  scheduleHistoryExpiry();
+  return true;
+}
+
+function touchSharedSessionActivity() {
+  const activityAt = Math.max(
+    Date.now(),
+    historyLastActivityAt + 1,
+    storedHistoryActivityAt() + 1,
+  );
+  historyLastActivityAt = activityAt;
+  sessionActivityFallbackAt = activityAt;
+  safeLocalStorageSet(SESSION_ACTIVITY_KEY, String(activityAt));
+  cancelPendingExpiredReset(activityAt);
+  return activityAt;
+}
+
 function taskStateApiPath(url) {
   return String(url || '').split('?', 1)[0];
+}
+
+function isTaskStateRequestPath(url) {
+  const path = taskStateApiPath(url);
+  return TASK_STATE_JSON_PATHS.has(path) || TASK_STATE_STREAM_PATHS.has(path);
+}
+
+function isTaskStartingPath(url) {
+  const path = taskStateApiPath(url);
+  return isTaskStateRequestPath(path) && !['/api/session', '/api/reset'].includes(path);
+}
+
+function isExplicitSessionResetText(value) {
+  const compact = String(value || '')
+    .toLowerCase()
+    .replace(/[\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000，,。！？!?、.]+/gu, '');
+  return /^(?:(?:开始|创建|开个|开启)?新对话|(?:清空|删除)(?:整个|全部|当前)?(?:会话|对话|聊天记录)|全部清空)$/u
+    .test(compact);
+}
+
+function sessionRequestLockAvailable() {
+  return typeof globalThis.navigator?.locks?.request === 'function';
+}
+
+function sessionResetCoordinationAvailable() {
+  if (!sessionRequestLockAvailable()) return false;
+  const probe = createRequestId();
+  if (!safeLocalStorageSet(SESSION_STORAGE_PROBE_KEY, probe)) return false;
+  const readable = safeLocalStorageGet(SESSION_STORAGE_PROBE_KEY) === probe;
+  const removable = safeLocalStorageRemove(SESSION_STORAGE_PROBE_KEY);
+  return readable && removable;
+}
+
+function storedSessionResetEventId() {
+  const value = safeLocalStorageGet(SESSION_RESET_EVENT_KEY);
+  return value === undefined ? null : String(value || '');
+}
+
+function storedSessionRequestFenceId() {
+  const value = safeLocalStorageGet(SESSION_REQUEST_FENCE_KEY);
+  return value === undefined ? undefined : String(value || '');
+}
+
+function retireUnhandledSessionReset(resetEventId = storedSessionResetEventId()) {
+  const eventId = typeof resetEventId === 'string' ? resetEventId : '';
+  if (!eventId || eventId === lastHandledSessionResetEventId) return false;
+  lastHandledSessionResetEventId = eventId;
+  sessionResetEpoch += 1;
+  retireSessionForExternalReset();
+  return true;
+}
+
+function createSessionRequestFence() {
+  const id = `${Date.now()}:${createRequestId()}`;
+  if (!safeLocalStorageSet(SESSION_REQUEST_FENCE_KEY, id)) return null;
+  if (storedSessionRequestFenceId() !== id) {
+    safeLocalStorageRemove(SESSION_REQUEST_FENCE_KEY);
+    return null;
+  }
+  return { id, preserve: true, inherited: false };
+}
+
+function preserveSessionRequestFence(fence) {
+  if (fence?.id) fence.preserve = true;
+}
+
+function resolveSessionRequestFence(fence) {
+  if (fence?.id) fence.preserve = false;
+}
+
+function clearSessionRequestFence(fence) {
+  if (!fence?.id || storedSessionRequestFenceId() !== fence.id) return false;
+  return safeLocalStorageRemove(SESSION_REQUEST_FENCE_KEY)
+    && storedSessionRequestFenceId() === '';
+}
+
+function staleSessionActionError(message = '会话已在另一页面更新，请重新连接后继续。') {
+  return new UserVisibleError(
+    message,
+    ['retry_connection', 'new_chat'],
+    {
+      protocol: {
+        status: 'ERROR', layer: 'network', code: 'STALE_ACTION',
+        retryable: true, action: 'retry_connection', request_id: createRequestId(),
+      },
+    },
+  );
+}
+
+function sessionCoordinationError() {
+  return clientProtocolError(
+    '浏览器无法安全确认当前会话，请重新连接或开始新对话。',
+    'RESPONSE_INVALID',
+    createRequestId(),
+    ['retry_connection', 'new_chat'],
+  );
+}
+
+function sessionLockUnavailableError() {
+  return clientProtocolError(
+    '当前浏览器无法安全协调多个页面，请升级浏览器或改用最新版 Chrome、Edge 后重试。',
+    'RESPONSE_INVALID',
+    createRequestId(),
+    ['retry_connection'],
+  );
+}
+
+function retireUnresolvedSessionRequestFence(fenceId) {
+  const id = String(fenceId || '');
+  if (!id || id === lastHandledSessionRequestFenceId) return false;
+  lastHandledSessionRequestFenceId = id;
+  sessionResetEpoch += 1;
+  retireSessionForExternalReset();
+  return true;
+}
+
+async function completeSessionRequestWithFence(callback, fence) {
+  let result;
+  let failure = null;
+  try {
+    result = await callback(fence);
+  } catch (error) {
+    failure = error;
+  }
+  if (!fence.preserve && !clearSessionRequestFence(fence)) {
+    preserveSessionRequestFence(fence);
+    retireUnresolvedSessionRequestFence(fence.id);
+    throw sessionCoordinationError();
+  }
+  if (fence.preserve && !failure) failure = sessionCoordinationError();
+  if (failure) throw failure;
+  return result;
+}
+
+async function withSessionRequestLock(url, callback, { requireSupport = false } = {}) {
+  if (!isTaskStateRequestPath(url)) return callback();
+  const requestEpoch = sessionResetEpoch;
+  if (!sessionRequestLockAvailable()) {
+    if (requireSupport) return null;
+    retireUnhandledSessionReset();
+    const pendingFenceId = storedSessionRequestFenceId();
+    if (
+      (requestEpoch !== sessionResetEpoch || pendingFenceId)
+      && isTaskStartingPath(url)
+    ) {
+      if (pendingFenceId) retireUnresolvedSessionRequestFence(pendingFenceId);
+      throw staleSessionActionError();
+    }
+    if (isTaskStartingPath(url)) throw sessionLockUnavailableError();
+    if (pendingFenceId === undefined) throw sessionCoordinationError();
+    if (!pendingFenceId) return callback(null);
+    return completeSessionRequestWithFence(
+      callback,
+      { id: pendingFenceId, preserve: true, inherited: true },
+    );
+  }
+  return globalThis.navigator.locks.request(
+    SESSION_REQUEST_LOCK_NAME,
+    { mode: 'exclusive' },
+    async () => {
+      retireUnhandledSessionReset();
+      if (requestEpoch !== sessionResetEpoch && isTaskStartingPath(url)) {
+        throw staleSessionActionError();
+      }
+      const pendingFenceId = storedSessionRequestFenceId();
+      if (pendingFenceId === undefined) throw sessionCoordinationError();
+      if (pendingFenceId && isTaskStartingPath(url)) {
+        retireUnresolvedSessionRequestFence(pendingFenceId);
+        throw staleSessionActionError(
+          '上次请求结果尚未确认，请重新连接或开始新对话。',
+        );
+      }
+      const fence = pendingFenceId
+        ? { id: pendingFenceId, preserve: true, inherited: true }
+        : createSessionRequestFence();
+      if (!fence) throw sessionCoordinationError();
+      return completeSessionRequestWithFence(callback, fence);
+    },
+  );
+}
+
+function publishSessionReset(sessionRequestFence = null) {
+  const eventId = `${Date.now()}:${createRequestId()}`;
+  if (
+    !safeLocalStorageSet(SESSION_RESET_EVENT_KEY, eventId)
+    || safeLocalStorageGet(SESSION_RESET_EVENT_KEY) !== eventId
+  ) {
+    preserveSessionRequestFence(sessionRequestFence);
+    return false;
+  }
+  sessionResetEpoch += 1;
+  lastHandledSessionResetEventId = eventId;
+  sessionActivityFallbackAt = 0;
+  safeLocalStorageRemove(SESSION_ACTIVITY_KEY);
+  resolveSessionRequestFence(sessionRequestFence);
+  return true;
+}
+
+function authoritativeTaskStateEnvelopeAccepted(envelope) {
+  return Boolean(
+    envelope
+    && typeof envelope === 'object'
+    && taskStateAcceptedEnvelopes.get(envelope) === taskStateRequestGeneration
+    && taskStateContext.available
+    && taskStateContext.consistent
+  );
+}
+
+function authoritativeTaskStateIsEmpty() {
+  const snapshot = taskStateContext?.snapshot;
+  return taskStateContext.available
+    && taskStateContext.consistent
+    && snapshot?.workflow?.exists === false
+    && snapshot.active_child_task === null
+    && snapshot.current_unit === null
+    && snapshot.units.length === 0;
+}
+
+function publishAuthoritativeReset(
+  url,
+  envelope,
+  { error = false, sessionRequestFence = null } = {},
+) {
+  if (!authoritativeTaskStateEnvelopeAccepted(envelope)) return true;
+  const isEmpty = authoritativeTaskStateIsEmpty();
+  if (
+    isEmpty
+    && (
+      error
+      || taskStateApiPath(url) === '/api/reset'
+      || envelope?.intent === 'a3_session_reset'
+      || sessionRequestFence?.inherited
+    )
+  ) return publishSessionReset(sessionRequestFence);
+  return true;
+}
+
+function applyAuthoritativeEmptyError(url, envelope, { sessionRequestFence = null } = {}) {
+  if (!authoritativeTaskStateEnvelopeAccepted(envelope) || !authoritativeTaskStateIsEmpty()) {
+    return null;
+  }
+  const published = publishAuthoritativeReset(
+    url,
+    envelope,
+    { error: true, sessionRequestFence },
+  );
+  const applied = applyResetSessionContext(envelope);
+  if (applied) {
+    clearHistory();
+    renderHistory();
+  }
+  if (!published || !applied) preserveSessionRequestFence(sessionRequestFence);
+  return published && applied;
+}
+
+function applyAuthoritativeEmptyAfterCoordinationFailure(envelope, sessionRequestFence) {
+  preserveSessionRequestFence(sessionRequestFence);
+  const applied = applyResetSessionContext(envelope);
+  if (applied) {
+    clearHistory();
+    renderHistory();
+  }
+  return applied;
+}
+
+function resolveSessionRequestFenceFromEnvelope(envelope, sessionRequestFence) {
+  if (
+    authoritativeTaskStateEnvelopeAccepted(envelope)
+    || isTaskStateQueueNoUpdate(envelope)
+  ) resolveSessionRequestFence(sessionRequestFence);
 }
 
 function beginTaskStateRequest(url, responseMode) {
   const paths = responseMode === 'stream' ? TASK_STATE_STREAM_PATHS : TASK_STATE_JSON_PATHS;
   if (!paths.has(taskStateApiPath(url))) return null;
   const request = taskStateConsumer.begin();
+  activeTaskStateRequest = request;
+  taskStateRequestGeneration += 1;
+  activeTaskStateRequestGeneration = taskStateRequestGeneration;
   taskStateContext = taskStateConsumer.current();
-  syncA2ActionButtons();
+  syncTaskStateActionButtons();
   return request;
 }
 
@@ -220,14 +602,52 @@ function isTaskStateQueueNoUpdate(envelope) {
 
 function consumeTaskStateResponse(request, envelope, { error = false } = {}) {
   if (request === null || (error && isTaskStateQueueNoUpdate(envelope))) return;
+  const accepted = request === activeTaskStateRequest;
+  const acceptedGeneration = accepted ? activeTaskStateRequestGeneration : 0;
   taskStateContext = taskStateConsumer.consume(request, envelope);
-  syncA2ActionButtons();
+  if (accepted && envelope && typeof envelope === 'object') {
+    taskStateAcceptedEnvelopes.delete(envelope);
+    taskStateEnvelopeBindings.delete(envelope);
+    if (taskStateContext.available && taskStateContext.consistent) {
+      const workflow = taskStateContext.snapshot?.workflow;
+      const target = currentWorkflowActionTarget();
+      const legacyA3 = normalizeA3Snapshot(envelope?.session?.a3);
+      const projectionAllowed = workflow?.route === 'A3'
+        ? a3SnapshotMatchesTaskState(legacyA3, target)
+        : legacyA3 === null;
+      if (projectionAllowed) {
+        if (workflow?.route === 'A3') taskStateEnvelopeBindings.set(envelope, target);
+        taskStateAcceptedEnvelopes.set(envelope, acceptedGeneration);
+      } else {
+        invalidateTaskStateContext();
+      }
+    }
+  }
+  if (accepted) {
+    activeTaskStateRequest = null;
+    activeTaskStateRequestGeneration = 0;
+  }
+  syncTaskStateActionButtons();
 }
 
 function finishTaskStateRequest(request) {
   if (request === null) return;
+  if (request === activeTaskStateRequest) {
+    activeTaskStateRequest = null;
+    activeTaskStateRequestGeneration = 0;
+  }
   taskStateContext = taskStateConsumer.finish(request);
-  syncA2ActionButtons();
+  syncTaskStateActionButtons();
+}
+
+function invalidateTaskStateContext() {
+  const retirement = taskStateConsumer.begin();
+  taskStateContext = taskStateConsumer.current();
+  taskStateConsumer.finish(retirement);
+  activeTaskStateRequest = null;
+  activeTaskStateRequestGeneration = 0;
+  taskStateRequestGeneration += 1;
+  syncTaskStateActionButtons();
 }
 
 function currentChildActionTarget() {
@@ -251,6 +671,7 @@ function candidateChildActionBinding(item, index) {
     actionTarget,
     actionContext: {
       type: 'select_candidate',
+      task_id: actionTarget.childTaskId,
       rank: actionTarget.candidateRank,
       task_revision: actionTarget.childTaskRevision,
       candidate_generation: actionTarget.childCandidateGeneration,
@@ -260,25 +681,38 @@ function candidateChildActionBinding(item, index) {
 
 function recoveryChildActionBinding(action, retryAction, item) {
   if (action === 'retry_search') {
+    const target = {
+      childTaskId: String(item.childTaskId || ''),
+      childTaskRevision: Number(item.childTaskRevision || 0),
+    };
     return {
       action: 'retry_search',
-      target: {
-        childTaskId: String(item.childTaskId || ''),
-        childTaskRevision: Number(item.childTaskRevision || 0),
+      target,
+      actionContext: {
+        type: 'retry_search',
+        task_id: target.childTaskId,
+        task_revision: target.childTaskRevision,
       },
     };
   }
-  if (action !== 'retry_request' || retryAction?.actionContext?.type !== 'select_candidate') {
+  if (
+    action !== 'retry_request'
+    || !['select_candidate', 'retry_search'].includes(retryAction?.actionContext?.type)
+  ) {
     return null;
   }
+  const actionContext = retryAction.actionContext;
   return {
-    action: 'select_candidate',
+    action: actionContext.type,
     target: {
-      childTaskId: String(item.childTaskId || ''),
-      childTaskRevision: Number(retryAction.actionContext.task_revision || 0),
-      childCandidateGeneration: String(retryAction.actionContext.candidate_generation || ''),
-      candidateRank: Number(retryAction.actionContext.rank || 0),
+      childTaskId: String(actionContext.task_id || ''),
+      childTaskRevision: Number(actionContext.task_revision || 0),
+      ...(actionContext.type === 'select_candidate' ? {
+        childCandidateGeneration: String(actionContext.candidate_generation || ''),
+        candidateRank: Number(actionContext.rank || 0),
+      } : {}),
     },
+    actionContext,
   };
 }
 
@@ -324,6 +758,168 @@ function bindChildActionButton(button, action, target) {
   }
 }
 
+function currentWorkflowActionTarget() {
+  const workflow = taskStateContext?.snapshot?.workflow;
+  if (!workflow?.exists) return null;
+  return {
+    workflowId: String(workflow.workflow_id || ''),
+    workflowRevision: Number(workflow.task_revision || 0),
+  };
+}
+
+function workflowActionTargetMatchesA3(target, a3) {
+  const workflow = taskStateContext?.snapshot?.workflow;
+  return Boolean(
+    target
+    && a3
+    && workflow?.exists
+    && workflow.route === 'A3'
+    && String(target.workflowId || '') === workflow.workflow_id
+    && Number(target.workflowRevision || 0) === workflow.task_revision
+    && Number(a3.task_revision || 0) === Number(target.workflowRevision || 0)
+    && String(a3.phase || '') === workflow.phase
+  );
+}
+
+function taskStateWorkflowUnit(unitId) {
+  const cleanUnitId = String(unitId || '');
+  return taskStateContext?.snapshot?.units.find((unit) => unit.unit_id === cleanUnitId) || null;
+}
+
+function taskStateAllowsWorkflowAction(action, target = null) {
+  if (!taskStateV1.allowsWorkflowAction(taskStateContext, action)) return false;
+  if (!target || typeof target !== 'object') return false;
+  const workflow = taskStateContext.snapshot?.workflow;
+  const workflowId = String(target.workflowId || '');
+  const workflowRevision = Number(target.workflowRevision || 0);
+  if (
+    !workflow?.exists
+    || workflow.route !== 'A3'
+    || !workflowId
+    || workflowId !== workflow.workflow_id
+    || workflowRevision !== workflow.task_revision
+  ) return false;
+  if (action === 'select_unit') {
+    const unitId = String(target.unitId || '');
+    const unit = unitId ? taskStateWorkflowUnit(unitId) : null;
+    return Boolean(unit && ['AVAILABLE', 'PREPARED'].includes(unit.status));
+  }
+  if (action === 'prepare_units') {
+    const unitIds = Array.isArray(target.unitIds) ? target.unitIds.map(String) : [];
+    if (!unitIds.length || unitIds.some((unitId) => !unitId) || new Set(unitIds).size !== unitIds.length) {
+      return false;
+    }
+    return unitIds.every((unitId) => taskStateWorkflowUnit(unitId)?.status === 'AVAILABLE');
+  }
+  if (action === 'submit_crop') {
+    const unitId = String(target.unitId || '');
+    const currentUnit = taskStateContext.snapshot?.current_unit;
+    return Boolean(unitId && currentUnit?.unit_id === unitId && currentUnit.status === 'ACTIVE');
+  }
+  return false;
+}
+
+function taskStateAllowsA3Action(action, target, a3 = a3Current()) {
+  if (!workflowActionTargetMatchesA3(target, a3)) return false;
+  if (
+    action === 'submit_crop'
+    && String(a3?.selected_unit?.unit_id || '') !== String(target?.unitId || '')
+  ) return false;
+  return taskStateAllowsWorkflowAction(action, target);
+}
+
+function a3SnapshotMatchesTaskState(a3, target) {
+  if (!workflowActionTargetMatchesA3(target, a3)) return false;
+  const stateUnits = taskStateContext?.snapshot?.units || [];
+  if (a3.units.length !== stateUnits.length) return false;
+  const legacyUnits = new Map();
+  for (const unit of a3.units) {
+    if (!unit.unit_id || legacyUnits.has(unit.unit_id)) return false;
+    legacyUnits.set(unit.unit_id, unit);
+  }
+  for (const unit of stateUnits) {
+    const legacyUnit = legacyUnits.get(unit.unit_id);
+    const preparationStatus = String(legacyUnit?.preparation_status || '');
+    if (
+      !legacyUnit
+      || legacyUnit.page_index !== unit.page_index
+      || legacyUnit.display_label !== unit.display_label
+      || legacyUnit.completed !== (unit.status === 'COMPLETED')
+      || legacyUnit.searched !== (unit.status === 'CLOSED')
+      || legacyUnit.selected !== (unit.status === 'ACTIVE')
+      || !['pending', 'located', 'manual', 'ready'].includes(preparationStatus)
+    ) return false;
+    if (!legacyUnit.completed && !legacyUnit.searched && !legacyUnit.selected) {
+      if (preparationStatus === 'ready' && !legacyUnit.crop_available) return false;
+      if ((preparationStatus === 'ready') !== (unit.status === 'PREPARED')) return false;
+    }
+  }
+  const currentUnit = taskStateContext.snapshot?.current_unit || null;
+  const currentUnitId = String(currentUnit?.unit_id || '');
+  if (String(a3.selected_unit?.unit_id || '') !== currentUnitId) return false;
+  if (String(a3.selected_unit?.display_label || '') !== String(currentUnit?.display_label || '')) {
+    return false;
+  }
+  return a3.units.every((unit) => unit.selected === (unit.unit_id === currentUnitId));
+}
+
+function taskStateAllowsA3UnitNavigation(target, a3 = a3Current()) {
+  if (!workflowActionTargetMatchesA3(target, a3)) return false;
+  const units = taskStateContext?.snapshot?.units || [];
+  return units.some((unit) => taskStateAllowsWorkflowAction('select_unit', {
+    ...target,
+    unitId: unit.unit_id,
+  })) || units.some((unit) => taskStateAllowsWorkflowAction('prepare_units', {
+    ...target,
+    unitIds: [unit.unit_id],
+  }));
+}
+
+function workflowActionTargetFromControl(control) {
+  const target = {
+    workflowId: String(control.dataset.workflowId || ''),
+    workflowRevision: Number(control.dataset.workflowRevision || 0),
+  };
+  if (Object.hasOwn(control.dataset, 'workflowUnitId')) {
+    target.unitId = String(control.dataset.workflowUnitId || '');
+  }
+  if (Object.hasOwn(control.dataset, 'workflowUnitIds')) {
+    try {
+      const unitIds = JSON.parse(control.dataset.workflowUnitIds || '[]');
+      target.unitIds = Array.isArray(unitIds) ? unitIds.map(String) : [];
+    } catch (_error) {
+      target.unitIds = [];
+    }
+  }
+  return target;
+}
+
+function bindWorkflowActionControl(control, action, target, { hideWhenDenied = false } = {}) {
+  delete control.dataset.a3UnitNavigation;
+  delete control.dataset.workflowUnitId;
+  delete control.dataset.workflowUnitIds;
+  control.dataset.workflowAction = action;
+  control.dataset.workflowId = String(target?.workflowId || '');
+  control.dataset.workflowRevision = String(Number(target?.workflowRevision || 0));
+  control.dataset.hideWhenDenied = String(Boolean(hideWhenDenied));
+  if (Object.hasOwn(target || {}, 'unitId')) {
+    control.dataset.workflowUnitId = String(target.unitId || '');
+  }
+  if (Object.hasOwn(target || {}, 'unitIds')) {
+    control.dataset.workflowUnitIds = JSON.stringify(target.unitIds || []);
+  }
+}
+
+function bindA3UnitNavigationControl(control, target, { hideWhenDenied = false } = {}) {
+  delete control.dataset.workflowAction;
+  delete control.dataset.workflowUnitId;
+  delete control.dataset.workflowUnitIds;
+  control.dataset.a3UnitNavigation = 'true';
+  control.dataset.workflowId = String(target?.workflowId || '');
+  control.dataset.workflowRevision = String(Number(target?.workflowRevision || 0));
+  control.dataset.hideWhenDenied = String(Boolean(hideWhenDenied));
+}
+
 function syncA2ActionButtons() {
   if (typeof document !== 'object') return;
   document.querySelectorAll('[data-child-action]').forEach((button) => {
@@ -337,6 +933,11 @@ function syncA2ActionButtons() {
     }
     if (button.classList.contains('message-recovery')) button.hidden = !allowed;
   });
+}
+
+function syncTaskStateActionButtons() {
+  syncA2ActionButtons();
+  if (typeof syncA3ActionButtons === 'function') syncA3ActionButtons();
 }
 
 function protocolFields(source = {}) {
@@ -370,15 +971,16 @@ function clientProtocolError(message, code, requestId, recoveryActions = ['retry
 
 function saveHistory({ refreshActivity = false } = {}) {
   if (refreshActivity || !Number.isFinite(historyLastActivityAt) || historyLastActivityAt <= 0) {
-    historyLastActivityAt = Date.now();
+    historyLastActivityAt = touchSharedSessionActivity();
+  } else {
+    historyLastActivityAt = Math.max(historyLastActivityAt, storedHistoryActivityAt());
   }
-  try {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify({
-      savedAt: historyLastActivityAt,
-      lastActivityAt: historyLastActivityAt,
-      messages: history.slice(-HISTORY_LIMIT),
-    }));
-  } catch (_error) {
+  const saved = safeLocalStorageSet(HISTORY_KEY, JSON.stringify({
+    savedAt: historyLastActivityAt,
+    lastActivityAt: historyLastActivityAt,
+    messages: history.slice(-HISTORY_LIMIT),
+  }));
+  if (!saved) {
     if (!historyStorageWarningShown) {
       historyStorageWarningShown = true;
       setTimeout(() => showFailureNotice(
@@ -420,6 +1022,8 @@ function remember(item) {
     childTaskId: String(item.childTaskId || ''),
     childTaskRevision: Number(item.childTaskRevision || 0),
     childCandidateGeneration: String(item.childCandidateGeneration || ''),
+    workflowId: String(item.workflowId || ''),
+    workflowRevision: Number(item.workflowRevision || 0),
     messageId: String(item.messageId || ''),
     responseId: String(item.responseId || ''),
     noticeKey: String(item.noticeKey || ''),
@@ -454,22 +1058,36 @@ function normalizeRetryAction(action) {
   if (!action || action.type !== 'text') return null;
   const value = String(action.value || '').trim();
   if (!value) return null;
-  const context = action.actionContext && typeof action.actionContext === 'object'
+  const rawContext = action.actionContext && typeof action.actionContext === 'object'
+    ? action.actionContext
+    : null;
+  const contextType = String(rawContext?.type || '');
+  const context = ['select_candidate', 'retry_search'].includes(contextType)
     ? {
-        type: String(action.actionContext.type || ''),
-        rank: Number(action.actionContext.rank || 0),
-        task_revision: Number(action.actionContext.task_revision || 0),
-        candidate_generation: String(action.actionContext.candidate_generation || ''),
+        type: contextType,
+        task_id: String(rawContext.task_id || ''),
+        task_revision: Number(rawContext.task_revision || 0),
+        ...(contextType === 'select_candidate' ? {
+          rank: Number(rawContext.rank || 0),
+          candidate_generation: String(rawContext.candidate_generation || ''),
+        } : {}),
       }
     : null;
   return {
     type: 'text', value, displayValue: String(action.displayValue || value),
-    actionContext: context?.type === 'select_candidate' ? context : null,
+    actionContext: context,
   };
 }
 
 function mergeRecoveryActions(...groups) {
   return normalizeRecoveryActions(groups.flat());
+}
+
+function taskStateFailureRecoveryActions(actions = []) {
+  const normalized = normalizeRecoveryActions(actions);
+  return taskStateContext?.reason === 'MISSING'
+    ? mergeRecoveryActions(normalized, ['retry_connection'])
+    : normalized;
 }
 
 function normalizeA3Snapshot(value) {
@@ -736,7 +1354,7 @@ function createRecoveryActions(actions, item = {}) {
       else if (action === 'retry_connection') retryConnection();
       else if (action === 'retry_request') retryTextAction(retryAction, childActionTarget);
       else if (action === 'retry_search' && taskStateAllowsChildAction(action, childActionTarget)) {
-        sendTextValue('重试');
+        sendTextValue('重试', '重试', childBinding.actionContext, childActionTarget);
       }
     });
     host.append(button);
@@ -805,24 +1423,32 @@ async function copyAuthorContact() {
   }
 }
 
-function createA3UnitActions(rawA3) {
+function createA3UnitActions(rawA3, item = {}) {
   const a3 = normalizeA3Snapshot(rawA3);
   if (!a3 || !a3.units.length) return null;
-  const current = normalizeA3Snapshot(sessionContext.a3);
-  const currentRevision = Number(current?.task_revision || 0);
-  const isCurrentList = current && currentRevision === Number(a3.task_revision || 0);
+  const workflowTarget = {
+    workflowId: String(item.workflowId || ''),
+    workflowRevision: Number(item.workflowRevision || 0),
+  };
   if (a3.phase === 'A2_ACTIVE') {
-    const remaining = current?.units.filter((unit) => !unit.completed && !unit.searched) || [];
-    if (!isCurrentList || current?.phase !== 'A2_ACTIVE' || remaining.length <= 1) return null;
     const host = document.createElement('div');
     host.className = 'a3-unit-actions';
     host.dataset.a3Revision = String(a3.task_revision || 0);
+    host.dataset.a3Phase = a3.phase;
+    host.dataset.workflowId = workflowTarget.workflowId;
+    host.dataset.workflowRevision = String(workflowTarget.workflowRevision);
     const switchButton = document.createElement('button');
     switchButton.type = 'button';
     switchButton.className = 'a3-unit-choice a3-switch-question';
-    switchButton.dataset.a3Revision = String(a3.task_revision || 0);
     switchButton.textContent = '换题重新搜';
-    switchButton.addEventListener('click', openA3Sheet);
+    bindA3UnitNavigationControl(switchButton, workflowTarget, { hideWhenDenied: true });
+    const allowed = taskStateAllowsA3UnitNavigation(workflowTarget, a3);
+    switchButton.disabled = !allowed;
+    switchButton.hidden = !allowed;
+    switchButton.addEventListener('click', () => {
+      if (!taskStateAllowsA3UnitNavigation(workflowTarget, a3Current())) return;
+      openA3Sheet(workflowTarget);
+    });
     host.append(switchButton);
     return host;
   }
@@ -830,12 +1456,22 @@ function createA3UnitActions(rawA3) {
     const host = document.createElement('div');
     host.className = 'a3-unit-actions';
     host.dataset.a3Revision = String(a3.task_revision || 0);
+    host.dataset.a3Phase = a3.phase;
+    host.dataset.workflowId = workflowTarget.workflowId;
+    host.dataset.workflowRevision = String(workflowTarget.workflowRevision);
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'a3-unit-choice a3-open-auto-selection';
     const prepared = a3.units.filter((unit) => unit.requested && !unit.completed && !unit.searched).length;
     button.textContent = prepared ? `查看已准备题目（${prepared}）` : '选择要查询的题目';
-    button.addEventListener('click', openA3Sheet);
+    bindA3UnitNavigationControl(button, workflowTarget, { hideWhenDenied: true });
+    const allowed = taskStateAllowsA3UnitNavigation(workflowTarget, a3);
+    button.disabled = !allowed;
+    button.hidden = !allowed;
+    button.addEventListener('click', () => {
+      if (!taskStateAllowsA3UnitNavigation(workflowTarget, a3Current())) return;
+      openA3Sheet(workflowTarget);
+    });
     host.append(button);
     return host;
   }
@@ -843,18 +1479,20 @@ function createA3UnitActions(rawA3) {
   const host = document.createElement('div');
   host.className = 'a3-unit-actions';
   host.dataset.a3Revision = String(a3.task_revision || 0);
-  const selectionAllowed = ['WAIT_UNIT_SELECTION', 'CROP_REQUIRED'].includes(current?.phase || '');
+  host.dataset.a3Phase = a3.phase;
+  host.dataset.workflowId = workflowTarget.workflowId;
+  host.dataset.workflowRevision = String(workflowTarget.workflowRevision);
   a3.units.forEach((unit) => {
-    const currentUnit = current?.units.find((item) => item.unit_id === unit.unit_id);
-    const completed = Boolean(currentUnit?.completed || unit.completed);
-    const searched = Boolean(currentUnit?.searched || unit.searched);
-    const closed = completed || searched;
+    const completed = Boolean(unit.completed);
+    const searched = Boolean(unit.searched);
     const button = document.createElement('button');
     button.type = 'button';
     button.className = `a3-unit-choice${completed ? ' is-complete' : ''}`;
     button.dataset.a3UnitId = unit.unit_id;
     button.dataset.a3Revision = String(a3.task_revision || 0);
-    button.disabled = !isCurrentList || !selectionAllowed || closed || !currentUnit;
+    const actionTarget = { ...workflowTarget, unitId: unit.unit_id };
+    bindWorkflowActionControl(button, 'select_unit', actionTarget);
+    button.disabled = !taskStateAllowsA3Action('select_unit', actionTarget, a3);
     if (completed) {
       button.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>';
       const label = document.createElement('span');
@@ -865,21 +1503,31 @@ function createA3UnitActions(rawA3) {
     } else {
       button.textContent = unit.display_label || '未标号题目';
     }
-    button.addEventListener('click', () => selectA3Unit(unit.unit_id));
+    button.addEventListener('click', () => selectA3Unit(actionTarget));
     host.append(button);
   });
-  if (current?.phase === 'CROP_REQUIRED' && current.selected_unit?.unit_id) {
-    host.append(createA3ContinueCropButton());
+  if (a3.phase === 'CROP_REQUIRED' && a3.selected_unit?.unit_id) {
+    host.append(createA3ContinueCropButton({
+      ...workflowTarget,
+      unitId: a3.selected_unit.unit_id,
+    }, a3));
   }
   return host;
 }
 
-function createA3ContinueCropButton() {
+function createA3ContinueCropButton(actionTarget, a3 = a3Current()) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'a3-unit-choice a3-continue-crop';
   button.textContent = '继续裁剪';
-  button.addEventListener('click', () => openA3Crop({ force: true }));
+  bindWorkflowActionControl(button, 'submit_crop', actionTarget, { hideWhenDenied: true });
+  const allowed = taskStateAllowsA3Action('submit_crop', actionTarget, a3);
+  button.disabled = !allowed;
+  button.hidden = !allowed;
+  button.addEventListener('click', () => {
+    if (!taskStateAllowsA3Action('submit_crop', actionTarget)) return;
+    openA3Crop(actionTarget, { force: true });
+  });
   return button;
 }
 
@@ -1018,7 +1666,7 @@ function addMessage(item, persist = true) {
     persist
     && (
       normalizeRecoveryActions(item.recoveryActions).includes('retry_search')
-      || retryAction?.actionContext?.type === 'select_candidate'
+      || ['select_candidate', 'retry_search'].includes(retryAction?.actionContext?.type)
     )
     && !item.childTaskId
   ) {
@@ -1077,7 +1725,7 @@ function addMessage(item, persist = true) {
     images.forEach((url, index) => grid.append(createMediaCard(url, index, { ...item, images })));
     content.append(grid);
   }
-  const a3Actions = createA3UnitActions(item.a3);
+  const a3Actions = createA3UnitActions(item.a3, item);
   const recoveryActions = createRecoveryActions(item.recoveryActions, item);
   const authorContactAction = createAuthorContactAction(item.authorContact);
   if (a3Actions && authorContactAction) a3Actions.append(authorContactAction);
@@ -1092,8 +1740,7 @@ function addMessage(item, persist = true) {
   if (feedbackEligible) content.append(createMessageActions(item, article));
   article.append(content);
   chat.append(article);
-  syncA2ActionButtons();
-  syncA3ActionButtons();
+  syncTaskStateActionButtons();
   if (persist) remember(item);
   scrollToLatest();
   return article;
@@ -1115,8 +1762,14 @@ function isLegacyInlineOnlyMessage(item, index, messages) {
 }
 
 function restoreHistory() {
+  restoreA3CropHistoryState();
   try {
-    const raw = localStorage.getItem(HISTORY_KEY) || localStorage.getItem(LEGACY_HISTORY_KEY);
+    const currentRaw = safeLocalStorageGet(HISTORY_KEY);
+    const legacyRaw = currentRaw ? null : safeLocalStorageGet(LEGACY_HISTORY_KEY);
+    if (currentRaw === undefined || legacyRaw === undefined) {
+      throw new Error('browser storage is unavailable');
+    }
+    const raw = currentRaw || legacyRaw;
     const stored = JSON.parse(raw || 'null');
     const activityAt = Number(stored?.lastActivityAt ?? stored?.savedAt);
     const now = Date.now();
@@ -1130,7 +1783,9 @@ function restoreHistory() {
       return;
     }
     if (now - activityAt >= HISTORY_TTL_MS) {
-      clearHistory();
+      clearHistory({ preserveStoredHistory: true });
+      sessionResetRequired = true;
+      sessionResetActivityAt = activityAt;
       pendingSessionExpiredNotice = true;
       return;
     }
@@ -1157,7 +1812,7 @@ function restoreHistory() {
       const noticeKey = String(item.noticeKey || '').trim();
       if (noticeKey) activeFailureNotices.add(noticeKey);
     });
-    localStorage.removeItem(LEGACY_HISTORY_KEY);
+    safeLocalStorageRemove(LEGACY_HISTORY_KEY);
     saveHistory();
     renderHistory();
   } catch (_error) {
@@ -1180,9 +1835,72 @@ function flushStartupNotices() {
 
 async function repairUploadedImageHistory() {
   try {
-    const data = await request('/api/session', {}, 5000, '会话恢复超时。', false);
-    updateSessionContext(data);
+    refreshHistoryActivityFromStorage();
+    let resetRequired = sessionResetRequired;
+    let data;
+    if (resetRequired) {
+      if (!sessionResetCoordinationAvailable()) {
+        flushStartupNotices();
+        showFailureNotice(
+          'connection',
+          '旧对话已经过期，请点击开始新对话后继续。',
+          ['new_chat'],
+        );
+        return false;
+      }
+      const lockedResult = await withSessionRequestLock(
+        '/api/reset',
+        async (sessionRequestFence) => {
+          refreshHistoryActivityFromStorage();
+          if (!sessionResetRequired) {
+            return {
+              reset: false,
+              data: await request(
+                '/api/session', {}, 5000, '会话恢复超时。', false, '', true,
+                sessionRequestFence,
+              ),
+            };
+          }
+          return {
+            reset: true,
+            data: await request(
+              '/api/reset',
+              { method: 'POST' },
+              5000,
+              '新对话创建超时。',
+              false,
+              '',
+              true,
+              sessionRequestFence,
+            ),
+          };
+        },
+        { requireSupport: true },
+      );
+      if (!lockedResult) return false;
+      if (lockedResult.coordinationFailed) {
+        flushStartupNotices();
+        showFailureNotice(
+          'connection',
+          '浏览器无法安全同步新会话，请点击开始新对话后继续。',
+          ['new_chat'],
+        );
+        return false;
+      }
+      resetRequired = lockedResult.reset;
+      data = lockedResult.data;
+    } else {
+      data = await request('/api/session', {}, 5000, '会话恢复超时。', false);
+    }
+    const accepted = resetRequired ? applyResetSessionContext(data) : updateSessionContext(data);
+    if (!accepted) return false;
     resolveFailureNotice('connection');
+    if (resetRequired) {
+      clearHistory();
+      renderHistory();
+      flushStartupNotices();
+      return true;
+    }
     renderHistory();
     if (!data.session?.session_valid) {
       if (history.length) {
@@ -1192,19 +1910,20 @@ async function repairUploadedImageHistory() {
       } else {
         flushStartupNotices();
       }
-      return;
+      return true;
     }
     flushStartupNotices();
-    if (!isPersistentImage(data.uploaded_image)) return;
+    if (!isPersistentImage(data.uploaded_image)) return true;
     for (let index = history.length - 1; index >= 0; index -= 1) {
       const item = history[index];
       if (item.me && item.message === '我发了一张题图。' && (!Array.isArray(item.images) || !item.images.length)) {
         item.images = [data.uploaded_image];
         saveHistory();
         renderHistory();
-        return;
+        return true;
       }
     }
+    return true;
   } catch (_error) {
     flushStartupNotices();
     showFailureNotice(
@@ -1213,10 +1932,50 @@ async function repairUploadedImageHistory() {
       ['retry_connection'],
       { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: createRequestId(), search_id: sessionContext.search_id || '' },
     );
+    return false;
   }
 }
 
-function clearHistory() {
+function runSessionBootstrap() {
+  if (sessionBootstrapPending && sessionBootstrap) return sessionBootstrap;
+  sessionBootstrapPending = true;
+  const pending = repairUploadedImageHistory().finally(() => {
+    if (sessionBootstrap === pending) sessionBootstrapPending = false;
+  });
+  sessionBootstrap = pending;
+  return pending;
+}
+
+async function sessionTaskStartAllowed() {
+  refreshHistoryActivityFromStorage();
+  const pending = sessionBootstrap;
+  if (pending) await pending;
+  if (!sessionResetRequired) return true;
+  setStatus('error', '需要先重新建立会话');
+  showFailureNotice(
+    'connection',
+    '旧对话已经过期，请先重新连接并建立新会话。',
+    ['retry_connection'],
+    { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: createRequestId(), search_id: '' },
+  );
+  return false;
+}
+
+function clearA3WorkflowState() {
+  a3SourceUrl = '';
+  a3SourceWorkflowKey = '';
+  a3Bounds = null;
+  a3LocalDrafts.clear();
+  a3PrepareSelection.clear();
+  a3DismissedKey = '';
+  a3KnownWorkflowKey = '';
+  clearA3MediaElementSources();
+  closeA3TransientUi();
+  clearA3CropHistoryState();
+  closeLightbox();
+}
+
+function clearHistory({ preserveStoredHistory = false } = {}) {
   history = [];
   activeFailureNotices.clear();
   historyLastActivityAt = 0;
@@ -1224,26 +1983,56 @@ function clearHistory() {
   historyExpiryTimer = null;
   clearPendingUpload();
   releaseAllObjectUrls();
-  a3SourceUrl = '';
-  a3Bounds = null;
-  a3LocalDrafts.clear();
-  a3DismissedKey = '';
-  a3KnownRevision = 0;
-  localStorage.removeItem(HISTORY_KEY);
-  localStorage.removeItem(LEGACY_HISTORY_KEY);
+  clearA3WorkflowState();
+  if (!preserveStoredHistory) {
+    safeLocalStorageRemove(HISTORY_KEY);
+    safeLocalStorageRemove(LEGACY_HISTORY_KEY);
+  }
+}
+
+function retireSessionForExternalReset() {
+  const controller = activeController;
+  activeController = null;
+  operationVersion += 1;
+  if (controller) controller.abort('session-reset');
+  invalidateTaskStateContext();
+  setBusy(false);
+  clearHistory({ preserveStoredHistory: true });
+  sessionResetRequired = false;
+  sessionResetActivityAt = 0;
+  pendingSessionExpiredNotice = false;
+  sessionContext = {
+    session_valid: false, phase: 'IDLE', has_active_image: false,
+    task_revision: 0, candidate_generation: '', candidate_count: 0, search_id: '', a3: null,
+    a3WorkflowId: '', a3WorkflowRevision: 0,
+  };
+  renderHistory();
+  closeLightbox();
+  setStatus('ready', '会话已在另一页面重置');
 }
 
 function expireHistoryIfNeeded() {
   if (!history.length || !Number.isFinite(historyLastActivityAt) || historyLastActivityAt <= 0) return false;
+  if (refreshHistoryActivityFromStorage()) return false;
   if (Date.now() - historyLastActivityAt < HISTORY_TTL_MS) {
     scheduleHistoryExpiry();
     return false;
   }
-  clearHistory();
+  const expiredActivityAt = historyLastActivityAt;
+  const controller = activeController;
+  activeController = null;
+  operationVersion += 1;
+  if (controller) controller.abort('history-expired');
+  invalidateTaskStateContext();
+  setBusy(false);
+  clearHistory({ preserveStoredHistory: true });
+  sessionResetRequired = true;
+  sessionResetActivityAt = expiredActivityAt;
   renderHistory();
   sessionContext = {
     session_valid: false, phase: 'IDLE', has_active_image: false,
-    task_revision: 0, candidate_generation: '', candidate_count: 0,
+    task_revision: 0, candidate_generation: '', candidate_count: 0, search_id: '', a3: null,
+    a3WorkflowId: '', a3WorkflowRevision: 0,
   };
   closeLightbox();
   showSessionExpiredNotice();
@@ -1295,7 +2084,7 @@ function setBusy(value) {
   fileInput.disabled = value;
   form.setAttribute('aria-busy', String(value));
   updateComposer();
-  syncA2ActionButtons();
+  syncTaskStateActionButtons();
   if (!a3CropWorkspace.hidden) renderA3Selection();
 }
 
@@ -1417,7 +2206,35 @@ function streamedError(event) {
   return new UserVisibleError(text, actions, { retryable });
 }
 
-async function request(url, options, timeoutMs, timeoutMessage, track = true, networkMessage = '') {
+async function request(
+  url,
+  options,
+  timeoutMs,
+  timeoutMessage,
+  track = true,
+  networkMessage = '',
+  sessionLockHeld = false,
+  sessionRequestFence = null,
+) {
+  if (!sessionLockHeld && isTaskStateRequestPath(url)) {
+    if (isTaskStartingPath(url)) touchSharedSessionActivity();
+    return withSessionRequestLock(
+      url,
+      (requestFence) => request(
+        url,
+        options,
+        timeoutMs,
+        timeoutMessage,
+        track,
+        networkMessage,
+        true,
+        requestFence,
+      ),
+    );
+  }
+  if (taskStateApiPath(url) === '/api/reset') {
+    preserveSessionRequestFence(sessionRequestFence);
+  }
   const taskStateRequest = beginTaskStateRequest(url, 'json');
   const controller = new AbortController();
   const requestId = createRequestId();
@@ -1436,10 +2253,24 @@ async function request(url, options, timeoutMs, timeoutMessage, track = true, ne
     }
     if (!response.ok) {
       consumeTaskStateResponse(taskStateRequest, data, { error: true });
+      const emptyResetApplied = applyAuthoritativeEmptyError(
+        url,
+        data,
+        { sessionRequestFence },
+      );
+      if (emptyResetApplied === false) throw sessionCoordinationError();
+      if (emptyResetApplied === null) {
+        resolveSessionRequestFenceFromEnvelope(data, sessionRequestFence);
+      }
       throw safeHttpError(response.status, data, requestId);
     }
     if (!contentType.includes('application/json')) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
     consumeTaskStateResponse(taskStateRequest, data);
+    if (!publishAuthoritativeReset(url, data, { sessionRequestFence })) {
+      applyAuthoritativeEmptyAfterCoordinationFailure(data, sessionRequestFence);
+      throw sessionCoordinationError();
+    }
+    resolveSessionRequestFenceFromEnvelope(data, sessionRequestFence);
     return data;
   } catch (error) {
     if (error.name === 'AbortError') {
@@ -1468,7 +2299,26 @@ async function requestStream(
   onProgress,
   networkMessage = '',
   { renewTimeoutOnProgress = false } = {},
+  sessionLockHeld = false,
+  sessionRequestFence = null,
 ) {
+  if (!sessionLockHeld && isTaskStateRequestPath(url)) {
+    if (isTaskStartingPath(url)) touchSharedSessionActivity();
+    return withSessionRequestLock(
+      url,
+      (requestFence) => requestStream(
+        url,
+        options,
+        timeoutMs,
+        timeoutMessage,
+        onProgress,
+        networkMessage,
+        { renewTimeoutOnProgress },
+        true,
+        requestFence,
+      ),
+    );
+  }
   const taskStateRequest = beginTaskStateRequest(url, 'stream');
   const controller = new AbortController();
   const requestId = createRequestId();
@@ -1486,6 +2336,16 @@ async function requestStream(
     if (!response.ok) {
       let data = {};
       try { data = await response.json(); } catch (_error) { data = {}; }
+      consumeTaskStateResponse(taskStateRequest, data, { error: true });
+      const emptyResetApplied = applyAuthoritativeEmptyError(
+        url,
+        data,
+        { sessionRequestFence },
+      );
+      if (emptyResetApplied === false) throw sessionCoordinationError();
+      if (emptyResetApplied === null) {
+        resolveSessionRequestFenceFromEnvelope(data, sessionRequestFence);
+      }
       throw safeHttpError(response.status, data, requestId);
     }
     if (!response.body) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
@@ -1507,6 +2367,18 @@ async function requestStream(
         if (event.type === 'result') {
           const terminalResult = event.data;
           consumeTaskStateResponse(taskStateRequest, terminalResult);
+          if (!publishAuthoritativeReset(
+            url,
+            terminalResult,
+            { sessionRequestFence },
+          )) {
+            applyAuthoritativeEmptyAfterCoordinationFailure(
+              terminalResult,
+              sessionRequestFence,
+            );
+            throw sessionCoordinationError();
+          }
+          resolveSessionRequestFenceFromEnvelope(terminalResult, sessionRequestFence);
           clearTimeout(timer);
           try { await reader.cancel(); } catch (_error) { /* terminal result already won */ }
           if (!terminalResult) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
@@ -1514,6 +2386,15 @@ async function requestStream(
         }
         if (event.type === 'error') {
           consumeTaskStateResponse(taskStateRequest, event, { error: true });
+          const emptyResetApplied = applyAuthoritativeEmptyError(
+            url,
+            event,
+            { sessionRequestFence },
+          );
+          if (emptyResetApplied === false) throw sessionCoordinationError();
+          if (emptyResetApplied === null) {
+            resolveSessionRequestFenceFromEnvelope(event, sessionRequestFence);
+          }
           throw streamedError(event);
         }
       }
@@ -1540,8 +2421,9 @@ async function requestStream(
 }
 
 function responseItem(data) {
-  updateSessionContext(data);
-  const childTarget = currentChildActionTarget() || {};
+  const accepted = updateSessionContext(data);
+  const childTarget = accepted ? (currentChildActionTarget() || {}) : {};
+  const workflowTarget = accepted?.workflowTarget || {};
   const failure = data?.failure && typeof data.failure === 'object' ? data.failure : null;
   const protocol = protocolFields(data);
   const recoveryAction = protocolRecoveryAction(data?.action)
@@ -1556,6 +2438,7 @@ function responseItem(data) {
     candidateCount: Number(data.session?.candidate_count || 0),
     candidateGeneration: String(data.session?.candidate_generation || ''),
     ...childTarget,
+    ...workflowTarget,
     variant: protocol.status === 'ERROR' || failure
       ? 'error'
       : protocol.status === 'PARTIAL' ? 'partial' : '',
@@ -1564,7 +2447,7 @@ function responseItem(data) {
     messageId: createMessageId(),
     responseId: String(data.response_id || ''),
     createdAt: Date.now(),
-    a3: normalizeA3Snapshot(data.session?.a3),
+    a3: accepted?.a3 || null,
     feedbackImages: normalizeFeedbackImages(data.feedback_images),
     ...protocol,
   };
@@ -1581,20 +2464,87 @@ function setResponseStatus(data) {
 }
 
 function maybeOpenAutoPreparedA3Sheet(response) {
-  if (response.intent === 'a3_units_prepared' && response.a3?.auto_prepare_all_units) {
-    openA3Sheet();
+  const target = {
+    workflowId: String(response.workflowId || ''),
+    workflowRevision: Number(response.workflowRevision || 0),
+  };
+  if (
+    response.intent === 'a3_units_prepared'
+    && response.a3?.auto_prepare_all_units
+    && workflowActionTargetMatchesA3(target, response.a3)
+    && taskStateAllowsA3UnitNavigation(target)
+  ) {
+    openA3Sheet(target);
   }
 }
 
 function updateSessionContext(data) {
-  if (!data?.session) return;
+  const acceptedGeneration = data && typeof data === 'object'
+    ? taskStateAcceptedEnvelopes.get(data)
+    : undefined;
+  if (!data?.session || acceptedGeneration !== taskStateRequestGeneration) {
+    if (data && typeof data === 'object') {
+      taskStateAcceptedEnvelopes.delete(data);
+      taskStateEnvelopeBindings.delete(data);
+    }
+    return null;
+  }
+  taskStateAcceptedEnvelopes.delete(data);
+  const a3 = normalizeA3Snapshot(data.session.a3);
+  const envelopeWorkflowTarget = taskStateEnvelopeBindings.get(data) || null;
+  taskStateEnvelopeBindings.delete(data);
+  const workflowTarget = workflowActionTargetMatchesA3(envelopeWorkflowTarget, a3)
+    ? envelopeWorkflowTarget
+    : null;
+  const workflowKey = workflowIdentityKey(workflowTarget);
+  if (workflowKey !== a3SourceWorkflowKey) {
+    a3SourceUrl = '';
+    a3SourceWorkflowKey = '';
+  }
   sessionContext = {
     ...sessionContext,
     ...data.session,
-    a3: normalizeA3Snapshot(data.session.a3),
+    a3,
+    a3WorkflowId: String(workflowTarget?.workflowId || ''),
+    a3WorkflowRevision: Number(workflowTarget?.workflowRevision || 0),
   };
-  if (isPersistentImage(data.uploaded_image)) a3SourceUrl = data.uploaded_image;
+  if (workflowKey && isPersistentImage(data.uploaded_image)) {
+    a3SourceUrl = data.uploaded_image;
+    a3SourceWorkflowKey = workflowKey;
+  }
   syncA3Interface();
+  return { workflowTarget, a3 };
+}
+
+function applyResetSessionContext(data) {
+  const acceptedGeneration = data && typeof data === 'object'
+    ? taskStateAcceptedEnvelopes.get(data)
+    : undefined;
+  const snapshot = taskStateContext?.snapshot;
+  const accepted = acceptedGeneration === taskStateRequestGeneration
+    && taskStateContext.available
+    && taskStateContext.consistent
+    && snapshot?.workflow?.exists === false
+    && snapshot.active_child_task === null
+    && snapshot.current_unit === null
+    && snapshot.units.length === 0;
+  if (data && typeof data === 'object') {
+    taskStateAcceptedEnvelopes.delete(data);
+    taskStateEnvelopeBindings.delete(data);
+  }
+  if (!accepted) {
+    invalidateTaskStateContext();
+    return false;
+  }
+  sessionContext = {
+    session_valid: false, phase: 'IDLE', has_active_image: false,
+    task_revision: 0, candidate_generation: '', candidate_count: 0, search_id: '', a3: null,
+    a3WorkflowId: '', a3WorkflowRevision: 0,
+  };
+  sessionResetRequired = false;
+  sessionResetActivityAt = 0;
+  clearA3WorkflowState();
+  return true;
 }
 
 function invalidateCandidateActions() {
@@ -1610,15 +2560,77 @@ function a3Current() {
   return normalizeA3Snapshot(sessionContext.a3);
 }
 
+function currentA3WorkflowTarget(a3 = a3Current()) {
+  const target = {
+    workflowId: String(sessionContext.a3WorkflowId || ''),
+    workflowRevision: Number(sessionContext.a3WorkflowRevision || 0),
+  };
+  return workflowActionTargetMatchesA3(target, a3) ? target : null;
+}
+
+function currentA3CropActionTarget(a3 = a3Current()) {
+  const workflowTarget = currentA3WorkflowTarget(a3);
+  const currentUnit = taskStateContext?.snapshot?.current_unit;
+  const selectedUnitId = String(a3?.selected_unit?.unit_id || '');
+  if (!workflowTarget || !currentUnit || !selectedUnitId || selectedUnitId !== currentUnit.unit_id) {
+    return null;
+  }
+  return { ...workflowTarget, unitId: currentUnit.unit_id };
+}
+
 function a3CropReviewMessage(a3 = a3Current()) {
   const code = String(a3?.crop_review_code || '');
   return A3_CROP_REVIEW_MESSAGES[code]
     || '裁剪结果未通过，请重新选择区域裁剪。';
 }
 
-function a3DraftKey(a3 = a3Current()) {
-  const unitId = a3?.selected_unit?.unit_id || '';
-  return unitId ? `${Number(a3.task_revision || 0)}:${unitId}` : '';
+function workflowIdentityKey(target) {
+  const workflowId = String(target?.workflowId || '');
+  const workflowRevision = Number(target?.workflowRevision || 0);
+  return workflowId && Number.isInteger(workflowRevision) && workflowRevision > 0
+    ? JSON.stringify([workflowId, workflowRevision])
+    : '';
+}
+
+function a3MediaUrl(path, target) {
+  if (!workflowIdentityKey(target)) return '';
+  return `${path}?workflow_id=${encodeURIComponent(target.workflowId)}`
+    + `&task_revision=${encodeURIComponent(target.workflowRevision)}`;
+}
+
+function clearImageSource(image) {
+  if (!image) return;
+  if (typeof image.removeAttribute === 'function') image.removeAttribute('src');
+  else image.src = '';
+}
+
+function clearA3MediaElementSources() {
+  if (typeof a3SheetOverlayImage !== 'undefined') clearImageSource(a3SheetOverlayImage);
+  if (typeof a3SourceImage !== 'undefined') clearImageSource(a3SourceImage);
+  if (typeof a3SheetUnits !== 'undefined' && a3SheetUnits) {
+    a3SheetUnits.querySelectorAll?.('img').forEach(clearImageSource);
+    a3SheetUnits.replaceChildren?.();
+  }
+  if (typeof lightboxImage !== 'undefined' && lightboxImage) {
+    const lightboxSource = String(lightboxImage.getAttribute?.('src') || lightboxImage.src || '');
+    if (
+      lightboxSource.includes('/api/a3/overlay')
+      || lightboxSource.includes('/api/a3/crop/')
+      || lightboxSource.includes('/api/upload/')
+      || lightboxSource.includes('/api/media/')
+    ) {
+      if (typeof lightbox !== 'undefined' && lightbox && !lightbox.hidden) closeLightbox();
+      else clearImageSource(lightboxImage);
+    }
+  }
+}
+
+function a3DraftKey(a3 = a3Current(), target = currentA3WorkflowTarget(a3)) {
+  const unitId = Object.hasOwn(target || {}, 'unitId')
+    ? String(target.unitId || '')
+    : String(a3?.selected_unit?.unit_id || '');
+  const identity = workflowIdentityKey(target);
+  return identity && unitId ? JSON.stringify([target.workflowId, target.workflowRevision, unitId]) : '';
 }
 
 function validA3Bounds(value) {
@@ -1634,85 +2646,127 @@ function validA3Bounds(value) {
 }
 
 function syncA3ActionButtons() {
+  if (typeof document !== 'object') return;
   const a3 = a3Current();
   document.querySelectorAll('.a3-unit-choice[data-a3-unit-id]').forEach((button) => {
     const unit = a3?.units.find((item) => item.unit_id === button.dataset.a3UnitId);
-    const sameRevision = Number(button.dataset.a3Revision || 0) === Number(a3?.task_revision || 0);
     const completed = Boolean(unit?.completed);
     const searched = Boolean(unit?.searched);
-    const closed = completed || searched;
-    const selected = Boolean(unit?.selected);
-    const selectionAllowed = ['WAIT_UNIT_SELECTION', 'CROP_REQUIRED'].includes(a3?.phase || '');
     if (unit && searched) button.textContent = `${unit.display_label || '未标号题目'} · 已检索`;
     else if (unit && !completed) button.textContent = unit.display_label || '未标号题目';
     else if (unit && completed) {
       const label = button.querySelector('span');
       if (label) label.textContent = `${unit.display_label || '未标号题目'} · 已完成`;
     }
-    button.disabled = !unit || !sameRevision || !selectionAllowed || closed || selected;
     button.classList.toggle('is-complete', completed);
   });
+
   const actionGroups = Array.from(document.querySelectorAll('.a3-unit-actions'));
-  const currentGroups = actionGroups.filter((host) => (
-    Number(host.dataset.a3Revision || 0) === Number(a3?.task_revision || 0)
+  const workflowTarget = currentA3WorkflowTarget(a3);
+  const currentGroups = actionGroups.filter((host) => Boolean(
+    workflowTarget
+    && host.dataset.workflowId === workflowTarget.workflowId
+    && Number(host.dataset.workflowRevision || 0) === workflowTarget.workflowRevision
+    && host.dataset.a3Phase === taskStateContext.snapshot.workflow.phase
   ));
   let latestGroup = currentGroups.at(-1) || null;
-  const canContinueCrop = a3?.phase === 'CROP_REQUIRED' && Boolean(a3.selected_unit?.unit_id);
+  const cropTarget = currentA3CropActionTarget(a3);
+  const canContinueCrop = Boolean(
+    cropTarget && taskStateAllowsA3Action('submit_crop', cropTarget, a3)
+  );
   if (canContinueCrop && !latestGroup) {
     const latestAssistantContent = Array.from(document.querySelectorAll('.message:not(.user) .message-content')).at(-1);
     if (latestAssistantContent) {
       latestGroup = document.createElement('div');
       latestGroup.className = 'a3-unit-actions';
       latestGroup.dataset.a3Revision = String(a3.task_revision || 0);
+      latestGroup.dataset.a3Phase = a3.phase;
+      latestGroup.dataset.workflowId = workflowTarget.workflowId;
+      latestGroup.dataset.workflowRevision = String(workflowTarget.workflowRevision);
       latestAssistantContent.append(latestGroup);
       actionGroups.push(latestGroup);
     }
   }
   if (canContinueCrop && latestGroup && !latestGroup.querySelector('.a3-continue-crop')) {
-    latestGroup.append(createA3ContinueCropButton());
+    latestGroup.append(createA3ContinueCropButton(cropTarget, a3));
   }
   actionGroups.forEach((host) => {
     host.hidden = host !== latestGroup;
   });
-  document.querySelectorAll('.a3-switch-question').forEach((button) => {
-    const host = button.closest('.a3-unit-actions');
-    const available = Boolean(host && !host.hidden && a3?.phase === 'A2_ACTIVE');
-    button.hidden = !available;
-    button.disabled = !available;
+
+  document.querySelectorAll('[data-workflow-action]').forEach((control) => {
+    const action = String(control.dataset.workflowAction || '');
+    const allowed = !(typeof isBusy === 'boolean' && isBusy)
+      && taskStateAllowsA3Action(action, workflowActionTargetFromControl(control), a3);
+    control.disabled = !allowed;
+    if (control.dataset.hideWhenDenied === 'true') control.hidden = !allowed;
   });
-  document.querySelectorAll('.a3-continue-crop').forEach((button) => {
-    const host = button.closest('.a3-unit-actions');
-    const available = Boolean(host && !host.hidden && canContinueCrop);
-    button.hidden = !available;
-    button.disabled = !available;
+  document.querySelectorAll('[data-a3-unit-navigation]').forEach((control) => {
+    const allowed = !(typeof isBusy === 'boolean' && isBusy)
+      && taskStateAllowsA3UnitNavigation(workflowActionTargetFromControl(control), a3);
+    control.disabled = !allowed;
+    if (control.dataset.hideWhenDenied === 'true') control.hidden = !allowed;
   });
+
+  if (!a3CropWorkspace.hidden) renderA3Selection();
 }
 
 function syncA3Interface() {
   const a3 = a3Current();
   syncA3ActionButtons();
   if (!a3) {
-    if (!a3CropWorkspace.hidden) requestCloseA3Crop({ dismiss: false });
-    return;
-  }
-  if (a3KnownRevision && a3KnownRevision !== a3.task_revision) {
+    clearA3MediaElementSources();
+    a3Bounds = null;
     a3LocalDrafts.clear();
     a3PrepareSelection.clear();
     a3DismissedKey = '';
+    a3DismissNextCrop = false;
+    a3KnownWorkflowKey = '';
+    if (!a3CropWorkspace.hidden) requestCloseA3Crop({ dismiss: false });
+    else if (a3CropHistoryActive) clearA3CropHistoryState();
+    if (!a3SheetBackdrop.hidden) closeA3Sheet();
+    return;
   }
-  a3KnownRevision = a3.task_revision;
+  const workflowTarget = currentA3WorkflowTarget(a3);
+  const workflowKey = workflowIdentityKey(workflowTarget);
+  const cropTarget = currentA3CropActionTarget(a3);
+  const cropKey = cropTarget ? a3DraftKey(a3, cropTarget) : '';
+  if (a3KnownWorkflowKey !== workflowKey) {
+    clearA3MediaElementSources();
+    a3Bounds = null;
+    a3LocalDrafts.clear();
+    a3PrepareSelection.clear();
+    if (!cropKey || a3DismissedKey !== cropKey) a3DismissedKey = '';
+  }
+  a3KnownWorkflowKey = workflowKey;
   renderA3SheetUnits(a3);
-  if (a3.phase === 'CROP_REQUIRED') {
-    const key = a3DraftKey(a3);
-    if (key && key !== a3DismissedKey) openA3Crop();
+  if (cropTarget && taskStateAllowsA3Action('submit_crop', cropTarget, a3)) {
+    const key = cropKey;
+    if (a3DismissNextCrop && key) {
+      a3DismissedKey = key;
+      a3DismissNextCrop = false;
+    }
+    if (key && key !== a3DismissedKey) openA3Crop(cropTarget);
   } else if (!a3CropWorkspace.hidden) {
     requestCloseA3Crop({ dismiss: false });
+  } else if (a3CropHistoryActive) {
+    clearA3CropHistoryState();
+  } else {
+    a3DismissNextCrop = false;
+  }
+  if (!taskStateAllowsA3UnitNavigation(workflowTarget, a3) && !a3SheetBackdrop.hidden) {
+    closeA3Sheet();
   }
 }
 
-async function selectA3Unit(unitId) {
-  if (!unitId || isBusy) return;
-  a3DismissedKey = '';
+async function selectA3Unit(target) {
+  if (isBusy) return;
+  const actionTarget = target && typeof target === 'object' ? {
+    workflowId: String(target.workflowId || ''),
+    workflowRevision: Number(target.workflowRevision || 0),
+    unitId: String(target.unitId || ''),
+  } : null;
+  if (!taskStateAllowsA3Action('select_unit', actionTarget)) return;
   closeA3Sheet();
   const operation = ++operationVersion;
   const pending = addMessage({ message: '正在打开裁剪页', variant: 'pending' }, false);
@@ -1722,7 +2776,11 @@ async function selectA3Unit(unitId) {
     const data = await requestStream('/api/a3/select/stream', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ unit_id: unitId, task_revision: Number(a3Current()?.task_revision || 0) }),
+      body: JSON.stringify({
+        workflow_id: actionTarget.workflowId,
+        unit_id: actionTarget.unitId,
+        task_revision: actionTarget.workflowRevision,
+      }),
     }, A3_TIMEOUT_MS, '选题或搜题等待超时，请重新选择。', (event) => {
       if (operation !== operationVersion) return;
       updatePendingMessage(pending, event.message);
@@ -1738,7 +2796,7 @@ async function selectA3Unit(unitId) {
     pending.remove();
     addMessage({
       message: error.message || '选题失败，请重新选择。',
-      variant: 'error', recoveryActions: error.recoveryActions || [],
+      variant: 'error', recoveryActions: taskStateFailureRecoveryActions(error.recoveryActions),
       ...protocolFields(error),
     });
     setStatus('error', '选题失败');
@@ -1748,22 +2806,31 @@ async function selectA3Unit(unitId) {
   }
 }
 
-function openA3Crop({ force = false } = {}) {
+function openA3Crop(actionTarget, { force = false } = {}) {
   const a3 = a3Current();
   const selected = a3?.selected_unit;
-  if (!a3 || a3.phase !== 'CROP_REQUIRED' || !selected?.unit_id) return;
-  if (!a3SourceUrl) {
+  if (!selected?.unit_id || !taskStateAllowsA3Action('submit_crop', actionTarget, a3)) return;
+  const workflowKey = workflowIdentityKey(actionTarget);
+  if (!a3SourceUrl || !workflowKey || workflowKey !== a3SourceWorkflowKey) {
     setStatus('error', '原始题图未能恢复');
     return;
   }
-  const key = a3DraftKey(a3);
+  const key = a3DraftKey(a3, actionTarget);
   if (force) a3DismissedKey = '';
   if (!force && key === a3DismissedKey) return;
   a3CropLabel.textContent = selected.display_label || '未标号题目';
   const contextText = String(selected.context_text || '').trim();
   a3Context.hidden = !contextText;
   a3ContextText.textContent = contextText;
-  a3Reselect.hidden = a3.units.filter((unit) => !unit.completed && !unit.searched).length <= 1;
+  const workflowTarget = {
+    workflowId: actionTarget.workflowId,
+    workflowRevision: actionTarget.workflowRevision,
+  };
+  bindA3UnitNavigationControl(a3Reselect, workflowTarget, { hideWhenDenied: true });
+  const canReselect = taskStateAllowsA3UnitNavigation(workflowTarget, a3);
+  a3Reselect.hidden = !canReselect;
+  a3Reselect.disabled = !canReselect;
+  bindWorkflowActionControl(a3Submit, 'submit_crop', actionTarget);
   const serverDraft = validA3Bounds(a3.crop_draft?.bounds);
   a3Bounds = validA3Bounds(a3LocalDrafts.get(key)) || serverDraft;
   if (a3Bounds) a3LocalDrafts.set(key, { ...a3Bounds });
@@ -1774,15 +2841,40 @@ function openA3Crop({ force = false } = {}) {
   document.body.dataset.modal = 'a3-crop';
   if (a3SourceImage.complete && a3SourceImage.naturalWidth) fitA3Image();
   if (!a3CropHistoryActive) {
-    window.history.pushState({ ...(window.history.state || {}), a3Crop: true }, '');
+    window.history.pushState({
+      ...(window.history.state || {}),
+      a3Crop: {
+        workflowId: actionTarget.workflowId,
+        workflowRevision: actionTarget.workflowRevision,
+        unitId: actionTarget.unitId,
+      },
+    }, '');
     a3CropHistoryActive = true;
+    a3CropHistoryKey = key;
+  } else if (a3CropHistoryKey !== key) {
+    window.history.replaceState({
+      ...(window.history.state || {}),
+      a3Crop: {
+        workflowId: actionTarget.workflowId,
+        workflowRevision: actionTarget.workflowRevision,
+        unitId: actionTarget.unitId,
+      },
+    }, '');
+    a3CropHistoryKey = key;
   }
   a3CropBack.focus();
 }
 
-function finishCloseA3Crop({ dismiss = true } = {}) {
+function finishCloseA3Crop({ dismiss = true, dismissKey = null } = {}) {
+  a3PendingClose = null;
+  if (dismiss) {
+    const resolvedKey = dismissKey === null
+      ? a3DraftKey(a3Current(), workflowActionTargetFromControl(a3Submit))
+      : String(dismissKey);
+    if (resolvedKey) a3DismissedKey = resolvedKey;
+    else a3DismissNextCrop = true;
+  }
   if (a3CropWorkspace.hidden) return;
-  if (dismiss) a3DismissedKey = a3DraftKey();
   a3CropWorkspace.hidden = true;
   a3CropWorkspace.setAttribute('aria-hidden', 'true');
   a3Pointer = null;
@@ -1791,20 +2883,69 @@ function finishCloseA3Crop({ dismiss = true } = {}) {
   delete document.body.dataset.modal;
 }
 
+function closeA3TransientUi() {
+  if (!a3CropWorkspace.hidden) finishCloseA3Crop({ dismiss: false });
+  closeA3Sheet();
+  closeA3Example();
+}
+
+function clearA3CropHistoryState() {
+  const historyState = window.history.state;
+  if (historyState && typeof historyState === 'object' && Object.hasOwn(historyState, 'a3Crop')) {
+    const nextState = { ...historyState };
+    delete nextState.a3Crop;
+    window.history.replaceState(nextState, '');
+  }
+  a3CropHistoryActive = false;
+  a3CropHistoryKey = '';
+  a3PendingClose = null;
+  a3DismissNextCrop = false;
+}
+
+function a3CropHistoryMarker(historyState) {
+  if (!historyState || typeof historyState !== 'object' || !Object.hasOwn(historyState, 'a3Crop')) {
+    return { active: false, target: null, key: '' };
+  }
+  if (historyState.a3Crop === true) return { active: true, target: null, key: '' };
+  const raw = historyState.a3Crop;
+  if (!raw || typeof raw !== 'object') return { active: false, target: null, key: '' };
+  const target = {
+    workflowId: String(raw.workflowId || ''),
+    workflowRevision: Number(raw.workflowRevision || 0),
+    unitId: String(raw.unitId || ''),
+  };
+  const key = a3DraftKey(null, target);
+  return key ? { active: true, target, key } : { active: false, target: null, key: '' };
+}
+
+function restoreA3CropHistoryState() {
+  const marker = a3CropHistoryMarker(window.history.state);
+  a3CropHistoryActive = marker.active;
+  a3CropHistoryKey = marker.key;
+  a3PendingClose = null;
+}
+
 function requestCloseA3Crop({ dismiss = true } = {}) {
-  a3PendingDismiss = dismiss;
+  const pendingClose = {
+    dismiss: Boolean(dismiss),
+    key: a3DraftKey(a3Current(), workflowActionTargetFromControl(a3Submit)),
+  };
   if (a3CropHistoryActive) {
-    window.history.back();
+    const navigationPending = a3PendingClose !== null;
+    a3PendingClose = pendingClose;
+    if (!navigationPending) window.history.back();
     return;
   }
-  finishCloseA3Crop({ dismiss });
+  finishCloseA3Crop({ dismiss: pendingClose.dismiss, dismissKey: pendingClose.key });
 }
 
 function renderA3Selection() {
   const bounds = validA3Bounds(a3Bounds);
+  const cropTarget = workflowActionTargetFromControl(a3Submit);
+  const canSubmit = taskStateAllowsA3Action('submit_crop', cropTarget);
   a3Selection.hidden = !bounds;
   a3ImageHint.hidden = Boolean(bounds);
-  a3Submit.disabled = !bounds || isBusy;
+  a3Submit.disabled = !bounds || isBusy || !canSubmit;
   a3CropStatus.classList.toggle('is-warning', Boolean(a3Current()?.crop_review_required));
   if (!bounds) {
     a3CropStatus.textContent = '尚未框选结构图';
@@ -1850,7 +2991,13 @@ function paintA3Selection(bounds) {
 }
 
 function startA3Selection(event) {
-  if (isBusy || a3SourceImage.complete === false || a3Pointer) return;
+  const cropTarget = workflowActionTargetFromControl(a3Submit);
+  if (
+    isBusy
+    || !taskStateAllowsA3Action('submit_crop', cropTarget)
+    || a3SourceImage.complete === false
+    || a3Pointer
+  ) return;
   if (event.pointerType === 'mouse' && event.button !== 0) return;
   if (event.pointerType !== 'mouse' && !event.isPrimary) return;
   const point = a3Point(event);
@@ -1915,13 +3062,17 @@ function endA3Selection(event) {
   if (a3ImageFrame.hasPointerCapture(event.pointerId)) a3ImageFrame.releasePointerCapture(event.pointerId);
   if (event.type === 'pointercancel') a3Bounds = pointer.origin;
   if (!validA3Bounds(a3Bounds)) a3Bounds = null;
-  else a3LocalDrafts.set(a3DraftKey(), { ...a3Bounds });
+  else {
+    const key = a3DraftKey(a3Current(), workflowActionTargetFromControl(a3Submit));
+    if (key) a3LocalDrafts.set(key, { ...a3Bounds });
+  }
   renderA3Selection();
 }
 
 async function submitA3Crop() {
   const bounds = validA3Bounds(a3Bounds);
-  if (!bounds || isBusy) return;
+  const actionTarget = workflowActionTargetFromControl(a3Submit);
+  if (!bounds || isBusy || !taskStateAllowsA3Action('submit_crop', actionTarget)) return;
   const operation = ++operationVersion;
   setBusy(true);
   a3Submit.disabled = true;
@@ -1932,9 +3083,10 @@ async function submitA3Crop() {
     const data = await requestStream('/api/a3/crop/stream', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
+        workflow_id: actionTarget.workflowId,
         bounds,
-        unit_id: String(a3Current()?.selected_unit?.unit_id || ''),
-        task_revision: Number(a3Current()?.task_revision || 0),
+        unit_id: actionTarget.unitId,
+        task_revision: actionTarget.workflowRevision,
       }),
     }, A3_TIMEOUT_MS, '裁剪校验或搜题等待超时，已保留裁剪范围。', (event) => {
       if (operation !== operationVersion) return;
@@ -1964,7 +3116,7 @@ async function submitA3Crop() {
     a3CropStatus.textContent = error.message || '裁剪校验失败，可以直接重试';
     addMessage({
       message: error.message || '裁剪校验失败，可以直接重试。',
-      variant: 'error', recoveryActions: error.recoveryActions || [],
+      variant: 'error', recoveryActions: taskStateFailureRecoveryActions(error.recoveryActions),
       ...protocolFields(error),
     });
     setStatus('error', '裁剪校验失败');
@@ -1977,6 +3129,7 @@ async function submitA3Crop() {
 
 function renderA3SheetUnits(a3 = a3Current()) {
   if (!a3SheetUnits || !a3) return;
+  const workflowTarget = currentA3WorkflowTarget(a3);
   a3SheetUnits.replaceChildren();
   if (a3.auto_crop_enabled) {
     renderA3AutoSheetUnits(a3);
@@ -1984,17 +3137,21 @@ function renderA3SheetUnits(a3 = a3Current()) {
   }
   a3SheetSubtitle.hidden = false;
   a3SheetSubtitle.textContent = '选择其他题目后会重新裁剪并搜索';
-  a3SheetOverlay.hidden = !a3.auto_crop_overlay_available;
-  if (a3.auto_crop_overlay_available) {
-    a3SheetOverlayImage.src = `/api/a3/overlay?revision=${encodeURIComponent(a3.task_revision)}`;
-  }
+  const overlayUrl = a3.auto_crop_overlay_available
+    ? a3MediaUrl('/api/a3/overlay', workflowTarget)
+    : '';
+  a3SheetOverlay.hidden = !overlayUrl;
+  if (overlayUrl) a3SheetOverlayImage.src = overlayUrl;
+  else clearImageSource(a3SheetOverlayImage);
   a3SheetFooter.hidden = true;
   a3.units.forEach((unit) => {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'a3-sheet-unit';
     const isCurrent = unit.unit_id === a3.selected_unit?.unit_id;
-    button.disabled = a3.page_finished || unit.completed || unit.searched || isCurrent;
+    const actionTarget = { ...workflowTarget, unitId: unit.unit_id };
+    bindWorkflowActionControl(button, 'select_unit', actionTarget);
+    button.disabled = isBusy || !taskStateAllowsA3Action('select_unit', actionTarget, a3);
     button.setAttribute('aria-current', String(isCurrent));
     const text = document.createElement('span');
     const title = document.createElement('strong');
@@ -2010,13 +3167,24 @@ function renderA3SheetUnits(a3 = a3Current()) {
     icon.innerHTML = unit.completed ? '<path d="m5 12 4 4L19 6"/>' : '<path d="m9 18 6-6-6-6"/>';
     button.append(text);
     if (!isCurrent) button.append(icon);
-    button.addEventListener('click', () => selectA3Unit(unit.unit_id));
+    button.addEventListener('click', () => selectA3Unit(actionTarget));
     a3SheetUnits.append(button);
   });
 }
 
 function renderA3AutoSheetUnits(a3) {
-  const currentIds = new Set(a3.units.filter((unit) => !unit.completed && !unit.searched && !unit.requested).map((unit) => unit.unit_id));
+  const workflowTarget = currentA3WorkflowTarget(a3);
+  const currentIds = new Set(a3.units.filter((unit) => {
+    const canSelect = taskStateAllowsA3Action(
+      'select_unit', { ...workflowTarget, unitId: unit.unit_id }, a3,
+    );
+    const canPrepare = taskStateAllowsA3Action(
+      'prepare_units', { ...workflowTarget, unitIds: [unit.unit_id] }, a3,
+    );
+    const prepared = taskStateWorkflowUnit(unit.unit_id)?.status === 'PREPARED';
+    const directlySelectable = canSelect && (prepared || unit.requested || !canPrepare);
+    return canPrepare && !directlySelectable;
+  }).map((unit) => unit.unit_id));
   Array.from(a3PrepareSelection).forEach((unitId) => {
     if (!currentIds.has(unitId)) a3PrepareSelection.delete(unitId);
   });
@@ -2024,23 +3192,33 @@ function renderA3AutoSheetUnits(a3) {
   a3SheetSubtitle.textContent = a3.auto_prepare_all_units
     ? ''
     : '可多选；只校验你准备查询的裁图';
-  a3SheetOverlay.hidden = !a3.auto_crop_overlay_available;
-  if (a3.auto_crop_overlay_available) {
-    a3SheetOverlayImage.src = `/api/a3/overlay?revision=${encodeURIComponent(a3.task_revision)}`;
-  }
-  a3SheetFooter.hidden = a3.page_finished
-    || !a3.units.some((unit) => !unit.completed && !unit.searched && !unit.requested);
+  const overlayUrl = a3.auto_crop_overlay_available
+    ? a3MediaUrl('/api/a3/overlay', workflowTarget)
+    : '';
+  a3SheetOverlay.hidden = !overlayUrl;
+  if (overlayUrl) a3SheetOverlayImage.src = overlayUrl;
+  else clearImageSource(a3SheetOverlayImage);
+  a3SheetFooter.hidden = currentIds.size === 0;
   a3.units.forEach((unit) => {
-    const prepared = unit.requested;
-    const host = document.createElement(prepared ? 'button' : 'label');
-    if (prepared) host.type = 'button';
-    const closed = a3.page_finished || unit.completed || unit.searched;
+    const stateUnit = taskStateWorkflowUnit(unit.unit_id);
+    const selectTarget = { ...workflowTarget, unitId: unit.unit_id };
+    const prepareTarget = { ...workflowTarget, unitIds: [unit.unit_id] };
+    const canSelect = taskStateAllowsA3Action('select_unit', selectTarget, a3);
+    const canPrepare = taskStateAllowsA3Action('prepare_units', prepareTarget, a3);
+    const prepared = stateUnit?.status === 'PREPARED';
+    const directlySelectable = canSelect && (prepared || unit.requested || !canPrepare);
+    const host = document.createElement(directlySelectable ? 'button' : 'label');
+    if (directlySelectable) host.type = 'button';
+    const closed = !canSelect && !canPrepare;
     host.className = `a3-auto-unit${closed ? ' is-closed' : ''}${prepared ? ' is-prepared' : ''}`;
     const visual = document.createElement('span');
     visual.className = 'a3-auto-unit-visual';
-    if (unit.crop_available) {
+    const cropUrl = unit.crop_available
+      ? a3MediaUrl(`/api/a3/crop/${encodeURIComponent(unit.unit_id)}`, workflowTarget)
+      : '';
+    if (cropUrl) {
       const image = document.createElement('img');
-      image.src = `/api/a3/crop/${encodeURIComponent(unit.unit_id)}?revision=${encodeURIComponent(a3.task_revision)}`;
+      image.src = cropUrl;
       image.alt = `${unit.display_label || '未标号题目'}自动裁图`;
       visual.append(image);
     } else {
@@ -2059,19 +3237,27 @@ function renderA3AutoSheetUnits(a3) {
     else detail.textContent = '选择后使用人工裁剪';
     copy.append(title, detail);
     host.append(visual, copy);
-    if (prepared) {
+    if (directlySelectable) {
       const arrow = document.createElement('span');
       arrow.className = 'a3-auto-unit-arrow';
       arrow.textContent = unit.completed ? '已完成' : unit.searched ? '已检索' : '继续';
       host.append(arrow);
-      host.disabled = closed || unit.selected;
-      if (!host.disabled) host.addEventListener('click', () => selectA3Unit(unit.unit_id));
+      bindWorkflowActionControl(host, 'select_unit', selectTarget);
+      host.disabled = isBusy || !canSelect;
+      host.addEventListener('click', () => selectA3Unit(selectTarget));
     } else {
       const input = document.createElement('input');
       input.type = 'checkbox';
       input.checked = a3PrepareSelection.has(unit.unit_id);
-      input.disabled = closed;
+      bindWorkflowActionControl(input, 'prepare_units', prepareTarget);
+      input.disabled = isBusy || !canPrepare;
       input.addEventListener('change', () => {
+        if (!taskStateAllowsA3Action('prepare_units', prepareTarget)) {
+          input.checked = false;
+          a3PrepareSelection.delete(unit.unit_id);
+          updateA3PrepareFooter();
+          return;
+        }
         if (input.checked) a3PrepareSelection.add(unit.unit_id);
         else a3PrepareSelection.delete(unit.unit_id);
         updateA3PrepareFooter();
@@ -2085,15 +3271,20 @@ function renderA3AutoSheetUnits(a3) {
 
 function updateA3PrepareFooter() {
   const count = a3PrepareSelection.size;
+  const a3 = a3Current();
+  const workflowTarget = currentA3WorkflowTarget(a3);
+  const actionTarget = { ...workflowTarget, unitIds: Array.from(a3PrepareSelection) };
+  bindWorkflowActionControl(a3Prepare, 'prepare_units', actionTarget);
   a3SheetCount.textContent = count ? `已选择 ${count} 道` : '尚未选择';
-  a3Prepare.disabled = isBusy || count === 0;
+  a3Prepare.disabled = isBusy || !taskStateAllowsA3Action('prepare_units', actionTarget, a3);
   a3Prepare.textContent = count ? `校验所选 ${count} 道题` : '校验所选题目';
 }
 
 async function prepareA3Units() {
-  const a3 = a3Current();
-  const unitIds = Array.from(a3PrepareSelection);
-  if (!a3?.auto_crop_enabled || !unitIds.length || isBusy) return;
+  if (isBusy) return;
+  const actionTarget = workflowActionTargetFromControl(a3Prepare);
+  if (!taskStateAllowsA3Action('prepare_units', actionTarget)) return;
+  const unitIds = [...actionTarget.unitIds];
   const operation = ++operationVersion;
   setBusy(true);
   updateA3PrepareFooter();
@@ -2101,7 +3292,11 @@ async function prepareA3Units() {
   try {
     const data = await requestStream('/api/a3/prepare/stream', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ unit_ids: unitIds, task_revision: Number(a3.task_revision || 0) }),
+      body: JSON.stringify({
+        workflow_id: actionTarget.workflowId,
+        unit_ids: unitIds,
+        task_revision: actionTarget.workflowRevision,
+      }),
     }, A3_TIMEOUT_MS, '裁图校验等待超时，请重新选择。', (event) => {
       if (operation !== operationVersion) return;
       a3SheetCount.textContent = event.message;
@@ -2117,7 +3312,7 @@ async function prepareA3Units() {
     if (operation !== operationVersion) return;
     addMessage({
       message: error.message || '裁图校验失败，请重新选择。',
-      variant: 'error', recoveryActions: error.recoveryActions || [],
+      variant: 'error', recoveryActions: taskStateFailureRecoveryActions(error.recoveryActions),
       ...protocolFields(error),
     });
     setStatus('error', '裁图校验失败');
@@ -2128,9 +3323,17 @@ async function prepareA3Units() {
   }
 }
 
-function openA3Sheet() {
+function openA3Sheet(target) {
   const a3 = a3Current();
-  if (!a3 || (!a3.auto_crop_enabled && a3.units.length <= 1)) return;
+  const workflowTarget = target && typeof target === 'object' ? {
+    workflowId: String(target.workflowId || ''),
+    workflowRevision: Number(target.workflowRevision || 0),
+  } : null;
+  if (
+    !a3
+    || !taskStateAllowsA3UnitNavigation(workflowTarget, a3)
+    || (!a3.auto_crop_enabled && a3.units.length <= 1)
+  ) return;
   renderA3SheetUnits(a3);
   a3SheetBackdrop.hidden = false;
   a3SheetClose.focus();
@@ -2200,10 +3403,15 @@ function closeA3Example() {
 async function sendTextValue(value, displayValue = value, actionContext = null, childActionTarget = null) {
   const clean = String(value || '').trim();
   if (!clean || isBusy) return;
-  if (
-    actionContext?.type === 'select_candidate'
-    && !taskStateAllowsChildAction('select_candidate', childActionTarget)
-  ) return;
+  if (actionContext === null && isExplicitSessionResetText(clean)) {
+    await resetConversation();
+    return;
+  }
+  if (!(await sessionTaskStartAllowed()) || isBusy) return;
+  const childAction = ['select_candidate', 'retry_search'].includes(actionContext?.type)
+    ? actionContext.type
+    : '';
+  if (childAction && !taskStateAllowsChildAction(childAction, childActionTarget)) return;
   addMessage({ message: displayValue, me: true });
   textInput.value = '';
   resizeComposer();
@@ -2229,13 +3437,14 @@ async function sendTextValue(value, displayValue = value, actionContext = null, 
     if (operation !== operationVersion) return;
     pending?.remove();
     if (data.intent === 'a3_session_reset') {
+      if (!applyResetSessionContext(data)) {
+        throw clientProtocolError(
+          '服务返回格式异常，请稍后重试。',
+          'RESPONSE_INVALID',
+          String(data?.request_id || createRequestId()),
+        );
+      }
       clearHistory();
-      if (!a3CropWorkspace.hidden) finishCloseA3Crop({ dismiss: false });
-      a3CropHistoryActive = false;
-      sessionContext = {
-        session_valid: false, phase: 'IDLE', has_active_image: false,
-        task_revision: 0, candidate_generation: '', candidate_count: 0, search_id: '',
-      };
       chat.replaceChildren();
       empty.hidden = false;
       setStatus('ready', '已开始新对话');
@@ -2381,8 +3590,7 @@ async function retryUpload(row, prepared) {
 
 async function uploadImage(selected) {
   if (isBusy) return;
-  await sessionBootstrap;
-  if (isBusy) return;
+  if (!(await sessionTaskStartAllowed()) || isBusy) return;
   const validationError = validateImage(selected);
   fileInput.value = '';
   if (validationError) {
@@ -2470,11 +3678,16 @@ async function resetConversation() {
   closeDrawer();
   setStatus('working', '正在创建新对话…');
   try {
-    await request('/api/reset', { method: 'POST' }, TEXT_TIMEOUT_MS, '新对话创建超时，请稍后重试。');
+    const data = await request('/api/reset', { method: 'POST' }, TEXT_TIMEOUT_MS, '新对话创建超时，请稍后重试。');
     if (operation !== operationVersion) return;
+    if (!applyResetSessionContext(data)) {
+      throw clientProtocolError(
+        '服务返回格式异常，请稍后重试。',
+        'RESPONSE_INVALID',
+        String(data?.request_id || createRequestId()),
+      );
+    }
     clearHistory();
-    if (!a3CropWorkspace.hidden) finishCloseA3Crop({ dismiss: false });
-    a3CropHistoryActive = false;
     chat.replaceChildren();
     empty.hidden = false;
     setStatus('ready', '已开始新对话');
@@ -2513,7 +3726,7 @@ async function checkHealth() {
 async function retryConnection() {
   if (isBusy) return;
   const healthy = await checkHealth();
-  if (healthy && !isBusy) await repairUploadedImageHistory();
+  if (healthy && !isBusy) await runSessionBootstrap();
 }
 
 form.addEventListener('submit', (event) => { event.preventDefault(); sendText(); });
@@ -2537,7 +3750,7 @@ topNewChatButton.addEventListener('click', resetConversation);
 lightboxClose.addEventListener('click', closeLightbox);
 lightbox.addEventListener('click', (event) => { if (event.target === lightbox) closeLightbox(); });
 a3CropBack.addEventListener('click', () => requestCloseA3Crop({ dismiss: true }));
-a3Reselect.addEventListener('click', openA3Sheet);
+a3Reselect.addEventListener('click', () => openA3Sheet(workflowActionTargetFromControl(a3Reselect)));
 a3SheetClose.addEventListener('click', closeA3Sheet);
 a3SheetBackdrop.addEventListener('click', (event) => { if (event.target === a3SheetBackdrop) closeA3Sheet(); });
 a3Prepare.addEventListener('click', prepareA3Units);
@@ -2571,11 +3784,45 @@ document.addEventListener('keydown', (event) => {
   else if (!lightbox.hidden) closeLightbox();
   else closeDrawer();
 });
-window.addEventListener('popstate', () => {
-  if (!a3CropHistoryActive) return;
+window.addEventListener('popstate', (event) => {
+  const historyState = event?.state ?? window.history.state;
+  const marker = a3CropHistoryMarker(historyState);
+  const markerActive = marker.active;
+  if (!a3CropHistoryActive) {
+    if (!markerActive) return;
+    const a3 = a3Current();
+    const cropTarget = marker.target || currentA3CropActionTarget(a3);
+    if (cropTarget && taskStateAllowsA3Action('submit_crop', cropTarget, a3)) {
+      a3CropHistoryActive = true;
+      a3CropHistoryKey = marker.key || a3DraftKey(a3, cropTarget);
+      openA3Crop(cropTarget, { force: true });
+    } else {
+      clearA3CropHistoryState();
+    }
+    return;
+  }
+  if (markerActive) return;
+  const previousHistoryKey = a3CropHistoryKey;
   a3CropHistoryActive = false;
-  finishCloseA3Crop({ dismiss: a3PendingDismiss });
-  a3PendingDismiss = true;
+  a3CropHistoryKey = '';
+  const currentKey = a3DraftKey(a3Current(), workflowActionTargetFromControl(a3Submit));
+  const pendingClose = a3PendingClose || { dismiss: true, key: currentKey || previousHistoryKey };
+  a3PendingClose = null;
+  if (a3CropWorkspace.hidden || currentKey === pendingClose.key) {
+    finishCloseA3Crop({ dismiss: pendingClose.dismiss, dismissKey: pendingClose.key });
+    return;
+  }
+  const reboundTarget = workflowActionTargetFromControl(a3Submit);
+  window.history.pushState({
+    ...(window.history.state || {}),
+    a3Crop: {
+      workflowId: reboundTarget.workflowId,
+      workflowRevision: reboundTarget.workflowRevision,
+      unitId: reboundTarget.unitId,
+    },
+  }, '');
+  a3CropHistoryActive = true;
+  a3CropHistoryKey = a3DraftKey(a3Current(), reboundTarget);
 });
 document.addEventListener('dragenter', (event) => {
   if (!hasDraggedFiles(event)) return;
@@ -2614,6 +3861,19 @@ document.addEventListener('drop', (event) => {
 window.addEventListener('blur', hideDropOverlay);
 window.addEventListener('pagehide', releaseAllObjectUrls);
 window.addEventListener('focus', expireHistoryIfNeeded);
+window.addEventListener('storage', (event) => {
+  if (event.key === SESSION_RESET_EVENT_KEY && event.newValue) {
+    retireUnhandledSessionReset(event.newValue);
+    return;
+  }
+  if (
+    event.key === HISTORY_KEY
+    || event.key === LEGACY_HISTORY_KEY
+    || event.key === SESSION_ACTIVITY_KEY
+  ) {
+    refreshHistoryActivityFromStorage();
+  }
+});
 window.addEventListener('offline', () => {
   setStatus('error', '当前网络已断开');
   showFailureNotice(
@@ -2635,7 +3895,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) expi
 
 syncVisualViewport();
 restoreHistory();
-sessionBootstrap = repairUploadedImageHistory();
+runSessionBootstrap();
 resizeComposer();
 updateComposer();
 checkHealth();

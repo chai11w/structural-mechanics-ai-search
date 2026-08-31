@@ -31,13 +31,14 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn("a3PrepareSelection", self.script)
         self.assertIn("a3SheetSubtitle.hidden = a3.auto_prepare_all_units", self.script)
         self.assertIn("response.intent === 'a3_units_prepared'", self.script)
-        self.assertIn("openA3Sheet();", self.script)
+        self.assertIn("taskStateAllowsA3UnitNavigation(target)", self.script)
+        self.assertIn("openA3Sheet(target);", self.script)
         self.assertIn("A3_AUTO_PREPARE_IDLE_TIMEOUT_MS = 210000", self.script)
         self.assertIn("renewTimeoutOnProgress: autoPrepareAll", self.script)
         self.assertIn("renewTimeoutOnProgress: true", self.script)
         self.assertGreaterEqual(self.script.count("maybeOpenAutoPreparedA3Sheet(response)"), 3)
-        self.assertIn("await sessionBootstrap", self.script)
-        self.assertIn("sessionBootstrap = repairUploadedImageHistory()", self.script)
+        self.assertIn("await sessionTaskStartAllowed()", self.script)
+        self.assertIn("runSessionBootstrap();", self.script)
         self.assertIn(".lightbox { position: fixed; z-index: 120", self.style)
         self.assertIn(".a3-sheet-backdrop, .a3-example-backdrop { position: fixed; z-index: 80", self.style)
 
@@ -56,12 +57,15 @@ class A3WebUiCopyTests(unittest.TestCase):
             self.script.index("function renderA3AutoSheetUnits")
         ]
 
-        self.assertIn("a3SheetOverlay.hidden = !a3.auto_crop_overlay_available", manual_body)
-        self.assertIn("/api/a3/overlay?revision=", manual_body)
+        self.assertIn("a3MediaUrl('/api/a3/overlay', workflowTarget)", manual_body)
+        self.assertIn("a3SheetOverlay.hidden = !overlayUrl", manual_body)
+        self.assertIn("workflow_id=${encodeURIComponent(target.workflowId)}", self.script)
+        self.assertIn("task_revision=${encodeURIComponent(target.workflowRevision)}", self.script)
 
     def test_searched_a3_unit_is_visually_and_functionally_closed(self):
         self.assertIn("searched: Boolean(unit.searched)", self.script)
-        self.assertIn("host.disabled = closed || unit.selected", self.script)
+        self.assertIn("const closed = !canSelect && !canPrepare", self.script)
+        self.assertIn("input.disabled = isBusy || !canPrepare", self.script)
         self.assertIn("已检索，不可重复进入", self.script)
         self.assertIn(".a3-auto-unit:disabled .a3-auto-unit-arrow { color: #282825", self.style)
 
@@ -112,7 +116,8 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn("a3CropStatus.textContent = response.message", crop_body)
         self.assertNotIn("crop_review_feedback", self.script)
         self.assertIn("function a3CropReviewMessage", self.script)
-        self.assertIn("a3: normalizeA3Snapshot(data.session.a3)", self.script)
+        self.assertIn("const a3 = normalizeA3Snapshot(data.session.a3)", self.script)
+        self.assertIn("a3WorkflowId: String(workflowTarget?.workflowId || '')", self.script)
         self.assertIn("className = 'a3-unit-choice a3-continue-crop'", self.script)
         self.assertIn("isPersistentImage(data.submitted_crop)", crop_body)
         self.assertLess(

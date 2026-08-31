@@ -6,8 +6,8 @@
 
 ## Current Priority
 
-- 工程化梳理优先于新增自主功能：阶段 3.1～3.3 服务端及 3.4.1～3.4.3 前端模型/信封/A2 动作迁移已完成，A3 仍使用旧 phase/unit flag 授权。busy/queue 拒绝保持无状态，仍不动 8788/8794，也不提前混入阶段结果或暂停/继续。
-- 3.4.3 已完成且尚未部署；96 项前端/FastAPI 通过，最近 73 项 task-state 回归通过。全仓 1152 项基线唯一失败为可复现、单独通过的 SQLite WAL 顺序波动。主阶段 3 仍为 `IN_PROGRESS`，下一独立批次迁移 A3 动作，之后才进入含 8896/live/8790 的 3.5 启用门。
+- 工程化梳理优先于新增自主功能：阶段 3.1～3.4 已在代码中完成，A2/A3 动作均由 branded V1 `allowed_actions` 授权并绑定 identity/revision/target；busy/queue 拒绝保持无状态，仍不动 8788/8794，也不提前混入阶段结果或暂停/继续。
+- 3.4 已完成且尚未部署；28 项前端聚焦、220 项本批次定向、73 项 task-state 及全仓 1173 项全部通过。主阶段 3 仍为 `IN_PROGRESS`，下一独立批次才进入含 8896/live/8790 的 3.5 启用门。
 - 8790 网页已由 A3-V1 接管业务内核并继续使用 8795 控制库邀请码；费用、反馈汇总、动态额度和旧并发队列下一轮恢复。
 - 8896 保留同内核验收，8897 暂留独立回退；当前重点是 8790 真实样本验收和失败记录收集。Paddle 试验结论保留，不再作为当前阻塞项。
 - 8794 影子规划及有限自主阶段暂停排期；待 8892 固定流程、取消语义和验收样本稳定，且真实失败记录证明固定编排不足后再恢复。
@@ -61,7 +61,7 @@
    - 3.2.2 锁内权威读取：DONE；A3 wrapper 按 A3→A2 锁序让父子 store 各读取一次，standalone A2 只获取 A2 锁，已持 A2 锁的调用方可传 frozen state 而不重锁/重读；缺失、不可读、稳定未知状态和受控文件/入口证据均已收口。47 项 task-state 定向测试及全仓 1031 项回归通过；当前只新增 runtime 内部入口，未改公共出口。
    - 3.2.3 异常与矩阵测试：DONE；实际构造结果已覆盖空记录与全部可持久化父 route/phase 合法/非法组合、九个 live child phase × standalone/direct A2/A3 active、特殊 child 边界、A3 active/父子组合读取异常、脱敏和旧 revision 动作证据。51 项 task-state 定向测试及全仓 1035 项回归通过；阶段 3.2 整体 DONE，未改生产代码或公共出口。
    - 3.3 JSON/stream 出口一致性：DONE，尚未部署。3.3.1～3.3.5 完成公共映射及 session、HTTP success/error、五条任务 stream 接入；3.3.6 已用非空 A2/A3 V1 验证跨出口 exact parity、完整 pair、失败后处理、零重读和 legacy 兼容，并修复 session/reset 不完整组合可能发布原 typed 或跨 read-set 拼接的问题。73 项 task-state、179 项 FastAPI/A3/Response Store 直接相关及全仓 1147 项回归通过。
-   - 3.4 前端消费：IN_PROGRESS，尚未部署。3.4.1 exact/branded fail-closed model、3.4.2 权威信封原子接线及 3.4.3 A2 动作迁移已完成；候选、`retry_search` 和候选 retry 绑定 V1 child ID/revision/generation/rank，只由 branded child actions 放行，`next_stage` 不授权。96 项前端/FastAPI 通过；最近 73 项 task-state 通过，全仓 1152 项基线仅既有 WAL 顺序测试失败且单独通过。后续 A3 动作迁移仍为 PLANNED，主阶段 3 保持 IN_PROGRESS。
+   - 3.4 前端消费：DONE，尚未部署。3.4.1～3.4.5 完成 exact/branded fail-closed model、权威信封原子接线、A2/A3 动作迁移及恢复/多标签页生命周期收口。候选动作绑定 child ID/revision/generation/rank；A3 选择、准备、裁剪绑定 workflow ID/revision/unit(s)，前后端共同拒绝跨 workflow ABA 错绑，`next_stage` 不授权。网络/队列失败不自动重放 A3 动作；过期/reset 以共享 activity、默认 pending request fence、committed tombstone 和 Web Lock 协调，未知结果先对账且排队旧请求不触网；无 Web Lock 时任务入口在 fetch 前关闭，仅保留 session/reset 对账。28 项前端聚焦、220 项本批次定向、73 项 task-state 及全仓 1173 项全部通过；主阶段 3 保持 IN_PROGRESS，下一步为 3.5 启用门。
 4. **关键阶段结构化保存中间结果（PLANNED）**：保存识图、裁图、章节、荷载、分层候选数、失败原因及版本；以 `artifact_id` 受控关联短期原图、裁图和 overlay，查看、延长保留、删除均审计，路径不进 trace/公共输出，支持诊断、复用和 checkpoint。
 5. **幂等执行与父子任务控制（PLANNED）**：统一任务版本、幂等键、执行锁和 A3→A2 父子生命周期，避免重复点击、网络重试或恢复造成重复执行和重复计费。
 6. **长任务与 HTTP 流逐步解耦（PLANNED）**：让后台任务持有执行生命周期，HTTP/updates 流只负责提交、观察和控制；页面刷新或连接断开不再等于任务状态丢失。

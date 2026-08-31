@@ -22,6 +22,7 @@ from tiku_agent.external_load_screen import (
 from tiku_agent.session_artifacts import SessionArtifacts, session_key
 from tiku_agent.session_store import SessionStore
 from tiku_agent.state import AgentState
+from tiku_agent import task_state_contract as task_state_contract
 from tiku_agent.task_state_builder import READ_MISSING, READ_OK, READ_UNREADABLE
 from tiku_agent.task_state_contract import TaskStateSnapshotV1, empty_task_state_snapshot
 from tiku_agent.task_state_runtime import (
@@ -926,6 +927,7 @@ class AgentSessionRuntime:
         session_id: str,
         text: str,
         *,
+        action_context: object | None = None,
         identity_key: str = "",
         progress: ProgressReporter | None = None,
         request_id: str = "",
@@ -943,7 +945,14 @@ class AgentSessionRuntime:
             lambda: self._run(
                 clean_session_id,
                 "text",
-                lambda agent: agent.handle_text(text),
+                lambda agent: self._handle_text_or_authorized_action(
+                    agent,
+                    clean_session_id,
+                    text,
+                    action_context=action_context,
+                    request_id=clean_request_id,
+                    task_state_capabilities=task_state_capabilities,
+                ),
                 identity_key=identity_key,
                 progress=progress,
                 request_id=clean_request_id,
@@ -955,6 +964,126 @@ class AgentSessionRuntime:
             identity_key=identity_key,
             progress=progress,
             task_state_capabilities=task_state_capabilities,
+        )
+
+    def _handle_text_or_authorized_action(
+        self,
+        agent: TikuSearchAgent,
+        session_id: str,
+        text: str,
+        *,
+        action_context: object | None,
+        request_id: str,
+        task_state_capabilities: TaskStateEntryCapabilities | None,
+    ) -> AgentResponse:
+        if action_context is None:
+            return agent.handle_text(text)
+
+        snapshot = self.task_state_snapshot_v1_from_frozen_state(
+            session_id,
+            agent.state,
+            capabilities=task_state_capabilities,
+        )
+        resolved = self._resolve_authorized_child_action(snapshot, action_context)
+        context = action_context if type(action_context) is dict else {}
+        action = context.get("type")
+        if resolved is None:
+            return self._stale_child_action_response(
+                agent.state,
+                action=action if type(action) is str else "",
+                request_id=request_id,
+            )
+
+        action, rank = resolved
+        structured = getattr(agent, "handle_authorized_child_action", None)
+        if callable(structured):
+            return structured(action, rank=rank)
+        command = f"选择候选 {rank}" if rank is not None else "重试搜索"
+        return agent.handle_text(command)
+
+    @staticmethod
+    def _resolve_authorized_child_action(
+        snapshot: TaskStateSnapshotV1,
+        action_context: object,
+    ) -> tuple[str, int | None] | None:
+        """Resolve one exact action from a trusted V1 snapshot."""
+
+        child = (
+            snapshot.active_child_task
+            if snapshot.consistency.status == task_state_contract.CONSISTENCY_OK
+            else None
+        )
+        context = action_context if type(action_context) is dict else {}
+        action = context.get("type")
+        task_id = context.get("task_id")
+        task_revision = context.get("task_revision")
+        expected_keys = {"type", "task_id", "task_revision"}
+        common_valid = (
+            child is not None
+            and type(action) is str
+            and action in {
+                task_state_contract.ACTION_SELECT_CANDIDATE,
+                task_state_contract.ACTION_RETRY_SEARCH,
+            }
+            and type(task_id) is str
+            and task_id == child.task_id
+            and type(task_revision) is int
+            and task_revision == child.task_revision
+            and action in child.allowed_actions
+        )
+        rank: int | None = None
+        if action == task_state_contract.ACTION_RETRY_SEARCH:
+            valid = set(context) == expected_keys and common_valid
+        elif action == task_state_contract.ACTION_SELECT_CANDIDATE:
+            expected_keys.update({"rank", "candidate_generation"})
+            raw_rank = context.get("rank")
+            generation = context.get("candidate_generation")
+            valid = (
+                set(context) == expected_keys
+                and common_valid
+                and type(raw_rank) is int
+                and 1 <= raw_rank <= child.candidate_count
+                and type(generation) is str
+                and bool(generation)
+                and generation == child.candidate_generation
+            )
+            if valid:
+                rank = raw_rank
+        else:
+            valid = False
+
+        if not valid:
+            return None
+        return str(action), rank
+
+    @staticmethod
+    def _stale_child_action_response(
+        state: AgentState,
+        *,
+        action: str,
+        request_id: str,
+    ) -> AgentResponse:
+        if action == task_state_contract.ACTION_SELECT_CANDIDATE:
+            has_image = bool(state.active_image_path)
+            text = (
+                "这是上一道题或上一轮搜索的候选，已经不能选择。请继续完成当前题目的章节确认和搜索。"
+                if has_image
+                else "这是已失效的候选，当前会话没有可选择的候选题，请重新上传题图。"
+            )
+            intent = "stale_candidate"
+            code = "STALE_CANDIDATE"
+        else:
+            text = "这个操作已经失效，请使用当前页面中的操作。"
+            intent = "stale_action"
+            code = "STALE_ACTION"
+        return AgentResponse(
+            text=text,
+            intent=intent,
+            protocol=RequestProtocol.from_code(
+                code,
+                request_id=request_id,
+                search_id=state.current_search_id,
+            ).to_dict(),
         )
 
     def clear(

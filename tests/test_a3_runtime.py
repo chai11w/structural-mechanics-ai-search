@@ -1464,6 +1464,173 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertTrue(runtime.current_auto_crop_overlay_path("auto-page").is_file())
         self.assertEqual(load_calls, [])
 
+    def test_a3_media_resolvers_reject_old_workflow_aba_and_keep_legacy_compatibility(self):
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "media-aba.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "media-aba-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            auto_cropper=FakeAutoCropper(),
+            external_load_screen=lambda _path: "yes",
+        )
+        session_id = "media-workflow-aba"
+        runtime.handle_image(session_id, self.source)
+        old_snapshot = runtime.session_snapshot(session_id)
+        old_workflow_id = old_snapshot["workflow_search_id"]
+        old_revision = old_snapshot["task_revision"]
+
+        runtime.clear(session_id)
+        runtime.handle_image(session_id, self.source)
+        current = runtime.session_snapshot(session_id)
+        current_workflow_id = current["workflow_search_id"]
+        current_revision = current["task_revision"]
+
+        self.assertNotEqual(current_workflow_id, old_workflow_id)
+        self.assertEqual(current_revision, old_revision)
+        self.assertIsNone(
+            runtime.current_auto_crop_overlay_path(
+                session_id,
+                expected_workflow_id=old_workflow_id,
+                expected_task_revision=old_revision,
+            )
+        )
+        self.assertIsNone(
+            runtime.current_crop_path(
+                session_id,
+                "g1-u1",
+                expected_workflow_id=old_workflow_id,
+                expected_task_revision=old_revision,
+            )
+        )
+
+        current_overlay = runtime.current_auto_crop_overlay_path(
+            session_id,
+            expected_workflow_id=current_workflow_id,
+            expected_task_revision=current_revision,
+        )
+        current_crop = runtime.current_crop_path(
+            session_id,
+            "g1-u1",
+            expected_workflow_id=current_workflow_id,
+            expected_task_revision=current_revision,
+        )
+        self.assertIsNotNone(current_overlay)
+        self.assertTrue(current_overlay.is_file())
+        self.assertIsNotNone(current_crop)
+        self.assertTrue(current_crop.is_file())
+        self.assertEqual(
+            runtime.current_auto_crop_overlay_path(session_id),
+            current_overlay,
+        )
+        self.assertEqual(
+            runtime.current_crop_path(session_id, "g1-u1"),
+            current_crop,
+        )
+        self.assertIsNone(
+            runtime.current_crop_path(
+                session_id,
+                "g1-u2-extra",
+                expected_workflow_id=current_workflow_id,
+                expected_task_revision=current_revision,
+            )
+        )
+
+    def test_a3_media_resolvers_fail_closed_for_incomplete_or_invalid_identity(self):
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "media-identity.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "media-identity-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            auto_cropper=FakeAutoCropper(),
+            external_load_screen=lambda _path: "yes",
+        )
+        session_id = "media-invalid-identity"
+        runtime.handle_image(session_id, self.source)
+        snapshot = runtime.session_snapshot(session_id)
+        workflow_id = snapshot["workflow_search_id"]
+        revision = snapshot["task_revision"]
+        invalid_pairs = (
+            {"expected_workflow_id": workflow_id},
+            {"expected_task_revision": revision},
+            {
+                "expected_workflow_id": "",
+                "expected_task_revision": revision,
+            },
+            {
+                "expected_workflow_id": workflow_id,
+                "expected_task_revision": True,
+            },
+            {
+                "expected_workflow_id": workflow_id,
+                "expected_task_revision": float(revision),
+            },
+            {
+                "expected_workflow_id": 123,
+                "expected_task_revision": revision,
+            },
+        )
+
+        for identity in invalid_pairs:
+            with self.subTest(identity=identity):
+                self.assertIsNone(
+                    runtime.current_auto_crop_overlay_path(session_id, **identity)
+                )
+                self.assertIsNone(
+                    runtime.current_crop_path(session_id, "g1-u1", **identity)
+                )
+
+    def test_a3_media_resolvers_lock_parent_and_read_state_once(self):
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "media-read-once.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "media-read-once-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            auto_cropper=FakeAutoCropper(),
+            external_load_screen=lambda _path: "yes",
+        )
+        session_id = "media-read-once"
+        runtime.handle_image(session_id, self.source)
+        snapshot = runtime.session_snapshot(session_id)
+        workflow_id = snapshot["workflow_search_id"]
+        revision = snapshot["task_revision"]
+        events: list[str] = []
+        parent_store = _CountingStoreProxy(runtime.store, "a3_store", events)
+        parent_lock = _TracingRLock("a3_lock", events)
+        runtime.store = parent_store
+        runtime._lock = lambda _session_id: parent_lock
+
+        overlay = runtime.current_auto_crop_overlay_path(
+            session_id,
+            expected_workflow_id=workflow_id,
+            expected_task_revision=revision,
+        )
+
+        self.assertIsNotNone(overlay)
+        self.assertEqual(parent_store.load_count, 1)
+        self.assertEqual(
+            events,
+            ["a3_lock:acquire", "a3_store:load", "a3_lock:release"],
+        )
+
+        parent_store.reset_load_count()
+        events.clear()
+        crop = runtime.current_crop_path(
+            session_id,
+            "g1-u1",
+            expected_workflow_id=workflow_id,
+            expected_task_revision=revision,
+        )
+
+        self.assertIsNotNone(crop)
+        self.assertEqual(parent_store.load_count, 1)
+        self.assertEqual(
+            events,
+            ["a3_lock:acquire", "a3_store:load", "a3_lock:release"],
+        )
+
     def test_single_auto_crop_validates_and_enters_a2_without_user_selection(self):
         load_calls = []
         runtime = A3MvpRuntime(
@@ -1586,6 +1753,194 @@ class A3RuntimeTests(unittest.TestCase):
         selected_snapshot = runtime.session_snapshot("auto-prepare-partial")["a3"]
         self.assertEqual(selected_snapshot["phase"], A3_PHASE_CROP_REQUIRED)
         self.assertTrue(selected_snapshot["crop_draft"]["available"])
+
+    def test_select_unit_rejects_old_workflow_with_same_revision_and_unit(self):
+        session_id = "select-workflow-aba"
+        self.runtime.handle_image(session_id, self.source)
+        old_workflow_search_id = self.runtime.session_snapshot(session_id)[
+            "workflow_search_id"
+        ]
+        self.runtime.clear(session_id)
+        self.runtime.handle_image(session_id, self.source)
+        current = self.runtime.session_snapshot(session_id)
+
+        response = self.runtime.select_unit(
+            session_id,
+            "g1-u1",
+            task_revision=1,
+            workflow_search_id=old_workflow_search_id,
+        )
+
+        self.assertNotEqual(current["workflow_search_id"], old_workflow_search_id)
+        self.assertEqual(response.intent, "stale_action")
+        after = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(after["phase"], A3_PHASE_WAIT_SELECTION)
+        self.assertEqual(after["selected_unit"]["unit_id"], "")
+
+    def test_prepare_units_rejects_old_workflow_with_same_revision_and_units(self):
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "prepare-workflow-aba.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "prepare-workflow-aba-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            auto_cropper=FakeAutoCropper(),
+            external_load_screen=lambda _path: "yes",
+        )
+        session_id = "prepare-workflow-aba"
+        runtime.handle_image(session_id, self.source)
+        old_workflow_search_id = runtime.session_snapshot(session_id)[
+            "workflow_search_id"
+        ]
+        runtime.clear(session_id)
+        runtime.handle_image(session_id, self.source)
+        current = runtime.session_snapshot(session_id)
+
+        response = runtime.prepare_units(
+            session_id,
+            ["g1-u1"],
+            task_revision=1,
+            workflow_search_id=old_workflow_search_id,
+        )
+
+        self.assertNotEqual(current["workflow_search_id"], old_workflow_search_id)
+        self.assertEqual(response.intent, "stale_action")
+        after = runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(after["phase"], A3_PHASE_WAIT_SELECTION)
+        self.assertEqual(after["requested_unit_ids"], [])
+
+    def test_submit_crop_rejects_old_workflow_with_same_revision_and_unit(self):
+        session_id = "crop-workflow-aba"
+        self.runtime.handle_image(session_id, self.source)
+        old_workflow_search_id = self.runtime.session_snapshot(session_id)[
+            "workflow_search_id"
+        ]
+        self.runtime.clear(session_id)
+        self.runtime.handle_image(session_id, self.source)
+        current = self.runtime.session_snapshot(session_id)
+        self.runtime.select_unit(
+            session_id,
+            "g1-u1",
+            task_revision=1,
+            workflow_search_id=current["workflow_search_id"],
+        )
+
+        response = self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
+            unit_id="g1-u1",
+            task_revision=1,
+            workflow_search_id=old_workflow_search_id,
+        )
+
+        self.assertNotEqual(current["workflow_search_id"], old_workflow_search_id)
+        self.assertEqual(response.intent, "stale_action")
+        after = self.runtime.session_snapshot(session_id)["a3"]
+        self.assertEqual(after["phase"], A3_PHASE_CROP_REQUIRED)
+        self.assertFalse(after["crop_review_required"])
+
+    def test_nested_child_action_rejects_inconsistent_combined_state(self):
+        session_id = "nested-child-inconsistent-combined"
+        self.runtime.handle_image(session_id, self.source)
+        self.runtime.select_unit(session_id, "g1-u1")
+        self.runtime.handle_crop(
+            session_id,
+            {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
+        )
+        child = self.a2.store.load(session_id)
+        self.assertIsNotNone(child)
+        parent = self.runtime.store.load(session_id)
+        self.assertIsNotNone(parent)
+        parent.workflow_search_id = child.current_search_id
+        self.runtime.store.save(parent)
+
+        response = self.runtime.handle_text(
+            session_id,
+            "选择候选 1",
+            action_context={
+                "type": "select_candidate",
+                "task_id": child.current_search_id,
+                "task_revision": child.task_revision,
+                "candidate_generation": child.candidate_generation,
+                "rank": 1,
+            },
+            task_state_capabilities=TaskStateEntryCapabilities(
+                reset_session_available=True,
+            ),
+        )
+
+        self.assertEqual(response.intent, "stale_candidate")
+        self.assertEqual(self.a2.text_calls, [])
+
+    def test_prepare_units_rejects_duplicate_active_and_prepared_targets_without_model_work(self):
+        load_calls = []
+        verifier = FakeVerifier()
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "prepare-current-unit-status.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "prepare-current-unit-status-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=verifier,
+            auto_cropper=FakeAutoCropper(),
+            external_load_screen=lambda path: load_calls.append(Path(path)) or "yes",
+        )
+
+        duplicate_session = "prepare-duplicate-target"
+        runtime.handle_image(duplicate_session, self.source)
+        duplicate_workflow = runtime.session_snapshot(duplicate_session)[
+            "workflow_search_id"
+        ]
+        duplicate = runtime.prepare_units(
+            duplicate_session,
+            ["g1-u1", "g1-u1"],
+            task_revision=1,
+            workflow_search_id=duplicate_workflow,
+        )
+        self.assertEqual(duplicate.intent, "stale_action")
+        self.assertEqual(verifier.calls, [])
+        self.assertEqual(load_calls, [])
+
+        active_session = "prepare-active-target"
+        runtime.handle_image(active_session, self.source)
+        active_workflow = runtime.session_snapshot(active_session)["workflow_search_id"]
+        selected = runtime.select_unit(
+            active_session,
+            "g1-u2",
+            task_revision=1,
+            workflow_search_id=active_workflow,
+        )
+        self.assertEqual(selected.intent, "a3_unit_selected")
+        active = runtime.prepare_units(
+            active_session,
+            ["g1-u2"],
+            task_revision=1,
+            workflow_search_id=active_workflow,
+        )
+        self.assertEqual(active.intent, "stale_action")
+        self.assertEqual(verifier.calls, [])
+        self.assertEqual(load_calls, [])
+
+        prepared_session = "prepare-prepared-target"
+        runtime.handle_image(prepared_session, self.source)
+        prepared_workflow = runtime.session_snapshot(prepared_session)[
+            "workflow_search_id"
+        ]
+        first = runtime.prepare_units(
+            prepared_session,
+            ["g1-u1"],
+            task_revision=1,
+            workflow_search_id=prepared_workflow,
+        )
+        self.assertEqual(first.intent, "a3_units_prepared")
+        calls_after_first = (list(verifier.calls), list(load_calls))
+        repeated = runtime.prepare_units(
+            prepared_session,
+            ["g1-u1"],
+            task_revision=1,
+            workflow_search_id=prepared_workflow,
+        )
+        self.assertEqual(repeated.intent, "stale_action")
+        self.assertEqual((verifier.calls, load_calls), calls_after_first)
 
     def test_prepare_only_validates_requested_auto_crops_then_directly_enters_a2(self):
         load_calls = []
@@ -2270,8 +2625,16 @@ class A3RuntimeTests(unittest.TestCase):
             uploaded.json()["task_state"]["consistency"],
             {"status": "OK", "codes": []},
         )
+        workflow_search_id = uploaded.json()["task_state"]["workflow"]["workflow_id"]
 
-        selected = client.post("/api/a3/select", json={"unit_id": "g1-u1", "task_revision": 1})
+        selected = client.post(
+            "/api/a3/select",
+            json={
+                "unit_id": "g1-u1",
+                "task_revision": 1,
+                "workflow_id": workflow_search_id,
+            },
+        )
         self.assertEqual(selected.status_code, 200)
         self.assertEqual(selected.json()["session"]["a3"]["phase"], A3_PHASE_CROP_REQUIRED)
         self.assertEqual(
@@ -2285,6 +2648,7 @@ class A3RuntimeTests(unittest.TestCase):
                 "bounds": {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
                 "unit_id": "g1-u1",
                 "task_revision": 1,
+                "workflow_id": workflow_search_id,
             },
         )
         events = [json.loads(line) for line in cropped.text.splitlines() if line]
@@ -2304,7 +2668,11 @@ class A3RuntimeTests(unittest.TestCase):
 
         switched = client.post(
             "/api/a3/select",
-            json={"unit_id": "g1-u2", "task_revision": 1},
+            json={
+                "unit_id": "g1-u2",
+                "task_revision": 1,
+                "workflow_id": workflow_search_id,
+            },
         )
         self.assertEqual(switched.status_code, 200)
         switched_a3 = switched.json()["session"]["a3"]
@@ -3199,12 +3567,27 @@ class A3RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(uploaded.status_code, 200)
         self.assertEqual(uploaded.json()["intent"], "a3_auto_crops_ready")
-        self.assertEqual(client.get("/api/a3/overlay").status_code, 200)
-        self.assertEqual(client.get("/api/a3/crop/g1-u1").status_code, 200)
+        workflow_search_id = uploaded.json()["task_state"]["workflow"]["workflow_id"]
+        media_identity = {
+            "workflow_id": workflow_search_id,
+            "task_revision": 1,
+        }
+        self.assertEqual(
+            client.get("/api/a3/overlay", params=media_identity).status_code,
+            200,
+        )
+        self.assertEqual(
+            client.get("/api/a3/crop/g1-u1", params=media_identity).status_code,
+            200,
+        )
 
         prepared = client.post(
             "/api/a3/prepare/stream",
-            json={"unit_ids": ["g1-u1", "g1-u2"], "task_revision": 1},
+            json={
+                "unit_ids": ["g1-u1", "g1-u2"],
+                "task_revision": 1,
+                "workflow_id": workflow_search_id,
+            },
         )
         events = [json.loads(line) for line in prepared.text.splitlines() if line]
         self.assertEqual(events[-1]["type"], "result")
@@ -3222,7 +3605,11 @@ class A3RuntimeTests(unittest.TestCase):
 
         selected = client.post(
             "/api/a3/select/stream",
-            json={"unit_id": "g1-u2", "task_revision": 1},
+            json={
+                "unit_id": "g1-u2",
+                "task_revision": 1,
+                "workflow_id": workflow_search_id,
+            },
         )
         select_events = [json.loads(line) for line in selected.text.splitlines() if line]
         self.assertEqual(select_events[-1]["type"], "result")
@@ -3238,6 +3625,68 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertEqual(select_data["intent"], "search_image")
         self.assertEqual(select_data["session"]["a3"]["phase"], A3_PHASE_A2_ACTIVE)
         self.assertTrue(select_data["submitted_crop"].startswith("/api/media/"))
+
+    def test_fastapi_a3_media_get_requires_current_workflow_identity(self):
+        runtime = A3MvpRuntime(
+            store=SQLiteA3SessionStore(self.root / "media-identity-api.sqlite3"),
+            artifacts=SessionArtifacts(self.root / "media-identity-api-sessions"),
+            a2_runtime=self.a2,
+            page_observer=FakeObserver(),
+            crop_verifier=self.verifier,
+            auto_cropper=FakeAutoCropper(second_status="auto_ready"),
+            external_load_screen=lambda _path: "yes",
+        )
+        client = TestClient(
+            create_app(runtime=runtime, incoming_dir=self.root / "media-identity-incoming")
+        )
+
+        first = client.post(
+            "/api/image",
+            files={"file": ("first.jpg", self.source.read_bytes(), "image/jpeg")},
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+        first_workflow_id = first.json()["task_state"]["workflow"]["workflow_id"]
+        first_identity = {"workflow_id": first_workflow_id, "task_revision": 1}
+        self.assertEqual(client.get("/api/a3/overlay").status_code, 422)
+        self.assertEqual(
+            client.get("/api/a3/crop/g1-u1", params={"workflow_id": first_workflow_id}).status_code,
+            422,
+        )
+        self.assertEqual(
+            client.get("/api/a3/overlay", params={"workflow_id": "", "task_revision": 1}).status_code,
+            400,
+        )
+        self.assertEqual(
+            client.get("/api/a3/crop/g1-u1", params={"workflow_id": first_workflow_id, "task_revision": 0}).status_code,
+            400,
+        )
+        self.assertEqual(client.get("/api/a3/overlay", params=first_identity).status_code, 200)
+        self.assertEqual(
+            client.get("/api/a3/crop/g1-u1", params=first_identity).status_code,
+            200,
+        )
+
+        reset = client.post("/api/reset")
+        self.assertEqual(reset.status_code, 200, reset.text)
+        second = client.post(
+            "/api/image",
+            files={"file": ("second.jpg", self.source.read_bytes(), "image/jpeg")},
+        )
+        self.assertEqual(second.status_code, 200, second.text)
+        second_workflow_id = second.json()["task_state"]["workflow"]["workflow_id"]
+        self.assertNotEqual(second_workflow_id, first_workflow_id)
+        second_identity = {"workflow_id": second_workflow_id, "task_revision": 1}
+
+        self.assertEqual(client.get("/api/a3/overlay", params=first_identity).status_code, 404)
+        self.assertEqual(
+            client.get("/api/a3/crop/g1-u1", params=first_identity).status_code,
+            404,
+        )
+        self.assertEqual(client.get("/api/a3/overlay", params=second_identity).status_code, 200)
+        self.assertEqual(
+            client.get("/api/a3/crop/g1-u1", params=second_identity).status_code,
+            200,
+        )
 
     def test_fastapi_upload_stream_auto_prepares_all_before_selection(self):
         runtime = A3MvpRuntime(
@@ -3281,10 +3730,15 @@ class A3RuntimeTests(unittest.TestCase):
         self.assertTrue(
             all(unit["preparation_status"] == "ready" for unit in a3["units"])
         )
+        workflow_search_id = upload_data["task_state"]["workflow"]["workflow_id"]
 
         selected = client.post(
             "/api/a3/select/stream",
-            json={"unit_id": "g1-u1", "task_revision": 1},
+            json={
+                "unit_id": "g1-u1",
+                "task_revision": 1,
+                "workflow_id": workflow_search_id,
+            },
         )
         select_events = [json.loads(line) for line in selected.text.splitlines() if line]
         select_data = select_events[-1]["data"]

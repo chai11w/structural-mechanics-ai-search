@@ -7,8 +7,8 @@
 - 8790 读取 8795 控制库认证；A1/A2/A3 与子 A2 统一计费。队列默认 1 个运行、2 个排队、55 秒等待，支持 FIFO、防插队、流关闭撤队和同锁分片去重。
 - 8795 是可替换的过渡后台；Trace/Response 主链独立于它。live 已核对 Response、反馈、费用、Trace、身份与时间顺序，未增加 Trace 页面。
 - 8 个 live SQLite 库在发布前后均通过 `quick_check`、`integrity_check`；A2、A3、追问、反馈、费用展示和停用烟测通过，4 条新反馈均绑定服务端 Response。
-- 阶段 3.3、3.4.1～3.4.3 已在代码中完成但未部署；前端已消费权威状态信封，A2 按钮已迁移到 child `allowed_actions`，A3 按钮仍沿用旧授权，3.5 启用门未开始。
-- 当前验证：96 项前端/FastAPI 通过；最近 73 项 task-state 通过。全仓基线 1152 项有 1 项既有 SQLite WAL 顺序波动，该项单独通过。
+- 阶段 3.3、3.4 已在代码中完成但未部署；A2/A3 动作均由 branded V1 `allowed_actions` 授权，3.5 启用门未开始。
+- 当前验证：28 项前端聚焦、220 项本批次定向、73 项 task-state 及全仓 1173 项全部通过；Node/Python 语法与差异检查通过。
 - 已创建 3 个独立、7 天、每日 3 元模型估算额度的内测邀请码并验证；明文只经 8795 受控复制，不进入日志或项目文件。
 
 ## Implemented
@@ -23,20 +23,20 @@
 - Trace Store 使用严格白名单、唯一终态和有界异步写入；Response Store 按 trace 幂等保存隐私受限投影，冲突或写失败 fail-closed。诊断 CLI 支持 trace/response/feedback/稳定身份只读查询，retention 默认 dry-run。
 - 8790/8795 看门狗精确核对端口、PID、Python 和完整参数；使用单实例锁、活 PID 保护与候选启动验证，禁止按端口杀未知进程。
 - 阶段 3.1 与 3.2 已完成：冻结 `TaskStateSnapshotV1`，实现纯构造器、A3→A2 双锁父子各单读、standalone A2 单锁单读、frozen-state 零重读及异常/矩阵 fail-closed；完成时 51 项 task-state、全仓 1035 项通过。
-- 3.3.1～3.3.4 已完成 exact typed V1 公共映射及 session、HTTP 200 业务 JSON 和五个受控 HTTP error 出口；响应时冻结，missing/expired、不可读、stale、取消、reset、媒体重开和 A3 部分清理均按契约 fail-closed，不在边界事后重读。
-- 3.3.5～3.3.6 已完成五条任务 stream result/error 及跨出口验收：success 位于 `event.data.task_state`，error 位于 `event.task_state`；非空 A2/A3 V1、完整/不完整 pair、Response Store/序列化失败、session/reset 和 legacy prepare/crop 均已覆盖。busy/queue/progress 保持无状态，3.3 整体 DONE。
-- 3.4.1～3.4.3 已完成：exact、深冻结、品牌与 fail-closed model 原子消费全部权威信封；A2 候选、`retry_search` 和候选 transport retry 只经 branded child action 授权，并绑定 V1 task ID/revision/generation/rank，旧历史、媒体失效、busy、非法/不一致或 stale 参数均关闭。A3 旧授权尚未迁移。
+- 3.3 已完成 exact typed V1 公共映射及 session、HTTP JSON/error、五条 stream result/error 和跨出口验收；响应时冻结，success 位于 `event.data.task_state`、error 位于 `event.task_state`，失败处理与 legacy 兼容均 fail-closed，busy/queue/progress 保持无状态。
+- 3.4.1～3.4.5 已完成：exact/branded fail-closed model 原子消费权威信封；A2 候选动作绑定 child ID/revision/generation/rank，A3 选择、准备和裁剪绑定 workflow ID/revision/unit(s)，前后端均拒绝 stale/ABA 错绑，`next_stage` 不授权。
+- A3 网络/队列失败不自动重放；历史动作、题图、裁剪和 dismissal 绑定 workflow。过期 reset 以共享 activity、默认 pending request fence、committed tombstone 和 Web Lock 协调；只有可信确定终态或 queue no-update 清 fence，只有 exact empty 提交 reset，未知结果/提交失败后排队旧请求不触网。
 
 ## In Progress
 
-- 主阶段 3 仍进行中：3.1～3.3 服务端、3.4.1～3.4.3 前端模型/信封/A2 动作迁移 DONE；后续 A3 动作迁移及 3.5 启用门待实施。
+- 主阶段 3 仍进行中：3.1～3.4 DONE 且尚未部署；下一独立批次为 3.5 启用门。
 - 本地内测发布已完成；待账户侧配置 Cloudflare Access 与边缘登录限速后，再向 2～3 名测试者发放邀请码并观察 24～48 小时。
 
 ## Not Implemented
 
 - Cloudflare Access、边缘登录限速和测试者邮箱名单仍需账户侧配置；应用内限速不能替代边缘策略。
 - 8795 尚无 Trace/Response 诊断 UI；未来若需要，只能作为可选只读消费者。
-- A3 动作迁移、3.5 启用门与阶段 4～6 尚未实现。
+- 3.5 启用门与阶段 4～6 尚未实现。
 - Paddle splitter、全自动裁剪及自动/人工回退属于 A3 V2，暂不继续。
 - 8890 影子期费用报表、桁架高度几何计算、视觉重排和候选二次位置复筛仍未完成。
 - retention 未安装周期调度、未真实 apply；运行日志仍只有 `policy_missing` 报告。
@@ -61,7 +61,8 @@
 - 旧 `parse_chapter` 会把“第4章”映射为内部 `4力法`；严格入口对纯数字返回 `uncertain`，其他未迁移入口仍可能误搜。
 - 邀请码转发会共享额度；签名 Cookie 不能阻止持码人主动共享，完成后落账也可能让最后一个在途任务略超阈值。
 - Trace 写入为 fail-open，只以健康计数暴露丢失；WAL 双副本和只读检查降低风险，但不是绝对线性化快照。
-- 全仓顺序运行时，诊断 evidence 只读测试会因 `model_costs.sqlite3` WAL 自动 checkpoint 观察到文件变化；3.4 基线同样失败且该项单独通过，前端批次不改无关诊断链。
+- 全仓顺序回归偶发因 `model_costs.sqlite3` WAL checkpoint 使诊断 evidence 测试观察到文件变化；本轮首次出现、单跑及第二次全仓均通过。
+- 无 Web Lock 时自动过期 reset 与全部任务入口均在触网前 fail-closed，只允许 `/api/session`、`/api/reset` 对账；3.5 启用门需核验目标浏览器支持并给出升级提示。
 
 ## Do Not Do
 
@@ -76,7 +77,7 @@
 
 ## Next Best Step
 
-1. 实施下一独立批次的 A3 workflow/unit 动作迁移：只用 branded model 的 `allowed_actions` 授权并用 V1 unit/revision 校验具体参数，不用 `next_stage` 放行动作；不进入 3.5。
+1. 下一独立批次执行 3.5 启用门：定向/全量回归后做 8896 契约烟测和只读 live 对照，再精确启用 8790；不触碰 8788/8794/8795。
 2. 账户侧为 8790/8795 配置独立 Cloudflare Access 与窄范围边缘限速后，再受控发放 3 个邀请码。
 3. 观察 24～48 小时，以成功率、排队、裁图、候选质量、反馈错绑和估算费用决定后续；异常时先停用邀请码再撤销 Access。
 

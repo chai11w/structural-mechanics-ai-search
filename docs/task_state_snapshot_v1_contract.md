@@ -2,9 +2,9 @@
 
 ## 结论与范围
 
-阶段 3.1 完成父 workflow、当前子题任务和题目单元的权威状态契约定稿。本文件冻结 V1 的字段、词汇、字段来源、派生谓词、拓扑边界、一致性错误和冲突策略，是后续实现的权威规范。阶段 3.2.1 已实现从“已冻结 read-set + 可信入口证据”到 `TaskStateSnapshotV1` 的纯构造器，落在 `tiku_agent/task_state_builder.py`；阶段 3.2.2 已实现 `tiku_agent/task_state_runtime.py` 的锁内读取与证据包装，并由 `A3MvpRuntime.task_state_snapshot_v1()`、`AgentSessionRuntime.task_state_snapshot_v1()` 和 `AgentSessionRuntime.task_state_snapshot_v1_from_frozen_state()` 提供内部运行时入口；阶段 3.2.3 已用实际构造结果矩阵和组合读取异常完成边界验收。阶段 3.3.1 冻结 exact typed 公共映射，3.3.2～3.3.5 分别接入 `/api/session`、HTTP 200 业务 JSON、受控非 stream HTTP 4xx/5xx 和五条任务 stream 终态；3.3.6 已完成跨出口 parity、失败后处理、兼容入口和全仓回归验收。
+阶段 3.1 完成父 workflow、当前子题任务和题目单元的权威状态契约定稿。本文件冻结 V1 的字段、词汇、字段来源、派生谓词、拓扑边界、一致性错误和冲突策略，是后续实现的权威规范。阶段 3.2.1 已实现从“已冻结 read-set + 可信入口证据”到 `TaskStateSnapshotV1` 的纯构造器，落在 `tiku_agent/task_state_builder.py`；阶段 3.2.2 已实现 `tiku_agent/task_state_runtime.py` 的锁内读取与证据包装，并由 `A3MvpRuntime.task_state_snapshot_v1()`、`AgentSessionRuntime.task_state_snapshot_v1()` 和 `AgentSessionRuntime.task_state_snapshot_v1_from_frozen_state()` 提供内部运行时入口；阶段 3.2.3 已用实际构造结果矩阵和组合读取异常完成边界验收。阶段 3.3.1 冻结 exact typed 公共映射，3.3.2～3.3.5 分别接入 `/api/session`、HTTP 200 业务 JSON、受控非 stream HTTP 4xx/5xx 和五条任务 stream 终态；3.3.6 已完成跨出口 parity、失败后处理、兼容入口和全仓回归验收。阶段 3.4.1～3.4.5 已完成前端 exact/branded model、信封消费、A2/A3 动作迁移及恢复生命周期收口。
 
-**阶段 3.3 出口一致性及 3.4.1～3.4.2 前端 model/信封接线已在代码中完成，但尚未部署启用到 8790。** 当前受控 HTTP 出口在根级返回 `task_state`，五条任务 stream 的 success 在 `event.data.task_state`、非准入 error 在 `event.task_state` 返回 exact typed V1；浏览器已按这些权威层级原子消费，busy/queue、progress 和非任务响应保持 no-update。旧按钮授权尚未迁移，3.5 启用门仍未完成，因此主阶段 3 仍为 `IN_PROGRESS`，不能声称已经上线。既有内部 `session_snapshot()` 仍是兼容投影，不等同于统一快照。
+**阶段 3.3 出口一致性及 3.4 前端消费已在代码中完成，但尚未部署启用到 8790。** 当前受控 HTTP 出口在根级返回 `task_state`，五条任务 stream 的 success 在 `event.data.task_state`、非准入 error 在 `event.task_state` 返回 exact typed V1；浏览器按这些权威层级原子消费，A2/A3 动作只由 branded `allowed_actions` 授权，busy/queue、progress 和非任务响应保持 no-update。3.5 启用门仍未完成，因此主阶段 3 仍为 `IN_PROGRESS`，不能声称已经上线。既有内部 `session_snapshot()` 仍是兼容投影，不等同于统一快照。
 
 以下内容不属于阶段 3.1：
 
@@ -752,7 +752,7 @@ progress、无会话输入拒绝和非任务路径继续不增加状态。
 Python 3.12 下 73 项 task-state 定向测试、179 项 FastAPI/A3/Response Store 直接
 相关测试及阶段最终全仓 1147 项回归全部通过。未部署、未重启任何服务。
 
-## 3.4.1 前端 V1 解析与 fail-closed model（DONE；尚未接线/部署）
+## 3.4.1 前端 V1 解析与 fail-closed model（DONE；接线见 3.4.2；尚未部署）
 
 前端新增 `tiku_agent/demo_web/task_state.js` 纯模块，按 V1 exact key、schema、类型、
 枚举、phase/status/next-stage、phase action 子集、completed-step 可达集合、candidate
@@ -817,11 +817,49 @@ Python typed fixture 驱动的 Node 动态矩阵同时覆盖 V1/legacy token 矛
 binding、按钮恢复/关闭和 queue no-update；96 项前端/FastAPI 回归通过。A3 控件、自动
 打开逻辑和服务端状态机未改，未部署、启动、停止或重启服务。
 
+## 3.4.4 A3 workflow/unit 动作授权迁移（DONE；尚未部署）
+
+A3 `select_unit`、`prepare_units`、`submit_crop` 只经 branded
+`allowsWorkflowAction()` 放行，不再依赖 legacy phase、selected unit 或 preparation flag
+授权；`next_stage` 仍只用于展示。每个控件绑定同一 V1 workflow 的 `workflow_id`、
+`task_revision` 和目标 `unit_id`/`unit_ids`，在渲染、同步和点击前重验；V1 与 legacy 对
+`AVAILABLE`/`PREPARED` 的解释不一致、状态缺失/非法/不一致、目标集合变化或 busy 时均
+fail-closed。网络、超时和队列失败只允许重新连接，不自动重放可能计费的 A3 动作。
+
+四个 FastAPI A3 网页入口把 `workflow_id` 设为必填，并作为
+`workflow_search_id` 传入 runtime；runtime 在父锁内同时校验 workflow identity、revision
+和 unit 参数，关闭“新旧 workflow 恰好具有相同 revision/unit”的 ABA 错绑。JSON、stream
+与 legacy/V1 pair 测试均覆盖该参数链，未改变无 V1 capabilities 的内部 legacy 调用。
+
+## 3.4.5 前端恢复与生命周期收口（DONE；尚未部署）
+
+上传题图 URL、裁剪 draft、历史 action binding、自动打开标记和 Back dismissal 均绑定
+workflow identity；workflow 切换时先清除旧题图和裁剪状态，打开裁剪页及提交前再次核对，
+避免新 workflow 沿用旧媒体。冷启动发现本地历史超过两小时后不恢复旧 A3 session，而在
+恢复完成前保持任务入口关闭，并通过权威 `/api/reset` 建立空状态。
+
+多标签页以共享 activity、pending request fence、committed reset tombstone 和同源 Web
+Lock 协调。每个 task-state 请求取得锁后、`fetch` 前写入并回读默认 pending 的 fence；
+只有已消费的可信确定终态或明确 queue no-update 清除 fence，只有已消费的 exact empty V1
+才提交 tombstone。普通任务/reset 超时、网络中断、响应格式不明或
+tombstone 提交失败时保留 fence，后续排队任务取得锁后只退休旧 UI 并返回 stale，不进入
+`fetch`；`/api/session` 或再次 `/api/reset` 可在同一锁内对账并清除 fence 或提交 reset。
+自动过期 reset 取得锁后再次读取 activity，新活动会取消 reset 并改读 `/api/session`。
+浏览器不支持 Web Lock 时不自动 reset，且所有 task-starting 入口均在 `fetch` 前
+fail-closed；只允许 `/api/session`、`/api/reset` 继承已有 fence 进行只读/显式对账。
+
+验收以共享存储、FIFO 锁的确定性交错 Node harness 覆盖刷新、过期、跨标签页
+activity/fence/reset、JSON 与 stream 权威空错误提交失败、reset 超时/非空对账、无锁降级、
+迟到终态、媒体/workflow 错绑和动作不重放。阶段收口时 28 项前端聚焦、220 项本批次
+FastAPI/A3/前端定向、73 项 task-state 及全仓 1173 项回归全部通过，Node/Python 语法与
+`git diff --check` 通过；首次全仓仅既有 WAL 时序项失败，该项单跑和第二次全仓均通过。
+未部署、启动、停止或重启任何服务。
+
 ## 后续批次
 
 1. **3.2.1 纯构造器（DONE）**：已完成从冻结 read-set 和可信入口证据到 V1 快照的无 I/O 投影，实现与定向测试见 `tiku_agent/task_state_builder.py` 和 `tests/test_task_state_builder.py`。
 2. **3.2.2 锁内权威读取（DONE）**：已在 A3→A2 锁序内一次读取父子状态，在 standalone A2 锁内单读 child，并为已持锁调用方提供零重锁、零 store 读取的 frozen-state 入口；缺失/不可读/稳定未知分类、受控文件与入口能力证据及回归测试见 `tiku_agent/task_state_runtime.py`、两个 runtime 类和 `tests/test_task_state_runtime.py`。项目 Python 3.12 下 47 项 task-state 定向测试及全仓 1031 项回归通过。
 3. **3.2.3 异常与矩阵测试（DONE）**：父 route/phase 与 child phase/topology 的实际构造矩阵、A3 active/组合读取异常、脱敏及旧 revision 动作证据均已补齐；阶段 3.2 整体完成。项目 Python 3.12 下 51 项 task-state 定向测试及全仓 1035 项回归通过。
 4. **3.3 出口一致性（DONE；尚未部署）**：3.3.1～3.3.6 已完成；跨 session、JSON success/error、stream result/error 和 reset 的 exact V1 parity、失败后处理、零重读及 legacy 兼容均已验收，阶段最终全仓 1147 项通过。
-5. **3.4 前端消费（IN_PROGRESS；尚未部署）**：3.4.1 纯解析/model、3.4.2 原子信封接线与 3.4.3 A2 动作迁移已完成；下一步迁移 A3 workflow/unit 控件，只用服务端 `allowed_actions` 授权，`next_stage` 仅供展示/引导，不授权动作。
+5. **3.4 前端消费（DONE；尚未部署）**：3.4.1～3.4.5 已完成 exact/branded model、原子信封接线、A2/A3 动作迁移及恢复/多标签页生命周期收口；A2/A3 只由服务端 `allowed_actions` 授权，动作参数绑定 V1 identity/revision/target，`next_stage` 不授权。阶段最终全仓 1173 项通过。
 6. **3.5 启用门（尚未实现）**：定向/全量回归、8896 契约烟测、只读 live 对照后再精确启用 8790；不触碰 8788/8794/8795。
