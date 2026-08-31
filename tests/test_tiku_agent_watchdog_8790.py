@@ -8,6 +8,7 @@ import unittest
 
 
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("powershell")
+GIT = shutil.which("git.exe") or shutil.which("git")
 
 
 class TikuAgentWatchdog8790Test(unittest.TestCase):
@@ -273,6 +274,41 @@ Write-Output "$($valid.commit)|$missing|$inconsistent|$noCommit|$dirty|$primary"
             result.stdout.strip().splitlines()[-1],
             f"{commit}|True|True|True|True|True",
         )
+
+    @unittest.skipUnless(
+        POWERSHELL and GIT,
+        "Windows PowerShell and Git are required",
+    )
+    def test_release_git_query_decodes_unicode_without_global_config(self):
+        safety = str(self.safety_path).replace("'", "''")
+        with tempfile.TemporaryDirectory(prefix="tiku release git ") as temporary:
+            repository = Path(temporary) / "题库 release"
+            initialized = subprocess.run(
+                [str(GIT), "init", str(repository)],
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            repository_value = str(repository.resolve()).replace("'", "''")
+            result = self._run_powershell(
+                f"""
+$env:GIT_CONFIG_GLOBAL = 'NUL'
+$env:GIT_CONFIG_SYSTEM = 'NUL'
+. '{safety}'
+$output = @(Invoke-Tiku8790ReleaseGit -ProjectDirectory '{repository_value}' -GitArguments @('rev-parse', '--show-toplevel'))
+$matches = $output.Count -eq 1 -and [string]::Equals(
+  [System.IO.Path]::GetFullPath(([string]$output[0]).Trim()),
+  [System.IO.Path]::GetFullPath('{repository_value}'),
+  [System.StringComparison]::OrdinalIgnoreCase
+)
+Write-Output "$matches|$($output.Count)"
+"""
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "True|1")
 
     @unittest.skipUnless(POWERSHELL, "Windows PowerShell is required")
     def test_windows_argv_encoding_preserves_absolute_entrypoint(self):

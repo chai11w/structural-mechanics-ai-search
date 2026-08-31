@@ -69,18 +69,50 @@ function Invoke-Tiku8790ReleaseGit {
     if (-not $command -or -not $command.Source) {
         throw "Git executable could not be resolved for 8790 release verification."
     }
-    $previousPreference = $ErrorActionPreference
+    $logicalArguments = @(
+        "-c",
+        "core.quotePath=false",
+        "-C",
+        $ProjectDirectory
+    ) + @($GitArguments)
+    $encodedArguments = @(
+        $logicalArguments |
+            ForEach-Object {
+                ConvertTo-Tiku8790CommandLineArgument -Argument ([string]$_)
+            }
+    )
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $command.Source
+    $startInfo.Arguments = $encodedArguments -join " "
+    $startInfo.WorkingDirectory = $ProjectDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $utf8 = [System.Text.UTF8Encoding]::new($false)
+    $startInfo.StandardOutputEncoding = $utf8
+    $startInfo.StandardErrorEncoding = $utf8
+    $startInfo.EnvironmentVariables["GIT_OPTIONAL_LOCKS"] = "0"
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
     try {
-        $ErrorActionPreference = "Continue"
-        $output = @(& $command.Source -C $ProjectDirectory @GitArguments 2>$null)
-        $exitCode = $LASTEXITCODE
+        if (-not $process.Start()) {
+            throw "8790 Git release identity verification failed to start."
+        }
+        $standardOutput = $process.StandardOutput.ReadToEnd()
+        [void]$process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
     } finally {
-        $ErrorActionPreference = $previousPreference
+        $process.Dispose()
     }
     if ($exitCode -ne 0) {
         throw "8790 Git release identity verification failed."
     }
-    return $output
+    return @(
+        $standardOutput -split "\r?\n" |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
 }
 
 function Assert-Tiku8790ReleaseIdentity {
