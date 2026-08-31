@@ -6,8 +6,8 @@
 - 端口隔离保持：8788 飞书、8790 生产、8795 后台；8896 仅用于隔离验收且验收后已停服，8794 无监听，8891/8897 为分流/回退端口。
 - 8790 读取 8795 控制库认证；A1/A2/A3 与子 A2 统一计费。队列默认 1 个运行、2 个排队、55 秒等待，支持 FIFO、防插队、流关闭撤队和同锁分片去重。
 - 8795 是可替换的过渡后台，Trace/Response 主链独立于它；8 个 live SQLite 库及 A2/A3、追问、反馈、费用和停用闭环已验收，4 条新反馈均绑定服务端 Response。
-- 阶段 3.3、3.4 已完成并合入 `codex/mainline-bounded-autonomy-v1`，但尚未部署；3.5.1～3.5.2 已在 `codex/task-state-stage-3-5-1` 完成，8790 未部署或操作。
-- 当前验证：18 项 3.5.2 runner/watchdog 聚焦及全仓 1216 项通过；固定 checkout 的 8896 gate 得到 `http_sqlite_ok`，14 个 evidence request 对应 28 条 trace event 和 3 条 Response Store 记录，浏览器无控制台错误或横向溢出，停服后 listener 与阶段进程均为零。
+- 主阶段 3 已完成：3.3/3.4 的统一任务状态出口与前端消费已随 3.5.4 启用到 8790；生产计划任务固定到受 manifest 约束的干净 release checkout，不再从可变主工作区启动。
+- 当前验证：8790 hardening 全仓 1221 项通过；live 固定 release、任务/父子链/唯一 listener、1/2/55、control 引用、回退 XML 和 8 份一致 SQLite 备份均已验收。浏览器无错误或溢出，支持 Web Lock，live `task_state.js` 与 release 哈希一致。
 - 已创建 3 个独立、7 天、每日 3 元模型估算额度的内测邀请码并验证；明文只经 8795 受控复制，不进入日志或项目文件。
 
 ## Implemented
@@ -18,22 +18,22 @@
 - 公共五态协议只输出注册 code/白名单字段；候选原子交付，答案区分 0/部分/全部，媒体失败可重发，同题重试沿用 `search_id`。
 - 8790 已实现有界队列、请求限长、登录限速、安全客户端地址和 JSON 工作线程；8795 管理登录同样限长限速，邀请码永久删除在费用库异常时 fail-closed。
 - Trace/Response Store 使用白名单、唯一终态和幂等隐私投影；诊断 CLI 支持有界只读查询，retention 默认 dry-run。
-- 8790/8795 看门狗精确核对端口、PID、Python 和完整参数；8896 还将绝对入口绑定 checkout、安全编码 argv，并在无法确认端口所有者时 fail-closed，三者均禁止按端口杀未知进程。
+- 8790/8795 看门狗核对端口、PID、Python 和完整参数；8790/8896 还绑定绝对 checkout/入口、安全 argv，端口所有者不明时 fail-closed。8790 每次启动复验 manifest、完整提交、干净 linked checkout、Python/runtime；Limited 任务以显式 UTF-8 和 `core.quotePath=false` 解析中文 Git 路径。
 - 3.1～3.2 已冻结 `TaskStateSnapshotV1` 并实现纯构造、锁内单读、frozen-state 零重读及异常 fail-closed。
 - 3.3～3.4 已统一 session/JSON/error/stream 快照；前端只由 branded `allowed_actions` 授权，动作绑定任务 identity/revision/target，拒绝 stale/ABA，网络未知结果不自动重放。
-- 3.5.1 已完成：干净 worktree fixture、8896 精确进程管理和 external-load deadline 锁内失权均已回归；未运行服务/watchdog、访问端口、读取 live 数据或部署。
-- 3.5.2 已完成且未部署：固定 linked checkout、完整提交、绝对 Git/Python/PowerShell/runtime 运行 8896 契约烟测；HTTP、SQLite、浏览器和精确清理均通过。空 listener 只接受 `Get-NetTCPConnection` 的结构化 no-match，权限、CIM 和其他错误继续 fail-closed。
+- 3.5.1～3.5.2 已完成：离线安全回归及固定 checkout 的 8896 HTTP/SQLite/浏览器契约烟测与精确清理通过；这两个批次当时均未部署 8790。
+- 3.5.3 只读审计正确阻断旧启动链的可变工作区、未知提交和缺失 release/manifest/回退锚点；3.5.4 经用户随后明确授权本次限定 remediation，建立固定 release 与受限回退并精确启用，watchdog 周期、独立健康/浏览器验收通过，8788/8794/8795 监听身份前后不变。
 
 ## In Progress
 
-- 主阶段 3 仍进行中：3.1～3.4 DONE、已合入主线且尚未部署，3.5.1～3.5.2 DONE；下一独立批次为须另行确认的 3.5.3 只读 live 对照。
-- 本地内测发布已完成；待账户侧配置 Cloudflare Access 与边缘登录限速后，再向 2～3 名测试者发放邀请码并观察 24～48 小时。
+- 本地内测发布和主阶段 3 已完成；待账户侧配置 Cloudflare Access 与边缘登录限速后，再向 2～3 名测试者发放邀请码并观察 24～48 小时。
 
 ## Not Implemented
 
 - Cloudflare Access、边缘登录限速和测试者邮箱名单仍需账户侧配置；应用内限速不能替代边缘策略。
 - 8795 尚无 Trace/Response 诊断 UI；未来若需要，只能作为可选只读消费者。
-- 3.5.3～3.5.4 启用门与阶段 4～6 尚未实现。
+- 阶段 4～6 尚未实现；不要因主阶段 3 上线而自动开始。
+- 仓库尚无可复用的 8790 计划任务 release 发布器；`switch_tiku_agent_8790_control.ps1` 只用于早期控制库迁移，不承担任务 XML/action 切换与代码回退。
 - Paddle splitter、全自动裁剪及自动/人工回退属于 A3 V2，暂不继续。
 - 8890 影子期费用报表、桁架高度几何计算、视觉重排和候选二次位置复筛仍未完成。
 - retention 未安装周期调度、未真实 apply；运行日志仍只有 `policy_missing` 报告。
@@ -59,7 +59,7 @@
 - 邀请码转发会共享额度；签名 Cookie 不能阻止持码人主动共享，完成后落账也可能让最后一个在途任务略超阈值。
 - Trace 写入为 fail-open，只以健康计数暴露丢失；WAL 双副本和只读检查降低风险，但不是绝对线性化快照。
 - 全仓顺序回归曾因费用库 WAL checkpoint 使诊断测试观察到文件变化；单跑和复跑通过，仍属时序风险。
-- 无 Web Lock 时自动过期 reset 与全部任务入口均在触网前 fail-closed，只允许 `/api/session`、`/api/reset` 对账；3.5.3～3.5.4 启用门仍需核验目标浏览器支持并给出升级提示。
+- 无 Web Lock 时自动过期 reset 与全部任务入口均在触网前 fail-closed，只允许 `/api/session`、`/api/reset` 对账；当前验收浏览器已确认支持 Web Lock，但发放前仍需覆盖实际测试者浏览器。
 
 ## Do Not Do
 
@@ -70,14 +70,14 @@
 - 不跨章节搜索，不绕过项目脚本识别、过滤和排序；未授权时不把图片发给外部模型。
 - 不把公共输出改造扩展到个人飞书入口，不随意停止 8788。
 - 不按端口批量杀进程，不覆盖活 PID 文件；身份核对失败时停在现场。
-- 未经用户另行确认，不访问、部署或操作 8790；3.5 不触碰 8788、8794、8795，也不调用会读取这些运行状态的旧切换脚本。
+- 后续 8790 发布必须先固定 release/manifest、备份运行数据与任务 XML，并按完整 exe/argv/PID/父子链精确切换；不得把 `switch_tiku_agent_8790_control.ps1` 当作计划任务发布器，也不得影响 8788/8794/8795。
 - 不在目标回复缺失时保存整段反馈历史，也不把反馈专用框选图重复注入普通聊天消息。
 
 ## Next Best Step
 
-1. 用户另行确认后执行 3.5.3 只读 live 对照；只能从 8790 侧静态启动证据核对 control 引用，不连接、读取或探测 8795，也不触碰 8788/8794。
-2. 3.5.3 通过后单独汇报；3.5.4 精确启用 8790 仍须再次确认，并先核对实际运行提交、固定 checkout、live runtime、回退版本和运行数据备份。
-3. 账户侧为 8790/8795 配置独立 Cloudflare Access 与窄范围边缘限速后，再受控发放 3 个邀请码并观察 24～48 小时。
+1. 账户侧为 8790/8795 配置独立 Cloudflare Access 与窄范围边缘限速；完成前不同时发放公网地址和邀请码。
+2. 受控发放 3 个独立邀请码并观察 24～48 小时，记录成功闭环、排队超时、A3 裁图、候选相关性、点踩和估算费用。
+3. 根据真实失败记录再审查阶段 4 的中间结果持久化；未经单独确认不开始阶段 4。
 
 ## Important Commands
 

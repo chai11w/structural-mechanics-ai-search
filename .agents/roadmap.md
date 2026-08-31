@@ -7,7 +7,7 @@
 ## Current Priority
 
 - 工程化梳理优先于新增自主功能：阶段 3.1～3.4 已完成并合入 `codex/mainline-bounded-autonomy-v1`，A2/A3 动作均由 branded V1 `allowed_actions` 授权并绑定 identity/revision/target；busy/queue 拒绝保持无状态，仍不动 8788/8794，也不提前混入阶段结果或暂停/继续。
-- 3.4 已合入主线且尚未部署；3.5.1～3.5.2 已在独立分支完成。8896 gate 固定 linked checkout、完整提交和绝对工具链/runtime，HTTP、SQLite、浏览器及精确清理通过；18 项 runner/watchdog 聚焦与全仓 1216 项通过。主阶段 3 仍为 `IN_PROGRESS`，下一独立批次为须另行确认的 3.5.3 只读 live 对照。
+- 主阶段 3 已完成并启用到 8790。3.5.3 只读 live 对照因旧服务缺少固定 release/manifest 和可信回退锚点而正确阻断；用户随后明确授权本次限定 remediation 与精确启用。8790 现由固定干净 release、完整提交和 manifest 启动，计划任务、watchdog→agent→listener、1/2/55、control 引用、回退/备份、完整 watchdog 周期和真实浏览器静态资源均通过；release hardening 全仓 1221 项通过，8788/8794/8795 监听身份前后不变。
 - 8790 网页已由 A3-V1 接管业务内核并继续使用 8795 控制库邀请码；费用、反馈汇总、动态额度和旧并发队列下一轮恢复。
 - 8896 保留同内核验收，8897 暂留独立回退；当前重点是 8790 真实样本验收和失败记录收集。Paddle 试验结论保留，不再作为当前阻塞项。
 - 8794 影子规划及有限自主阶段暂停排期；待 8892 固定流程、取消语义和验收样本稳定，且真实失败记录证明固定编排不足后再恢复。
@@ -49,22 +49,23 @@
 
 - Planner 结构化计划、权限契约、有界执行、选择性自主等阶段在 8892 验证完成前暂停；恢复前以 8890 规范文档的验收门为准。
 
-### 当前：Agent 工程化梳理与可恢复运行基础
+### 当前（阶段 3 已完成）：Agent 工程化梳理与可恢复运行基础
 
 目标是降低现有系统的理解成本、排错成本和改动风险；不以暂停/继续为理由一次性重写主线。各阶段按依赖顺序推进，前一阶段稳定后才进入下一阶段：
 
 1. **统一输出层（DONE）**：新 Agent/Web 已把内部诊断与用户文案分离，注册错误码和白名单字段统一进入 HTTP、流式与 A3 公共输出；定向回归和 8790/8896 运行核验已通过，个人飞书入口保持原样。
 2. **统一 trace、日志、错误和用户反馈（DONE）**：2.1～2.5 已完成；每次 HTTP/stream 操作可把路由、阶段、模型/工具、费用写入、错误、最终公共结果以及后续反馈串到服务端 trace。可评分回复先保存隐私受限的权威投影并获得 `response_id`，反馈必须以 `rated_response_id` 通过 identity/session/有效期及 conversation 目标一致性校验；独立诊断 CLI 已提供新链优先、旧链回退的只读查询和隔离的保留维护入口。详见 [`现状矩阵`](../docs/trace_phase1_observability_inventory.md) 与 [`Trace V1 契约`](../docs/trace_phase1_audit.md)。
-3. **统一任务状态快照（IN_PROGRESS）**：为父 workflow 和子题任务提供权威的当前阶段、状态、已完成内容、允许动作和下一阶段视图，避免各入口自行拼装状态。
+3. **统一任务状态快照（DONE）**：为父 workflow 和子题任务提供权威的当前阶段、状态、已完成内容、允许动作和下一阶段视图，避免各入口自行拼装状态。
    - 3.1 冻结权威状态契约、公共结构、动作/里程碑矩阵、unit 互斥规则和 fail-closed 一致性边界：DONE；契约、定向测试和规范分别落在 `tiku_agent/task_state_contract.py`、`tests/test_task_state_contract.py`、`docs/task_state_snapshot_v1_contract.md`。
    - 3.2.1 纯构造器：DONE；从冻结 read-set 与可信入口证据无 I/O 投影 V1 快照，完成字段谓词、拓扑判断、动作过滤、17 个一致性 code 和 fail-closed 占位，定向 31 项及全仓 1015 项回归通过。
    - 3.2.2 锁内权威读取：DONE；A3 wrapper 按 A3→A2 锁序让父子 store 各读取一次，standalone A2 只获取 A2 锁，已持 A2 锁的调用方可传 frozen state 而不重锁/重读；缺失、不可读、稳定未知状态和受控文件/入口证据均已收口。47 项 task-state 定向测试及全仓 1031 项回归通过；当前只新增 runtime 内部入口，未改公共出口。
    - 3.2.3 异常与矩阵测试：DONE；实际构造结果已覆盖空记录与全部可持久化父 route/phase 合法/非法组合、九个 live child phase × standalone/direct A2/A3 active、特殊 child 边界、A3 active/父子组合读取异常、脱敏和旧 revision 动作证据。51 项 task-state 定向测试及全仓 1035 项回归通过；阶段 3.2 整体 DONE，未改生产代码或公共出口。
-   - 3.3 JSON/stream 出口一致性：DONE，尚未部署。3.3.1～3.3.5 完成公共映射及 session、HTTP success/error、五条任务 stream 接入；3.3.6 已用非空 A2/A3 V1 验证跨出口 exact parity、完整 pair、失败后处理、零重读和 legacy 兼容，并修复 session/reset 不完整组合可能发布原 typed 或跨 read-set 拼接的问题。73 项 task-state、179 项 FastAPI/A3/Response Store 直接相关及全仓 1147 项回归通过。
-   - 3.4 前端消费：DONE，尚未部署。3.4.1～3.4.5 完成 exact/branded fail-closed model、权威信封原子接线、A2/A3 动作迁移及恢复/多标签页生命周期收口。候选动作绑定 child ID/revision/generation/rank；A3 选择、准备、裁剪绑定 workflow ID/revision/unit(s)，前后端共同拒绝跨 workflow ABA 错绑，`next_stage` 不授权。网络/队列失败不自动重放 A3 动作；过期/reset 以共享 activity、默认 pending request fence、committed tombstone 和 Web Lock 协调，未知结果先对账且排队旧请求不触网；无 Web Lock 时任务入口在 fetch 前关闭，仅保留 session/reset 对账。28 项前端聚焦、220 项本批次定向、73 项 task-state 及全仓 1173 项全部通过；主阶段 3 保持 IN_PROGRESS，下一步为 3.5 启用门。
-   - 3.5.1 启用前离线回归与静态安全预检：DONE，未部署。干净 worktree fixture 已补齐；8896 watchdog 只允许 8896，以绝对入口绑定 checkout，安全编码 argv，使用单实例锁/活 PID 保护并在端口无法确认时 fail-closed，移除按端口杀进程。external-load screen 的 deadline 由 race 锁内判定，计时从 agent 构造完成后开始，确定性交错覆盖晚到失权。28/220/73 项原回归、13 项 watchdog 聚焦、65 项受影响回归及最终全仓 1178 项通过；未访问或运行任何端口、live 数据、服务或 watchdog。
-   - 3.5.2 8896 契约烟测：DONE，未部署。使用固定 linked checkout、完整提交、绝对 Git/Python/PowerShell/runtime 和硬化 watchdog；HTTP 与停服后 SQLite 证据通过，14 个 evidence request 对应 28 条 trace event 和 3 条 Response Store 记录。真实浏览器加载 task-state 页面无控制台错误、资源缺失或横向溢出；watchdog、agent 和 8896 listener 均精确清理。Windows 空 listener 的结构化 no-match 已收口，其他查询错误继续 fail-closed；全程未触碰 8788/8790/8794/8795。
-   - 3.5.3 只读 live 对照、3.5.4 精确启用 8790：PLANNED，均须用户另行确认。只允许从 8790 侧静态启动证据核对 control 引用，不连接、读取或探测 8795；若无法在该边界内证明或启用则阻断并重新确认。另须核对实际运行提交、固定 checkout、8790 live runtime、回退版本和运行数据备份，不能把仓库 HEAD 当作线上版本证据。
+   - 3.3 JSON/stream 出口一致性：DONE，已随 3.5.4 启用 8790。3.3.1～3.3.5 完成公共映射及 session、HTTP success/error、五条任务 stream 接入；3.3.6 已用非空 A2/A3 V1 验证跨出口 exact parity、完整 pair、失败后处理、零重读和 legacy 兼容，并修复 session/reset 不完整组合可能发布原 typed 或跨 read-set 拼接的问题。73 项 task-state、179 项 FastAPI/A3/Response Store 直接相关及全仓 1147 项回归通过。
+   - 3.4 前端消费：DONE，已随 3.5.4 启用 8790。3.4.1～3.4.5 完成 exact/branded fail-closed model、权威信封原子接线、A2/A3 动作迁移及恢复/多标签页生命周期收口。候选动作绑定 child ID/revision/generation/rank；A3 选择、准备、裁剪绑定 workflow ID/revision/unit(s)，前后端共同拒绝跨 workflow ABA 错绑，`next_stage` 不授权。网络/队列失败不自动重放 A3 动作；过期/reset 以共享 activity、默认 pending request fence、committed tombstone 和 Web Lock 协调，未知结果先对账且排队旧请求不触网；无 Web Lock 时任务入口在 fetch 前关闭，仅保留 session/reset 对账。28 项前端聚焦、220 项本批次定向、73 项 task-state 及全仓 1173 项全部通过。
+   - 3.5.1 启用前离线回归与静态安全预检：DONE；该批次当时未部署。干净 worktree fixture 已补齐；8896 watchdog 只允许 8896，以绝对入口绑定 checkout，安全编码 argv，使用单实例锁/活 PID 保护并在端口无法确认时 fail-closed，移除按端口杀进程。external-load screen 的 deadline 由 race 锁内判定，计时从 agent 构造完成后开始，确定性交错覆盖晚到失权。28/220/73 项原回归、13 项 watchdog 聚焦、65 项受影响回归及最终全仓 1178 项通过；未访问或运行任何端口、live 数据、服务或 watchdog。
+   - 3.5.2 8896 契约烟测：DONE；该批次当时未部署 8790。使用固定 linked checkout、完整提交、绝对 Git/Python/PowerShell/runtime 和硬化 watchdog；HTTP 与停服后 SQLite 证据通过，14 个 evidence request 对应 28 条 trace event 和 3 条 Response Store 记录。真实浏览器加载 task-state 页面无控制台错误、资源缺失或横向溢出；watchdog、agent 和 8896 listener 均精确清理。Windows 空 listener 的结构化 no-match 已收口，其他查询错误继续 fail-closed；全程未触碰 8788/8790/8794/8795。
+   - 3.5.3 只读 live 对照：DONE，结论为 BLOCKED。静态证据确认旧启动链/watchdog 从可变主工作区启动，不能证明实际提交，且缺少固定 release/manifest 和匹配回退锚点；按原安全边界停止并重新确认，没有把仓库 HEAD 当作线上证据。
+   - 3.5.4 remediation 与精确启用 8790：DONE。用户随后明确授权本次限定 remediation 与精确启用后，watchdog 强制完整提交、manifest、干净 linked checkout、绝对入口/Python/runtime 和每次启动复验，并修复 Limited 任务环境下中文 Git 路径解析。受限备份包含 Git bundle、任务 XML、8 份 SQLite 在线一致副本及 control key 配对；精确切换后任务 Running、父子链/唯一 listener/1/2/55/control 引用、health/Trace 和完整巡检周期均通过。真实浏览器邀请页无控制台错误或横向溢出，Web Lock 可用，live `task_state.js` 哈希与 release 一致；8788/8794/8795 监听身份前后不变。
 4. **关键阶段结构化保存中间结果（PLANNED）**：保存识图、裁图、章节、荷载、分层候选数、失败原因及版本；以 `artifact_id` 受控关联短期原图、裁图和 overlay，查看、延长保留、删除均审计，路径不进 trace/公共输出，支持诊断、复用和 checkpoint。
 5. **幂等执行与父子任务控制（PLANNED）**：统一任务版本、幂等键、执行锁和 A3→A2 父子生命周期，避免重复点击、网络重试或恢复造成重复执行和重复计费。
 6. **长任务与 HTTP 流逐步解耦（PLANNED）**：让后台任务持有执行生命周期，HTTP/updates 流只负责提交、观察和控制；页面刷新或连接断开不再等于任务状态丢失。
