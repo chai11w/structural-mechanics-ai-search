@@ -950,8 +950,14 @@ pending fence；只有 `/api/session` 成功对账后才重新放行。cache-bus
 状态仍在启动时恢复。无 Web Lock 时任务入口在读图前明确提示升级或改用最新版 Chrome、Edge，
 不再伪装成普通网络波动。connection/session-recovery/history-storage 等 operational notice
 保留在页面中，但不再把无历史首页整体隐藏。cache-buster 为
-`20260901-refresh-recovery-v4`；实现及聚焦回归已完成，尚未部署到 8896 或 8790。
-当前 134 项前端/FastAPI/8896 verifier 聚焦回归及全仓 1225 项回归通过。
+`20260901-refresh-recovery-v4`。当前 134 项前端/FastAPI/8896 verifier 聚焦回归及全仓
+1225 项回归通过。固定 release `635cb0cb27fe04d8373a1b958e452b650f598da2` 已部署到
+8896；health、精确 watchdog/agent/listener 身份、受保护端口、单标签首页、Edge 双标签首页、
+14 请求 HTTP 契约，以及隔离历史 response 行后的 28 条 trace / 3 条 Response Store 离线
+证据均通过。部署前任务 XML、7 份 SQLite 一致性备份及验收证据保存在仓库外
+`F:\cc\_backups\7-题库检索\2026-09-01\8896-refresh-recovery-v4-20260901-201018`。
+内置浏览器文件选择器未产生自动化可接管的 chooser 事件，因此真实拖图仍等待用户手动验收；
+不得写成 8896 用户验收 DONE。v4 尚未部署到 8790。
 
 ## 后续批次
 
