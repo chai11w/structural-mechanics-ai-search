@@ -16,9 +16,13 @@ $LogDir = Join-Path $RuntimeDir "service_logs"
 $StatusFile = Join-Path $LogDir "watchdog_8888.status"
 $WatchdogPidFile = Join-Path $LogDir "watchdog_8888.pid"
 $AgentPidFile = Join-Path $LogDir "tiku_8888.pid"
-$AgentOutLog = Join-Path $LogDir "tiku_8888.out.log"
-$AgentErrLog = Join-Path $LogDir "tiku_8888.err.log"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+$createdNew = $false
+$watchdogMutex = [System.Threading.Mutex]::new($true, "Local\TikuAgentDemo8888Watchdog", [ref]$createdNew)
+if (-not $createdNew) {
+    exit 0
+}
 
 function Write-Status {
     param([string]$Message)
@@ -42,10 +46,14 @@ function Stop-PortProcess {
     foreach ($processId in ($processIds | Where-Object { $_ -and $_ -ne 0 })) {
         Write-Status "Stopping process on port ${Port}: PID $processId"
         Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id $processId -Timeout 5 -ErrorAction SilentlyContinue
     }
 }
 
 function Start-Agent {
+    $logStamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $agentOutLog = Join-Path $LogDir "tiku_8888.$logStamp.out.log"
+    $agentErrLog = Join-Path $LogDir "tiku_8888.$logStamp.err.log"
     $arguments = @(
         "-B",
         "scripts\run_tiku_agent_8888.py",
@@ -56,43 +64,51 @@ function Start-Agent {
     $process = Start-Process $PythonExe `
         -ArgumentList $arguments `
         -WorkingDirectory $ProjectDir `
-        -RedirectStandardOutput $AgentOutLog `
-        -RedirectStandardError $AgentErrLog `
+        -RedirectStandardOutput $agentOutLog `
+        -RedirectStandardError $agentErrLog `
         -WindowStyle Hidden `
         -PassThru
     Set-Content -LiteralPath $AgentPidFile -Value $process.Id -Encoding ASCII
-    Write-Status "Started 8888 demo agent: PID $($process.Id)"
+    Write-Status "Started 8888 demo agent: PID $($process.Id) stdout=$([IO.Path]::GetFileName($agentOutLog)) stderr=$([IO.Path]::GetFileName($agentErrLog))"
     return $process
 }
 
-Set-Content -LiteralPath $WatchdogPidFile -Value $PID -Encoding ASCII
-Set-Content -LiteralPath $StatusFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Watchdog started. Project=$ProjectDir Port=$Port RuntimeDir=$RuntimeDir" -Encoding UTF8
-foreach ($path in @($AgentOutLog, $AgentErrLog)) {
-    if (-not (Test-Path -LiteralPath $path)) {
-        New-Item -ItemType File -Path $path -Force | Out-Null
-    }
-}
-
-$agentProcess = $null
 try {
+    Set-Content -LiteralPath $WatchdogPidFile -Value $PID -Encoding ASCII
+    Write-Status "Watchdog started. Project=$ProjectDir Port=$Port RuntimeDir=$RuntimeDir"
+    $consecutiveFailures = 0
     while ($true) {
-        if (-not $agentProcess -or $agentProcess.HasExited -or -not (Test-Health)) {
-            if ($agentProcess -and -not $agentProcess.HasExited) {
-                Stop-Process -Id $agentProcess.Id -Force -ErrorAction SilentlyContinue
-            }
-            Write-Status "Health check failed; restarting 8888 demo agent."
-            Stop-PortProcess
-            Start-Sleep -Seconds 2
-            $agentProcess = Start-Agent
-            Start-Sleep -Seconds 4
+        try {
             if (Test-Health) {
-                Write-Status "Health check passed."
+                $consecutiveFailures = 0
+            } else {
+                $consecutiveFailures += 1
+                $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+                if ($listeners.Count -eq 0 -or $consecutiveFailures -ge 2) {
+                    Write-Status "Health check failed ($consecutiveFailures); restarting 8888 demo agent."
+                    Stop-PortProcess
+                    Start-Sleep -Seconds 2
+                    Start-Agent | Out-Null
+                    Start-Sleep -Seconds 4
+                    if (Test-Health) {
+                        Write-Status "Health check passed."
+                        $consecutiveFailures = 0
+                    } else {
+                        Write-Status "Health check still failing after restart."
+                    }
+                }
             }
+        } catch {
+            Write-Status "Watchdog cycle failed: type=$($_.Exception.GetType().Name) hresult=$($_.Exception.HResult) line=$($_.InvocationInfo.ScriptLineNumber)"
         }
-        Start-Sleep -Seconds 20
+        Start-Sleep -Seconds 10
     }
 } finally {
     if (Test-Path -LiteralPath $WatchdogPidFile) {
         Remove-Item -LiteralPath $WatchdogPidFile -Force -ErrorAction SilentlyContinue
+    }
+    if ($watchdogMutex) {
+        $watchdogMutex.ReleaseMutex()
+        $watchdogMutex.Dispose()
     }
 }
