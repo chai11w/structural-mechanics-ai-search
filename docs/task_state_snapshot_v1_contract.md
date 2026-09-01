@@ -943,6 +943,16 @@ pending fence；只有 `/api/session` 成功对账后才重新放行。cache-bus
 重启 NATAPP、触碰 8888 或开始阶段 4。3.5.3 的 DONE/BLOCKED 和上方 3.5.4 的 DONE 均是
 历史事实，不因本节延期而改写。
 
+`v3` 的真实浏览器复核又确认了一个独立的首次进入问题：8896 的 `/api/session` 返回 200，
+但空白本地历史也会在页面加载时立即进入 pending fence 对账；一旦浏览器协调能力不足或客户端
+不能消费该对账，operational notice 会覆盖首页。`v4` 对此不放松 task-start fail-closed：空白
+本地历史先稳定显示首页，第一次任务在读图和触网前惰性完成只读 bootstrap；有历史或真实过期
+状态仍在启动时恢复。无 Web Lock 时任务入口在读图前明确提示升级或改用最新版 Chrome、Edge，
+不再伪装成普通网络波动。connection/session-recovery/history-storage 等 operational notice
+保留在页面中，但不再把无历史首页整体隐藏。cache-buster 为
+`20260901-refresh-recovery-v4`；实现及聚焦回归已完成，尚未部署到 8896 或 8790。
+当前 134 项前端/FastAPI/8896 verifier 聚焦回归及全仓 1225 项回归通过。
+
 ## 后续批次
 
 1. **3.2.1 纯构造器（DONE）**：已完成从冻结 read-set 和可信入口证据到 V1 快照的无 I/O 投影，实现与定向测试见 `tiku_agent/task_state_builder.py` 和 `tests/test_task_state_builder.py`。

@@ -1296,7 +1296,7 @@ function resolveFailureNotice(key) {
   chat.querySelectorAll('[data-notice-key]').forEach((article) => {
     if (article.dataset.noticeKey === noticeKey) article.remove();
   });
-  if (!chat.childElementCount) empty.hidden = false;
+  if (!history.length) empty.hidden = false;
 }
 
 function setFeedbackPending(pending) {
@@ -1712,6 +1712,7 @@ function createMediaCard(url, index, item) {
 
 function addMessage(item, persist = true) {
   item = { ...item, createdAt: Number(item.createdAt || Date.now()) };
+  const noticeKey = String(item.noticeKey || '').trim();
   const retryAction = normalizeRetryAction(item.retryAction);
   if (
     persist
@@ -1737,10 +1738,9 @@ function addMessage(item, persist = true) {
       createdAt: item.createdAt,
     };
   }
-  empty.hidden = true;
+  if (!noticeKey) empty.hidden = true;
   const article = document.createElement('article');
   article.className = `message${item.me ? ' user' : ''}${item.variant ? ` ${item.variant}` : ''}`;
-  const noticeKey = String(item.noticeKey || '').trim();
   if (noticeKey) article.dataset.noticeKey = noticeKey;
   if (item.variant === 'error') article.setAttribute('role', 'alert');
   if (!item.me) {
@@ -1801,7 +1801,7 @@ function addMessage(item, persist = true) {
 
 function renderHistory() {
   chat.replaceChildren();
-  empty.hidden = history.length > 0 || activeFailureNotices.size > 0;
+  empty.hidden = history.length > 0;
   history.forEach((item) => addMessage({ ...item, images: (item.images || []).filter(isPersistentImage) }, false));
   activeFailureNotices.forEach((item) => addMessage(item, false));
 }
@@ -2028,8 +2028,18 @@ function runSessionBootstrap() {
 
 async function sessionTaskStartAllowed() {
   refreshHistoryActivityFromStorage();
-  const pending = sessionBootstrap;
-  if (pending && !(await pending)) return false;
+  const pending = sessionBootstrap || runSessionBootstrap();
+  if (!(await pending)) return false;
+  if (!sessionRequestLockAvailable()) {
+    setStatus('error', '当前浏览器不支持安全会话');
+    showFailureNotice(
+      'connection',
+      '当前浏览器无法安全协调多个页面，请升级浏览器或改用最新版 Chrome、Edge 后重试。',
+      ['retry_connection'],
+      { status: 'ERROR', layer: 'session', code: 'RESPONSE_INVALID', retryable: true, action: 'retry_connection', request_id: createRequestId(), search_id: sessionContext.search_id || '' },
+    );
+    return false;
+  }
   if (!sessionResetRequired) return true;
   setStatus('error', '需要先重新建立会话');
   showFailureNotice(
@@ -3959,5 +3969,6 @@ syncVisualViewport();
 restoreHistory();
 resizeComposer();
 updateComposer();
-retryConnection();
+if (pendingHistoryStorageNotice && !sessionResetRequired) flushStartupNotices();
+if (history.length || sessionResetRequired) retryConnection();
 }

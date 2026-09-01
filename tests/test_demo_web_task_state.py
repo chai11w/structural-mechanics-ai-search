@@ -594,7 +594,7 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260901-refresh-recovery-v3"'
+        demo_asset = 'src="/assets/demo.js?v=20260901-refresh-recovery-v4"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
@@ -677,6 +677,7 @@ const createHarness = new Function(`
   const activeFailureNotices = new Map();
   const rows = [];
   const persistCalls = [];
+  const history = [];
   const empty = { hidden: false };
   const chat = {
     childElementCount: 0,
@@ -699,7 +700,7 @@ const createHarness = new Function(`
     };
     rows.push(row);
     chat.childElementCount += 1;
-    empty.hidden = true;
+    if (!item.noticeKey) empty.hidden = true;
     return row;
   }
   ${noticeSource}
@@ -718,13 +719,14 @@ assert.equal(harness.showFailureNotice('connection', 'duplicate', ['retry_connec
 assert.ok(harness.showFailureNotice('session-recovery', 'reconcile', ['retry_connection']));
 assert.deepEqual(harness.persistCalls(), [false, false]);
 assert.deepEqual(harness.keys(), ['connection', 'session-recovery']);
+assert.equal(harness.empty(), false);
 harness.resolveFailureNotice('connection');
 assert.deepEqual(harness.rows(), [
   { key: 'connection', removed: true },
   { key: 'session-recovery', removed: false },
 ]);
 assert.deepEqual(harness.keys(), ['session-recovery']);
-assert.equal(harness.empty(), true);
+assert.equal(harness.empty(), false);
 harness.resolveFailureNotice('session-recovery');
 assert.deepEqual(harness.keys(), []);
 assert.equal(harness.empty(), false);
@@ -1246,7 +1248,11 @@ const retryHarness = createRetryHarness();
 
         startup = demo.rsplit("syncVisualViewport();", 1)[1].rsplit("}", 1)[0]
         self.assertIn("restoreHistory();", startup)
-        self.assertIn("retryConnection();", startup)
+        self.assertIn(
+            "if (pendingHistoryStorageNotice && !sessionResetRequired) flushStartupNotices();",
+            startup,
+        )
+        self.assertIn("if (history.length || sessionResetRequired) retryConnection();", startup)
         self.assertNotIn("runSessionBootstrap();", startup)
         self.assertNotIn("checkHealth();", startup)
         self.assertNotIn("request('/health'", demo)
@@ -1274,6 +1280,12 @@ const retryHarness = createRetryHarness();
             upload_source.index("await sessionTaskStartAllowed()"),
             upload_source.index("validateImage(selected)"),
         )
+        self.assertIn(
+            "const pending = sessionBootstrap || runSessionBootstrap();",
+            demo_source,
+        )
+        self.assertIn("if (!sessionRequestLockAvailable())", demo_source)
+        self.assertIn("empty.hidden = history.length > 0;", demo_source)
         self.assertIn("window.addEventListener('storage'", demo_source)
         self.assertIn("event.key === SESSION_RESET_EVENT_KEY", demo_source)
         self.assertIn("retireSessionForExternalReset();", demo_source)
@@ -1713,6 +1725,44 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
 const harness = createHarness(taskStateV1);
 
 (async () => {
+  const lazyBootstrapHarness = createHarness(taskStateV1);
+  lazyBootstrapHarness.queueJson(lazyBootstrapHarness.envelope(fixtures.a3));
+  assert.equal(await lazyBootstrapHarness.sessionTaskStartAllowed(), true);
+  assert.deepEqual(lazyBootstrapHarness.fetchUrls(), ['/api/session']);
+
+  const noLockGateHarness = createHarness(taskStateV1);
+  noLockGateHarness.queueJson(noLockGateHarness.envelope(fixtures.a3));
+  globalThis.navigator.locks = null;
+  assert.equal(await noLockGateHarness.sessionTaskStartAllowed(), false);
+  globalThis.navigator.locks = sessionLockManager;
+  assert.deepEqual(noLockGateHarness.fetchUrls(), ['/api/session']);
+  assert.deepEqual(noLockGateHarness.statusUpdates().at(-1), {
+    state: 'error', message: '当前浏览器不支持安全会话',
+  });
+  assert.equal(
+    noLockGateHarness.failureNotices().at(-1).message,
+    '当前浏览器无法安全协调多个页面，请升级浏览器或改用最新版 Chrome、Edge 后重试。',
+  );
+
+  const inheritedFenceStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: 'pending-before-reload',
+  };
+  const inheritedFenceHarness = createHarness(taskStateV1, inheritedFenceStorage);
+  inheritedFenceHarness.queueJson({
+    task_state: fixtures.empty,
+    uploaded_image: '',
+    session: {
+      session_valid: false, phase: 'IDLE', has_active_image: false,
+      task_revision: 0, candidate_generation: '', candidate_count: 0,
+      search_id: '', a3: null,
+    },
+  });
+  globalThis.navigator.locks = null;
+  assert.equal(await inheritedFenceHarness.runSessionBootstrap(), true);
+  globalThis.navigator.locks = sessionLockManager;
+  assert.equal(inheritedFenceHarness.requestFenceId(), '');
+  assert.deepEqual(inheritedFenceHarness.fetchUrls(), ['/api/session']);
+
   const successEnvelope = harness.envelope(fixtures.a3);
   harness.queueJson(successEnvelope);
   const data = await harness.request('/api/session', {}, 1000, 'session timeout');
