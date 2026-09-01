@@ -10,7 +10,7 @@ from uuid import uuid4
 from tiku_agent.agent import AgentToolbox, TikuSearchAgent
 from tiku_agent.external_load_screen import NO_EXTERNAL_LOAD_MESSAGE
 from tiku_agent.session_artifacts import SessionArtifacts
-from tiku_agent.session_runtime import AgentSessionRuntime
+from tiku_agent.session_runtime import AgentSessionRuntime, _ImageRace
 from tiku_agent.session_store import SQLiteSessionStore
 from tiku_agent.state import AgentState
 from tiku_agent.task_log import TaskLogEntry, TaskLogger
@@ -205,18 +205,96 @@ class ExternalLoadScreenRuntimeTest(unittest.TestCase):
 
         self.assertEqual(response.state["phase"], "WAIT_CHAPTER")
 
+    def test_screen_timeout_starts_after_agent_factory_returns(self):
+        runtime, _ = self.build_runtime(screen=lambda _path: "no", timeout=0.05)
+        original_factory = runtime.agent_factory
+        factory_started = threading.Event()
+        release_factory = threading.Event()
+
+        def blocked_factory(state):
+            factory_started.set()
+            release_factory.wait(1)
+            assert original_factory is not None
+            return original_factory(state)
+
+        runtime.agent_factory = blocked_factory
+        response_box = []
+        error_box = []
+        finished = threading.Event()
+
+        def run_search() -> None:
+            try:
+                response_box.append(runtime.handle_image("slow-factory", self.source))
+            except BaseException as exc:
+                error_box.append(exc)
+            finally:
+                finished.set()
+
+        worker = threading.Thread(target=run_search)
+        worker.start()
+        try:
+            self.assertTrue(factory_started.wait(0.5))
+            self.assertFalse(finished.wait(0.15))
+        finally:
+            release_factory.set()
+            worker.join(1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(error_box, [])
+        self.assertEqual(response_box[0].intent, "external_load_screen")
+
     def test_screen_timeout_revokes_late_no_authority(self):
+        screen_started = threading.Event()
+        release_screen = threading.Event()
+
+        def blocked_late_no(_image_path: str | Path) -> str:
+            screen_started.set()
+            release_screen.wait(1)
+            return "no"
+
         runtime, logger = self.build_runtime(
-            screen=delayed_screen(0.08, "no"), timeout=0.02
+            screen=blocked_late_no, timeout=0.02
         )
+        response_box = []
+        error_box = []
+        finished = threading.Event()
 
-        started = time.perf_counter()
-        response = runtime.handle_image("screen-timeout", self.source)
+        def run_search() -> None:
+            try:
+                response_box.append(
+                    runtime.handle_image("screen-timeout", self.source)
+                )
+            except BaseException as exc:
+                error_box.append(exc)
+            finally:
+                finished.set()
 
-        self.assertLess(time.perf_counter() - started, 0.06)
-        self.assertEqual(response.state["phase"], "WAIT_CHAPTER")
+        worker = threading.Thread(target=run_search)
+        worker.start()
+        try:
+            self.assertTrue(screen_started.wait(0.5))
+            self.assertTrue(finished.wait(0.5))
+            self.assertEqual(error_box, [])
+            self.assertFalse(release_screen.is_set())
+            self.assertEqual(response_box[0].state["phase"], "WAIT_CHAPTER")
+        finally:
+            release_screen.set()
+            worker.join(1)
+
         self.assertTrue(logger.event.wait(1))
         self.assertEqual(runtime.store.load("screen-timeout").phase, "WAIT_CHAPTER")
+
+        now = [4.99]
+        on_time = _ImageRace(screen_deadline=5.0, clock=lambda: now[0])
+        self.assertTrue(on_time.claim_no_load())
+        now[0] = 5.01
+        self.assertTrue(on_time.claim_no_load())
+        self.assertFalse(on_time.claim_candidates())
+
+        expired = _ImageRace(screen_deadline=5.0, clock=lambda: 5.0)
+        self.assertFalse(expired.claim_no_load())
+        self.assertFalse(expired.no_load_committed)
+        self.assertTrue(expired.claim_candidates())
 
     def test_clear_waits_for_discarded_background_search(self):
         runtime, logger = self.build_runtime(

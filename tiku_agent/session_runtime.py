@@ -82,15 +82,28 @@ class SessionResponseSnapshotError(RuntimeError):
 
 
 class _ImageRace:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        screen_deadline: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._lock = threading.Lock()
         self._winner = ""
+        self._screen_deadline = screen_deadline
+        self._clock = clock
         self.cancel_search = threading.Event()
 
     def claim_no_load(self) -> bool:
         with self._lock:
             if self._winner:
                 return self._winner == "no_load"
+            if (
+                self._screen_deadline is not None
+                and self._clock() >= self._screen_deadline
+            ):
+                self._winner = "screen_expired"
+                return False
             self._winner = "no_load"
             self.cancel_search.set()
             return True
@@ -663,11 +676,12 @@ class AgentSessionRuntime:
             task_kind="image",
             started_at=started_at.isoformat(),
         )
-        race = _ImageRace()
         agent = self._make_agent(
             AgentState.from_dict(baseline_state.to_dict()), progress=progress
         )
         error_context["state"] = agent.state
+        deadline = time.monotonic() + self.external_load_timeout_seconds
+        race = _ImageRace(screen_deadline=deadline)
         agent.image_search_cancelled = race.cancel_search.is_set
         agent.commit_image_candidates = race.claim_candidates
         assert self._image_executor is not None
@@ -687,7 +701,6 @@ class AgentSessionRuntime:
                 search_id=search_id,
             )
 
-        deadline = time.monotonic() + self.external_load_timeout_seconds
         response: AgentResponse | None = None
         response_state: AgentState | None = None
         search_error: BaseException | None = None

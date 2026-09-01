@@ -104,6 +104,7 @@ const a3ExampleCanvas = $('#a3-example-canvas');
 
 const TEXT_TIMEOUT_MS = 60000;
 const IMAGE_TIMEOUT_MS = 90000;
+const SESSION_BOOTSTRAP_TIMEOUT_MS = 15000;
 const A3_TIMEOUT_MS = 180000;
 const A3_AUTO_PREPARE_IDLE_TIMEOUT_MS = 210000;
 const A3_TEXT_RETRY_TIMEOUT_MS = 100000;
@@ -122,6 +123,9 @@ const SESSION_RESET_EVENT_KEY = 'tiku-agent-session-reset-v1';
 const SESSION_STORAGE_PROBE_KEY = 'tiku-agent-session-storage-probe-v1';
 const SESSION_REQUEST_FENCE_KEY = 'tiku-agent-session-request-fence-v1';
 const SESSION_REQUEST_LOCK_NAME = 'tiku-agent-session-request-v1';
+const OPERATIONAL_NOTICE_KEYS = new Set([
+  'connection', 'session-recovery', 'history-storage',
+]);
 const LEGACY_EXPIRED_MEDIA_MESSAGE = '题图或结果图片已失效，请重新上传题图；如果问题反复出现，可以点踩告诉我们。';
 const A3_INLINE_ONLY_INTENTS = new Set([
   'a3_unit_selected', 'a3_unit_already_selected', 'a3_crop_review_required',
@@ -185,7 +189,7 @@ let feedbackRequestPending = false;
 let historyLastActivityAt = 0;
 let historyExpiryTimer = null;
 let historyStorageWarningShown = false;
-const activeFailureNotices = new Set();
+const activeFailureNotices = new Map();
 let pendingSessionExpiredNotice = false;
 let pendingHistoryStorageNotice = '';
 let sessionResetRequired = false;
@@ -1278,14 +1282,21 @@ function closeFeedback() {
 function showFailureNotice(key, message, recoveryActions = [], protocol = {}) {
   const noticeKey = String(key || '').trim();
   if (!noticeKey || activeFailureNotices.has(noticeKey)) return null;
-  activeFailureNotices.add(noticeKey);
-  return addMessage({
+  const item = {
     message, variant: 'error', recoveryActions, noticeKey, ...protocolFields(protocol),
-  });
+  };
+  activeFailureNotices.set(noticeKey, item);
+  return addMessage(item, false);
 }
 
 function resolveFailureNotice(key) {
-  activeFailureNotices.delete(String(key || '').trim());
+  const noticeKey = String(key || '').trim();
+  if (!noticeKey) return;
+  activeFailureNotices.delete(noticeKey);
+  chat.querySelectorAll('[data-notice-key]').forEach((article) => {
+    if (article.dataset.noticeKey === noticeKey) article.remove();
+  });
+  if (!chat.childElementCount) empty.hidden = false;
 }
 
 function setFeedbackPending(pending) {
@@ -1729,6 +1740,8 @@ function addMessage(item, persist = true) {
   empty.hidden = true;
   const article = document.createElement('article');
   article.className = `message${item.me ? ' user' : ''}${item.variant ? ` ${item.variant}` : ''}`;
+  const noticeKey = String(item.noticeKey || '').trim();
+  if (noticeKey) article.dataset.noticeKey = noticeKey;
   if (item.variant === 'error') article.setAttribute('role', 'alert');
   if (!item.me) {
     const avatar = document.createElement('div');
@@ -1788,8 +1801,9 @@ function addMessage(item, persist = true) {
 
 function renderHistory() {
   chat.replaceChildren();
-  empty.hidden = history.length > 0;
+  empty.hidden = history.length > 0 || activeFailureNotices.size > 0;
   history.forEach((item) => addMessage({ ...item, images: (item.images || []).filter(isPersistentImage) }, false));
+  activeFailureNotices.forEach((item) => addMessage(item, false));
 }
 
 function isLegacyInlineOnlyMessage(item, index, messages) {
@@ -1833,6 +1847,7 @@ function restoreHistory() {
     const storedMessages = stored.messages.slice(-HISTORY_LIMIT);
     const restoredMessages = storedMessages.filter((item, index) => (
       !isLegacyInlineOnlyMessage(item, index, storedMessages)
+      && !OPERATIONAL_NOTICE_KEYS.has(String(item?.noticeKey || '').trim())
       && !(
         item?.variant === 'error'
         && item?.code === 'MEDIA_NOT_FOUND'
@@ -1848,10 +1863,6 @@ function restoreHistory() {
       };
     });
     activeFailureNotices.clear();
-    history.forEach((item) => {
-      const noticeKey = String(item.noticeKey || '').trim();
-      if (noticeKey) activeFailureNotices.add(noticeKey);
-    });
     safeLocalStorageRemove(LEGACY_HISTORY_KEY);
     saveHistory();
     renderHistory();
@@ -1896,7 +1907,7 @@ async function repairUploadedImageHistory() {
             return {
               reset: false,
               data: await request(
-                '/api/session', {}, 5000, '会话恢复超时。', false, '', true,
+                '/api/session', {}, SESSION_BOOTSTRAP_TIMEOUT_MS, '会话恢复超时。', false, '', true,
                 sessionRequestFence,
               ),
             };
@@ -1930,11 +1941,22 @@ async function repairUploadedImageHistory() {
       resetRequired = lockedResult.reset;
       data = lockedResult.data;
     } else {
-      data = await request('/api/session', {}, 5000, '会话恢复超时。', false);
+      data = await request(
+        '/api/session', {}, SESSION_BOOTSTRAP_TIMEOUT_MS, '会话恢复超时。', false,
+      );
     }
     const accepted = resetRequired ? applyResetSessionContext(data) : updateSessionContext(data);
-    if (!accepted) return false;
+    if (!accepted) {
+      throw clientProtocolError(
+        '会话返回格式异常，请重新连接。',
+        'RESPONSE_INVALID',
+        createRequestId(),
+        ['retry_connection'],
+      );
+    }
     resolveFailureNotice('connection');
+    resolveFailureNotice('session-recovery');
+    if (!isBusy) setStatus('ready', '准备就绪');
     if (resetRequired) {
       clearHistory();
       renderHistory();
@@ -1971,22 +1993,23 @@ async function repairUploadedImageHistory() {
     ) && Boolean(storedSessionRequestFenceId());
     if (coordinationFailed) {
       resolveFailureNotice('connection');
-      setStatus('error', '需要开始新对话');
+      setStatus('error', '等待重新连接');
       showFailureNotice(
         'session-recovery',
-        '服务可以连接，但上次请求结果无法安全确认，当前对话不能继续。请开始新对话后重新上传题图。',
-        ['new_chat'],
+        '连接暂时不稳定，上次请求结果尚待确认。当前对话已保留，请重新连接完成确认。',
+        ['retry_connection'],
         {
-          status: 'ERROR', layer: 'session', code: 'STALE_ACTION', retryable: false,
-          action: 'new_chat', request_id: createRequestId(), search_id: sessionContext.search_id || '',
+          status: 'ERROR', layer: 'session', code: 'STALE_ACTION', retryable: true,
+          action: 'retry_connection', request_id: createRequestId(), search_id: sessionContext.search_id || '',
         },
       );
     } else {
+      setStatus('error', '暂时无法连接');
       showFailureNotice(
         'connection',
         '暂时无法连接服务。当前对话仍保留在本机，请检查网络后重新连接。',
         ['retry_connection'],
-        { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: createRequestId(), search_id: sessionContext.search_id || '' },
+        { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_connection', request_id: createRequestId(), search_id: sessionContext.search_id || '' },
       );
     }
     return false;
@@ -2013,7 +2036,7 @@ async function sessionTaskStartAllowed() {
     'connection',
     '旧对话已经过期，请先重新连接并建立新会话。',
     ['retry_connection'],
-    { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: createRequestId(), search_id: '' },
+    { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_connection', request_id: createRequestId(), search_id: '' },
   );
   return false;
 }
@@ -3762,28 +3785,10 @@ async function resetConversation() {
   }
 }
 
-async function checkHealth() {
-  try {
-    await request('/health', {}, 5000, '服务连接超时。', false);
-    resolveFailureNotice('connection');
-    if (!isBusy) setStatus('ready', '准备就绪');
-    return true;
-  } catch (_error) {
-    setStatus('error', '本地服务未连接');
-    showFailureNotice(
-      'connection',
-      '暂时无法连接服务。当前对话仍保留在本机，请检查网络后重新连接。',
-      ['retry_connection'],
-      { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: createRequestId(), search_id: sessionContext.search_id || '' },
-    );
-    return false;
-  }
-}
-
 async function retryConnection() {
   if (isBusy) return;
-  const healthy = await checkHealth();
-  if (healthy && !isBusy) await runSessionBootstrap();
+  setStatus('working', '正在恢复会话…');
+  await runSessionBootstrap();
 }
 
 form.addEventListener('submit', (event) => { event.preventDefault(); sendText(); });
@@ -3937,7 +3942,7 @@ window.addEventListener('offline', () => {
     'connection',
     '当前网络已断开。当前对话仍保留在本机，请恢复网络后重新连接。',
     ['retry_connection'],
-    { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: createRequestId(), search_id: sessionContext.search_id || '' },
+    { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_connection', request_id: createRequestId(), search_id: sessionContext.search_id || '' },
   );
 });
 window.addEventListener('online', retryConnection);
@@ -3952,8 +3957,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) expi
 
 syncVisualViewport();
 restoreHistory();
-runSessionBootstrap();
 resizeComposer();
 updateComposer();
-checkHealth();
+retryConnection();
 }

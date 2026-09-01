@@ -4,7 +4,7 @@
 
 阶段 3.1 完成父 workflow、当前子题任务和题目单元的权威状态契约定稿。本文件冻结 V1 的字段、词汇、字段来源、派生谓词、拓扑边界、一致性错误和冲突策略，是后续实现的权威规范。阶段 3.2.1 已实现从“已冻结 read-set + 可信入口证据”到 `TaskStateSnapshotV1` 的纯构造器，落在 `tiku_agent/task_state_builder.py`；阶段 3.2.2 已实现 `tiku_agent/task_state_runtime.py` 的锁内读取与证据包装，并由 `A3MvpRuntime.task_state_snapshot_v1()`、`AgentSessionRuntime.task_state_snapshot_v1()` 和 `AgentSessionRuntime.task_state_snapshot_v1_from_frozen_state()` 提供内部运行时入口；阶段 3.2.3 已用实际构造结果矩阵和组合读取异常完成边界验收。阶段 3.3.1 冻结 exact typed 公共映射，3.3.2～3.3.5 分别接入 `/api/session`、HTTP 200 业务 JSON、受控非 stream HTTP 4xx/5xx 和五条任务 stream 终态；3.3.6 已完成跨出口 parity、失败后处理、兼容入口和全仓回归验收。阶段 3.4.1～3.4.5 已完成前端 exact/branded model、信封消费、A2/A3 动作迁移及恢复生命周期收口。
 
-**阶段 3.3 出口一致性及 3.4 前端消费已在代码中完成，但尚未部署启用到 8790。** 当前受控 HTTP 出口在根级返回 `task_state`，五条任务 stream 的 success 在 `event.data.task_state`、非准入 error 在 `event.task_state` 返回 exact typed V1；浏览器按这些权威层级原子消费，A2/A3 动作只由 branded `allowed_actions` 授权，busy/queue、progress 和非任务响应保持 no-update。3.5 启用门仍未完成，因此主阶段 3 仍为 `IN_PROGRESS`，不能声称已经上线。既有内部 `session_snapshot()` 仍是兼容投影，不等同于统一快照。
+**阶段 3.3 出口一致性及 3.4 前端消费已随 3.5.4 部署启用到 8790，主阶段 3 为 `DONE`。** 当前受控 HTTP 出口在根级返回 `task_state`，五条任务 stream 的 success 在 `event.data.task_state`、非准入 error 在 `event.task_state` 返回 exact typed V1；浏览器按这些权威层级原子消费，A2/A3 动作只由 branded `allowed_actions` 授权，busy/queue、progress 和非任务响应保持 no-update。启用门已完成 8896 契约烟测、8790 只读对照及固定 release 精确启用；既有内部 `session_snapshot()` 仍是兼容投影，不等同于统一快照。后续 refresh-recovery 热修复只收口浏览器恢复和 operational notice 生命周期，不改变 V1、公共信封位置或动作授权语义；其 live 恢复验收已按用户要求延期。
 
 以下内容不属于阶段 3.1：
 
@@ -518,7 +518,7 @@ V1 consistency code 精确限定为以下 17 个：
 - A3 active child 不可读及父子同时不可读时，仍保持 A3→A2 锁序、每个 store 单次读取、逆序释放、稳定错误码、全动作清空和异常正文脱敏；
 - 同一 child ID 的旧 `task_revision` 不得获得 `retry_search`。
 
-项目 Python 3.12 下 51 项 task-state 定向测试及全仓 1035 项回归通过。因此阶段 3.2 整体 DONE；截至 3.2 验收时，公共 HTTP/stream、前端消费和 8790 启用仍分别属于 3.3～3.5。当前 3.3.2～3.3.5 已接入 session、业务 JSON、受控 HTTP error 与 stream 终态，仍未部署。
+项目 Python 3.12 下 51 项 task-state 定向测试及全仓 1035 项回归通过。因此阶段 3.2 整体 DONE；截至 3.2 验收时，公共 HTTP/stream、前端消费和 8790 启用仍分别属于 3.3～3.5。3.3.2～3.3.5 后续完成 session、业务 JSON、受控 HTTP error 与 stream 终态接入，并已随 3.5.4 启用到 8790。
 
 ## 响应时序与兼容边界
 
@@ -573,7 +573,7 @@ fail-closed。3.3.2 已接入 `/api/session` 的锁内快照，3.3.3 已接入
 HTTP 200 业务 JSON，3.3.4 已接入受控非 stream HTTP error，3.3.5 已接入
 stream result/error；后续只处理跨出口验收。
 
-## 3.3.2 `/api/session` 接入（DONE；尚未部署）
+## 3.3.2 `/api/session` 接入（DONE；已随 3.5.4 启用 8790）
 
 `GET /api/session` 的成功载荷现在固定为三个根级 sibling：
 `uploaded_image`、兼容字段 `session` 和权威 `task_state`。新增字段严格经过
@@ -605,7 +605,7 @@ missing/expired 只输出标准 empty V1；parent missing + child live 仍按
 兼容、题图恢复与隔离、Cookie 属性、401 零读取和 8790/8890/8794 基线。
 项目 Python 3.12 下 64 项 task-state 定向测试及全仓 1053 项回归通过。
 
-## 3.3.3 HTTP 200 业务 JSON 接入（DONE；尚未部署）
+## 3.3.3 HTTP 200 业务 JSON 接入（DONE；已随 3.5.4 启用 8790）
 
 本小步只扩展受控任务型 HTTP 200 JSON，不改变协议状态本身：
 
@@ -659,7 +659,7 @@ response-time V1，不读取或伪造更新后的状态。
 项目 Python 3.12 下 65 项 task-state 定向测试、193 项相关出口测试及全仓
 1072 项回归通过。
 
-## 3.3.4 受控 HTTP error 接入（DONE；尚未部署）
+## 3.3.4 受控 HTTP error 接入（DONE；已随 3.5.4 启用 8790）
 
 本小步只覆盖具有已建立会话上下文的非 stream 受控 HTTP 4xx/5xx，精确路径为
 `/api/session`、`/api/message`、`/api/image`、`/api/a3/select` 和
@@ -694,7 +694,7 @@ purge 失败、映射失败、媒体重开、无 Cookie、队列拒绝、排除�
 A3→A2 锁序。项目 Python 3.12 下 65 项 task-state 定向测试、206 项相关
 HTTP/runtime 出口测试及全仓 1116 项回归通过。
 
-## 3.3.5 stream result/error 接入（DONE；尚未部署）
+## 3.3.5 stream result/error 接入（DONE；已随 3.5.4 启用 8790）
 
 本小步精确覆盖五条已有任务 stream：`/api/message/stream`、
 `/api/image/stream`、`/api/a3/select/stream`、`/api/a3/prepare/stream` 和
@@ -728,7 +728,7 @@ A3 wrapper 误判为 standalone A2，也不得从异常正文或 live store 拼�
 分类、单次冻结读取和 A3→A2 锁序。项目 Python 3.12 下 65 项 task-state 定向测试、
 189 项直接相关 HTTP/stream/A3/反馈测试及全仓 1129 项回归通过。
 
-## 3.3.6 跨出口 parity 与回归验收（DONE；尚未部署）
+## 3.3.6 跨出口 parity 与回归验收（DONE；已随 3.5.4 启用 8790）
 
 3.3.6 用非空 standalone A2/A3 V1 验证 `/api/session`、HTTP 200 业务 JSON、
 受控 HTTP error、五条 stream 的 result/error 和 reset。相同入口能力下，JSON 与
@@ -750,9 +750,9 @@ progress、无会话输入拒绝和非任务路径继续不增加状态。
 
 验收新增独立 `tests/test_task_state_exit_parity.py`，并补 A3 legacy 兼容断言。项目
 Python 3.12 下 73 项 task-state 定向测试、179 项 FastAPI/A3/Response Store 直接
-相关测试及阶段最终全仓 1147 项回归全部通过。未部署、未重启任何服务。
+相关测试及阶段最终全仓 1147 项回归全部通过。该小批次当时未部署、未重启任何服务。
 
-## 3.4.1 前端 V1 解析与 fail-closed model（DONE；接线见 3.4.2；尚未部署）
+## 3.4.1 前端 V1 解析与 fail-closed model（DONE；接线见 3.4.2；已随 3.5.4 启用 8790）
 
 前端新增 `tiku_agent/demo_web/task_state.js` 纯模块，按 V1 exact key、schema、类型、
 枚举、phase/status/next-stage、phase action 子集、completed-step 可达集合、candidate
@@ -779,9 +779,9 @@ Node/CommonJS 和 browser-global 分支执行前端模块；同时覆盖缺/多�
 action、非法里程碑、revision/generation、unit 排序/重复/双 ACTIVE、父子错绑、Unicode
 边界、accessor/descriptor exact shape 和伪造 model。93 项前端/FastAPI 与 73 项
 task-state 回归通过；全仓发现的 1150 项中 1 项无关诊断 WAL 顺序测试失败，该失败在
-`0f4bd8e` 的 1147 项基线中同样复现且单独运行通过。未部署、未重启任何服务。
+`0f4bd8e` 的 1147 项基线中同样复现且单独运行通过。该小批次当时未部署、未重启任何服务。
 
-## 3.4.2 前端响应信封接线（DONE；尚未部署）
+## 3.4.2 前端响应信封接线（DONE；已随 3.5.4 启用 8790）
 
 `demo.js` 以精确 JSON/stream 任务路径白名单在两个公共请求包装器集中接线：session、
 普通 JSON success/error 与 reset 从根级读取，stream result 只从 `event.data` 读取，
@@ -792,16 +792,17 @@ shape/topology 及合法 `INCONSISTENT` 均保持 fail-closed，不回退寻找�
 每个任务状态请求开始即切到 MISSING/closed，并取得一次性 Symbol token；只有最新请求
 可提交一个终态，旧请求、重复终态和已结束 token 均不能读取或覆盖新 model。两个包装器
 在 `finally` 统一退休 token。`QUEUE_FULL`/`QUEUE_TIMEOUT`、progress 与非任务响应严格
-no-update；queue 即使意外夹带状态也忽略。重连在 health 前后检查 busy，观察型 session
-refresh 不能抢占正在执行任务的 post-media-reopen 最终状态。
+no-update；queue 即使意外夹带状态也忽略。启动与重新连接在非 busy 时只调用权威
+`/api/session` 对账，不再并行请求 `/health`；bootstrap 超时为 15 秒，观察型 session
+refresh 仍不能抢占正在执行任务的 post-media-reopen 最终状态。
 
 测试以 Python typed fixture 驱动真实 Node 模块，并动态执行 `demo.js` 的实际白名单与消费
 函数，覆盖 session、JSON、五条 stream、reset、missing/invalid、queue、非任务、错层、
 乱序、重复终态、getter 零读取和 busy 重连竞态；对抗复核未发现遗留高/中风险。95 项
 前端/FastAPI 与 73 项 task-state 回归通过；全仓 1152 项仅既有 SQLite WAL 顺序测试
-失败，该项单独通过。未迁移任何按钮，未部署、启动、停止或重启服务。
+失败，该项单独通过。该小批次当时未迁移任何按钮，也未部署、启动、停止或重启服务。
 
-## 3.4.3 A2 子题动作授权迁移（DONE；尚未部署）
+## 3.4.3 A2 子题动作授权迁移（DONE；已随 3.5.4 启用 8790）
 
 候选卡 `select_candidate`、业务 `retry_search` 及携带候选 action context 的 transport
 retry 只经 branded `allowsChildAction()` 放行，不再使用 legacy session phase 授权。
@@ -815,9 +816,9 @@ missing/invalid/未知 schema/`INCONSISTENT` 以及只有 `next_stage` 均 fail-
 按钮隐藏，普通文本 retry、登录、上传、反馈及本地媒体查看不进入 child 动作命名空间。
 Python typed fixture 驱动的 Node 动态矩阵同时覆盖 V1/legacy token 矛盾、candidate retry
 binding、按钮恢复/关闭和 queue no-update；96 项前端/FastAPI 回归通过。A3 控件、自动
-打开逻辑和服务端状态机未改，未部署、启动、停止或重启服务。
+打开逻辑和服务端状态机未改；该小批次当时未部署、启动、停止或重启服务。
 
-## 3.4.4 A3 workflow/unit 动作授权迁移（DONE；尚未部署）
+## 3.4.4 A3 workflow/unit 动作授权迁移（DONE；已随 3.5.4 启用 8790）
 
 A3 `select_unit`、`prepare_units`、`submit_crop` 只经 branded
 `allowsWorkflowAction()` 放行，不再依赖 legacy phase、selected unit 或 preparation flag
@@ -831,7 +832,7 @@ fail-closed。网络、超时和队列失败只允许重新连接，不自动重
 和 unit 参数，关闭“新旧 workflow 恰好具有相同 revision/unit”的 ABA 错绑。JSON、stream
 与 legacy/V1 pair 测试均覆盖该参数链，未改变无 V1 capabilities 的内部 legacy 调用。
 
-## 3.4.5 前端恢复与生命周期收口（DONE；尚未部署）
+## 3.4.5 前端恢复与生命周期收口（DONE；已随 3.5.4 启用 8790）
 
 上传题图 URL、裁剪 draft、历史 action binding、自动打开标记和 Back dismissal 均绑定
 workflow identity；workflow 切换时先清除旧题图和裁剪状态，打开裁剪页及提交前再次核对，
@@ -848,18 +849,102 @@ tombstone 提交失败时保留 fence，后续排队任务取得锁后只退休�
 浏览器不支持 Web Lock 时不自动 reset，且所有 task-starting 入口均在 `fetch` 前
 fail-closed；只允许 `/api/session`、`/api/reset` 继承已有 fence 进行只读/显式对账。
 
+瞬时 bootstrap 超时、网络中断或无效响应保留 pending request fence，只提供
+`retry_connection`，不得把尚待权威对账误判为必须开始新对话。后续 exact
+`/api/session` 有效对账后清除 fence，并移除 `connection` / `session-recovery` 临时提示。
+operational notice 不写入对话历史，恢复旧 history 时过滤遗留 notice。真实过期、无 Web
+Lock 或协调能力缺失的原 fail-closed 边界保持不变。
+
 验收以共享存储、FIFO 锁的确定性交错 Node harness 覆盖刷新、过期、跨标签页
 activity/fence/reset、JSON 与 stream 权威空错误提交失败、reset 超时/非空对账、无锁降级、
 迟到终态、媒体/workflow 错绑和动作不重放。阶段收口时 28 项前端聚焦、220 项本批次
 FastAPI/A3/前端定向、73 项 task-state 及全仓 1173 项回归全部通过，Node/Python 语法与
 `git diff --check` 通过；首次全仓仅既有 WAL 时序项失败，该项单跑和第二次全仓均通过。
-未部署、启动、停止或重启任何服务。
+该小批次当时未部署、启动、停止或重启任何服务。
+
+## 3.5.1 启用前离线回归与静态安全预检（DONE；未部署）
+
+3.5.1 在独立 worktree 的 `codex/task-state-stage-3-5-1` 分支中，以已合入主线的
+`2b0c7f8` 为基线执行。该批次只允许离线测试、静态差异和启动脚本安全检查；没有访问、
+启动、停止或重启任何端口，没有读取 live runtime、SQLite、日志、Cookie 或本地敏感配置，
+没有调用模型、写题库或部署。8896 契约烟测属于 3.5.2，8790 的只读 live 对照与启用
+仍须用户另行明确确认；8788、8794、8795 不在 3.5 操作范围。
+
+干净 worktree 首轮 220 项定向回归暴露 5 个测试依赖未跟踪 `.tmp_tiku_agent` 目录；
+`FastApiDemoTest` 现幂等建立被忽略的测试 runtime 根，生产代码不变。静态安全预检同时发现
+旧 8896 watchdog 可接受任意端口并按端口停止监听者。现已将其限制为固定 8896，并复用
+共享 process guard：启动前解析精确 Python，以绝对入口绑定脚本 checkout，按 Windows argv
+规则编码参数，按完整参数、唯一监听 PID 和可执行文件联合校验；使用单实例锁和活 watchdog
+PID 保护；端口枚举两条来源均失败时 fail-closed；仅在候选完整复核且健康后写 agent PID；
+只停止仍可验证的进程，移除按端口杀进程逻辑。上述脚本只经 Parser 和单元测试验证，未执行。
+
+首轮全仓回归还暴露 external-load screen 的 60ms 墙钟断言在负载下抖动。复核发现实现也有
+真实截止竞态：旧 `_ImageRace` 只由请求线程在醒来后撤销 screen 权威，若该线程在 deadline
+附近失去调度，晚到的 `no` 可能先抢占。现由 race 冻结 deadline，并在 `claim_no_load()` 的
+同一把锁内判定过期；计时从 agent 构造完成后开始，不让准备耗时侵占 screen 窗口。测试以
+事件交错证明请求可在 screen 仍阻塞时返回、晚到 `no` 不覆盖状态，并直接覆盖截止点前后
+授权，不再以放宽墙钟阈值掩盖问题。
+
+最终验收环境为项目 Python 3.12.10、Node v24.16.0，`pip check` 无冲突。28 项前端聚焦、
+220 项 FastAPI/A3/前端定向、73 项 task-state、13 项 8896/8790/shared watchdog guard 聚焦
+回归均通过；全仓共 1178 项通过。Node 双脚本语法、PowerShell
+Parser 与 `git diff --check` 通过。该结果只放行 3.5.2 的 8896 契约烟测，不证明目标真实
+浏览器支持 Web Lock，也不证明 8790 当前运行提交、runtime 或可回退版本。
+
+## 3.5.2 8896 契约烟测（DONE；未部署 8790）
+
+使用固定 linked checkout、完整提交、绝对 Git/Python/PowerShell/runtime 和硬化
+watchdog 完成 8896 契约烟测。HTTP 与停服后 SQLite 证据通过，14 个 evidence
+request 对应 28 条 trace event 和 3 条 Response Store 记录；真实浏览器加载
+task-state 页面无控制台错误、资源缺失或横向溢出，watchdog、agent 和 listener
+均精确清理。该批次没有触碰 8788/8790/8794/8795。
+
+## 3.5.3 只读 live 对照（DONE；结论 BLOCKED）
+
+只读静态证据确认旧启动链/watchdog 从可变主工作区启动，不能证明实际运行提交，
+且缺少固定 release、manifest 和匹配回退锚点；因此按原安全边界停止并请求用户
+重新确认，没有把仓库 HEAD 或健康响应误当作线上版本证据。
+
+## 3.5.4 remediation 与精确启用 8790（DONE）
+
+用户随后明确授权本次限定 remediation 与精确启用后，8790 watchdog 强制完整提交、manifest、干净
+linked checkout、绝对入口/Python/runtime，并在初始启动和每次重启前复验；Limited
+计划任务环境下的中文 Git 路径使用显式 UTF-8、`core.quotePath=false` 和禁用可选
+锁的只读调用解析。冻结 release 提交为
+`ee5a830bb864d9d558718755b750d67f6d1a5ae4`，manifest SHA-256 为
+`D2D051DF35A80B3210B4C393456F94FC9B8F9A005B18931A2D433F7122BCD5BC`；
+固定 checkout 位于
+`F:\cc\_deploy\7-题库检索\8790\ee5a830bb864d9d558718755b750d67f6d1a5ae4`，
+受限回退证据位于
+`F:\cc\_backups\7-题库检索\2026-08-31\8790-repair-20260831-194108`。
+release hardening 最终全仓 1221 项通过。
+
+启用前保存受限 Git bundle、旧任务 XML、8 份 SQLite 在线一致副本及 control key
+配对证据。精确切换后，计划任务保持 Running，watchdog→agent→唯一 8790 listener、
+1/2/55、control 引用、health/Trace、完整巡检周期、固定 release/manifest 和回退
+证据均通过，8788/8794/8795 监听身份前后不变。真实浏览器邀请页无控制台错误或
+横向溢出，目标浏览器支持 Web Lock，live `task_state.js` 的 SHA-256 与 release
+文件一致；未认证 `/api/session` 继续返回 401。
+
+## 3.5.4 后续：8790 refresh-recovery 热修复（IMPLEMENTED；LIVE ACCEPTANCE DEFERRED）
+
+短暂入口延迟后的刷新曾把尚待权威对账误报为会话不可继续。后续热修复将启动与重连收口为
+仅调用 `/api/session`，把 bootstrap 超时提高到 15 秒，并按上文规则保留 pending fence、
+提供 `retry_connection` 及清理临时 operational notice；cache-buster 为
+`20260901-refresh-recovery-v2`。代码已完成全仓 1222 项回归并以固定 release 部署，受限
+备份和回退证据已保存，NATAPP watchdog、8790 本地 health/Trace 及公网静态资源加载均正常。
+
+真实已登录浏览器的恢复对账仍未完成：页面可加载新脚本，但 `/api/session` 没有形成可验收的
+成功闭环，现有证据不足以把原因归结到 NATAPP 客户端、浏览器协调或 8790 应用中的任一层。
+用户已要求暂停继续修复，待其后续统一处理；因此不得把本节写成 live acceptance DONE，
+不得为此重启 NATAPP、触碰 8888 或开始阶段 4。3.5.3 的 DONE/BLOCKED 和上方 3.5.4 的 DONE
+均是历史事实，不因本节延期而改写。
 
 ## 后续批次
 
 1. **3.2.1 纯构造器（DONE）**：已完成从冻结 read-set 和可信入口证据到 V1 快照的无 I/O 投影，实现与定向测试见 `tiku_agent/task_state_builder.py` 和 `tests/test_task_state_builder.py`。
 2. **3.2.2 锁内权威读取（DONE）**：已在 A3→A2 锁序内一次读取父子状态，在 standalone A2 锁内单读 child，并为已持锁调用方提供零重锁、零 store 读取的 frozen-state 入口；缺失/不可读/稳定未知分类、受控文件与入口能力证据及回归测试见 `tiku_agent/task_state_runtime.py`、两个 runtime 类和 `tests/test_task_state_runtime.py`。项目 Python 3.12 下 47 项 task-state 定向测试及全仓 1031 项回归通过。
 3. **3.2.3 异常与矩阵测试（DONE）**：父 route/phase 与 child phase/topology 的实际构造矩阵、A3 active/组合读取异常、脱敏及旧 revision 动作证据均已补齐；阶段 3.2 整体完成。项目 Python 3.12 下 51 项 task-state 定向测试及全仓 1035 项回归通过。
-4. **3.3 出口一致性（DONE；尚未部署）**：3.3.1～3.3.6 已完成；跨 session、JSON success/error、stream result/error 和 reset 的 exact V1 parity、失败后处理、零重读及 legacy 兼容均已验收，阶段最终全仓 1147 项通过。
-5. **3.4 前端消费（DONE；尚未部署）**：3.4.1～3.4.5 已完成 exact/branded model、原子信封接线、A2/A3 动作迁移及恢复/多标签页生命周期收口；A2/A3 只由服务端 `allowed_actions` 授权，动作参数绑定 V1 identity/revision/target，`next_stage` 不授权。阶段最终全仓 1173 项通过。
-6. **3.5 启用门（尚未实现）**：定向/全量回归、8896 契约烟测、只读 live 对照后再精确启用 8790；不触碰 8788/8794/8795。
+4. **3.3 出口一致性（DONE；已启用 8790）**：3.3.1～3.3.6 已完成；跨 session、JSON success/error、stream result/error 和 reset 的 exact V1 parity、失败后处理、零重读及 legacy 兼容均已验收，阶段最终全仓 1147 项通过。
+5. **3.4 前端消费（DONE；已启用 8790）**：3.4.1～3.4.5 已完成 exact/branded model、原子信封接线、A2/A3 动作迁移及恢复/多标签页生命周期收口；A2/A3 只由服务端 `allowed_actions` 授权，动作参数绑定 V1 identity/revision/target，`next_stage` 不授权。阶段最终全仓 1173 项通过。
+6. **3.5 启用门（DONE）**：3.5.1 离线回归、3.5.2 8896 契约烟测、3.5.3 只读 live 阻断审计及 3.5.4 8790 remediation/精确启用均已完成；固定 release/manifest、运行身份、回退/备份、受保护端口和真实浏览器静态资源证据均已验收。

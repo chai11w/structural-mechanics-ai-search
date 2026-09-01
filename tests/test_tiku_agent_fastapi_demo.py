@@ -263,6 +263,14 @@ class FakeRuntime:
 
 
 class FastApiDemoTest(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        # Ignored runtime directories are absent in a clean worktree.
+        (Path(__file__).resolve().parents[1] / ".tmp_tiku_agent").mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
     @staticmethod
     def _http_error_task_state():
         return task_state_contract.TaskStateSnapshotV1(
@@ -5425,7 +5433,7 @@ class FastApiDemoTest(unittest.TestCase):
         for expected in (
             'href="/assets/demo.css?v=20260822-feedback-v1"',
             'src="/assets/task_state.js?v=20260830-task-state-3-4-5"',
-            'src="/assets/demo.js?v=20260831-session-recovery-v1"',
+            'src="/assets/demo.js?v=20260901-refresh-recovery-v2"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',

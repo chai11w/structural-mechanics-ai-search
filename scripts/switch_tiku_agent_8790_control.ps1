@@ -5,12 +5,17 @@ param(
     [string]$RuntimeDir,
     [string]$ControlDb,
     [string]$LegacyInviteConfig,
+    [Parameter(Mandatory = $true)][string]$ReleaseManifest,
+    [Parameter(Mandatory = $true)][string]$ExpectedCommit,
+    [Parameter(Mandatory = $true)][string]$BackupProjectRoot,
     [double]$RollbackDailyBudgetCny = 30,
     [double]$RollbackPerInviteDailyBudgetCny = 3,
     [string]$PythonExe = "C:\Users\31492\AppData\Local\Programs\Python\Python312\python.exe"
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "watchdog_process_guard.ps1")
+. (Join-Path $PSScriptRoot "tiku_agent_watchdog_8790_safety.ps1")
 
 $ProjectDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $RuntimeDir) { $RuntimeDir = Join-Path $ProjectDir ".tmp_tiku_agent_v2_prod_8790" }
@@ -25,11 +30,34 @@ foreach ($name in @("RuntimeDir", "ControlDb", "LegacyInviteConfig", "PythonExe"
 $RuntimeDir = [System.IO.Path]::GetFullPath($RuntimeDir)
 $ControlDb = [System.IO.Path]::GetFullPath($ControlDb)
 $LegacyInviteConfig = [System.IO.Path]::GetFullPath($LegacyInviteConfig)
+if (-not [System.IO.Path]::IsPathRooted($BackupProjectRoot)) {
+    throw "BackupProjectRoot must be an absolute path."
+}
+$BackupProjectRoot = [System.IO.Path]::GetFullPath($BackupProjectRoot)
 $StatusFile = Join-Path $RuntimeDir "watchdog_8790.status"
 $WatchdogPidFile = Join-Path $RuntimeDir "watchdog_8790.pid"
 $BotPidFile = Join-Path $RuntimeDir "tiku_8790.pid"
 $ModeFile = Join-Path $RuntimeDir "deployment_mode.json"
 $WatchdogScript = Join-Path $PSScriptRoot "tiku_agent_watchdog_8790.ps1"
+$AgentEntrypoint = (Resolve-Path -LiteralPath (
+    Join-Path $ProjectDir "scripts\run_tiku_agent_8790.py"
+) -ErrorAction Stop).Path
+$ExpectedPythonPath = Resolve-WatchdogExecutablePath -Executable $PythonExe
+$PowerShellExe = Resolve-WatchdogExecutablePath -Executable (
+    Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+)
+$releaseIdentityParameters = @{
+    ManifestPath = $ReleaseManifest
+    ExpectedCommit = $ExpectedCommit
+    ProjectDirectory = $ProjectDir
+    AgentEntrypoint = $AgentEntrypoint
+    PythonExecutable = $ExpectedPythonPath
+    RuntimeDirectory = $RuntimeDir
+}
+$ReleaseIdentity = Assert-Tiku8790ReleaseIdentity @releaseIdentityParameters
+$ReleaseManifest = $ReleaseIdentity.manifest
+$ExpectedCommit = $ReleaseIdentity.commit
+$PythonExe = $ReleaseIdentity.python
 
 function Test-Health {
     try {
@@ -92,10 +120,14 @@ function Assert-CurrentProcesses([int]$WatchdogPid) {
 }
 
 function Start-Watchdog([string]$Mode) {
+    $verifiedRelease = Assert-Tiku8790ReleaseIdentity @releaseIdentityParameters
     $arguments = @(
-        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $WatchdogScript,
+        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", $WatchdogScript,
         "-Port", "$Port", "-RuntimeDir", $RuntimeDir,
-        "-PythonExe", $PythonExe
+        "-ReleaseManifest", $verifiedRelease.manifest,
+        "-ExpectedCommit", $verifiedRelease.commit,
+        "-PythonExe", $verifiedRelease.python
     )
     if ($Mode -eq "control") {
         $arguments += @("-ControlDb", $ControlDb)
@@ -106,7 +138,20 @@ function Start-Watchdog([string]$Mode) {
             "-PerInviteDailyBudgetCny", "$RollbackPerInviteDailyBudgetCny"
         )
     }
-    return Start-Process powershell.exe -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    $launchArguments = @(
+        $arguments |
+            ForEach-Object {
+                ConvertTo-Tiku8790CommandLineArgument -Argument ([string]$_)
+            }
+    )
+    $startParameters = @{
+        FilePath = $PowerShellExe
+        ArgumentList = $launchArguments
+        WorkingDirectory = $ProjectDir
+        WindowStyle = "Hidden"
+        PassThru = $true
+    }
+    return Start-Process @startParameters
 }
 
 function Stop-ExactProcess([int]$ProcessId, [string]$ExpectedName) {
@@ -127,40 +172,46 @@ function Wait-Healthy([int]$Seconds = 20) {
     return $false
 }
 
-foreach ($path in @($RuntimeDir, $ControlDb, $LegacyInviteConfig, $PythonExe, $WatchdogScript, $StatusFile, $BotPidFile)) {
+foreach ($path in @(
+    $RuntimeDir,
+    $ControlDb,
+    $LegacyInviteConfig,
+    $ReleaseManifest,
+    $PythonExe,
+    $WatchdogScript,
+    $AgentEntrypoint,
+    $StatusFile,
+    $BotPidFile
+)) {
     if (-not (Test-Path -LiteralPath $path)) { throw "Required path not found: $path" }
 }
 if (-not (Test-Health)) { throw "8790 is not healthy before the switch." }
-$adminHealth = Invoke-RestMethod -Uri "http://127.0.0.1:8795/health" -TimeoutSec 3
-if ($adminHealth.status -ne "ok") { throw "8795 is not healthy before the switch." }
-
-& $PythonExe -B (Join-Path $PSScriptRoot "manage_tiku_admin.py") `
-    --control-db $ControlDb --import-invites $LegacyInviteConfig --require-status-match
-if ($LASTEXITCODE -ne 0) { throw "Control database preflight failed." }
-
 $detectedWatchdogPid = Resolve-CurrentWatchdogPid
 if ($CurrentWatchdogPid -gt 0 -and $CurrentWatchdogPid -ne $detectedWatchdogPid) {
     throw "Supplied watchdog PID does not match the uniquely detected current watchdog."
 }
-Write-Host "Preflight passed: 8790 and 8795 are healthy; control database import is conflict-free."
+$oldListenerPid = Assert-CurrentProcesses $detectedWatchdogPid
+Write-Host "Read-only preflight passed: release identity and current 8790 processes are verified."
 Write-Host "Verified current 8790 watchdog PID: $detectedWatchdogPid"
 if (-not $Apply) {
-    Write-Host "No processes changed. Rerun with -Apply after the maintenance window is approved."
+    Write-Host "No service or control database changed. Rerun with -Apply after approval."
     return
 }
 
-$oldListenerPid = Assert-CurrentProcesses $detectedWatchdogPid
+$adminHealth = Invoke-RestMethod -Uri "http://127.0.0.1:8795/health" -TimeoutSec 3
+if ($adminHealth.status -ne "ok") { throw "8795 is not healthy before the switch." }
 $dateFolder = Get-Date -Format "yyyy-MM-dd"
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$projectName = Split-Path $ProjectDir -Leaf
-$projectBackupRoot = Join-Path "F:\cc\_backups" $projectName
-$backupBase = [System.IO.Path]::GetFullPath((Join-Path $projectBackupRoot $dateFolder))
+$backupBase = [System.IO.Path]::GetFullPath((
+    Join-Path $BackupProjectRoot $dateFolder
+))
 $backupDir = [System.IO.Path]::GetFullPath((Join-Path $backupBase "8790_control_switch_$stamp"))
 $boundary = $backupBase.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
 if (-not $backupDir.StartsWith($boundary, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Backup directory escaped the approved project backup root."
 }
 if (Test-Path -LiteralPath $backupDir) { throw "Backup directory already exists: $backupDir" }
+New-Item -ItemType Directory -Path $backupBase -Force -ErrorAction Stop | Out-Null
 New-Item -ItemType Directory -Path $backupDir -ErrorAction Stop | Out-Null
 $sqliteBackup = Join-Path $backupDir "control.sqlite3"
 $inviteEncryptionKey = Join-Path (Split-Path $ControlDb -Parent) "invite_code_encryption.key"
@@ -183,6 +234,19 @@ if ($LASTEXITCODE -ne 0) { throw "Control database backup failed." }
 Copy-Item -LiteralPath $LegacyInviteConfig -Destination (Join-Path $backupDir "invite_access.json") -ErrorAction Stop
 if (Test-Path -LiteralPath $inviteEncryptionKey -PathType Leaf) {
     Copy-Item -LiteralPath $inviteEncryptionKey -Destination (Join-Path $backupDir "invite_code_encryption.key") -ErrorAction Stop
+}
+
+& $PythonExe -B (Join-Path $PSScriptRoot "manage_tiku_admin.py") `
+    --control-db $ControlDb `
+    --import-invites $LegacyInviteConfig `
+    --require-status-match `
+    --apply-import
+if ($LASTEXITCODE -ne 0) {
+    throw "Control database import failed before any process was stopped."
+}
+$revalidatedListenerPid = Assert-CurrentProcesses $detectedWatchdogPid
+if ($revalidatedListenerPid -ne $oldListenerPid) {
+    throw "8790 listener changed after control database import; no process was stopped."
 }
 
 $newWatchdog = $null
