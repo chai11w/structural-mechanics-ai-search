@@ -19,7 +19,7 @@ from tiku_agent.state import AgentState
 
 
 class TikuAgent8896FlowTest(unittest.TestCase):
-    def test_app_enables_orientation_before_routing(self):
+    def test_app_enables_orientation_before_routing_when_requested(self):
         with tempfile.TemporaryDirectory() as temp, patch(
             "scripts.run_tiku_agent_8896.build_runtime",
             return_value=object(),
@@ -27,7 +27,7 @@ class TikuAgent8896FlowTest(unittest.TestCase):
             "scripts.run_tiku_agent_8896.build_a3_page_orienter",
             return_value="orienter",
         ):
-            app = build_app(Path(temp))
+            app = build_app(Path(temp), enable_a3_text_orientation=True)
 
         self.assertIsNotNone(app)
         self.assertEqual(
@@ -51,11 +51,16 @@ class TikuAgent8896FlowTest(unittest.TestCase):
         self.assertTrue(defaults.enable_triage)
         self.assertTrue(defaults.enable_auto_crop)
         self.assertTrue(defaults.enable_a3_intent_v1)
-        self.assertTrue(defaults.enable_a3_text_orientation)
+        self.assertFalse(defaults.enable_a3_text_orientation)
         self.assertTrue(defaults.enable_media_cache)
         self.assertFalse(
             build_argument_parser()
             .parse_args(["--disable-a3-text-orientation"])
+            .enable_a3_text_orientation
+        )
+        self.assertTrue(
+            build_argument_parser()
+            .parse_args(["--enable-a3-text-orientation"])
             .enable_a3_text_orientation
         )
         self.assertFalse(
@@ -63,6 +68,19 @@ class TikuAgent8896FlowTest(unittest.TestCase):
             .parse_args(["--disable-media-cache"])
             .enable_media_cache
         )
+
+    def test_app_does_not_load_orientation_ocr_by_default(self):
+        with tempfile.TemporaryDirectory() as temp, patch(
+            "scripts.run_tiku_agent_8896.build_runtime",
+            return_value=object(),
+        ) as runtime_builder, patch(
+            "scripts.run_tiku_agent_8896.build_a3_page_orienter"
+        ) as build_orienter:
+            app = build_app(Path(temp))
+
+        self.assertIsNotNone(app)
+        build_orienter.assert_not_called()
+        self.assertIsNone(runtime_builder.call_args.kwargs["a3_page_orienter"])
 
     def test_auto_crop_is_promoted_by_default_with_manual_rollback(self):
         with tempfile.TemporaryDirectory() as temp:

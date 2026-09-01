@@ -1834,6 +1834,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="新增题目入库前使用的隔离 RapidOCR 依赖目录",
     )
     parser.add_argument(
+        "--enable-store-text-orientation",
+        dest="enable_store_text_orientation",
+        action="store_true",
+        help="开启新增题目入库前的文字方向校正",
+    )
+    parser.add_argument(
         "--disable-store-text-orientation",
         dest="enable_store_text_orientation",
         action="store_false",
@@ -1854,7 +1860,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.set_defaults(
         enable_dimension_filter=None,
-        enable_store_text_orientation=True,
+        enable_store_text_orientation=False,
     )
     parser.add_argument("--working-reaction", default="OK", help="收到图片后给原消息添加的 emoji_type；留空则关闭")
     parser.add_argument(

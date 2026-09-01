@@ -54,12 +54,14 @@ class _FakeCoordinator:
 
 
 class FeishuStoreFlowTests(unittest.TestCase):
-    def test_8788_store_orientation_is_enabled_by_default_with_rollback_flag(self):
+    def test_8788_store_orientation_is_disabled_by_default_with_opt_in_flag(self):
         defaults = build_parser().parse_args([])
         disabled = build_parser().parse_args(["--disable-store-text-orientation"])
+        enabled = build_parser().parse_args(["--enable-store-text-orientation"])
 
-        self.assertTrue(defaults.enable_store_text_orientation)
+        self.assertFalse(defaults.enable_store_text_orientation)
         self.assertFalse(disabled.enable_store_text_orientation)
+        self.assertTrue(enabled.enable_store_text_orientation)
 
     def test_question_orientation_precedes_classification_and_becomes_store_source(self):
         with tempfile.TemporaryDirectory() as temp_dir:

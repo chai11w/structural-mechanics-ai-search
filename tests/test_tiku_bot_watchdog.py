@@ -21,6 +21,8 @@ class TikuBotWatchdogTest(unittest.TestCase):
         start = script.index("$botProcess = Start-Bot", restart)
         self.assertLess(cleanup, start)
         self.assertLess(script.index("Wait-PortFree", cleanup), start)
+        self.assertIn("[switch]$EnableStoreTextOrientation", script)
+        self.assertIn('$arguments += "--enable-store-text-orientation"', script)
 
 
 if __name__ == "__main__":

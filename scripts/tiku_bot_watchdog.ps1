@@ -5,6 +5,7 @@ param(
     [string]$PublicHost = $env:TIKU_PUBLIC_HOST,
     [int]$MaxMessageAgeMinutes = 15,
     [switch]$ExternalTunnel,
+    [switch]$EnableStoreTextOrientation,
     [switch]$EnrollAdminSenderOnce
 )
 
@@ -81,6 +82,9 @@ function Start-Bot {
     )
     if ($EnrollAdminSenderOnce) {
         $arguments += "--enroll-admin-sender-once"
+    }
+    if ($EnableStoreTextOrientation) {
+        $arguments += "--enable-store-text-orientation"
     }
     $process = Start-Process python `
         -ArgumentList $arguments `

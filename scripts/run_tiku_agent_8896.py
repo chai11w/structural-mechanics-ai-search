@@ -193,7 +193,7 @@ def build_app(
     enable_a3_intent_v1: bool = True,
     enable_a3_intent_model_fallback: bool = True,
     enable_output_watchdog: bool = True,
-    enable_a3_text_orientation: bool = True,
+    enable_a3_text_orientation: bool = False,
     a3_orientation_dependency_dir: str | Path = DEFAULT_A3_ORIENTATION_DEPENDENCY_DIR,
     enable_media_cache: bool = True,
     media_cache_seconds: int = 300,
@@ -270,6 +270,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Isolated RapidOCR dependency directory",
     )
     parser.add_argument(
+        "--enable-a3-text-orientation",
+        dest="enable_a3_text_orientation",
+        action="store_true",
+        help="Enable A3 OCR text orientation correction",
+    )
+    parser.add_argument(
         "--disable-a3-text-orientation",
         dest="enable_a3_text_orientation",
         action="store_false",
@@ -298,7 +304,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         enable_auto_crop=True,
         enable_a3_intent_v1=True,
         enable_output_watchdog=True,
-        enable_a3_text_orientation=True,
+        enable_a3_text_orientation=False,
         enable_media_cache=True,
     )
     return parser

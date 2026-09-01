@@ -21,7 +21,7 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
         self.assertTrue(defaults.enable_triage)
         self.assertTrue(defaults.enable_auto_crop)
         self.assertTrue(defaults.enable_output_watchdog)
-        self.assertTrue(defaults.enable_a3_text_orientation)
+        self.assertFalse(defaults.enable_a3_text_orientation)
         self.assertEqual(defaults.max_concurrent_tasks, 1)
         self.assertEqual(defaults.max_queued_tasks, 2)
         self.assertEqual(defaults.queue_wait_seconds, 55.0)
@@ -31,6 +31,11 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
         self.assertFalse(
             build_argument_parser()
             .parse_args(["--disable-a3-text-orientation"])
+            .enable_a3_text_orientation
+        )
+        self.assertTrue(
+            build_argument_parser()
+            .parse_args(["--enable-a3-text-orientation"])
             .enable_a3_text_orientation
         )
 
@@ -96,6 +101,7 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
             app = build_app(
                 Path(temp) / "runtime",
                 enable_triage=False,
+                enable_a3_text_orientation=True,
                 max_concurrent_tasks=3,
                 max_queued_tasks=4,
                 queue_wait_seconds=66,
@@ -131,7 +137,7 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
             self.assertEqual(build_runtime.call_args.kwargs["max_queued_tasks"], 4)
             self.assertEqual(build_runtime.call_args.kwargs["queue_wait_seconds"], 66)
 
-    def test_production_orientation_can_be_disabled_without_loading_ocr(self):
+    def test_production_orientation_is_disabled_by_default_without_loading_ocr(self):
         with tempfile.TemporaryDirectory() as temp, patch(
             "scripts.run_tiku_agent_8790.build_a3_runtime",
             return_value=object(),
@@ -141,7 +147,6 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
             app = build_app(
                 Path(temp) / "runtime",
                 enable_triage=False,
-                enable_a3_text_orientation=False,
             )
 
             self.assertIsNotNone(app)
