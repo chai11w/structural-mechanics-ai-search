@@ -4,7 +4,7 @@
 
 阶段 3.1 完成父 workflow、当前子题任务和题目单元的权威状态契约定稿。本文件冻结 V1 的字段、词汇、字段来源、派生谓词、拓扑边界、一致性错误和冲突策略，是后续实现的权威规范。阶段 3.2.1 已实现从“已冻结 read-set + 可信入口证据”到 `TaskStateSnapshotV1` 的纯构造器，落在 `tiku_agent/task_state_builder.py`；阶段 3.2.2 已实现 `tiku_agent/task_state_runtime.py` 的锁内读取与证据包装，并由 `A3MvpRuntime.task_state_snapshot_v1()`、`AgentSessionRuntime.task_state_snapshot_v1()` 和 `AgentSessionRuntime.task_state_snapshot_v1_from_frozen_state()` 提供内部运行时入口；阶段 3.2.3 已用实际构造结果矩阵和组合读取异常完成边界验收。阶段 3.3.1 冻结 exact typed 公共映射，3.3.2～3.3.5 分别接入 `/api/session`、HTTP 200 业务 JSON、受控非 stream HTTP 4xx/5xx 和五条任务 stream 终态；3.3.6 已完成跨出口 parity、失败后处理、兼容入口和全仓回归验收。阶段 3.4.1～3.4.5 已完成前端 exact/branded model、信封消费、A2/A3 动作迁移及恢复生命周期收口。
 
-**阶段 3.3 出口一致性及 3.4 前端消费已随 3.5.4 部署启用到 8790，主阶段 3 为 `DONE`。** 当前受控 HTTP 出口在根级返回 `task_state`，五条任务 stream 的 success 在 `event.data.task_state`、非准入 error 在 `event.task_state` 返回 exact typed V1；浏览器按这些权威层级原子消费，A2/A3 动作只由 branded `allowed_actions` 授权，busy/queue、progress 和非任务响应保持 no-update。启用门已完成 8896 契约烟测、8790 只读对照及固定 release 精确启用；既有内部 `session_snapshot()` 仍是兼容投影，不等同于统一快照。
+**阶段 3.3 出口一致性及 3.4 前端消费已随 3.5.4 部署启用到 8790，主阶段 3 为 `DONE`。** 当前受控 HTTP 出口在根级返回 `task_state`，五条任务 stream 的 success 在 `event.data.task_state`、非准入 error 在 `event.task_state` 返回 exact typed V1；浏览器按这些权威层级原子消费，A2/A3 动作只由 branded `allowed_actions` 授权，busy/queue、progress 和非任务响应保持 no-update。启用门已完成 8896 契约烟测、8790 只读对照及固定 release 精确启用；既有内部 `session_snapshot()` 仍是兼容投影，不等同于统一快照。后续 refresh-recovery 热修复只收口浏览器恢复和 operational notice 生命周期，不改变 V1、公共信封位置或动作授权语义；其 live 恢复验收已按用户要求延期。
 
 以下内容不属于阶段 3.1：
 
@@ -792,8 +792,9 @@ shape/topology 及合法 `INCONSISTENT` 均保持 fail-closed，不回退寻找�
 每个任务状态请求开始即切到 MISSING/closed，并取得一次性 Symbol token；只有最新请求
 可提交一个终态，旧请求、重复终态和已结束 token 均不能读取或覆盖新 model。两个包装器
 在 `finally` 统一退休 token。`QUEUE_FULL`/`QUEUE_TIMEOUT`、progress 与非任务响应严格
-no-update；queue 即使意外夹带状态也忽略。重连在 health 前后检查 busy，观察型 session
-refresh 不能抢占正在执行任务的 post-media-reopen 最终状态。
+no-update；queue 即使意外夹带状态也忽略。启动与重新连接在非 busy 时只调用权威
+`/api/session` 对账，不再并行请求 `/health`；bootstrap 超时为 15 秒，观察型 session
+refresh 仍不能抢占正在执行任务的 post-media-reopen 最终状态。
 
 测试以 Python typed fixture 驱动真实 Node 模块，并动态执行 `demo.js` 的实际白名单与消费
 函数，覆盖 session、JSON、五条 stream、reset、missing/invalid、queue、非任务、错层、
@@ -847,6 +848,12 @@ tombstone 提交失败时保留 fence，后续排队任务取得锁后只退休�
 自动过期 reset 取得锁后再次读取 activity，新活动会取消 reset 并改读 `/api/session`。
 浏览器不支持 Web Lock 时不自动 reset，且所有 task-starting 入口均在 `fetch` 前
 fail-closed；只允许 `/api/session`、`/api/reset` 继承已有 fence 进行只读/显式对账。
+
+瞬时 bootstrap 超时、网络中断或无效响应保留 pending request fence，只提供
+`retry_connection`，不得把尚待权威对账误判为必须开始新对话。后续 exact
+`/api/session` 有效对账后清除 fence，并移除 `connection` / `session-recovery` 临时提示。
+operational notice 不写入对话历史，恢复旧 history 时过滤遗留 notice。真实过期、无 Web
+Lock 或协调能力缺失的原 fail-closed 边界保持不变。
 
 验收以共享存储、FIFO 锁的确定性交错 Node harness 覆盖刷新、过期、跨标签页
 activity/fence/reset、JSON 与 stream 权威空错误提交失败、reset 超时/非空对账、无锁降级、
@@ -918,6 +925,20 @@ release hardening 最终全仓 1221 项通过。
 证据均通过，8788/8794/8795 监听身份前后不变。真实浏览器邀请页无控制台错误或
 横向溢出，目标浏览器支持 Web Lock，live `task_state.js` 的 SHA-256 与 release
 文件一致；未认证 `/api/session` 继续返回 401。
+
+## 3.5.4 后续：8790 refresh-recovery 热修复（IMPLEMENTED；LIVE ACCEPTANCE DEFERRED）
+
+短暂入口延迟后的刷新曾把尚待权威对账误报为会话不可继续。后续热修复将启动与重连收口为
+仅调用 `/api/session`，把 bootstrap 超时提高到 15 秒，并按上文规则保留 pending fence、
+提供 `retry_connection` 及清理临时 operational notice；cache-buster 为
+`20260901-refresh-recovery-v2`。代码已完成全仓 1222 项回归并以固定 release 部署，受限
+备份和回退证据已保存，NATAPP watchdog、8790 本地 health/Trace 及公网静态资源加载均正常。
+
+真实已登录浏览器的恢复对账仍未完成：页面可加载新脚本，但 `/api/session` 没有形成可验收的
+成功闭环，现有证据不足以把原因归结到 NATAPP 客户端、浏览器协调或 8790 应用中的任一层。
+用户已要求暂停继续修复，待其后续统一处理；因此不得把本节写成 live acceptance DONE，
+不得为此重启 NATAPP、触碰 8888 或开始阶段 4。3.5.3 的 DONE/BLOCKED 和上方 3.5.4 的 DONE
+均是历史事实，不因本节延期而改写。
 
 ## 后续批次
 

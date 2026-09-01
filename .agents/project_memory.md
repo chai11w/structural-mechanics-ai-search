@@ -7,7 +7,7 @@
 - 8790 读取 8795 控制库认证；A1/A2/A3 与子 A2 统一计费。队列默认 1 个运行、2 个排队、55 秒等待，支持 FIFO、防插队、流关闭撤队和同锁分片去重。
 - 8795 是可替换的过渡后台，Trace/Response 主链独立于它；8 个 live SQLite 库及 A2/A3、追问、反馈、费用和停用闭环已验收，4 条新反馈均绑定服务端 Response。
 - 主阶段 3 已完成：3.3/3.4 的统一任务状态出口与前端消费已随 3.5.4 启用到 8790；生产计划任务固定到受 manifest 约束的干净 release checkout，不再从可变主工作区启动。
-- 当前验证：8790 hardening 全仓 1221 项通过；live 固定 release、任务/父子链/唯一 listener、1/2/55、control 引用、回退 XML 和 8 份一致 SQLite 备份均已验收。浏览器无错误或溢出，支持 Web Lock，live `task_state.js` 与 release 哈希一致。
+- 当前 8790 为 refresh-recovery 固定 release，全仓 1222 项通过，运行、回退和 Trace 证据保持；公网已加载新 `demo.js` 且 `/health` 一致，但登录 `/api/session` 对账未闭环。用户暂停修复；3.5.3 DONE/BLOCKED、3.5.4 DONE 的历史状态不可改写。
 - 已创建 3 个独立、7 天、每日 3 元模型估算额度的内测邀请码并验证；明文只经 8795 受控复制，不进入日志或项目文件。
 
 ## Implemented
@@ -21,11 +21,11 @@
 - 8790/8795 看门狗核对端口、PID、Python 和完整参数；8790/8896 还绑定绝对 checkout/入口、安全 argv，端口所有者不明时 fail-closed。8790 每次启动复验 manifest、完整提交、干净 linked checkout、Python/runtime；Limited 任务以显式 UTF-8 和 `core.quotePath=false` 解析中文 Git 路径。
 - 3.1～3.2 已冻结 `TaskStateSnapshotV1` 并实现纯构造、锁内单读、frozen-state 零重读及异常 fail-closed。
 - 3.3～3.4 已统一 session/JSON/error/stream 快照；前端只由 branded `allowed_actions` 授权，动作绑定任务 identity/revision/target，拒绝 stale/ABA，网络未知结果不自动重放。
-- 3.5.1～3.5.2 已完成：离线安全回归及固定 checkout 的 8896 HTTP/SQLite/浏览器契约烟测与精确清理通过；这两个批次当时均未部署 8790。
-- 3.5.3 只读审计正确阻断旧启动链的可变工作区、未知提交和缺失 release/manifest/回退锚点；3.5.4 经用户随后明确授权本次限定 remediation，建立固定 release 与受限回退并精确启用，watchdog 周期、独立健康/浏览器验收通过，8788/8794/8795 监听身份前后不变。
+- 3.5.1～3.5.4 已完成：8896 烟测后，3.5.3 因旧启动链无可信 release/回退锚点正确 BLOCKED；用户再授权 3.5.4 建立固定 release、受限回退并精确启用，受保护端口不变。后续 refresh-recovery 已实现 `/api/session` 单一对账、15 秒超时、pending fence、`retry_connection` 和临时 notice 清理；不改 V1、不开始阶段 4，live 闭环按上方状态延期。
 
 ## In Progress
 
+- refresh-recovery live 闭环按用户要求暂停；不再改 NATAPP、不回退 release，也不声明 live 通过。
 - 本地内测发布和主阶段 3 已完成；待账户侧配置 Cloudflare Access 与边缘登录限速后，再向 2～3 名测试者发放邀请码并观察 24～48 小时。
 
 ## Not Implemented
@@ -60,6 +60,7 @@
 - Trace 写入为 fail-open，只以健康计数暴露丢失；WAL 双副本和只读检查降低风险，但不是绝对线性化快照。
 - 全仓顺序回归曾因费用库 WAL checkpoint 使诊断测试观察到文件变化；单跑和复跑通过，仍属时序风险。
 - 无 Web Lock 时自动过期 reset 与全部任务入口均在触网前 fail-closed，只允许 `/api/session`、`/api/reset` 对账；当前验收浏览器已确认支持 Web Lock，但发放前仍需覆盖实际测试者浏览器。
+- NATAPP 静态资源和 `/health` 可达不证明登录恢复闭环；当前证据无法定位到 NATAPP、Web Lock 或 8790 中的某一层。
 
 ## Do Not Do
 
@@ -71,13 +72,14 @@
 - 不把公共输出改造扩展到个人飞书入口，不随意停止 8788。
 - 不按端口批量杀进程，不覆盖活 PID 文件；身份核对失败时停在现场。
 - 后续 8790 发布必须先固定 release/manifest、备份运行数据与任务 XML，并按完整 exe/argv/PID/父子链精确切换；不得把 `switch_tiku_agent_8790_control.ps1` 当作计划任务发布器，也不得影响 8788/8794/8795。
+- 不读或操作 8888；它与 8790 无关。refresh-recovery 暂停期间不改或重启 NATAPP。
 - 不在目标回复缺失时保存整段反馈历史，也不把反馈专用框选图重复注入普通聊天消息。
 
 ## Next Best Step
 
-1. 账户侧为 8790/8795 配置独立 Cloudflare Access 与窄范围边缘限速；完成前不同时发放公网地址和邀请码。
-2. 受控发放 3 个独立邀请码并观察 24～48 小时，记录成功闭环、排队超时、A3 裁图、候选相关性、点踩和估算费用。
-3. 根据真实失败记录再审查阶段 4 的中间结果持久化；未经单独确认不开始阶段 4。
+1. 新对话先核对“继续 3.5.3”与历史状态；重做只读 gate 必须新记复核，不能改写旧结论或自动恢复热修复。
+2. 按用户确认的剩余 3.5 范围继续，保持 refresh-recovery、NATAPP 和 8888 暂停；不开始阶段 4。
+3. 日后统一修复时，从登录 `/api/session` 未闭环继续，先建立可重复的单标签页验收。
 
 ## Important Commands
 

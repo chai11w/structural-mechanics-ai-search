@@ -8,6 +8,7 @@
 
 - 工程化梳理优先于新增自主功能：阶段 3.1～3.4 已完成并合入 `codex/mainline-bounded-autonomy-v1`，A2/A3 动作均由 branded V1 `allowed_actions` 授权并绑定 identity/revision/target；busy/queue 拒绝保持无状态，仍不动 8788/8794，也不提前混入阶段结果或暂停/继续。
 - 主阶段 3 已完成并启用到 8790。3.5.3 只读 live 对照因旧服务缺少固定 release/manifest 和可信回退锚点而正确阻断；用户随后明确授权本次限定 remediation 与精确启用。8790 现由固定干净 release、完整提交和 manifest 启动，计划任务、watchdog→agent→listener、1/2/55、control 引用、回退/备份、完整 watchdog 周期和真实浏览器静态资源均通过；release hardening 全仓 1221 项通过，8788/8794/8795 监听身份前后不变。
+- 3.5.4 后续 refresh-recovery 热修复已实现、推送并以固定 release 部署，全仓 1222 项通过；NATAPP 公网可加载 `20260901-refresh-recovery-v2` 且 `/health` 正常，但真实已登录 `/api/session` 恢复尚未完成。用户已暂停继续修复，准备在其所称“3.5 全部完成”后统一处理；现有 3.5.3/3.5.4 历史状态不回退，下一对话须先核对阶段命名。
 - 8790 网页已由 A3-V1 接管业务内核并继续使用 8795 控制库邀请码；费用、反馈汇总、动态额度和旧并发队列下一轮恢复。
 - 8896 保留同内核验收，8897 暂留独立回退；当前重点是 8790 真实样本验收和失败记录收集。Paddle 试验结论保留，不再作为当前阻塞项。
 - 8794 影子规划及有限自主阶段暂停排期；待 8892 固定流程、取消语义和验收样本稳定，且真实失败记录证明固定编排不足后再恢复。
@@ -66,6 +67,7 @@
    - 3.5.2 8896 契约烟测：DONE；该批次当时未部署 8790。使用固定 linked checkout、完整提交、绝对 Git/Python/PowerShell/runtime 和硬化 watchdog；HTTP 与停服后 SQLite 证据通过，14 个 evidence request 对应 28 条 trace event 和 3 条 Response Store 记录。真实浏览器加载 task-state 页面无控制台错误、资源缺失或横向溢出；watchdog、agent 和 8896 listener 均精确清理。Windows 空 listener 的结构化 no-match 已收口，其他查询错误继续 fail-closed；全程未触碰 8788/8790/8794/8795。
    - 3.5.3 只读 live 对照：DONE，结论为 BLOCKED。静态证据确认旧启动链/watchdog 从可变主工作区启动，不能证明实际提交，且缺少固定 release/manifest 和匹配回退锚点；按原安全边界停止并重新确认，没有把仓库 HEAD 当作线上证据。
    - 3.5.4 remediation 与精确启用 8790：DONE。用户随后明确授权本次限定 remediation 与精确启用后，watchdog 强制完整提交、manifest、干净 linked checkout、绝对入口/Python/runtime 和每次启动复验，并修复 Limited 任务环境下中文 Git 路径解析。受限备份包含 Git bundle、任务 XML、8 份 SQLite 在线一致副本及 control key 配对；精确切换后任务 Running、父子链/唯一 listener/1/2/55/control 引用、health/Trace 和完整巡检周期均通过。真实浏览器邀请页无控制台错误或横向溢出，Web Lock 可用，live `task_state.js` 哈希与 release 一致；8788/8794/8795 监听身份前后不变。
+   - 3.5.4 后续 refresh-recovery 热修复：IMPLEMENTED，LIVE ACCEPTANCE DEFERRED。启动/重连只经权威 `/api/session` 对账，bootstrap 超时 15 秒；瞬时错误保留 pending fence、只给 `retry_connection`，成功对账清除临时 recovery notice，cache-buster 为 `20260901-refresh-recovery-v2`。固定 release、受限备份、NATAPP watchdog 持久化和全仓 1222 项回归已完成，但真实已登录会话仍停在重连状态；用户要求暂停到后续统一修复。本项不改变 V1，不开始阶段 4，也不涉及 8888。
 4. **关键阶段结构化保存中间结果（PLANNED）**：保存识图、裁图、章节、荷载、分层候选数、失败原因及版本；以 `artifact_id` 受控关联短期原图、裁图和 overlay，查看、延长保留、删除均审计，路径不进 trace/公共输出，支持诊断、复用和 checkpoint。
 5. **幂等执行与父子任务控制（PLANNED）**：统一任务版本、幂等键、执行锁和 A3→A2 父子生命周期，避免重复点击、网络重试或恢复造成重复执行和重复计费。
 6. **长任务与 HTTP 流逐步解耦（PLANNED）**：让后台任务持有执行生命周期，HTTP/updates 流只负责提交、观察和控制；页面刷新或连接断开不再等于任务状态丢失。
