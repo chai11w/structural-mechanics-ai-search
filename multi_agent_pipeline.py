@@ -278,10 +278,12 @@ class MultiAgentCoordinator:
         router: RuleRouter | None = None,
         top_k: int | None = None,
         dimension_filter_enabled: bool | None = None,
+        runtime_dir: str | Path | None = None,
     ) -> None:
         self.qwen = qwen or QwenClassifier()
         self.router = router or RuleRouter()
         self.top_k = top_k or search.TOP_K
+        self.runtime_dir = Path(runtime_dir) if runtime_dir else Path(BASE) / ".tmp_feishu_tiku"
         self.dimension_filter_enabled = (
             search.cfg.get("dimension_filter_enabled") is True
             if dimension_filter_enabled is None
@@ -334,9 +336,31 @@ class MultiAgentCoordinator:
         status_callback=None,
         classified: dict[str, Any] | None = None,
     ) -> PipelineResult:
+        # Import lazily because tiku_agent.tools intentionally imports this
+        # module for the shared routing and ranking helpers. This keeps the
+        # Feishu bot on the same A2 tool sequence without creating a cycle.
+        from tiku_agent.tool_result import ToolOutcome
+        from tiku_agent.tools import (
+            AgentToolConfig,
+            classify_structure_tool,
+            coarse_search_tool,
+            rerank_candidates_tool,
+            route_bank_tool,
+        )
+
         loads = search.normalize_query_loads(loads)
-        route, load_details = self.router.route(loads)
-        if route.route == "needs_review" or route.excel_root is None:
+        # Keep a mutable classification envelope even for manual-load calls;
+        # the A2 structure step enriches it for the PipelineResult metadata.
+        classified = classified if classified is not None else {}
+        route_result = route_bank_tool(loads)
+        route_data = dict(route_result.data or {})
+        route_name = str(route_data.get("route") or "")
+        category = str(route_data.get("category") or "")
+        reason = str(route_data.get("reason") or route_result.error or "")
+        excel_root = Path(route_data["excel_root"]) if route_data.get("excel_root") else None
+        route = RouteDecision(route_name, category, reason, excel_root)
+        load_details = list(route_data.get("load_details") or [])
+        if route_result.outcome is not ToolOutcome.SUCCESS or route_name not in {"main", "symbolic"}:
             return make_pipeline_result(route, loads, load_details, [], False, chapter, classified)
 
         effective_chapter = resolve_effective_chapter(chapter, classified)
@@ -351,81 +375,84 @@ class MultiAgentCoordinator:
 
         if status_callback:
             status_callback("候选检索中...")
+        tool_config = AgentToolConfig(
+            runtime_dir=self.runtime_dir / "a2_tools",
+            top_k=self.top_k,
+            rerank_top=rerank_top,
+            dimension_filter_enabled=self.dimension_filter_enabled,
+        )
+
         structure_type = ""
         structure_filter_applied = False
-        if route.route == "symbolic" and query_image_path:
-            text_structure = infer_structure_type_from_text(classified)
-            if text_structure:
-                structure_type = text_structure
-                if classified is not None:
-                    classified["structure_type"] = structure_type
-                    classified["structure_type_confidence"] = 1.0
-                    classified["structure_type_reason"] = "题干文字"
-            else:
-                if status_callback:
-                    status_callback("结构类型识别中...")
-                try:
-                    structure = self.qwen.classify_structure_type(query_image_path)
-                    structure_type = normalize_structure_type(structure.get("structure_type"))
-                    if classified is not None:
-                        classified["structure_type"] = structure_type
-                        classified["structure_type_confidence"] = structure.get("confidence", 0.0)
-                        classified["structure_type_reason"] = structure.get("reason", "")
-                except Exception as exc:  # noqa: BLE001 - structure type is an optional speed-up.
-                    print(f"WARNING: 结构类型识别失败，跳过类型筛选: {exc}")
+        structure_result = classify_structure_tool(
+            query_image_path,
+            route=route_name,
+            classified=classified,
+            config=tool_config,
+        )
+        structure_data = dict(structure_result.data or {})
+        structure_type = normalize_structure_type(structure_data.get("structure_type"))
+        if classified is not None and structure_type:
+            classified["structure_type"] = structure_type
+            classified["structure_type_confidence"] = structure_data.get("confidence", 0.0)
+            classified["structure_type_reason"] = structure_data.get("reason", "")
+        if status_callback and route_name == "symbolic" and structure_result.outcome is ToolOutcome.PARTIAL:
+            status_callback("结构类型识别未完成，继续按荷载检索...")
 
-        results = rank_bank_candidates(
+        coarse_query_image = query_image_path if (query_image_path and (rerank or self.dimension_filter_enabled)) else None
+        coarse_result = coarse_search_tool(
             loads,
-            effective_chapter,
-            route.excel_root,
-            self.top_k,
-            structure_type=structure_type if route.route == "symbolic" else None,
-            for_rerank=bool(rerank and query_image_path),
-            rerank_min_score=rerank_threshold_for_route(route.route),
-        )
-        structure_filter_applied = any(item.get("structure_filter") for item in results)
-        results, dimension_filter = apply_dimension_prefilter(
-            results,
-            enabled=self.dimension_filter_enabled,
-            route=route.route,
+            chapter=effective_chapter,
+            route=route_name,
             structure_type=structure_type,
-            query_image_path=query_image_path,
-            recognizer=self.qwen,
-            status_callback=status_callback,
+            top_k=self.top_k,
+            query_image_path=coarse_query_image,
+            config=tool_config,
         )
+        coarse_data = dict(coarse_result.data or {})
+        structure_filter_applied = bool(coarse_data.get("structure_filter_applied"))
+        dimension_filter = dict(coarse_data.get("dimension_filter") or {})
+        candidates = list(coarse_data.get("candidates") or [])
+        if coarse_result.outcome is ToolOutcome.NO_MATCH or not candidates:
+            write_last_search([])
+            return make_pipeline_result(
+                route,
+                loads,
+                load_details,
+                [],
+                False,
+                effective_chapter,
+                classified,
+                structure_filter_applied=structure_filter_applied,
+                dimension_filter=dimension_filter,
+            )
+
         reranked = False
         rerank_note = ""
-        if rerank and query_image_path and results:
-            rerank_input = select_rerank_candidates(
-                results,
-                route.route,
-                preserve_bounded_pool=True,
-            )
-            if status_callback and rerank_input:
+        results = candidates
+        if rerank and query_image_path:
+            if status_callback:
                 status_callback(
                     f"{(rerank_provider or search.DEFAULT_RERANK_PROVIDER).upper()}复筛中..."
                 )
-            if rerank_input:
-                zhipu_results = search.rerank_candidates(
-                    query_image_path,
-                    rerank_input,
-                    top_n=rerank_top,
-                    model=rerank_model,
-                    provider=rerank_provider,
-                    max_workers=rerank_workers,
-                )
-                if zhipu_results and search.rerank_results_complete(zhipu_results):
-                    displayed = search.select_display_results(zhipu_results)
-                    results = normalize_rerank_results(displayed)
-                    reranked = True
-                    rerank_note = (
-                        ""
-                        if displayed
-                        else "复筛完成，但没有候选达到80%的可靠相似度门槛。"
-                    )
-                elif zhipu_results:
-                    rerank_note = search.rerank_incomplete_note(zhipu_results)
-                    results = search.mark_rerank_incomplete(results, rerank_note)
+            rerank_result = rerank_candidates_tool(
+                query_image_path,
+                candidates,
+                route=route_name,
+                rerank_top=rerank_top,
+                rerank_provider=rerank_provider,
+                rerank_model=rerank_model,
+                max_workers=rerank_workers,
+                force_rerank=force_rerank,
+            )
+            rerank_data = dict(rerank_result.data or {})
+            results = list(rerank_data.get("visible_candidates") or [])
+            reranked = bool(rerank_data.get("reranked"))
+            rerank_note = str(rerank_data.get("rerank_note") or "")
+            if rerank_result.outcome is ToolOutcome.NO_MATCH:
+                results = []
+            elif not results:
+                results = candidates
 
         write_last_search(results)
         return make_pipeline_result(

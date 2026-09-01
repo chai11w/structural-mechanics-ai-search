@@ -306,6 +306,7 @@ class TikuBot:
         self.coordinator = coordinator or MultiAgentCoordinator(
             top_k=options.top_k,
             dimension_filter_enabled=options.dimension_filter_enabled,
+            runtime_dir=options.temp_dir,
         )
         self.sessions = sessions or TikuSessionStore(options.session_ttl_seconds)
         self.store_service = store_service or FeishuStoreService(dry_run=options.dry_run)
