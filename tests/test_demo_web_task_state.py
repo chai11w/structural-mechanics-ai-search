@@ -594,7 +594,7 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260831-session-recovery-v1"'
+        demo_asset = 'src="/assets/demo.js?v=20260901-refresh-recovery-v2"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
@@ -663,6 +663,89 @@ assert.deepEqual(missing.starts, [readyModel]);
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_operational_failure_notices_are_ephemeral_and_removable(self):
+        node_test = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const source = fs.readFileSync('./tiku_agent/demo_web/demo.js', 'utf8');
+const start = source.indexOf('function showFailureNotice');
+const end = source.indexOf('function setFeedbackPending', start);
+assert.notEqual(start, -1);
+assert.notEqual(end, -1);
+const noticeSource = source.slice(start, end);
+const createHarness = new Function(`
+  const activeFailureNotices = new Map();
+  const rows = [];
+  const persistCalls = [];
+  const empty = { hidden: false };
+  const chat = {
+    childElementCount: 0,
+    querySelectorAll(selector) {
+      if (selector !== '[data-notice-key]') return [];
+      return rows.filter((row) => !row.removed);
+    },
+  };
+  function protocolFields(source = {}) { return { ...source }; }
+  function addMessage(item, persist = true) {
+    persistCalls.push(persist);
+    const row = {
+      dataset: { noticeKey: item.noticeKey },
+      removed: false,
+      remove() {
+        if (this.removed) return;
+        this.removed = true;
+        chat.childElementCount -= 1;
+      },
+    };
+    rows.push(row);
+    chat.childElementCount += 1;
+    empty.hidden = true;
+    return row;
+  }
+  ${noticeSource}
+  return Object.freeze({
+    showFailureNotice,
+    resolveFailureNotice,
+    keys: () => Array.from(activeFailureNotices.keys()),
+    rows: () => rows.map((row) => ({ key: row.dataset.noticeKey, removed: row.removed })),
+    persistCalls: () => [...persistCalls],
+    empty: () => empty.hidden,
+  });
+`);
+const harness = createHarness();
+assert.ok(harness.showFailureNotice('connection', 'offline', ['retry_connection']));
+assert.equal(harness.showFailureNotice('connection', 'duplicate', ['retry_connection']), null);
+assert.ok(harness.showFailureNotice('session-recovery', 'reconcile', ['retry_connection']));
+assert.deepEqual(harness.persistCalls(), [false, false]);
+assert.deepEqual(harness.keys(), ['connection', 'session-recovery']);
+harness.resolveFailureNotice('connection');
+assert.deepEqual(harness.rows(), [
+  { key: 'connection', removed: true },
+  { key: 'session-recovery', removed: false },
+]);
+assert.deepEqual(harness.keys(), ['session-recovery']);
+assert.equal(harness.empty(), true);
+harness.resolveFailureNotice('session-recovery');
+assert.deepEqual(harness.keys(), []);
+assert.equal(harness.empty(), false);
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", node_test],
+            cwd=ROOT,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("article.dataset.noticeKey = noticeKey", demo)
+        self.assertIn("const activeFailureNotices = new Map()", demo)
+        self.assertIn("OPERATIONAL_NOTICE_KEYS.has", demo)
+
     def test_demo_consumes_only_authoritative_task_state_envelopes(self):
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
@@ -717,7 +800,7 @@ assert.deepEqual(missing.starts, [readyModel]);
         self.assertEqual(demo.count("finishTaskStateRequest(taskStateRequest);"), 2)
 
         reset_block = demo.split("async function resetConversation()", 1)[1].split(
-            "async function checkHealth()", 1
+            "async function retryConnection()", 1
         )[0]
         self.assertIn("const data = await request('/api/reset'", reset_block)
         self.assertLess(
@@ -813,6 +896,9 @@ for (const value of ['结束这张图', '清空候选', '开始新题', '']) {
             "a3": _a3_snapshot().to_dict(),
             "inconsistent": _inconsistent_snapshot().to_dict(),
         }
+        demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(
+            encoding="utf-8"
+        )
         node_test = r"""
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -1114,36 +1200,34 @@ const retryConnectionSource = source.slice(
 );
 const createRetryHarness = new Function(`
   let isBusy = false;
-  let becomeBusyDuringHealth = false;
-  let healthChecks = 0;
   let sessionRepairs = 0;
-  async function checkHealth() {
-    healthChecks += 1;
-    if (becomeBusyDuringHealth) isBusy = true;
-    return true;
+  const calls = [];
+  function setStatus(state, message) { calls.push(['status', state, message]); }
+  async function runSessionBootstrap() {
+    calls.push(['request', '/api/session']);
+    sessionRepairs += 1;
   }
-  async function runSessionBootstrap() { sessionRepairs += 1; }
   ${retryConnectionSource}
   return Object.freeze({
     retryConnection,
     setBusy: (value) => { isBusy = value; },
-    setBecomeBusyDuringHealth: (value) => { becomeBusyDuringHealth = value; },
-    counts: () => ({ healthChecks, sessionRepairs }),
+    counts: () => ({ sessionRepairs }),
+    calls: () => structuredClone(calls),
   });
 `);
 const retryHarness = createRetryHarness();
 (async () => {
   retryHarness.setBusy(true);
   await retryHarness.retryConnection();
-  assert.deepEqual(retryHarness.counts(), { healthChecks: 0, sessionRepairs: 0 });
+  assert.deepEqual(retryHarness.counts(), { sessionRepairs: 0 });
+  assert.deepEqual(retryHarness.calls(), []);
   retryHarness.setBusy(false);
-  retryHarness.setBecomeBusyDuringHealth(true);
   await retryHarness.retryConnection();
-  assert.deepEqual(retryHarness.counts(), { healthChecks: 1, sessionRepairs: 0 });
-  retryHarness.setBusy(false);
-  retryHarness.setBecomeBusyDuringHealth(false);
-  await retryHarness.retryConnection();
-  assert.deepEqual(retryHarness.counts(), { healthChecks: 2, sessionRepairs: 1 });
+  assert.deepEqual(retryHarness.counts(), { sessionRepairs: 1 });
+  assert.deepEqual(retryHarness.calls(), [
+    ['status', 'working', '正在恢复会话…'],
+    ['request', '/api/session'],
+  ]);
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
@@ -1159,6 +1243,13 @@ const retryHarness = createRetryHarness();
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+        startup = demo.rsplit("syncVisualViewport();", 1)[1].rsplit("}", 1)[0]
+        self.assertIn("restoreHistory();", startup)
+        self.assertIn("retryConnection();", startup)
+        self.assertNotIn("runSessionBootstrap();", startup)
+        self.assertNotIn("checkHealth();", startup)
+        self.assertNotIn("request('/health'", demo)
 
     def test_real_transport_lifecycle_updates_session_and_does_not_replay_a3(self):
         fixtures = {
@@ -1277,7 +1368,9 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
   let historyExpiryTimer = null;
   let operationVersion = 0;
   let isBusy = false;
+  const SESSION_BOOTSTRAP_TIMEOUT_MS = 15000;
   const HISTORY_TTL_MS = 2 * 60 * 60 * 1000;
+  const HISTORY_LIMIT = 50;
   const HISTORY_KEY = 'history';
   const LEGACY_HISTORY_KEY = 'legacy-history';
   const SESSION_ACTIVITY_KEY = 'session-activity';
@@ -1285,6 +1378,11 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
   const SESSION_STORAGE_PROBE_KEY = 'session-storage-probe';
   const SESSION_REQUEST_FENCE_KEY = 'session-request-fence';
   const SESSION_REQUEST_LOCK_NAME = 'session-request-lock';
+  const OPERATIONAL_NOTICE_KEYS = new Set([
+    'connection', 'session-recovery', 'history-storage',
+  ]);
+  const LEGACY_EXPIRED_MEDIA_MESSAGE = 'legacy expired media';
+  const activeFailureNotices = new Map();
   const taskStateEnvelopeBindings = new WeakMap();
   const taskStateAcceptedEnvelopes = new WeakMap();
   const lifecycle = [];
@@ -1318,10 +1416,13 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
   const fetchPlans = [];
   const fetchUrls = [];
   const failureNotices = [];
+  const resolvedFailureNotices = [];
   const statusUpdates = [];
+  const timeoutDelays = [];
 
-  function setTimeout(callback) {
+  function setTimeout(callback, delay) {
     const id = ++timerId;
+    timeoutDelays.push(Number(delay));
     if (immediateTimeout) callback();
     return id;
   }
@@ -1330,11 +1431,15 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
   function setBusy(value) { isBusy = Boolean(value); }
   function setStatus(state, message) { statusUpdates.push({ state, message }); }
   function syncA3Interface() { syncA3Count += 1; }
-  function resolveFailureNotice() {}
+  function resolveFailureNotice(key) {
+    resolvedFailureNotices.push(String(key || ''));
+    activeFailureNotices.delete(String(key || ''));
+  }
   function renderHistory() {}
   function clearHistory() {
     clearHistoryCount += 1;
     history = [];
+    activeFailureNotices.clear();
     safeLocalStorageRemove(HISTORY_KEY);
     safeLocalStorageRemove(LEGACY_HISTORY_KEY);
   }
@@ -1571,13 +1676,16 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
     clearHistoryCount: () => clearHistoryCount,
     clearA3WorkflowCount: () => clearA3WorkflowCount,
     historyLength: () => history.length,
+    historyMessages: () => structuredClone(history),
     setStoredHistory: (value) => { storedHistory = structuredClone(value); },
     resetRequired: () => sessionResetRequired,
     sourceState: () => ({ url: a3SourceUrl, workflowKey: a3SourceWorkflowKey }),
     resetEvents: () => [...resetEvents],
     requestFenceId: () => sharedStorage.requestFenceId,
     failureNotices: () => structuredClone(failureNotices),
+    resolvedFailureNotices: () => [...resolvedFailureNotices],
     statusUpdates: () => structuredClone(statusUpdates),
+    timeoutDelays: () => [...timeoutDelays],
     commitExternalReset: (eventId) => {
       localStorage.setItem(SESSION_RESET_EVENT_KEY, eventId);
       localStorage.removeItem(SESSION_ACTIVITY_KEY);
@@ -2016,6 +2124,29 @@ const harness = createHarness(taskStateV1);
   assert.equal(failedResetHarness.resetEvents().length, 0);
   assert.ok(failedResetHarness.requestFenceId());
 
+  const transientTimeoutHarness = createHarness(taskStateV1);
+  transientTimeoutHarness.queueTimeout();
+  transientTimeoutHarness.setImmediateTimeout(true);
+  assert.equal(await transientTimeoutHarness.runSessionBootstrap(), false);
+  transientTimeoutHarness.setImmediateTimeout(false);
+  assert.deepEqual(transientTimeoutHarness.fetchUrls(), ['/api/session']);
+  assert.ok(transientTimeoutHarness.requestFenceId());
+  assert.equal(transientTimeoutHarness.historyLength(), 1);
+  assert.equal(transientTimeoutHarness.timeoutDelays().includes(15000), true);
+  const transientTimeoutNotice = transientTimeoutHarness.failureNotices().at(-1);
+  assert.equal(transientTimeoutNotice.key, 'connection');
+  assert.deepEqual(transientTimeoutNotice.recoveryActions, ['retry_connection']);
+  assert.equal(transientTimeoutNotice.recoveryActions.includes('new_chat'), false);
+  const timeoutReconciliation = transientTimeoutHarness.envelope(fixtures.a3);
+  transientTimeoutHarness.queueJson(timeoutReconciliation);
+  assert.equal(await transientTimeoutHarness.runSessionBootstrap(), true);
+  assert.equal(transientTimeoutHarness.requestFenceId(), '');
+  assert.equal(transientTimeoutHarness.historyLength(), 1);
+  assert.equal(
+    transientTimeoutHarness.resolvedFailureNotices().includes('connection'),
+    true,
+  );
+
   const unreconciledHarness = createHarness(taskStateV1);
   unreconciledHarness.queueJson({ ok: true });
   assert.equal(await unreconciledHarness.runSessionBootstrap(), false);
@@ -2025,18 +2156,43 @@ const harness = createHarness(taskStateV1);
   assert.equal(unreconciledNotice.key, 'session-recovery');
   assert.equal(
     unreconciledNotice.message,
-    '服务可以连接，但上次请求结果无法安全确认，当前对话不能继续。请开始新对话后重新上传题图。',
+    '连接暂时不稳定，上次请求结果尚待确认。当前对话已保留，请重新连接完成确认。',
   );
-  assert.deepEqual(unreconciledNotice.recoveryActions, ['new_chat']);
+  assert.deepEqual(unreconciledNotice.recoveryActions, ['retry_connection']);
   assert.equal(unreconciledNotice.protocol.status, 'ERROR');
   assert.equal(unreconciledNotice.protocol.layer, 'session');
   assert.equal(unreconciledNotice.protocol.code, 'STALE_ACTION');
-  assert.equal(unreconciledNotice.protocol.retryable, false);
-  assert.equal(unreconciledNotice.protocol.action, 'new_chat');
+  assert.equal(unreconciledNotice.protocol.retryable, true);
+  assert.equal(unreconciledNotice.protocol.action, 'retry_connection');
   assert.match(unreconciledNotice.protocol.request_id, /^req_[A-Za-z0-9_-]+$/);
   assert.deepEqual(unreconciledHarness.statusUpdates().at(-1), {
-    state: 'error', message: '需要开始新对话',
+    state: 'error', message: '等待重新连接',
   });
+  const unreconciledHistory = unreconciledHarness.historyMessages();
+  const authoritativeReconciliation = unreconciledHarness.envelope(fixtures.a3);
+  unreconciledHarness.queueJson(authoritativeReconciliation);
+  assert.equal(await unreconciledHarness.runSessionBootstrap(), true);
+  assert.equal(unreconciledHarness.requestFenceId(), '');
+  assert.deepEqual(unreconciledHarness.historyMessages(), unreconciledHistory);
+  assert.equal(
+    unreconciledHarness.resolvedFailureNotices().includes('session-recovery'),
+    true,
+  );
+
+  const noticeMigrationHarness = createHarness(taskStateV1);
+  noticeMigrationHarness.setStoredHistory({
+    lastActivityAt: Date.now(),
+    messages: [
+      { message: 'real conversation' },
+      { message: 'old connection', variant: 'error', noticeKey: 'connection' },
+      { message: 'old recovery', variant: 'error', noticeKey: 'session-recovery' },
+      { message: 'old storage', variant: 'error', noticeKey: 'history-storage' },
+    ],
+  });
+  noticeMigrationHarness.restoreHistory();
+  assert.deepEqual(noticeMigrationHarness.historyMessages(), [
+    { message: 'real conversation', messageId: 'transport-lifecycle', createdAt: noticeMigrationHarness.historyActivityAt() },
+  ]);
 
   const activeTabHarness = createHarness(taskStateV1);
   const staleActivityAt = Date.now() - (2 * 60 * 60 * 1000) - 1;

@@ -151,10 +151,13 @@ class A3WebUiCopyTests(unittest.TestCase):
         self.assertIn("item?.code === 'MEDIA_NOT_FOUND'", restore_body)
         self.assertIn("item?.message === LEGACY_EXPIRED_MEDIA_MESSAGE", restore_body)
 
-    def test_failure_notice_key_survives_refresh(self):
-        self.assertIn("noticeKey: String(item.noticeKey || '')", self.script)
+    def test_failure_notice_is_ephemeral_and_legacy_copy_is_removed_on_refresh(self):
+        self.assertIn("const activeFailureNotices = new Map()", self.script)
         self.assertIn("message, variant: 'error', recoveryActions, noticeKey", self.script)
-        self.assertIn("if (noticeKey) activeFailureNotices.add(noticeKey)", self.script)
+        self.assertIn("activeFailureNotices.set(noticeKey, item)", self.script)
+        self.assertIn("return addMessage(item, false)", self.script)
+        self.assertIn("OPERATIONAL_NOTICE_KEYS.has", self.script)
+        self.assertIn("article.dataset.noticeKey = noticeKey", self.script)
 
     def test_a3_error_text_retry_waits_100_seconds(self):
         self.assertIn("const A3_TEXT_RETRY_TIMEOUT_MS = 100000", self.script)
