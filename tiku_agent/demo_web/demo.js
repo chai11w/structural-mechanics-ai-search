@@ -123,6 +123,9 @@ const SESSION_RESET_EVENT_KEY = 'tiku-agent-session-reset-v1';
 const SESSION_STORAGE_PROBE_KEY = 'tiku-agent-session-storage-probe-v1';
 const SESSION_REQUEST_FENCE_KEY = 'tiku-agent-session-request-fence-v1';
 const SESSION_REQUEST_LOCK_NAME = 'tiku-agent-session-request-v1';
+const SESSION_FALLBACK_LOCK_PREFIX = `${SESSION_REQUEST_LOCK_NAME}:fallback:`;
+const SESSION_FALLBACK_LOCK_TTL_MS = 120000;
+const SESSION_FALLBACK_LOCK_POLL_MS = 25;
 const OPERATIONAL_NOTICE_KEYS = new Set([
   'connection', 'session-recovery', 'history-storage',
 ]);
@@ -293,6 +296,195 @@ function safeLocalStorageRemove(key) {
   }
 }
 
+function safeLocalStorageKeys(prefix = '') {
+  try {
+    const keys = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (typeof key === 'string' && key.startsWith(prefix)) keys.push(key);
+    }
+    return keys;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function sessionFallbackLockKey(id) {
+  return `${SESSION_FALLBACK_LOCK_PREFIX}${id}`;
+}
+
+function parseSessionFallbackLockRecord(key, raw) {
+  try {
+    const value = JSON.parse(raw || 'null');
+    const id = String(value?.id || '');
+    const ticket = Number(value?.ticket);
+    const expiresAt = Number(value?.expiresAt);
+    if (
+      !id
+      || key !== sessionFallbackLockKey(id)
+      || !Number.isSafeInteger(ticket)
+      || ticket < 0
+      || !Number.isFinite(expiresAt)
+    ) return null;
+    return {
+      key,
+      id,
+      kind: ['task', 'reset', 'read'].includes(value.kind) ? value.kind : 'read',
+      choosing: Boolean(value.choosing),
+      ticket,
+      expiresAt,
+    };
+  } catch (_error) {
+    return null;
+  }
+}
+
+function readSessionFallbackLockRecords() {
+  const keys = safeLocalStorageKeys(SESSION_FALLBACK_LOCK_PREFIX);
+  if (keys === null) return null;
+  const records = [];
+  for (const key of keys) {
+    const raw = safeLocalStorageGet(key);
+    if (raw === undefined) return null;
+    const record = parseSessionFallbackLockRecord(key, raw);
+    if (record) records.push(record);
+  }
+  return records;
+}
+
+function writeSessionFallbackLockRecord(record) {
+  const raw = JSON.stringify({
+    id: record.id,
+    kind: record.kind,
+    choosing: Boolean(record.choosing),
+    ticket: Number(record.ticket),
+    expiresAt: Number(record.expiresAt),
+  });
+  return safeLocalStorageSet(record.key, raw)
+    && safeLocalStorageGet(record.key) === raw;
+}
+
+function sessionFallbackLockPrecedes(left, right) {
+  return left.ticket < right.ticket
+    || (left.ticket === right.ticket && left.id < right.id);
+}
+
+function waitForSessionFallbackLock() {
+  return new Promise((resolve) => setTimeout(resolve, SESSION_FALLBACK_LOCK_POLL_MS));
+}
+
+async function acquireSessionFallbackLock(kind) {
+  const id = createRequestId();
+  const record = {
+    key: sessionFallbackLockKey(id),
+    id,
+    kind,
+    choosing: true,
+    ticket: 0,
+    expiresAt: Date.now() + SESSION_FALLBACK_LOCK_TTL_MS,
+  };
+  if (!writeSessionFallbackLockRecord(record)) return null;
+  let records = readSessionFallbackLockRecords();
+  if (records === null) {
+    safeLocalStorageRemove(record.key);
+    return null;
+  }
+  const now = Date.now();
+  record.ticket = 1 + records.reduce(
+    (highest, candidate) => candidate.expiresAt > now
+      ? Math.max(highest, candidate.ticket)
+      : highest,
+    0,
+  );
+  record.choosing = false;
+  if (!writeSessionFallbackLockRecord(record)) {
+    safeLocalStorageRemove(record.key);
+    return null;
+  }
+  while (true) {
+    const checkedAt = Date.now();
+    if (record.expiresAt - checkedAt < SESSION_FALLBACK_LOCK_TTL_MS / 2) {
+      record.expiresAt = checkedAt + SESSION_FALLBACK_LOCK_TTL_MS;
+      if (!writeSessionFallbackLockRecord(record)) {
+        safeLocalStorageRemove(record.key);
+        return null;
+      }
+    }
+    records = readSessionFallbackLockRecords();
+    if (records === null) {
+      safeLocalStorageRemove(record.key);
+      return null;
+    }
+    const blockers = records.filter((candidate) => (
+      candidate.id !== record.id
+      && candidate.expiresAt > checkedAt
+      && (
+        candidate.choosing
+        || (candidate.ticket > 0 && sessionFallbackLockPrecedes(candidate, record))
+      )
+    ));
+    if (!blockers.length) return { record, contendedTask: false, lost: false };
+    const precedingTask = blockers.some((candidate) => (
+      !candidate.choosing
+      && candidate.ticket > 0
+      && sessionFallbackLockPrecedes(candidate, record)
+      && ['task', 'reset'].includes(candidate.kind)
+    ));
+    if (kind === 'task' && precedingTask) {
+      return { record, contendedTask: true, lost: false };
+    }
+    await waitForSessionFallbackLock();
+  }
+}
+
+function sessionFallbackLockOwned(lease) {
+  const record = lease?.record;
+  const raw = record ? safeLocalStorageGet(record.key) : undefined;
+  const current = raw === undefined
+    ? null
+    : parseSessionFallbackLockRecord(record.key, raw);
+  return Boolean(
+    current
+    && current.id === record.id
+    && current.ticket === record.ticket
+    && current.expiresAt > Date.now()
+  );
+}
+
+function refreshSessionFallbackLock(lease) {
+  const record = lease?.record;
+  if (!sessionFallbackLockOwned(lease)) {
+    if (lease) lease.lost = true;
+    return false;
+  }
+  record.expiresAt = Date.now() + SESSION_FALLBACK_LOCK_TTL_MS;
+  const refreshed = writeSessionFallbackLockRecord(record);
+  if (!refreshed && lease) lease.lost = true;
+  return refreshed;
+}
+
+function releaseSessionFallbackLock(lease) {
+  const record = lease?.record;
+  if (!sessionFallbackLockOwned(lease)) return false;
+  return safeLocalStorageRemove(record.key);
+}
+
+async function withSessionFallbackLock(kind, callback) {
+  const lease = await acquireSessionFallbackLock(kind);
+  if (!lease) return { supported: false, value: null };
+  const heartbeat = setInterval(
+    () => refreshSessionFallbackLock(lease),
+    Math.floor(SESSION_FALLBACK_LOCK_TTL_MS / 6),
+  );
+  try {
+    const value = await callback(lease);
+    return { supported: true, value };
+  } finally {
+    clearInterval(heartbeat);
+    releaseSessionFallbackLock(lease);
+  }
+}
+
 function storedHistoryActivityAt() {
   const now = Date.now();
   let activityAt = 0;
@@ -381,7 +573,6 @@ function sessionRequestLockAvailable() {
 }
 
 function sessionResetCoordinationAvailable() {
-  if (!sessionRequestLockAvailable()) return false;
   const probe = createRequestId();
   if (!safeLocalStorageSet(SESSION_STORAGE_PROBE_KEY, probe)) return false;
   const readable = safeLocalStorageGet(SESSION_STORAGE_PROBE_KEY) === probe;
@@ -411,10 +602,7 @@ function retireUnhandledSessionReset(resetEventId = storedSessionResetEventId())
 function createSessionRequestFence() {
   const id = `${Date.now()}:${createRequestId()}`;
   if (!safeLocalStorageSet(SESSION_REQUEST_FENCE_KEY, id)) return null;
-  if (storedSessionRequestFenceId() !== id) {
-    safeLocalStorageRemove(SESSION_REQUEST_FENCE_KEY);
-    return null;
-  }
+  if (storedSessionRequestFenceId() !== id) return null;
   return { id, preserve: true, inherited: false };
 }
 
@@ -430,6 +618,14 @@ function clearSessionRequestFence(fence) {
   if (!fence?.id || storedSessionRequestFenceId() !== fence.id) return false;
   return safeLocalStorageRemove(SESSION_REQUEST_FENCE_KEY)
     && storedSessionRequestFenceId() === '';
+}
+
+function assertSessionRequestLease(fence) {
+  const lease = fence?.fallbackLease;
+  if (!lease) return true;
+  if (!lease.lost && refreshSessionFallbackLock(lease)) return true;
+  preserveSessionRequestFence(fence);
+  throw sessionCoordinationError();
 }
 
 function staleSessionActionError(message = '会话已在另一页面更新，请重新连接后继续。') {
@@ -493,9 +689,12 @@ async function completeSessionRequestWithFence(callback, fence) {
 async function withSessionRequestLock(url, callback, { requireSupport = false } = {}) {
   if (!isTaskStateRequestPath(url)) return callback();
   const requestEpoch = sessionResetEpoch;
-  if (!sessionRequestLockAvailable()) {
-    if (requireSupport) return null;
+  const runLocked = async (fallbackLease = null) => {
+    const contendedTask = Boolean(fallbackLease?.contendedTask);
     retireUnhandledSessionReset();
+    if (contendedTask && isTaskStartingPath(url)) {
+      throw staleSessionActionError('另一页面已有任务，请在当前会话更新后重试。');
+    }
     const pendingFenceId = storedSessionRequestFenceId();
     if (
       (requestEpoch !== sessionResetEpoch || pendingFenceId)
@@ -504,37 +703,36 @@ async function withSessionRequestLock(url, callback, { requireSupport = false } 
       if (pendingFenceId) retireUnresolvedSessionRequestFence(pendingFenceId);
       throw staleSessionActionError();
     }
-    if (isTaskStartingPath(url)) throw sessionLockUnavailableError();
     if (pendingFenceId === undefined) throw sessionCoordinationError();
-    if (!pendingFenceId) return callback(null);
-    return completeSessionRequestWithFence(
-      callback,
-      { id: pendingFenceId, preserve: true, inherited: true },
+    if (pendingFenceId && isTaskStartingPath(url)) {
+      retireUnresolvedSessionRequestFence(pendingFenceId);
+      throw staleSessionActionError(
+        '上次请求结果尚未确认，请重新连接或开始新对话。',
+      );
+    }
+    const fence = pendingFenceId
+      ? { id: pendingFenceId, preserve: true, inherited: true }
+      : createSessionRequestFence();
+    if (!fence) throw sessionCoordinationError();
+    if (fallbackLease) fence.fallbackLease = fallbackLease;
+    return completeSessionRequestWithFence(callback, fence);
+  };
+  if (sessionRequestLockAvailable()) {
+    return globalThis.navigator.locks.request(
+      SESSION_REQUEST_LOCK_NAME,
+      { mode: 'exclusive' },
+      () => runLocked(),
     );
   }
-  return globalThis.navigator.locks.request(
-    SESSION_REQUEST_LOCK_NAME,
-    { mode: 'exclusive' },
-    async () => {
-      retireUnhandledSessionReset();
-      if (requestEpoch !== sessionResetEpoch && isTaskStartingPath(url)) {
-        throw staleSessionActionError();
-      }
-      const pendingFenceId = storedSessionRequestFenceId();
-      if (pendingFenceId === undefined) throw sessionCoordinationError();
-      if (pendingFenceId && isTaskStartingPath(url)) {
-        retireUnresolvedSessionRequestFence(pendingFenceId);
-        throw staleSessionActionError(
-          '上次请求结果尚未确认，请重新连接或开始新对话。',
-        );
-      }
-      const fence = pendingFenceId
-        ? { id: pendingFenceId, preserve: true, inherited: true }
-        : createSessionRequestFence();
-      if (!fence) throw sessionCoordinationError();
-      return completeSessionRequestWithFence(callback, fence);
-    },
-  );
+  const lockKind = isTaskStartingPath(url)
+    ? 'task'
+    : taskStateApiPath(url) === '/api/reset' ? 'reset' : 'read';
+  const fallback = await withSessionFallbackLock(lockKind, runLocked);
+  if (!fallback.supported) {
+    if (requireSupport) return null;
+    throw sessionLockUnavailableError();
+  }
+  return fallback.value;
 }
 
 function publishSessionReset(sessionRequestFence = null) {
@@ -2030,16 +2228,6 @@ async function sessionTaskStartAllowed() {
   refreshHistoryActivityFromStorage();
   const pending = sessionBootstrap || runSessionBootstrap();
   if (!(await pending)) return false;
-  if (!sessionRequestLockAvailable()) {
-    setStatus('error', '当前浏览器不支持安全会话');
-    showFailureNotice(
-      'connection',
-      '当前浏览器无法安全协调多个页面，请升级浏览器或改用最新版 Chrome、Edge 后重试。',
-      ['retry_connection'],
-      { status: 'ERROR', layer: 'session', code: 'RESPONSE_INVALID', retryable: true, action: 'retry_connection', request_id: createRequestId(), search_id: sessionContext.search_id || '' },
-    );
-    return false;
-  }
   if (!sessionResetRequired) return true;
   setStatus('error', '需要先重新建立会话');
   showFailureNotice(
@@ -2342,6 +2530,7 @@ async function request(
       await response.text();
     }
     if (!response.ok) {
+      assertSessionRequestLease(sessionRequestFence);
       consumeTaskStateResponse(taskStateRequest, data, { error: true });
       const emptyResetApplied = applyAuthoritativeEmptyError(
         url,
@@ -2355,6 +2544,7 @@ async function request(
       throw safeHttpError(response.status, data, requestId);
     }
     if (!contentType.includes('application/json')) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
+    assertSessionRequestLease(sessionRequestFence);
     consumeTaskStateResponse(taskStateRequest, data);
     if (!publishAuthoritativeReset(url, data, { sessionRequestFence })) {
       applyAuthoritativeEmptyAfterCoordinationFailure(data, sessionRequestFence);
@@ -2426,6 +2616,7 @@ async function requestStream(
     if (!response.ok) {
       let data = {};
       try { data = await response.json(); } catch (_error) { data = {}; }
+      assertSessionRequestLease(sessionRequestFence);
       consumeTaskStateResponse(taskStateRequest, data, { error: true });
       const emptyResetApplied = applyAuthoritativeEmptyError(
         url,
@@ -2456,6 +2647,7 @@ async function requestStream(
         }
         if (event.type === 'result') {
           const terminalResult = event.data;
+          assertSessionRequestLease(sessionRequestFence);
           consumeTaskStateResponse(taskStateRequest, terminalResult);
           if (!publishAuthoritativeReset(
             url,
@@ -2475,6 +2667,7 @@ async function requestStream(
           return terminalResult;
         }
         if (event.type === 'error') {
+          assertSessionRequestLease(sessionRequestFence);
           consumeTaskStateResponse(taskStateRequest, event, { error: true });
           const emptyResetApplied = applyAuthoritativeEmptyError(
             url,

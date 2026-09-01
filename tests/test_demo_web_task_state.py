@@ -594,7 +594,7 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260901-refresh-recovery-v4"'
+        demo_asset = 'src="/assets/demo.js?v=20260901-refresh-recovery-v5"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
@@ -1284,7 +1284,7 @@ const retryHarness = createRetryHarness();
             "const pending = sessionBootstrap || runSessionBootstrap();",
             demo_source,
         )
-        self.assertIn("if (!sessionRequestLockAvailable())", demo_source)
+        self.assertIn("withSessionFallbackLock(lockKind, runLocked)", demo_source)
         self.assertIn("empty.hidden = history.length > 0;", demo_source)
         self.assertIn("window.addEventListener('storage'", demo_source)
         self.assertIn("event.key === SESSION_RESET_EVENT_KEY", demo_source)
@@ -1390,6 +1390,9 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
   const SESSION_STORAGE_PROBE_KEY = 'session-storage-probe';
   const SESSION_REQUEST_FENCE_KEY = 'session-request-fence';
   const SESSION_REQUEST_LOCK_NAME = 'session-request-lock';
+  const SESSION_FALLBACK_LOCK_PREFIX = SESSION_REQUEST_LOCK_NAME + ':fallback:';
+  const SESSION_FALLBACK_LOCK_TTL_MS = 120000;
+  const SESSION_FALLBACK_LOCK_POLL_MS = 25;
   const OPERATIONAL_NOTICE_KEYS = new Set([
     'connection', 'session-recovery', 'history-storage',
   ]);
@@ -1421,8 +1424,9 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
   let clearA3WorkflowCount = 0;
   let storedHistory = null;
   const sharedStorage = sharedSessionStorage || {
-    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '',
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '', lockRecords: {},
   };
+  sharedStorage.lockRecords ||= {};
   let storageFailures = { get: false, set: false, remove: false, resetSet: false };
   const resetEvents = [];
   const fetchPlans = [];
@@ -1436,6 +1440,9 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
     const id = ++timerId;
     timeoutDelays.push(Number(delay));
     if (immediateTimeout) callback();
+    else if (Number(delay) === SESSION_FALLBACK_LOCK_POLL_MS) {
+      globalThis.setTimeout(callback, 0);
+    }
     return id;
   }
   function clearTimeout() {}
@@ -1488,6 +1495,9 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
       if (key === SESSION_RESET_EVENT_KEY) return sharedStorage.resetEventId || null;
       if (key === SESSION_STORAGE_PROBE_KEY) return sharedStorage.probe || null;
       if (key === SESSION_REQUEST_FENCE_KEY) return sharedStorage.requestFenceId || null;
+      if (key.startsWith(SESSION_FALLBACK_LOCK_PREFIX)) {
+        return sharedStorage.lockRecords[key] || null;
+      }
       if (key === HISTORY_KEY || key === LEGACY_HISTORY_KEY) {
         return storedHistory === null ? null : JSON.stringify(storedHistory);
       }
@@ -1509,6 +1519,9 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
       }
       if (key === SESSION_STORAGE_PROBE_KEY) sharedStorage.probe = String(value || '');
       if (key === SESSION_REQUEST_FENCE_KEY) sharedStorage.requestFenceId = String(value || '');
+      if (key.startsWith(SESSION_FALLBACK_LOCK_PREFIX)) {
+        sharedStorage.lockRecords[key] = String(value || '');
+      }
     },
     removeItem(key) {
       if (storageFailures.remove) {
@@ -1519,6 +1532,13 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
       if (key === SESSION_ACTIVITY_KEY) sharedStorage.activityAt = 0;
       if (key === SESSION_STORAGE_PROBE_KEY) sharedStorage.probe = '';
       if (key === SESSION_REQUEST_FENCE_KEY) sharedStorage.requestFenceId = '';
+      if (key.startsWith(SESSION_FALLBACK_LOCK_PREFIX)) delete sharedStorage.lockRecords[key];
+    },
+    get length() {
+      return Object.keys(sharedStorage.lockRecords).length;
+    },
+    key(index) {
+      return Object.keys(sharedStorage.lockRecords)[index] || null;
     },
   };
   function createMessageId() { return 'transport-lifecycle'; }
@@ -1731,18 +1751,29 @@ const harness = createHarness(taskStateV1);
   assert.deepEqual(lazyBootstrapHarness.fetchUrls(), ['/api/session']);
 
   const noLockGateHarness = createHarness(taskStateV1);
-  noLockGateHarness.queueJson(noLockGateHarness.envelope(fixtures.a3));
-  globalThis.navigator.locks = null;
-  assert.equal(await noLockGateHarness.sessionTaskStartAllowed(), false);
-  globalThis.navigator.locks = sessionLockManager;
-  assert.deepEqual(noLockGateHarness.fetchUrls(), ['/api/session']);
-  assert.deepEqual(noLockGateHarness.statusUpdates().at(-1), {
-    state: 'error', message: '当前浏览器不支持安全会话',
+  noLockGateHarness.queueJson({
+    task_state: fixtures.empty,
+    uploaded_image: '',
+    session: {
+      session_valid: false, phase: 'IDLE', has_active_image: false,
+      task_revision: 0, candidate_generation: '', candidate_count: 0,
+      search_id: '', a3: null,
+    },
   });
+  globalThis.navigator.locks = null;
   assert.equal(
-    noLockGateHarness.failureNotices().at(-1).message,
-    '当前浏览器无法安全协调多个页面，请升级浏览器或改用最新版 Chrome、Edge 后重试。',
+    await noLockGateHarness.sessionTaskStartAllowed(), true,
+    'fresh no-lock bootstrap must allow task start',
   );
+  noLockGateHarness.queueEvent({
+    type: 'result', data: noLockGateHarness.envelope(fixtures.a3),
+  });
+  await noLockGateHarness.requestStream(
+    '/api/image/stream', { method: 'POST' }, 1000, 'image timeout',
+  );
+  globalThis.navigator.locks = sessionLockManager;
+  assert.deepEqual(noLockGateHarness.fetchUrls(), ['/api/session', '/api/image/stream']);
+  assert.equal(noLockGateHarness.requestFenceId(), '');
 
   const inheritedFenceStorage = {
     activityAt: 0, resetEventId: '', probe: '', requestFenceId: 'pending-before-reload',
@@ -1758,10 +1789,184 @@ const harness = createHarness(taskStateV1);
     },
   });
   globalThis.navigator.locks = null;
-  assert.equal(await inheritedFenceHarness.runSessionBootstrap(), true);
-  globalThis.navigator.locks = sessionLockManager;
+  assert.equal(
+    await inheritedFenceHarness.runSessionBootstrap(), true,
+    'inherited no-lock fence must reconcile against the empty session',
+  );
   assert.equal(inheritedFenceHarness.requestFenceId(), '');
-  assert.deepEqual(inheritedFenceHarness.fetchUrls(), ['/api/session']);
+  assert.equal(
+    await inheritedFenceHarness.sessionTaskStartAllowed(), true,
+    'reconciled no-lock session must allow the next upload',
+  );
+  inheritedFenceHarness.queueEvent({
+    type: 'result', data: inheritedFenceHarness.envelope(fixtures.a3),
+  });
+  await inheritedFenceHarness.requestStream(
+    '/api/image/stream', { method: 'POST' }, 1000, 'image timeout',
+  );
+  globalThis.navigator.locks = sessionLockManager;
+  assert.deepEqual(
+    inheritedFenceHarness.fetchUrls(),
+    ['/api/session', '/api/image/stream'],
+  );
+  assert.equal(inheritedFenceHarness.requestFenceId(), '');
+  assert.equal(
+    inheritedFenceHarness.failureNotices().some((notice) => notice.key === 'session-recovery'),
+    false,
+  );
+
+  const noLockSharedStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '', lockRecords: {},
+  };
+  const noLockTabA = createHarness(taskStateV1, noLockSharedStorage);
+  const noLockTabB = createHarness(taskStateV1, noLockSharedStorage);
+  const noLockEmptySession = {
+    task_state: fixtures.empty,
+    uploaded_image: '',
+    session: {
+      session_valid: false, phase: 'IDLE', has_active_image: false,
+      task_revision: 0, candidate_generation: '', candidate_count: 0,
+      search_id: '', a3: null,
+    },
+  };
+  globalThis.navigator.locks = null;
+  noLockTabA.queueJson(noLockEmptySession);
+  noLockTabB.queueJson(noLockEmptySession);
+  assert.equal(
+    await noLockTabA.runSessionBootstrap(), true,
+    'no-lock tab A bootstrap must succeed',
+  );
+  assert.equal(
+    await noLockTabB.runSessionBootstrap(), true,
+    'no-lock tab B bootstrap must succeed',
+  );
+  const releaseNoLockTabA = noLockTabA.queueDeferredEvent({
+    type: 'result', data: noLockTabA.envelope(fixtures.a3),
+  });
+  const noLockTabARequest = noLockTabA.requestStream(
+    '/api/image/stream', { method: 'POST' }, 1000, 'image timeout',
+  );
+  await waitForFetch(noLockTabA, '/api/image/stream');
+  noLockTabB.queueEvent({
+    type: 'result', data: noLockTabB.envelope(fixtures.a3),
+  });
+  const noLockTabBRequest = noLockTabB.requestStream(
+    '/api/image/stream', { method: 'POST' }, 1000, 'image timeout',
+  ).then(() => null, (error) => error);
+  await Promise.resolve();
+  assert.deepEqual(noLockTabA.fetchUrls(), ['/api/session', '/api/image/stream']);
+  assert.deepEqual(noLockTabB.fetchUrls(), ['/api/session']);
+  releaseNoLockTabA();
+  await noLockTabARequest;
+  const noLockTabBError = await noLockTabBRequest;
+  globalThis.navigator.locks = sessionLockManager;
+  assert.equal(noLockTabBError?.code, 'STALE_ACTION');
+  assert.equal(
+    noLockTabBError?.recoveryActions?.includes('retry_connection'), true,
+    'contending no-lock tab must receive explicit recovery',
+  );
+  assert.deepEqual(noLockTabB.fetchUrls(), ['/api/session']);
+  assert.equal(noLockSharedStorage.requestFenceId, '');
+  assert.deepEqual(noLockSharedStorage.lockRecords, {});
+
+  const choosingStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '', lockRecords: {},
+  };
+  const choosingId = 'later-choosing-task';
+  const choosingKey = 'session-request-lock:fallback:' + choosingId;
+  choosingStorage.lockRecords[choosingKey] = JSON.stringify({
+    id: choosingId,
+    kind: 'task',
+    choosing: true,
+    ticket: 0,
+    expiresAt: Date.now() + 120000,
+  });
+  const choosingHarness = createHarness(taskStateV1, choosingStorage);
+  choosingHarness.queueEvent({
+    type: 'result', data: choosingHarness.envelope(fixtures.a3),
+  });
+  globalThis.setTimeout(() => {
+    choosingStorage.lockRecords[choosingKey] = JSON.stringify({
+      id: choosingId,
+      kind: 'task',
+      choosing: false,
+      ticket: 2,
+      expiresAt: Date.now() + 120000,
+    });
+  }, 0);
+  globalThis.navigator.locks = null;
+  await choosingHarness.requestStream(
+    '/api/image/stream', { method: 'POST' }, 1000, 'image timeout',
+  );
+  globalThis.navigator.locks = sessionLockManager;
+  assert.deepEqual(choosingHarness.fetchUrls(), ['/api/image/stream']);
+  delete choosingStorage.lockRecords[choosingKey];
+  assert.deepEqual(choosingStorage.lockRecords, {});
+
+  const lostLeaseStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '', lockRecords: {},
+  };
+  const lostLeaseHarness = createHarness(taskStateV1, lostLeaseStorage);
+  const releaseLostLease = lostLeaseHarness.queueDeferredEvent({
+    type: 'result', data: lostLeaseHarness.envelope(fixtures.a3),
+  });
+  globalThis.navigator.locks = null;
+  const lostLeaseRequest = lostLeaseHarness.requestStream(
+    '/api/image/stream', { method: 'POST' }, 1000, 'image timeout',
+  ).then(() => null, (error) => error);
+  await waitForFetch(lostLeaseHarness, '/api/image/stream');
+  assert.equal(Object.keys(lostLeaseStorage.lockRecords).length, 1);
+  for (const key of Object.keys(lostLeaseStorage.lockRecords)) {
+    delete lostLeaseStorage.lockRecords[key];
+  }
+  releaseLostLease();
+  const lostLeaseError = await lostLeaseRequest;
+  globalThis.navigator.locks = sessionLockManager;
+  assert.equal(lostLeaseError?.code, 'RESPONSE_INVALID');
+  assert.equal(lostLeaseError?.recoveryActions?.includes('retry_connection'), true);
+  assert.ok(lostLeaseStorage.requestFenceId, 'lost lease must preserve pending fence');
+
+  const resetRaceStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '', lockRecords: {},
+  };
+  const resetRaceTabA = createHarness(taskStateV1, resetRaceStorage);
+  const resetRaceTabB = createHarness(taskStateV1, resetRaceStorage);
+  const releaseResetRace = resetRaceTabA.queueDeferredJson({
+    ok: true, task_state: fixtures.empty,
+  });
+  globalThis.navigator.locks = null;
+  const resetRaceRequest = resetRaceTabA.request(
+    '/api/reset', { method: 'POST' }, 1000, 'reset timeout',
+  );
+  await waitForFetch(resetRaceTabA, '/api/reset');
+  resetRaceTabB.queueEvent({
+    type: 'result', data: resetRaceTabB.envelope(fixtures.a3),
+  });
+  const resetRaceTaskError = await resetRaceTabB.requestStream(
+    '/api/image/stream', { method: 'POST' }, 1000, 'image timeout',
+  ).then(() => null, (error) => error);
+  assert.equal(resetRaceTaskError?.code, 'STALE_ACTION');
+  assert.equal(resetRaceTaskError?.recoveryActions?.includes('retry_connection'), true);
+  assert.deepEqual(resetRaceTabB.fetchUrls(), []);
+  releaseResetRace();
+  await resetRaceRequest;
+  globalThis.navigator.locks = sessionLockManager;
+  assert.ok(resetRaceStorage.resetEventId);
+  assert.equal(resetRaceStorage.requestFenceId, '');
+  assert.deepEqual(resetRaceStorage.lockRecords, {});
+
+  const noLockStorageDeniedHarness = createHarness(taskStateV1);
+  noLockStorageDeniedHarness.setStorageFailures({ get: true, set: true, remove: true });
+  noLockStorageDeniedHarness.queueEvent({
+    type: 'result', data: noLockStorageDeniedHarness.envelope(fixtures.a3),
+  });
+  globalThis.navigator.locks = null;
+  const noLockStorageDeniedError = await noLockStorageDeniedHarness.requestStream(
+    '/api/image/stream', { method: 'POST' }, 1000, 'image timeout',
+  ).then(() => null, (error) => error);
+  globalThis.navigator.locks = sessionLockManager;
+  assert.equal(noLockStorageDeniedError?.code, 'RESPONSE_INVALID');
+  assert.deepEqual(noLockStorageDeniedHarness.fetchUrls(), []);
 
   const successEnvelope = harness.envelope(fixtures.a3);
   harness.queueJson(successEnvelope);
@@ -2575,32 +2780,19 @@ const harness = createHarness(taskStateV1);
   assert.equal(noLockTombstoneHarness.session().session_valid, false);
   assert.equal(noLockTombstoneHarness.deliverExternalReset(noLockResetEventId), false);
 
-  const noLockUnsupportedHarness = createHarness(taskStateV1);
-  const noLockSessionEnvelope = noLockUnsupportedHarness.envelope(fixtures.a3);
-  noLockUnsupportedHarness.queueJson(noLockSessionEnvelope);
-  globalThis.navigator.locks = null;
-  noLockUnsupportedHarness.responseItem(
-    await noLockUnsupportedHarness.request('/api/session', {}, 1000, 'session timeout'),
-  );
-  const noLockUnsupportedError = await noLockUnsupportedHarness.request(
-    '/api/message', { method: 'POST' }, 1000, 'message timeout',
-  ).then(() => null, (error) => error);
-  globalThis.navigator.locks = sessionLockManager;
-  assert.equal(noLockUnsupportedError?.code, 'RESPONSE_INVALID');
-  assert.equal(noLockUnsupportedError?.recoveryActions?.includes('retry_connection'), true);
-  assert.deepEqual(noLockUnsupportedHarness.fetchUrls(), ['/api/session']);
-
   const noLockHarness = createHarness(taskStateV1);
   noLockHarness.setStoredHistory({
     lastActivityAt: Date.now() - (2 * 60 * 60 * 1000) - 1,
     messages: [{ message: 'expired without Web Locks' }],
   });
   noLockHarness.restoreHistory();
+  noLockHarness.queueJson({ ok: true, task_state: fixtures.empty });
   globalThis.navigator.locks = null;
-  assert.equal(await noLockHarness.runSessionBootstrap(), false);
+  assert.equal(await noLockHarness.runSessionBootstrap(), true);
   globalThis.navigator.locks = sessionLockManager;
-  assert.equal(noLockHarness.resetRequired(), true);
-  assert.deepEqual(noLockHarness.fetchUrls(), []);
+  assert.equal(noLockHarness.resetRequired(), false);
+  assert.deepEqual(noLockHarness.fetchUrls(), ['/api/reset']);
+  assert.equal(noLockHarness.requestFenceId(), '');
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

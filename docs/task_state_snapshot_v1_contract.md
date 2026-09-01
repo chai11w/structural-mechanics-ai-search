@@ -839,21 +839,25 @@ workflow identity；workflow 切换时先清除旧题图和裁剪状态，打开
 避免新 workflow 沿用旧媒体。冷启动发现本地历史超过两小时后不恢复旧 A3 session，而在
 恢复完成前保持任务入口关闭，并通过权威 `/api/reset` 建立空状态。
 
-多标签页以共享 activity、pending request fence、committed reset tombstone 和同源 Web
-Lock 协调。每个 task-state 请求取得锁后、`fetch` 前写入并回读默认 pending 的 fence；
+多标签页以共享 activity、pending request fence、committed reset tombstone 和同源请求锁
+协调。支持 Web Lock 时继续使用原生互斥；Web Lock 缺失但 `localStorage` 可读写时，使用
+同源 ticket/lease 兼容锁，并区分 task、reset 和 read 竞争。每个 task-state 请求取得锁后、
+`fetch` 前写入并回读默认 pending 的 fence；
 只有已消费的可信确定终态或明确 queue no-update 清除 fence，只有已消费的 exact empty V1
 才提交 tombstone。普通任务/reset 超时、网络中断、响应格式不明或
 tombstone 提交失败时保留 fence，后续排队任务取得锁后只退休旧 UI 并返回 stale，不进入
 `fetch`；`/api/session` 或再次 `/api/reset` 可在同一锁内对账并清除 fence 或提交 reset。
 自动过期 reset 取得锁后再次读取 activity，新活动会取消 reset 并改读 `/api/session`。
-浏览器不支持 Web Lock 时不自动 reset，且所有 task-starting 入口均在 `fetch` 前
-fail-closed；只允许 `/api/session`、`/api/reset` 继承已有 fence 进行只读/显式对账。
+兼容锁沿用相同 fence、reset epoch 和 stale/ABA 规则：同一时刻只有一个 task-starting
+入口可进入 `fetch`，竞争任务返回 `STALE_ACTION + retry_connection`；只允许
+`/api/session`、`/api/reset` 继承已有 fence 进行只读/显式对账。`localStorage` 不可用、
+兼容锁 ownership 无法确认或租约丢失时仍在 `fetch` 前或结果提交前 fail-closed。
 
 瞬时 bootstrap 超时、网络中断或无效响应保留 pending request fence，只提供
 `retry_connection`，不得把尚待权威对账误判为必须开始新对话。后续 exact
 `/api/session` 有效对账后清除 fence，并移除 `connection` / `session-recovery` 临时提示。
-operational notice 不写入对话历史，恢复旧 history 时过滤遗留 notice。真实过期、无 Web
-Lock 或协调能力缺失的原 fail-closed 边界保持不变。
+operational notice 不写入对话历史，恢复旧 history 时过滤遗留 notice。真实过期、存储能力
+缺失或协调身份无法确认的 fail-closed 边界保持不变。
 
 验收以共享存储、FIFO 锁的确定性交错 Node harness 覆盖刷新、过期、跨标签页
 activity/fence/reset、JSON 与 stream 权威空错误提交失败、reset 超时/非空对账、无锁降级、
@@ -958,6 +962,17 @@ pending fence；只有 `/api/session` 成功对账后才重新放行。cache-bus
 `F:\cc\_backups\7-题库检索\2026-09-01\8896-refresh-recovery-v4-20260901-201018`。
 内置浏览器文件选择器未产生自动化可接管的 chooser 事件，因此真实拖图仍等待用户手动验收；
 不得写成 8896 用户验收 DONE。v4 尚未部署到 8790。
+
+`v4` 上线后的内置浏览器复现确认目标环境没有 Web Lock；页面把该浏览器能力差异当成
+task-start 协调失败，所以 `/api/session` 与服务健康时仍会在拖图后显示“连接暂时不稳定”，
+并阻止 `/api/image/stream`。`v5` 保留原生 Web Lock 路径，并为可读写 `localStorage` 的同源
+页面增加 ticket/lease 兼容锁；锁记录带 ownership 校验、续租及 compare-before-remove，
+task/reset/read 分开判定，pending fence、task revision、`allowed_actions`、stale/ABA 拒绝和
+未知结果不重放规则保持不变。新鲜无锁会话、遗留 pending 对账后立即上传和双标签 stream
+竞争均进入确定性交错测试；存储或租约身份不可确认时继续 fail-closed。cache-buster 为
+`20260901-refresh-recovery-v5`。该版本必须在固定 8896 release 上完成真实内置浏览器上传、
+stream 请求、最终合法状态、运行身份及受保护端口不变验收后，才能写成 8896 用户验收通过；
+未经另行确认不得部署到 8790。
 
 ## 后续批次
 
