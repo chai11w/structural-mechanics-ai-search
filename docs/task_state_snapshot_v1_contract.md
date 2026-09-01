@@ -928,17 +928,20 @@ release hardening 最终全仓 1221 项通过。
 
 ## 3.5.4 后续：8790 refresh-recovery 热修复（IMPLEMENTED；LIVE ACCEPTANCE DEFERRED）
 
-短暂入口延迟后的刷新曾把尚待权威对账误报为会话不可继续。后续热修复将启动与重连收口为
+短暂入口延迟后的刷新曾把尚待权威对账误报为会话不可继续。首轮热修复将启动与重连收口为
 仅调用 `/api/session`，把 bootstrap 超时提高到 15 秒，并按上文规则保留 pending fence、
-提供 `retry_connection` 及清理临时 operational notice；cache-buster 为
-`20260901-refresh-recovery-v2`。代码已完成全仓 1222 项回归并以固定 release 部署，受限
-备份和回退证据已保存，NATAPP watchdog、8790 本地 health/Trace 及公网静态资源加载均正常。
+提供 `retry_connection` 及清理临时 operational notice；`v2` 已以固定 release 部署。
 
-真实已登录浏览器的恢复对账仍未完成：页面可加载新脚本，但 `/api/session` 没有形成可验收的
-成功闭环，现有证据不足以把原因归结到 NATAPP 客户端、浏览器协调或 8790 应用中的任一层。
-用户已要求暂停继续修复，待其后续统一处理；因此不得把本节写成 live acceptance DONE，
-不得为此重启 NATAPP、触碰 8888 或开始阶段 4。3.5.3 的 DONE/BLOCKED 和上方 3.5.4 的 DONE
-均是历史事实，不因本节延期而改写。
+后续真实双标签页复现确认：bootstrap 失败会保留 pending fence，但任务入口只等待 promise、
+未消费其 `false` 结果，导致拖入图片后仍继续本地处理，随后在请求锁处进入 stale 清理并返回
+初始页。`v3` 现已让所有任务入口在 bootstrap 未成功时于读图和触网前返回，保留 history 与
+pending fence；只有 `/api/session` 成功对账后才重新放行。cache-buster 为
+`20260901-refresh-recovery-v3`，152 项聚焦回归和全仓 1225 项测试通过。
+
+`v3` 尚未部署到 8790，真实已登录浏览器的恢复闭环仍不得写成 live acceptance DONE。生产
+发布仍须使用固定 release/manifest、运行数据与任务 XML 备份及精确进程身份核对；不得为此
+重启 NATAPP、触碰 8888 或开始阶段 4。3.5.3 的 DONE/BLOCKED 和上方 3.5.4 的 DONE 均是
+历史事实，不因本节延期而改写。
 
 ## 后续批次
 

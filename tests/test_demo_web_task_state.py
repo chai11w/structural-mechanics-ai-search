@@ -594,7 +594,7 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260901-refresh-recovery-v2"'
+        demo_asset = 'src="/assets/demo.js?v=20260901-refresh-recovery-v3"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
@@ -2133,6 +2133,13 @@ const harness = createHarness(taskStateV1);
   assert.ok(transientTimeoutHarness.requestFenceId());
   assert.equal(transientTimeoutHarness.historyLength(), 1);
   assert.equal(transientTimeoutHarness.timeoutDelays().includes(15000), true);
+  const transientFetchesBeforeTask = transientTimeoutHarness.fetchUrls();
+  const transientClearsBeforeTask = transientTimeoutHarness.clearHistoryCount();
+  assert.equal(await transientTimeoutHarness.sessionTaskStartAllowed(), false);
+  assert.deepEqual(transientTimeoutHarness.fetchUrls(), transientFetchesBeforeTask);
+  assert.equal(transientTimeoutHarness.clearHistoryCount(), transientClearsBeforeTask);
+  assert.equal(transientTimeoutHarness.historyLength(), 1);
+  assert.ok(transientTimeoutHarness.requestFenceId());
   const transientTimeoutNotice = transientTimeoutHarness.failureNotices().at(-1);
   assert.equal(transientTimeoutNotice.key, 'connection');
   assert.deepEqual(transientTimeoutNotice.recoveryActions, ['retry_connection']);
@@ -2142,6 +2149,7 @@ const harness = createHarness(taskStateV1);
   assert.equal(await transientTimeoutHarness.runSessionBootstrap(), true);
   assert.equal(transientTimeoutHarness.requestFenceId(), '');
   assert.equal(transientTimeoutHarness.historyLength(), 1);
+  assert.equal(await transientTimeoutHarness.sessionTaskStartAllowed(), true);
   assert.equal(
     transientTimeoutHarness.resolvedFailureNotices().includes('connection'),
     true,
@@ -2152,6 +2160,12 @@ const harness = createHarness(taskStateV1);
   assert.equal(await unreconciledHarness.runSessionBootstrap(), false);
   assert.deepEqual(unreconciledHarness.fetchUrls(), ['/api/session']);
   assert.ok(unreconciledHarness.requestFenceId());
+  const unreconciledFetchesBeforeTask = unreconciledHarness.fetchUrls();
+  const unreconciledClearsBeforeTask = unreconciledHarness.clearHistoryCount();
+  assert.equal(await unreconciledHarness.sessionTaskStartAllowed(), false);
+  assert.deepEqual(unreconciledHarness.fetchUrls(), unreconciledFetchesBeforeTask);
+  assert.equal(unreconciledHarness.clearHistoryCount(), unreconciledClearsBeforeTask);
+  assert.equal(unreconciledHarness.historyLength(), 1);
   const unreconciledNotice = unreconciledHarness.failureNotices().at(-1);
   assert.equal(unreconciledNotice.key, 'session-recovery');
   assert.equal(
@@ -2174,6 +2188,7 @@ const harness = createHarness(taskStateV1);
   assert.equal(await unreconciledHarness.runSessionBootstrap(), true);
   assert.equal(unreconciledHarness.requestFenceId(), '');
   assert.deepEqual(unreconciledHarness.historyMessages(), unreconciledHistory);
+  assert.equal(await unreconciledHarness.sessionTaskStartAllowed(), true);
   assert.equal(
     unreconciledHarness.resolvedFailureNotices().includes('session-recovery'),
     true,

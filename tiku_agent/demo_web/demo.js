@@ -2029,7 +2029,7 @@ function runSessionBootstrap() {
 async function sessionTaskStartAllowed() {
   refreshHistoryActivityFromStorage();
   const pending = sessionBootstrap;
-  if (pending) await pending;
+  if (pending && !(await pending)) return false;
   if (!sessionResetRequired) return true;
   setStatus('error', '需要先重新建立会话');
   showFailureNotice(
