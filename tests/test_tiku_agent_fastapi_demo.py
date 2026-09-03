@@ -24,8 +24,10 @@ from tiku_agent.fastapi_demo import (
     MAX_FEEDBACK_BYTES,
     MAX_IMAGE_BYTES,
     SESSION_COOKIE,
+    SESSION_COORDINATION_ACK_FIELD,
     _SCRIPT,
     _STYLE,
+    _SessionCoordinationRegistry,
     _agent_payload,
     _public_protocol_message,
     _public_session_snapshot,
@@ -67,6 +69,10 @@ from tiku_shared.trace_events import (
 _TASK_STATE_SCRIPT = (
     Path(__file__).resolve().parents[1] / "tiku_agent" / "demo_web" / "task_state.js"
 ).read_text(encoding="utf-8")
+
+
+def _v6_fence(label: str) -> str:
+    return f"{int(time.time() * 1000)}:{label}-{uuid4().hex}"
 
 
 def _standalone_child_task_state(
@@ -532,6 +538,803 @@ class FastApiDemoTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers["cache-control"], "private, max-age=300")
+
+    def test_v6_reconciliation_retires_a_fence_before_a_late_image(self):
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (4, 4), "white").save(image_bytes, format="JPEG")
+        upload = image_bytes.getvalue()
+        for endpoint in ("session", "reset"):
+            with self.subTest(endpoint=endpoint), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                media_path = root / "media.jpg"
+                Image.new("RGB", (4, 4), "white").save(media_path)
+                runtime = FakeRuntime(media_path)
+                runtime.snapshot.update({
+                    "session_valid": True,
+                    "phase": "WAIT_CANDIDATE_CHOICE",
+                    "candidate_generation": "4:1",
+                    "candidate_count": 1,
+                })
+                runtime.task_state_snapshot = _standalone_child_task_state(
+                    task_id="search_v6_reconcile_12345678",
+                    task_revision=4,
+                    phase="WAIT_CANDIDATE_CHOICE",
+                    allowed_actions=(task_state_contract.ACTION_SELECT_CANDIDATE,),
+                    candidate_count=1,
+                    candidate_generation="4:1",
+                )
+                client = TestClient(create_app(
+                    runtime=runtime,
+                    incoming_dir=root / "incoming",
+                ))
+                session_id = f"v6-reconcile-first-{endpoint}"
+                fence_id = _v6_fence(f"reconcile-first-{endpoint}")
+                common_headers = {
+                    "Cookie": f"{SESSION_COOKIE}={session_id}",
+                    "Sec-Fetch-Site": "same-origin",
+                    "X-Session-Coordination-Version": "6",
+                }
+                reconcile_headers = {
+                    **common_headers,
+                    "X-Session-Reconcile-Fences": json.dumps([fence_id]),
+                }
+                reconciliation = (
+                    client.get("/api/session", headers=reconcile_headers)
+                    if endpoint == "session"
+                    else client.post("/api/reset", headers=reconcile_headers)
+                )
+                self.assertEqual(reconciliation.status_code, 200, reconciliation.text)
+                self.assertEqual(
+                    reconciliation.json()[SESSION_COORDINATION_ACK_FIELD],
+                    {"version": "6", "completed_fences": [fence_id]},
+                )
+
+                late = client.post(
+                    "/api/image",
+                    content=upload,
+                    headers={
+                        **common_headers,
+                        "Content-Type": "image/jpeg",
+                        "X-Filename": "late.jpg",
+                        "X-Session-Request-Fence": fence_id,
+                    },
+                )
+
+                self.assertEqual(late.status_code, 200, late.text)
+                late_payload = late.json()
+                self.assertEqual(late_payload["code"], "STALE_ACTION")
+                self.assertEqual(
+                    late_payload[SESSION_COORDINATION_ACK_FIELD],
+                    {"version": "6", "completed_fences": [fence_id]},
+                )
+                self.assertEqual(
+                    late_payload["task_state"]["active_child_task"],
+                    (
+                        None
+                        if endpoint == "reset"
+                        else runtime.task_state_snapshot.to_dict()["active_child_task"]
+                    ),
+                )
+                self.assertFalse(any(call[0] == "image" for call in runtime.calls))
+                self.assertEqual(list((root / "incoming").glob("*")), [])
+
+    def test_v6_session_and_reset_wait_for_an_admitted_image_stream(self):
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (4, 4), "white").save(image_bytes, format="JPEG")
+        upload = image_bytes.getvalue()
+
+        class BlockingImageRuntime(FakeRuntime):
+            def __init__(self, image_path: Path):
+                super().__init__(image_path)
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def handle_image(self, session_id, image_path, **kwargs):
+                self.started.set()
+                if not self.release.wait(timeout=5):
+                    raise AssertionError("timed out waiting to release v6 image")
+                kwargs.pop("request_id", None)
+                return super().handle_image(session_id, image_path, **kwargs)
+
+        for endpoint in ("session", "reset"):
+            with self.subTest(endpoint=endpoint), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                media_path = root / "media.jpg"
+                Image.new("RGB", (4, 4), "white").save(media_path)
+                runtime = BlockingImageRuntime(media_path)
+                self.addCleanup(runtime.release.set)
+                app = create_app(runtime=runtime, incoming_dir=root / "incoming")
+                image_client = TestClient(app)
+                reconcile_client = TestClient(app)
+                session_id = f"v6-image-first-{endpoint}"
+                fence_id = _v6_fence(f"image-first-{endpoint}")
+                common_headers = {
+                    "Cookie": f"{SESSION_COOKIE}={session_id}",
+                    "Sec-Fetch-Site": "same-origin",
+                    "X-Session-Coordination-Version": "6",
+                }
+                responses: dict[str, object] = {}
+                errors: list[BaseException] = []
+                reconciliation_done = threading.Event()
+
+                def run_image() -> None:
+                    try:
+                        responses["image"] = image_client.post(
+                            "/api/image/stream",
+                            content=upload,
+                            headers={
+                                **common_headers,
+                                "Content-Type": "image/jpeg",
+                                "X-Filename": "question.jpg",
+                                "X-Session-Request-Fence": fence_id,
+                            },
+                        )
+                    except BaseException as exc:  # pragma: no cover - assertion reports it.
+                        errors.append(exc)
+
+                def run_reconciliation() -> None:
+                    try:
+                        headers = {
+                            **common_headers,
+                            "X-Session-Reconcile-Fences": json.dumps([fence_id]),
+                        }
+                        responses["reconcile"] = (
+                            reconcile_client.get("/api/session", headers=headers)
+                            if endpoint == "session"
+                            else reconcile_client.post("/api/reset", headers=headers)
+                        )
+                    except BaseException as exc:  # pragma: no cover - assertion reports it.
+                        errors.append(exc)
+                    finally:
+                        reconciliation_done.set()
+
+                image_worker = threading.Thread(target=run_image, daemon=True)
+                image_worker.start()
+                self.assertTrue(runtime.started.wait(timeout=2))
+                reconcile_worker = threading.Thread(
+                    target=run_reconciliation,
+                    daemon=True,
+                )
+                reconcile_worker.start()
+                self.assertFalse(
+                    reconciliation_done.wait(timeout=0.15),
+                    "reconciliation must wait for the admitted stream worker",
+                )
+                self.assertEqual(runtime.session_capture_calls, [])
+                self.assertFalse(any(call[0] == "clear" for call in runtime.calls))
+
+                runtime.release.set()
+                image_worker.join(timeout=5)
+                reconcile_worker.join(timeout=5)
+                self.assertFalse(image_worker.is_alive())
+                self.assertFalse(reconcile_worker.is_alive())
+                self.assertEqual(errors, [])
+                image_response = responses["image"]
+                reconcile_response = responses["reconcile"]
+                self.assertEqual(image_response.status_code, 200, image_response.text)
+                image_events = [
+                    json.loads(line)
+                    for line in image_response.text.splitlines()
+                    if line
+                ]
+                self.assertEqual(
+                    image_events[-1]["data"][SESSION_COORDINATION_ACK_FIELD],
+                    {"version": "6", "completed_fences": [fence_id]},
+                )
+                self.assertEqual(
+                    reconcile_response.status_code,
+                    200,
+                    reconcile_response.text,
+                )
+                self.assertEqual(runtime.calls[0][0], "image")
+                if endpoint == "session":
+                    self.assertEqual(
+                        reconcile_response.json()["session"]["phase"],
+                        "WAIT_CHAPTER",
+                    )
+                else:
+                    self.assertEqual(reconcile_response.json()["code"], "SESSION_RESET")
+                    self.assertEqual(runtime.calls[-1][0], "clear")
+
+    def test_v6_fence_replay_and_old_same_origin_page_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media_path = root / "media.jpg"
+            Image.new("RGB", (4, 4), "white").save(media_path)
+            image_bytes = io.BytesIO()
+            Image.new("RGB", (4, 4), "white").save(image_bytes, format="JPEG")
+            upload = image_bytes.getvalue()
+            runtime = FakeRuntime(media_path)
+            runtime.task_state_snapshot = _standalone_child_task_state(
+                task_id="search_v6_replay_12345678",
+                task_revision=3,
+                phase="WAIT_CANDIDATE_CHOICE",
+                allowed_actions=(task_state_contract.ACTION_SELECT_CANDIDATE,),
+                candidate_count=1,
+                candidate_generation="3:1",
+            )
+            client = TestClient(create_app(
+                runtime=runtime,
+                incoming_dir=root / "incoming",
+            ))
+            session_id = "v6-replay-session"
+            fence_id = _v6_fence("replay")
+            base_headers = {
+                "Cookie": f"{SESSION_COOKIE}={session_id}",
+                "Content-Type": "image/jpeg",
+                "X-Filename": "question.jpg",
+            }
+            v6_headers = {
+                **base_headers,
+                "Sec-Fetch-Site": "same-origin",
+                "X-Session-Coordination-Version": "6",
+                "X-Session-Request-Fence": fence_id,
+            }
+
+            read_fence_id = _v6_fence("read-own")
+            read_headers = {
+                "Cookie": f"{SESSION_COOKIE}={session_id}",
+                "Sec-Fetch-Site": "same-origin",
+                "X-Session-Coordination-Version": "6",
+                "X-Session-Request-Fence": read_fence_id,
+            }
+            overlap_fence_id = _v6_fence("overlap")
+            first_read = client.get("/api/session", headers=read_headers)
+            replayed_read = client.get("/api/session", headers=read_headers)
+            overlapping_read = client.get("/api/session", headers={
+                **read_headers,
+                "X-Session-Request-Fence": overlap_fence_id,
+                "X-Session-Reconcile-Fences": json.dumps([
+                    overlap_fence_id,
+                ]),
+            })
+
+            first = client.post("/api/image", content=upload, headers=v6_headers)
+            replay = client.post("/api/image", content=upload, headers=v6_headers)
+            stream_replay = client.post(
+                "/api/image/stream",
+                content=upload,
+                headers=v6_headers,
+            )
+            old_page = client.post(
+                "/api/image",
+                content=upload,
+                headers={**base_headers, "Sec-Fetch-Site": "same-origin"},
+            )
+            script = client.post("/api/image", content=upload, headers=base_headers)
+
+            self.assertEqual(first_read.status_code, 200, first_read.text)
+            self.assertEqual(
+                first_read.json()[SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": [read_fence_id]},
+            )
+            self.assertEqual(replayed_read.status_code, 409, replayed_read.text)
+            self.assertEqual(replayed_read.json()["code"], "STALE_ACTION")
+            self.assertEqual(overlapping_read.status_code, 409, overlapping_read.text)
+            self.assertEqual(overlapping_read.json()["code"], "STALE_ACTION")
+            self.assertEqual(first.status_code, 200, first.text)
+            self.assertEqual(
+                first.json()[SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": [fence_id]},
+            )
+            self.assertEqual(replay.status_code, 200, replay.text)
+            self.assertEqual(replay.json()["code"], "STALE_ACTION")
+            self.assertEqual(stream_replay.status_code, 200, stream_replay.text)
+            stream_replay_events = [
+                json.loads(line)
+                for line in stream_replay.text.splitlines()
+                if line
+            ]
+            self.assertEqual(
+                stream_replay_events[-1]["data"]["code"],
+                "STALE_ACTION",
+            )
+            self.assertEqual(
+                stream_replay_events[-1]["data"][SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": [fence_id]},
+            )
+            self.assertEqual(
+                replay.json()["task_state"]["active_child_task"]["allowed_actions"],
+                [task_state_contract.ACTION_SELECT_CANDIDATE],
+            )
+            self.assertEqual(old_page.status_code, 409, old_page.text)
+            self.assertEqual(old_page.json()["code"], "STALE_ACTION")
+            self.assertEqual(
+                old_page.json()["task_state"]["active_child_task"]["allowed_actions"],
+                [task_state_contract.ACTION_SELECT_CANDIDATE],
+            )
+            self.assertEqual(script.status_code, 200, script.text)
+            self.assertNotIn(SESSION_COORDINATION_ACK_FIELD, old_page.json())
+            self.assertNotIn(SESSION_COORDINATION_ACK_FIELD, script.json())
+            self.assertEqual(
+                [call[0] for call in runtime.calls].count("image"),
+                2,
+                "only the first v6 request and headerless non-browser script may execute",
+            )
+            self.assertEqual(list((root / "incoming").glob("*")), [])
+
+    def test_v6_expired_and_future_task_fences_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media_path = root / "media.jpg"
+            Image.new("RGB", (4, 4), "white").save(media_path)
+            image_bytes = io.BytesIO()
+            Image.new("RGB", (4, 4), "white").save(image_bytes, format="JPEG")
+            upload = image_bytes.getvalue()
+            runtime = FakeRuntime(media_path)
+            client = TestClient(create_app(
+                runtime=runtime,
+                incoming_dir=root / "incoming",
+            ))
+            now_ms = int(time.time() * 1000)
+            for label, fence_id in (
+                ("expired", f"{now_ms - (3 * 60 * 60 * 1000)}:expired-fence"),
+                ("future", f"{now_ms + (10 * 60 * 1000)}:future-fence"),
+            ):
+                with self.subTest(label=label):
+                    response = client.post(
+                        "/api/image",
+                        content=upload,
+                        headers={
+                            "Cookie": f"{SESSION_COOKIE}=v6-{label}-fence",
+                            "Sec-Fetch-Site": "same-origin",
+                            "Content-Type": "image/jpeg",
+                            "X-Filename": "question.jpg",
+                            "X-Session-Coordination-Version": "6",
+                            "X-Session-Request-Fence": fence_id,
+                        },
+                    )
+                    self.assertEqual(response.status_code, 409, response.text)
+                    self.assertEqual(response.json()["code"], "STALE_ACTION")
+                    self.assertNotIn(
+                        SESSION_COORDINATION_ACK_FIELD,
+                        response.json(),
+                    )
+            self.assertFalse(any(call[0] == "image" for call in runtime.calls))
+            self.assertEqual(list((root / "incoming").glob("*")), [])
+
+    def test_v6_message_json_and_stream_ack_exact_fences_and_reject_replays(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media_path = root / "media.jpg"
+            Image.new("RGB", (4, 4), "white").save(media_path)
+            runtime = FakeRuntime(media_path)
+            client = TestClient(create_app(runtime=runtime))
+            session_id = "v6-message-session"
+
+            def headers(fence_id: str) -> dict[str, str]:
+                return {
+                    "Cookie": f"{SESSION_COOKIE}={session_id}",
+                    "Sec-Fetch-Site": "same-origin",
+                    "X-Session-Coordination-Version": "6",
+                    "X-Session-Request-Fence": fence_id,
+                }
+
+            json_fence = _v6_fence("message-json")
+            json_response = client.post(
+                "/api/message",
+                json={"text": "继续"},
+                headers=headers(json_fence),
+            )
+            json_replay = client.post(
+                "/api/message",
+                json={"text": "继续"},
+                headers=headers(json_fence),
+            )
+            cross_stream_replay = client.post(
+                "/api/message/stream",
+                json={"text": "继续"},
+                headers=headers(json_fence),
+            )
+            stream_fence = _v6_fence("message-stream")
+            stream_response = client.post(
+                "/api/message/stream",
+                json={"text": "继续"},
+                headers=headers(stream_fence),
+            )
+            stream_replay = client.post(
+                "/api/message/stream",
+                json={"text": "继续"},
+                headers=headers(stream_fence),
+            )
+            old_page = client.post(
+                "/api/message",
+                json={"text": "继续"},
+                headers={
+                    "Cookie": f"{SESSION_COOKIE}={session_id}",
+                    "Sec-Fetch-Site": "same-origin",
+                },
+            )
+            script = client.post(
+                "/api/message",
+                json={"text": "继续"},
+                headers={"Cookie": f"{SESSION_COOKIE}={session_id}"},
+            )
+
+            self.assertEqual(json_response.status_code, 200, json_response.text)
+            self.assertEqual(
+                json_response.json()[SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": [json_fence]},
+            )
+            self.assertEqual(json_replay.status_code, 200, json_replay.text)
+            self.assertEqual(json_replay.json()["code"], "STALE_ACTION")
+            self.assertEqual(
+                json_replay.json()[SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": [json_fence]},
+            )
+
+            stream_events = [
+                json.loads(line) for line in stream_response.text.splitlines() if line
+            ]
+            replay_events = [
+                json.loads(line) for line in stream_replay.text.splitlines() if line
+            ]
+            cross_replay_events = [
+                json.loads(line)
+                for line in cross_stream_replay.text.splitlines()
+                if line
+            ]
+            self.assertEqual(
+                cross_stream_replay.status_code,
+                200,
+                cross_stream_replay.text,
+            )
+            self.assertEqual(
+                cross_replay_events[-1]["data"]["code"],
+                "STALE_ACTION",
+            )
+            self.assertEqual(
+                cross_replay_events[-1]["data"][SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": [json_fence]},
+            )
+            self.assertEqual(stream_response.status_code, 200, stream_response.text)
+            self.assertEqual(stream_events[-1]["type"], "result")
+            self.assertEqual(
+                stream_events[-1]["data"][SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": [stream_fence]},
+            )
+            self.assertEqual(stream_replay.status_code, 200, stream_replay.text)
+            self.assertEqual(replay_events[-1]["data"]["code"], "STALE_ACTION")
+            self.assertEqual(
+                replay_events[-1]["data"][SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": [stream_fence]},
+            )
+            self.assertEqual(old_page.status_code, 409, old_page.text)
+            self.assertNotIn(SESSION_COORDINATION_ACK_FIELD, old_page.json())
+            self.assertEqual(script.status_code, 200, script.text)
+            self.assertNotIn(SESSION_COORDINATION_ACK_FIELD, script.json())
+            self.assertEqual(
+                [call[0] for call in runtime.calls].count("text"),
+                3,
+                "only fresh v6 JSON/stream tasks and the headerless script execute",
+            )
+
+    def test_v6_task_errors_ack_only_after_the_admission_boundary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media_path = root / "media.jpg"
+            Image.new("RGB", (4, 4), "white").save(media_path)
+
+            class BusyRuntime(FakeRuntime):
+                def handle_text(self, session_id, text, **kwargs):
+                    del kwargs
+                    self.calls.append(("busy_text", session_id, text))
+                    raise AgentRuntimeBusyError("busy")
+
+            runtime = BusyRuntime(media_path)
+            client = TestClient(create_app(runtime=runtime))
+            session_id = "v6-message-errors"
+
+            def headers(fence_id: str) -> dict[str, str]:
+                return {
+                    "Cookie": f"{SESSION_COOKIE}={session_id}",
+                    "Sec-Fetch-Site": "same-origin",
+                    "X-Session-Coordination-Version": "6",
+                    "X-Session-Request-Fence": fence_id,
+                }
+
+            invalid_fence = _v6_fence("invalid-before-gate")
+            invalid = client.post(
+                "/api/message",
+                json={"text": ""},
+                headers=headers(invalid_fence),
+            )
+            json_fence = invalid_fence
+            busy_json = client.post(
+                "/api/message",
+                json={"text": "继续"},
+                headers=headers(json_fence),
+            )
+            busy_replay = client.post(
+                "/api/message",
+                json={"text": "继续"},
+                headers=headers(json_fence),
+            )
+            stream_fence = _v6_fence("busy-stream")
+            busy_stream = client.post(
+                "/api/message/stream",
+                json={"text": "继续"},
+                headers=headers(stream_fence),
+            )
+
+            self.assertEqual(invalid.status_code, 400, invalid.text)
+            self.assertEqual(
+                invalid.json()[SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": []},
+            )
+            self.assertEqual(busy_json.status_code, 429, busy_json.text)
+            self.assertEqual(busy_json.json()["code"], "QUEUE_FULL")
+            self.assertEqual(
+                busy_json.json()[SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": [json_fence]},
+            )
+            self.assertEqual(busy_replay.status_code, 200, busy_replay.text)
+            self.assertEqual(busy_replay.json()["code"], "STALE_ACTION")
+            self.assertEqual(
+                busy_replay.json()[SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": [json_fence]},
+            )
+            stream_events = [
+                json.loads(line) for line in busy_stream.text.splitlines() if line
+            ]
+            self.assertEqual(busy_stream.status_code, 200, busy_stream.text)
+            self.assertEqual(stream_events[-1]["type"], "error")
+            self.assertEqual(stream_events[-1]["code"], "QUEUE_FULL")
+            self.assertEqual(
+                stream_events[-1][SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": [stream_fence]},
+            )
+            self.assertEqual(
+                [call[0] for call in runtime.calls].count("busy_text"),
+                2,
+                "the pre-gate 400 must not retire its fence and replays must not execute",
+            )
+
+    def test_v6_a3_select_json_and_stream_use_the_same_coordination_gate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media_path = root / "media.jpg"
+            Image.new("RGB", (4, 4), "white").save(media_path)
+
+            class A3Runtime(FakeRuntime):
+                a3_enabled = True
+
+                def select_unit(self, session_id, unit_id, **kwargs):
+                    progress = kwargs.get("progress")
+                    if progress is not None:
+                        progress(self.progress_stage, self.progress_message)
+                    self.calls.append(("select", session_id, unit_id))
+                    return self._freeze_response(
+                        session_id,
+                        AgentResponse(text="已选择。", intent="a3_unit_selected"),
+                        task_state_capabilities=kwargs.get(
+                            "task_state_capabilities"
+                        ),
+                    )
+
+                def prepare_units(self, session_id, unit_ids, **kwargs):
+                    progress = kwargs.get("progress")
+                    if progress is not None:
+                        progress(self.progress_stage, self.progress_message)
+                    self.calls.append(("prepare", session_id, tuple(unit_ids)))
+                    return self._freeze_response(
+                        session_id,
+                        AgentResponse(text="已准备。", intent="a3_units_prepared"),
+                        task_state_capabilities=kwargs.get(
+                            "task_state_capabilities"
+                        ),
+                    )
+
+                def handle_crop(self, session_id, bounds, **kwargs):
+                    progress = kwargs.get("progress")
+                    if progress is not None:
+                        progress(self.progress_stage, self.progress_message)
+                    self.calls.append(("crop", session_id, dict(bounds)))
+                    return self._freeze_response(
+                        session_id,
+                        AgentResponse(text="已裁剪。", intent="a3_crop_submitted"),
+                        task_state_capabilities=kwargs.get(
+                            "task_state_capabilities"
+                        ),
+                    )
+
+            runtime = A3Runtime(media_path)
+            client = TestClient(create_app(runtime=runtime))
+            session_id = "v6-a3-select"
+            payload = {
+                "unit_id": "g1-u1",
+                "workflow_id": "search_v6_a3_workflow_01",
+                "task_revision": 1,
+            }
+
+            def headers(fence_id: str) -> dict[str, str]:
+                return {
+                    "Cookie": f"{SESSION_COOKIE}={session_id}",
+                    "Sec-Fetch-Site": "same-origin",
+                    "X-Session-Coordination-Version": "6",
+                    "X-Session-Request-Fence": fence_id,
+                }
+
+            json_fence = _v6_fence("a3-select-json")
+            json_response = client.post(
+                "/api/a3/select",
+                json=payload,
+                headers=headers(json_fence),
+            )
+            json_replay = client.post(
+                "/api/a3/select",
+                json=payload,
+                headers=headers(json_fence),
+            )
+            cross_stream_replay = client.post(
+                "/api/a3/select/stream",
+                json=payload,
+                headers=headers(json_fence),
+            )
+            stream_fence = _v6_fence("a3-select-stream")
+            stream_response = client.post(
+                "/api/a3/select/stream",
+                json=payload,
+                headers=headers(stream_fence),
+            )
+            prepare_fence = _v6_fence("a3-prepare-stream")
+            prepare_response = client.post(
+                "/api/a3/prepare/stream",
+                json={
+                    "unit_ids": ["g1-u1"],
+                    "workflow_id": payload["workflow_id"],
+                    "task_revision": payload["task_revision"],
+                },
+                headers=headers(prepare_fence),
+            )
+            crop_fence = _v6_fence("a3-crop-stream")
+            crop_response = client.post(
+                "/api/a3/crop/stream",
+                json={
+                    "unit_id": "g1-u1",
+                    "workflow_id": payload["workflow_id"],
+                    "task_revision": payload["task_revision"],
+                    "bounds": {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
+                },
+                headers=headers(crop_fence),
+            )
+            old_stream = client.post(
+                "/api/a3/select/stream",
+                json=payload,
+                headers={
+                    "Cookie": f"{SESSION_COOKIE}={session_id}",
+                    "Sec-Fetch-Site": "same-origin",
+                },
+            )
+
+            self.assertEqual(json_response.status_code, 200, json_response.text)
+            self.assertEqual(
+                json_response.json()[SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": [json_fence]},
+            )
+            self.assertEqual(json_replay.status_code, 200, json_replay.text)
+            self.assertEqual(json_replay.json()["code"], "STALE_ACTION")
+            cross_replay_events = [
+                json.loads(line)
+                for line in cross_stream_replay.text.splitlines()
+                if line
+            ]
+            self.assertEqual(
+                cross_replay_events[-1]["data"]["code"],
+                "STALE_ACTION",
+            )
+            self.assertEqual(
+                cross_replay_events[-1]["data"][SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": [json_fence]},
+            )
+            stream_events = [
+                json.loads(line) for line in stream_response.text.splitlines() if line
+            ]
+            self.assertEqual(stream_response.status_code, 200, stream_response.text)
+            self.assertEqual(
+                stream_events[-1]["data"][SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": [stream_fence]},
+            )
+            prepare_events = [
+                json.loads(line) for line in prepare_response.text.splitlines() if line
+            ]
+            crop_events = [
+                json.loads(line) for line in crop_response.text.splitlines() if line
+            ]
+            self.assertEqual(prepare_response.status_code, 200, prepare_response.text)
+            self.assertEqual(
+                prepare_events[-1]["data"][SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": [prepare_fence]},
+            )
+            self.assertEqual(crop_response.status_code, 200, crop_response.text)
+            self.assertEqual(
+                crop_events[-1]["data"][SESSION_COORDINATION_ACK_FIELD],
+                {"version": "6", "completed_fences": [crop_fence]},
+            )
+            self.assertEqual(old_stream.status_code, 409, old_stream.text)
+            self.assertNotIn(SESSION_COORDINATION_ACK_FIELD, old_stream.json())
+            self.assertEqual(
+                [call[0] for call in runtime.calls].count("select"),
+                2,
+                "the replay and old same-origin page must not reach A3 runtime work",
+            )
+            self.assertEqual(
+                [call[0] for call in runtime.calls].count("prepare"),
+                1,
+            )
+            self.assertEqual(
+                [call[0] for call in runtime.calls].count("crop"),
+                1,
+            )
+
+    def test_v6_registry_keeps_a_pinned_gate_during_sweep(self):
+        registry = _SessionCoordinationRegistry()
+        session_id, original = registry._pin("pinned-session")
+        original._last_used = 0
+        registry._last_sweep = 0
+        with patch(
+            "tiku_agent.fastapi_demo.time.monotonic",
+            return_value=10_000,
+        ):
+            other_session_id, other = registry._pin("sweep-trigger")
+            same_session_id, same = registry._pin("pinned-session")
+        try:
+            self.assertIs(same, original)
+        finally:
+            registry._unpin(same_session_id, same)
+            registry._unpin(other_session_id, other)
+            registry._unpin(session_id, original)
+
+    def test_cancelled_stream_worker_keeps_its_session_gate_until_true_exit(self):
+        registry = _SessionCoordinationRegistry()
+        worker_started = threading.Event()
+        release_worker = threading.Event()
+        reconciliation_done = threading.Event()
+        errors: list[BaseException] = []
+        fence_id = _v6_fence("cancelled-worker")
+
+        def execute(_progress) -> dict[str, object]:
+            with registry.task("cancelled-stream-session", fence_id):
+                worker_started.set()
+                if not release_worker.wait(timeout=5):
+                    raise AssertionError("timed out waiting to release stream worker")
+            return {"ok": True}
+
+        def reconcile() -> None:
+            try:
+                with registry.reconcile("cancelled-stream-session", (fence_id,)):
+                    pass
+            except BaseException as exc:  # pragma: no cover - assertion reports it.
+                errors.append(exc)
+            finally:
+                reconciliation_done.set()
+
+        async def scenario() -> None:
+            events = _stream_agent_events(
+                execute,
+                trace_context=TraceContext.create(),
+            )
+            consumer = asyncio.create_task(events.__anext__())
+            self.assertTrue(await asyncio.to_thread(worker_started.wait, 1))
+            consumer.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await consumer
+
+            reconcile_worker = threading.Thread(target=reconcile, daemon=True)
+            reconcile_worker.start()
+            self.assertFalse(
+                await asyncio.to_thread(reconciliation_done.wait, 0.15),
+                "reconciliation escaped while the cancelled to_thread worker ran",
+            )
+            release_worker.set()
+            await asyncio.to_thread(reconcile_worker.join, 2)
+            self.assertFalse(reconcile_worker.is_alive())
+
+        try:
+            asyncio.run(scenario())
+        finally:
+            release_worker.set()
+        self.assertEqual(errors, [])
 
     def test_session_endpoint_maps_live_standalone_a2_state_and_keeps_legacy_shape(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1067,21 +1870,38 @@ class FastApiDemoTest(unittest.TestCase):
             store = SQLiteTraceEventStore(root / "trace_events.sqlite3")
             recorder = TraceEventRecorder(store)
             runtime = FakeRuntime(image_path)
-            client = TestClient(create_app(
+            app = create_app(
                 runtime=runtime,
                 invite_access=InviteAccess(config_path),
                 trace_event_recorder=recorder,
-            ))
+            )
+            client = TestClient(app)
             secret = "raw-secret-invite-code"
             request_ids = [f"req_{value:032x}" for value in range(10, 13)]
+            session_fence = _v6_fence("auth-session")
+            stream_fence = _v6_fence("auth-stream")
+            coordination_headers = {
+                "Cookie": f"{SESSION_COOKIE}=auth-rejection-session",
+                "Sec-Fetch-Site": "same-origin",
+                "X-Session-Coordination-Version": "6",
+            }
 
             session_gate = client.get(
-                "/api/session", headers={"X-Request-ID": request_ids[0]}
+                "/api/session",
+                headers={
+                    **coordination_headers,
+                    "X-Request-ID": request_ids[0],
+                    "X-Session-Request-Fence": session_fence,
+                },
             )
             stream_gate = client.post(
                 "/api/message/stream",
                 json={"text": secret},
-                headers={"X-Request-ID": request_ids[1]},
+                headers={
+                    **coordination_headers,
+                    "X-Request-ID": request_ids[1],
+                    "X-Session-Request-Fence": stream_fence,
+                },
             )
             invalid_login = client.post(
                 "/api/invite/login",
@@ -1092,7 +1912,11 @@ class FastApiDemoTest(unittest.TestCase):
             self.assertEqual(session_gate.status_code, 401)
             self.assertEqual(runtime.session_capture_calls, [])
             self.assertNotIn("task_state", session_gate.json())
+            self.assertNotIn(SESSION_COORDINATION_ACK_FIELD, session_gate.json())
             self.assertEqual(stream_gate.status_code, 401)
+            self.assertNotIn(SESSION_COORDINATION_ACK_FIELD, stream_gate.json())
+            self.assertEqual(app.state.session_coordination._gates, {})
+            self.assertEqual(app.state.session_coordination._pins, {})
             self.assertEqual(invalid_login.status_code, 401)
             expected = (
                 ("LOGIN_REQUIRED", "/api/session", "json"),
@@ -1119,6 +1943,46 @@ class FastApiDemoTest(unittest.TestCase):
                         [event.to_dict() for event in events], ensure_ascii=False
                     ),
                 )
+
+    def test_authentication_rejection_does_not_mutate_a_registered_session_gate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "result.jpg"
+            Image.new("RGB", (4, 4), "white").save(image_path)
+            config, _codes = build_invitation_config(1)
+            config_path = root / "invites.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            app = create_app(
+                runtime=FakeRuntime(image_path),
+                invite_access=InviteAccess(config_path),
+            )
+            registry = app.state.session_coordination
+            client = TestClient(app)
+            session_id = "registered-auth-rejection-session"
+            active_fence = _v6_fence("auth-active")
+            rejected_fence = _v6_fence("auth-rejected")
+            with registry.task(session_id, active_fence):
+                pass
+            gate = registry._gates[session_id]
+            completed_before = dict(gate._completed_fences)
+
+            response = client.post(
+                "/api/message/stream",
+                json={"text": "不会执行"},
+                headers={
+                    "Cookie": f"{SESSION_COOKIE}={session_id}",
+                    "Sec-Fetch-Site": "same-origin",
+                    "X-Session-Coordination-Version": "6",
+                    "X-Session-Request-Fence": rejected_fence,
+                },
+            )
+            self.assertEqual(response.status_code, 401)
+            self.assertNotIn(SESSION_COORDINATION_ACK_FIELD, response.json())
+            with registry._lock:
+                self.assertEqual(registry._pins, {})
+                self.assertEqual(set(registry._gates), {session_id})
+                self.assertIs(registry._gates[session_id], gate)
+            self.assertEqual(gate._completed_fences, completed_before)
 
     def test_upload_rejections_match_json_and_stream_terminals(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5433,7 +6297,7 @@ class FastApiDemoTest(unittest.TestCase):
         for expected in (
             'href="/assets/demo.css?v=20260822-feedback-v1"',
             'src="/assets/task_state.js?v=20260830-task-state-3-4-5"',
-            'src="/assets/demo.js?v=20260901-refresh-recovery-v5"',
+            'src="/assets/demo.js?v=20260903-fence-login-v8"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',

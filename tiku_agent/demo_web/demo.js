@@ -122,9 +122,15 @@ const SESSION_ACTIVITY_KEY = 'tiku-agent-session-activity-v1';
 const SESSION_RESET_EVENT_KEY = 'tiku-agent-session-reset-v1';
 const SESSION_STORAGE_PROBE_KEY = 'tiku-agent-session-storage-probe-v1';
 const SESSION_REQUEST_FENCE_KEY = 'tiku-agent-session-request-fence-v1';
+const SESSION_REQUEST_FENCE_PREFIX = `${SESSION_REQUEST_FENCE_KEY}:pending:`;
+const SESSION_REQUEST_FENCE_RESOLVED_PREFIX = `${SESSION_REQUEST_FENCE_KEY}:resolved:`;
+const SESSION_COORDINATION_VERSION = '6';
+const SESSION_COORDINATION_MAX_RECONCILE_FENCES = 64;
 const SESSION_REQUEST_LOCK_NAME = 'tiku-agent-session-request-v1';
 const SESSION_FALLBACK_LOCK_PREFIX = `${SESSION_REQUEST_LOCK_NAME}:fallback:`;
 const SESSION_FALLBACK_LOCK_TTL_MS = 120000;
+const SESSION_FALLBACK_CHOOSING_TTL_MS = 2000;
+const SESSION_FALLBACK_LOCK_WAIT_MS = 5000;
 const SESSION_FALLBACK_LOCK_POLL_MS = 25;
 const OPERATIONAL_NOTICE_KEYS = new Set([
   'connection', 'session-recovery', 'history-storage',
@@ -202,6 +208,7 @@ let lastHandledSessionResetEventId = storedSessionResetEventId() || '';
 let lastHandledSessionRequestFenceId = '';
 let sessionBootstrap = null;
 let sessionBootstrapPending = false;
+let sessionRequestLockDepth = 0;
 let sessionContext = {
   session_valid: false, phase: 'IDLE', has_active_image: false,
   task_revision: 0, candidate_generation: '', candidate_count: 0, search_id: '',
@@ -296,6 +303,13 @@ function safeLocalStorageRemove(key) {
   }
 }
 
+function safeLocalStorageRemoveIfUnchanged(key, expectedRaw) {
+  if (typeof expectedRaw !== 'string') return false;
+  if (safeLocalStorageGet(key) !== expectedRaw) return false;
+  if (!safeLocalStorageRemove(key)) return false;
+  return safeLocalStorageGet(key) === null;
+}
+
 function safeLocalStorageKeys(prefix = '') {
   try {
     const keys = [];
@@ -317,37 +331,48 @@ function parseSessionFallbackLockRecord(key, raw) {
   try {
     const value = JSON.parse(raw || 'null');
     const id = String(value?.id || '');
+    const kind = String(value?.kind || '');
+    const choosing = Boolean(value?.choosing);
     const ticket = Number(value?.ticket);
     const expiresAt = Number(value?.expiresAt);
     if (
       !id
       || key !== sessionFallbackLockKey(id)
+      || !['task', 'reset', 'read'].includes(kind)
       || !Number.isSafeInteger(ticket)
       || ticket < 0
+      || (choosing ? ticket !== 0 : ticket === 0)
       || !Number.isFinite(expiresAt)
     ) return null;
     return {
       key,
       id,
-      kind: ['task', 'reset', 'read'].includes(value.kind) ? value.kind : 'read',
-      choosing: Boolean(value.choosing),
+      kind,
+      choosing,
       ticket,
       expiresAt,
+      raw: String(raw),
     };
   } catch (_error) {
     return null;
   }
 }
 
-function readSessionFallbackLockRecords() {
+function readSessionFallbackLockRecords(now = Date.now()) {
   const keys = safeLocalStorageKeys(SESSION_FALLBACK_LOCK_PREFIX);
   if (keys === null) return null;
   const records = [];
   for (const key of keys) {
     const raw = safeLocalStorageGet(key);
     if (raw === undefined) return null;
+    if (raw === null) continue;
     const record = parseSessionFallbackLockRecord(key, raw);
-    if (record) records.push(record);
+    // Every contender owns a unique key.  Foreign, expired or malformed
+    // records are ignored instead of compare-removed: localStorage has no
+    // atomic compare-and-swap, so deleting somebody else's key can race a
+    // renewal and destroy mutual exclusion at the TTL boundary.
+    if (!record || record.expiresAt <= now) continue;
+    records.push(record);
   }
   return records;
 }
@@ -360,8 +385,10 @@ function writeSessionFallbackLockRecord(record) {
     ticket: Number(record.ticket),
     expiresAt: Number(record.expiresAt),
   });
-  return safeLocalStorageSet(record.key, raw)
-    && safeLocalStorageGet(record.key) === raw;
+  if (!safeLocalStorageSet(record.key, raw)) return false;
+  if (safeLocalStorageGet(record.key) !== raw) return false;
+  record.raw = raw;
+  return true;
 }
 
 function sessionFallbackLockPrecedes(left, right) {
@@ -374,6 +401,7 @@ function waitForSessionFallbackLock() {
 }
 
 async function acquireSessionFallbackLock(kind) {
+  const waitStartedAt = globalThis.performance?.now?.() ?? Date.now();
   const id = createRequestId();
   const record = {
     key: sessionFallbackLockKey(id),
@@ -381,104 +409,161 @@ async function acquireSessionFallbackLock(kind) {
     kind,
     choosing: true,
     ticket: 0,
-    expiresAt: Date.now() + SESSION_FALLBACK_LOCK_TTL_MS,
+    expiresAt: Date.now() + SESSION_FALLBACK_CHOOSING_TTL_MS,
   };
-  if (!writeSessionFallbackLockRecord(record)) return null;
+  if (!writeSessionFallbackLockRecord(record)) {
+    return { status: 'unsupported', lease: null };
+  }
   let records = readSessionFallbackLockRecords();
   if (records === null) {
-    safeLocalStorageRemove(record.key);
-    return null;
+    releaseSessionFallbackLock({ record });
+    return { status: 'unsupported', lease: null };
   }
   const now = Date.now();
-  record.ticket = 1 + records.reduce(
+  const highestTicket = records.reduce(
     (highest, candidate) => candidate.expiresAt > now
       ? Math.max(highest, candidate.ticket)
       : highest,
     0,
   );
-  record.choosing = false;
-  if (!writeSessionFallbackLockRecord(record)) {
-    safeLocalStorageRemove(record.key);
-    return null;
+  if (
+    highestTicket >= Number.MAX_SAFE_INTEGER
+    || !sessionFallbackLockRecordOwned(record)
+  ) {
+    releaseSessionFallbackLock({ record });
+    return { status: 'lost', lease: null };
+  }
+  const lease = {
+    record: {
+      ...record,
+      choosing: false,
+      ticket: highestTicket + 1,
+      expiresAt: Date.now() + SESSION_FALLBACK_LOCK_TTL_MS,
+    },
+    lost: false,
+  };
+  if (!writeSessionFallbackLockRecord(lease.record)) {
+    releaseSessionFallbackLock({ record });
+    return { status: 'lost', lease: null };
+  }
+  if (Date.now() >= record.expiresAt || !sessionFallbackLockOwned(lease)) {
+    lease.lost = true;
+    releaseSessionFallbackLock(lease);
+    return { status: 'lost', lease: null };
   }
   while (true) {
     const checkedAt = Date.now();
-    if (record.expiresAt - checkedAt < SESSION_FALLBACK_LOCK_TTL_MS / 2) {
-      record.expiresAt = checkedAt + SESSION_FALLBACK_LOCK_TTL_MS;
-      if (!writeSessionFallbackLockRecord(record)) {
-        safeLocalStorageRemove(record.key);
-        return null;
-      }
+    if (!sessionFallbackLockOwned(lease)) {
+      lease.lost = true;
+      releaseSessionFallbackLock(lease);
+      return { status: 'lost', lease: null };
     }
-    records = readSessionFallbackLockRecords();
+    records = readSessionFallbackLockRecords(checkedAt);
     if (records === null) {
-      safeLocalStorageRemove(record.key);
-      return null;
+      lease.lost = true;
+      releaseSessionFallbackLock(lease);
+      return { status: 'lost', lease: null };
+    }
+    if (!records.some((candidate) => (
+      candidate.key === lease.record.key && candidate.raw === lease.record.raw
+    ))) {
+      lease.lost = true;
+      releaseSessionFallbackLock(lease);
+      return { status: 'lost', lease: null };
     }
     const blockers = records.filter((candidate) => (
-      candidate.id !== record.id
+      candidate.id !== lease.record.id
       && candidate.expiresAt > checkedAt
       && (
         candidate.choosing
-        || (candidate.ticket > 0 && sessionFallbackLockPrecedes(candidate, record))
+        || (candidate.ticket > 0 && sessionFallbackLockPrecedes(candidate, lease.record))
       )
     ));
-    if (!blockers.length) return { record, contendedTask: false, lost: false };
+    if (!blockers.length) return { status: 'acquired', lease };
     const precedingTask = blockers.some((candidate) => (
       !candidate.choosing
       && candidate.ticket > 0
-      && sessionFallbackLockPrecedes(candidate, record)
+      && sessionFallbackLockPrecedes(candidate, lease.record)
       && ['task', 'reset'].includes(candidate.kind)
     ));
     if (kind === 'task' && precedingTask) {
-      return { record, contendedTask: true, lost: false };
+      releaseSessionFallbackLock(lease);
+      return { status: 'contended', lease: null };
+    }
+    const waitedMs = (globalThis.performance?.now?.() ?? Date.now()) - waitStartedAt;
+    if (waitedMs >= SESSION_FALLBACK_LOCK_WAIT_MS) {
+      releaseSessionFallbackLock(lease);
+      return { status: 'contended', lease: null };
     }
     await waitForSessionFallbackLock();
   }
 }
 
-function sessionFallbackLockOwned(lease) {
-  const record = lease?.record;
+function sessionFallbackLockRecordOwned(record) {
   const raw = record ? safeLocalStorageGet(record.key) : undefined;
   const current = raw === undefined
     ? null
     : parseSessionFallbackLockRecord(record.key, raw);
   return Boolean(
     current
+    && raw === record.raw
     && current.id === record.id
+    && current.kind === record.kind
+    && current.choosing === record.choosing
     && current.ticket === record.ticket
     && current.expiresAt > Date.now()
   );
 }
 
+function sessionFallbackLockOwned(lease) {
+  return sessionFallbackLockRecordOwned(lease?.record);
+}
+
 function refreshSessionFallbackLock(lease) {
-  const record = lease?.record;
-  if (!sessionFallbackLockOwned(lease)) {
+  if (lease?.lost || !sessionFallbackLockOwned(lease)) {
     if (lease) lease.lost = true;
     return false;
   }
-  record.expiresAt = Date.now() + SESSION_FALLBACK_LOCK_TTL_MS;
-  const refreshed = writeSessionFallbackLockRecord(record);
-  if (!refreshed && lease) lease.lost = true;
-  return refreshed;
+  const previousExpiresAt = Number(lease.record.expiresAt);
+  const refreshedRecord = {
+    ...lease.record,
+    expiresAt: Date.now() + SESSION_FALLBACK_LOCK_TTL_MS,
+  };
+  const refreshed = writeSessionFallbackLockRecord(refreshedRecord);
+  if (refreshed) lease.record = refreshedRecord;
+  if (!refreshed || Date.now() >= previousExpiresAt) {
+    if (lease) lease.lost = true;
+    releaseSessionFallbackLock(lease);
+    return false;
+  }
+  return true;
 }
 
 function releaseSessionFallbackLock(lease) {
   const record = lease?.record;
-  if (!sessionFallbackLockOwned(lease)) return false;
-  return safeLocalStorageRemove(record.key);
+  return Boolean(
+    record?.key
+    && safeLocalStorageRemoveIfUnchanged(record.key, record.raw)
+  );
 }
 
 async function withSessionFallbackLock(kind, callback) {
-  const lease = await acquireSessionFallbackLock(kind);
-  if (!lease) return { supported: false, value: null };
+  const acquired = await acquireSessionFallbackLock(kind);
+  if (acquired.status !== 'acquired') {
+    return {
+      status: acquired.status,
+      supported: acquired.status !== 'unsupported',
+      value: null,
+    };
+  }
+  const { lease } = acquired;
   const heartbeat = setInterval(
     () => refreshSessionFallbackLock(lease),
     Math.floor(SESSION_FALLBACK_LOCK_TTL_MS / 6),
   );
   try {
     const value = await callback(lease);
-    return { supported: true, value };
+    return { status: 'acquired', supported: true, value };
   } finally {
     clearInterval(heartbeat);
     releaseSessionFallbackLock(lease);
@@ -574,9 +659,11 @@ function sessionRequestLockAvailable() {
 
 function sessionResetCoordinationAvailable() {
   const probe = createRequestId();
-  if (!safeLocalStorageSet(SESSION_STORAGE_PROBE_KEY, probe)) return false;
-  const readable = safeLocalStorageGet(SESSION_STORAGE_PROBE_KEY) === probe;
-  const removable = safeLocalStorageRemove(SESSION_STORAGE_PROBE_KEY);
+  const probeKey = `${SESSION_STORAGE_PROBE_KEY}:${probe}`;
+  if (!safeLocalStorageSet(probeKey, probe)) return false;
+  const readable = safeLocalStorageGet(probeKey) === probe;
+  const removable = readable
+    && safeLocalStorageRemoveIfUnchanged(probeKey, probe);
   return readable && removable;
 }
 
@@ -585,9 +672,52 @@ function storedSessionResetEventId() {
   return value === undefined ? null : String(value || '');
 }
 
+function sessionRequestFenceKey(id) {
+  return `${SESSION_REQUEST_FENCE_PREFIX}${encodeURIComponent(String(id || ''))}`;
+}
+
+function sessionRequestFenceResolvedKey(id) {
+  return `${SESSION_REQUEST_FENCE_RESOLVED_PREFIX}${encodeURIComponent(String(id || ''))}`;
+}
+
+function storedSessionRequestFences() {
+  const keys = safeLocalStorageKeys(SESSION_REQUEST_FENCE_PREFIX);
+  if (keys === null) return undefined;
+  const records = [];
+  for (const key of keys) {
+    const value = safeLocalStorageGet(key);
+    if (value === undefined) return undefined;
+    if (value === null) continue;
+    const id = String(value || '');
+    if (!id || key !== sessionRequestFenceKey(id)) return undefined;
+    records.push({ id, key, legacy: false });
+  }
+
+  // v5 used one shared key.  Never remove that key from v6: an older tab can
+  // replace its value between our read and remove.  A per-id tombstone retires
+  // only the exact legacy fence that an authoritative response reconciled.
+  const legacyValue = safeLocalStorageGet(SESSION_REQUEST_FENCE_KEY);
+  if (legacyValue === undefined) return undefined;
+  const legacyId = String(legacyValue || '');
+  if (legacyId) {
+    const resolvedValue = safeLocalStorageGet(sessionRequestFenceResolvedKey(legacyId));
+    if (resolvedValue === undefined) return undefined;
+    if (resolvedValue !== legacyId) {
+      records.push({ id: legacyId, key: SESSION_REQUEST_FENCE_KEY, legacy: true });
+    }
+  }
+  records.sort((left, right) => (
+    left.id.localeCompare(right.id)
+      || Number(left.legacy) - Number(right.legacy)
+      || left.key.localeCompare(right.key)
+  ));
+  return records;
+}
+
 function storedSessionRequestFenceId() {
-  const value = safeLocalStorageGet(SESSION_REQUEST_FENCE_KEY);
-  return value === undefined ? undefined : String(value || '');
+  const records = storedSessionRequestFences();
+  if (records === undefined) return undefined;
+  return records[0]?.id || '';
 }
 
 function retireUnhandledSessionReset(resetEventId = storedSessionResetEventId()) {
@@ -599,11 +729,26 @@ function retireUnhandledSessionReset(resetEventId = storedSessionResetEventId())
   return true;
 }
 
-function createSessionRequestFence() {
+function createSessionRequestFence({ allowExisting = false } = {}) {
   const id = `${Date.now()}:${createRequestId()}`;
-  if (!safeLocalStorageSet(SESSION_REQUEST_FENCE_KEY, id)) return null;
-  if (storedSessionRequestFenceId() !== id) return null;
-  return { id, preserve: true, inherited: false };
+  const key = sessionRequestFenceKey(id);
+  if (!safeLocalStorageSet(key, id) || safeLocalStorageGet(key) !== id) return null;
+  const records = storedSessionRequestFences();
+  if (records === undefined) return null;
+  const own = records.find((record) => record.key === key && record.id === id);
+  if (!own) return null;
+  const inheritedRecords = records.filter((record) => record.key !== key);
+  if (inheritedRecords.length && !allowExisting) {
+    safeLocalStorageRemoveIfUnchanged(key, id);
+    return { conflict: true, records: inheritedRecords };
+  }
+  return {
+    id,
+    records: allowExisting ? records : [own],
+    ownRecord: own,
+    preserve: true,
+    inherited: inheritedRecords.length > 0,
+  };
 }
 
 function preserveSessionRequestFence(fence) {
@@ -614,10 +759,130 @@ function resolveSessionRequestFence(fence) {
   if (fence?.id) fence.preserve = false;
 }
 
+function sessionRequestFenceAcknowledgedByEnvelope(envelope, fence) {
+  if (!fence?.id) return true;
+  const records = Array.isArray(fence.records) ? fence.records : [];
+  const expectedIds = new Set(
+    records.map((record) => String(record?.id || '')).filter(Boolean),
+  );
+  if (!expectedIds.size) return false;
+  const acknowledgement = envelope?.session_coordination;
+  if (!acknowledgement || typeof acknowledgement !== 'object' || Array.isArray(acknowledgement)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(acknowledgement);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  if (acknowledgement.version !== SESSION_COORDINATION_VERSION) return false;
+  if (!Array.isArray(acknowledgement.completed_fences)) return false;
+  const completedIds = acknowledgement.completed_fences;
+  if (
+    completedIds.some((id) => typeof id !== 'string' || !id)
+    || new Set(completedIds).size !== completedIds.length
+  ) return false;
+  const completed = new Set(completedIds);
+  return completed.size === expectedIds.size
+    && [...expectedIds].every((id) => completed.has(id));
+}
+
+function assertSessionRequestFenceAcknowledged(envelope, fence) {
+  if (sessionRequestFenceAcknowledgedByEnvelope(envelope, fence)) return true;
+  preserveSessionRequestFence(fence);
+  throw sessionCoordinationError();
+}
+
+function storedSessionRequestFenceRecordResolved(record) {
+  if (!record?.id || !record?.key) return false;
+  if (record.legacy) {
+    const current = safeLocalStorageGet(SESSION_REQUEST_FENCE_KEY);
+    if (current === undefined) return false;
+    if (current !== record.id) return true;
+    return safeLocalStorageGet(sessionRequestFenceResolvedKey(record.id)) === record.id;
+  }
+  const current = safeLocalStorageGet(record.key);
+  if (current === undefined) return false;
+  return current === null;
+}
+
+function clearStoredSessionRequestFenceRecord(record) {
+  if (!record?.id || !record?.key) return false;
+  if (record.legacy) {
+    const resolvedKey = sessionRequestFenceResolvedKey(record.id);
+    return safeLocalStorageSet(resolvedKey, record.id)
+      && safeLocalStorageGet(resolvedKey) === record.id;
+  }
+  const current = safeLocalStorageGet(record.key);
+  if (current === undefined) return false;
+  if (current === null) return true;
+  if (current !== record.id) return false;
+  return safeLocalStorageRemoveIfUnchanged(record.key, record.id);
+}
+
 function clearSessionRequestFence(fence) {
-  if (!fence?.id || storedSessionRequestFenceId() !== fence.id) return false;
-  return safeLocalStorageRemove(SESSION_REQUEST_FENCE_KEY)
-    && storedSessionRequestFenceId() === '';
+  const records = Array.isArray(fence?.records) ? fence.records : [];
+  if (!fence?.id || !records.length) return false;
+  let cleared = true;
+  for (const record of records) {
+    if (!clearStoredSessionRequestFenceRecord(record)) cleared = false;
+  }
+  return cleared && records.every(storedSessionRequestFenceRecordResolved);
+}
+
+function assertSessionRequestFenceCurrent(fence, { exclusive = false } = {}) {
+  const expected = Array.isArray(fence?.records) ? fence.records : [];
+  if (!fence?.id || !expected.length) throw sessionCoordinationError();
+  const pending = storedSessionRequestFences();
+  if (pending === undefined) throw sessionCoordinationError();
+  const expectedKeys = new Set(expected.map((record) => record.key));
+  const ownRecord = fence.ownRecord || (!fence.inherited ? expected[0] : null);
+  const ownPending = ownRecord
+    ? pending.some((record) => (
+      record.key === ownRecord.key && record.id === ownRecord.id
+    ))
+    : expected.some((record) => pending.some((candidate) => (
+      candidate.key === record.key && candidate.id === record.id
+    )));
+  if (!ownPending) {
+    preserveSessionRequestFence(fence);
+    throw staleSessionActionError(
+      '当前请求已被另一页面对账，请重新连接后继续。',
+    );
+  }
+  if (
+    exclusive
+    && (
+      !ownRecord
+      || pending.length !== 1
+      || pending[0].key !== ownRecord.key
+      || pending[0].id !== ownRecord.id
+    )
+  ) {
+    preserveSessionRequestFence(fence);
+    throw staleSessionActionError(
+      '另一页面已有任务，请重新连接后继续。',
+    );
+  }
+  if (!exclusive && !pending.some((record) => expectedKeys.has(record.key))) {
+    preserveSessionRequestFence(fence);
+    throw sessionCoordinationError();
+  }
+  return true;
+}
+
+function applySessionCoordinationHeaders(headers, fence) {
+  if (!fence?.id || !(headers instanceof Headers)) return;
+  const records = Array.isArray(fence.records) ? fence.records : [];
+  const ownRecord = fence.ownRecord || (!fence.inherited ? records[0] : null);
+  const inheritedIds = [...new Set(
+    records
+      .filter((record) => record.key !== ownRecord?.key)
+      .map((record) => String(record.id || ''))
+      .filter(Boolean),
+  )];
+  headers.set('X-Session-Coordination-Version', SESSION_COORDINATION_VERSION);
+  if (ownRecord?.id) headers.set('X-Session-Request-Fence', ownRecord.id);
+  if (inheritedIds.length) {
+    headers.set('X-Session-Reconcile-Fences', JSON.stringify(inheritedIds));
+  }
 }
 
 function assertSessionRequestLease(fence) {
@@ -626,6 +891,19 @@ function assertSessionRequestLease(fence) {
   if (!lease.lost && refreshSessionFallbackLock(lease)) return true;
   preserveSessionRequestFence(fence);
   throw sessionCoordinationError();
+}
+
+function assertSessionRequestCoordination(
+  fence,
+  url,
+  { authoritativeResponse = false } = {},
+) {
+  assertSessionRequestLease(fence);
+  if (authoritativeResponse && fence?.inherited && !fence?.ownRecord) return true;
+  return assertSessionRequestFenceCurrent(
+    fence,
+    { exclusive: isTaskStartingPath(url) },
+  );
 }
 
 function staleSessionActionError(message = '会话已在另一页面更新，请重新连接后继续。') {
@@ -690,48 +968,86 @@ async function withSessionRequestLock(url, callback, { requireSupport = false } 
   if (!isTaskStateRequestPath(url)) return callback();
   const requestEpoch = sessionResetEpoch;
   const runLocked = async (fallbackLease = null) => {
-    const contendedTask = Boolean(fallbackLease?.contendedTask);
     retireUnhandledSessionReset();
-    if (contendedTask && isTaskStartingPath(url)) {
-      throw staleSessionActionError('另一页面已有任务，请在当前会话更新后重试。');
-    }
-    const pendingFenceId = storedSessionRequestFenceId();
+    const pendingFences = storedSessionRequestFences();
+    if (pendingFences === undefined) throw sessionCoordinationError();
+    const pendingFenceBatch = pendingFences.slice(
+      0,
+      SESSION_COORDINATION_MAX_RECONCILE_FENCES,
+    );
+    const pendingFenceId = pendingFenceBatch[0]?.id || '';
     if (
-      (requestEpoch !== sessionResetEpoch || pendingFenceId)
+      (requestEpoch !== sessionResetEpoch || pendingFences.length)
       && isTaskStartingPath(url)
     ) {
       if (pendingFenceId) retireUnresolvedSessionRequestFence(pendingFenceId);
-      throw staleSessionActionError();
-    }
-    if (pendingFenceId === undefined) throw sessionCoordinationError();
-    if (pendingFenceId && isTaskStartingPath(url)) {
-      retireUnresolvedSessionRequestFence(pendingFenceId);
       throw staleSessionActionError(
-        '上次请求结果尚未确认，请重新连接或开始新对话。',
+        pendingFenceId
+          ? '上次请求结果尚未确认，请重新连接或开始新对话。'
+          : undefined,
       );
     }
-    const fence = pendingFenceId
-      ? { id: pendingFenceId, preserve: true, inherited: true }
+    const fence = pendingFences.length
+      ? {
+        id: pendingFenceId,
+        records: pendingFenceBatch,
+        preserve: true,
+        inherited: true,
+      }
       : createSessionRequestFence();
     if (!fence) throw sessionCoordinationError();
+    if (fence.conflict) {
+      retireUnresolvedSessionRequestFence(fence.records?.[0]?.id);
+      throw staleSessionActionError(
+        '另一页面已有任务，请重新连接后继续。',
+      );
+    }
     if (fallbackLease) fence.fallbackLease = fallbackLease;
+    assertSessionRequestCoordination(fence, url);
     return completeSessionRequestWithFence(callback, fence);
   };
   if (sessionRequestLockAvailable()) {
+    const taskStarting = isTaskStartingPath(url);
     return globalThis.navigator.locks.request(
       SESSION_REQUEST_LOCK_NAME,
-      { mode: 'exclusive' },
-      () => runLocked(),
+      taskStarting
+        ? { mode: 'exclusive', ifAvailable: true }
+        : { mode: 'exclusive' },
+      async (lock) => {
+        if (taskStarting && !lock) {
+          // A non-blocking task lock miss proves another page owns the
+          // session transition. Retire this tab's live projection before
+          // surfacing the stale-action error; never queue the old callback.
+          if (sessionRequestLockDepth === 0) retireSessionForCoordinationConflict();
+          throw staleSessionActionError(
+            '另一页面已有任务，请在当前会话更新后重试。',
+          );
+        }
+        sessionRequestLockDepth += 1;
+        try {
+          return await runLocked();
+        } finally {
+          sessionRequestLockDepth -= 1;
+        }
+      },
     );
   }
   const lockKind = isTaskStartingPath(url)
     ? 'task'
     : taskStateApiPath(url) === '/api/reset' ? 'reset' : 'read';
   const fallback = await withSessionFallbackLock(lockKind, runLocked);
-  if (!fallback.supported) {
+  if (fallback.status === 'unsupported') {
     if (requireSupport) return null;
     throw sessionLockUnavailableError();
   }
+  if (fallback.status === 'contended') {
+    throw staleSessionActionError(
+      lockKind === 'task'
+        ? '另一页面已有任务，请在当前会话更新后重试。'
+        : '另一页面正在处理当前会话，请稍后重新连接。',
+    );
+  }
+  if (fallback.status === 'lost') throw sessionCoordinationError();
   return fallback.value;
 }
 
@@ -748,7 +1064,6 @@ function publishSessionReset(sessionRequestFence = null) {
   lastHandledSessionResetEventId = eventId;
   sessionActivityFallbackAt = 0;
   safeLocalStorageRemove(SESSION_ACTIVITY_KEY);
-  resolveSessionRequestFence(sessionRequestFence);
   return true;
 }
 
@@ -820,10 +1135,19 @@ function applyAuthoritativeEmptyAfterCoordinationFailure(envelope, sessionReques
 }
 
 function resolveSessionRequestFenceFromEnvelope(envelope, sessionRequestFence) {
+  if (!sessionRequestFenceAcknowledgedByEnvelope(envelope, sessionRequestFence)) {
+    preserveSessionRequestFence(sessionRequestFence);
+    return false;
+  }
   if (
     authoritativeTaskStateEnvelopeAccepted(envelope)
     || isTaskStateQueueNoUpdate(envelope)
-  ) resolveSessionRequestFence(sessionRequestFence);
+    || isAuthenticationTerminalNoUpdate(envelope)
+  ) {
+    resolveSessionRequestFence(sessionRequestFence);
+    return true;
+  }
+  return false;
 }
 
 function beginTaskStateRequest(url, responseMode) {
@@ -842,6 +1166,13 @@ function isTaskStateQueueNoUpdate(envelope) {
   return envelope?.layer === 'queue' && TASK_STATE_QUEUE_CODES.has(envelope?.code);
 }
 
+function isAuthenticationTerminalNoUpdate(envelope) {
+  return envelope?.status === 'NEEDS_INPUT'
+    && envelope?.layer === 'login'
+    && envelope?.code === 'LOGIN_REQUIRED'
+    && envelope?.action === 'relogin';
+}
+
 function consumeTaskStateResponse(request, envelope, { error = false } = {}) {
   if (request === null || (error && isTaskStateQueueNoUpdate(envelope))) return;
   const accepted = request === activeTaskStateRequest;
@@ -856,7 +1187,11 @@ function consumeTaskStateResponse(request, envelope, { error = false } = {}) {
       const legacyA3 = normalizeA3Snapshot(envelope?.session?.a3);
       const projectionAllowed = workflow?.route === 'A3'
         ? a3SnapshotMatchesTaskState(legacyA3, target)
-        : legacyA3 === null;
+        : legacyA3 === null
+          || (
+            authoritativeTaskStateIsEmpty()
+            && a3SnapshotIsIdleCapability(legacyA3, envelope?.session)
+          );
       if (projectionAllowed) {
         if (workflow?.route === 'A3') taskStateEnvelopeBindings.set(envelope, target);
         taskStateAcceptedEnvelopes.set(envelope, acceptedGeneration);
@@ -1103,6 +1438,29 @@ function a3SnapshotMatchesTaskState(a3, target) {
     return false;
   }
   return a3.units.every((unit) => unit.selected === (unit.unit_id === currentUnitId));
+}
+
+function a3SnapshotIsIdleCapability(a3, session) {
+  return Boolean(
+    a3?.enabled
+    && session?.session_valid === false
+    && String(session.phase || '') === 'IDLE'
+    && !session.has_active_image
+    && Number(session.task_revision || 0) === 0
+    && String(session.candidate_generation || '') === ''
+    && Number(session.candidate_count || 0) === 0
+    && String(session.search_id || '') === ''
+    && a3.phase === 'IDLE'
+    && a3.task_revision === 0
+    && !a3.page_finished
+    && a3.units.length === 0
+    && !a3.selected_unit?.unit_id
+    && !a3.selected_unit?.display_label
+    && !a3.auto_crop_overlay_available
+    && !a3.crop_review_required
+    && !a3.crop_review_code
+    && !a3.crop_draft?.available
+  );
 }
 
 function taskStateAllowsA3UnitNavigation(target, a3 = a3Current()) {
@@ -2085,6 +2443,24 @@ function flushStartupNotices() {
 async function repairUploadedImageHistory() {
   try {
     refreshHistoryActivityFromStorage();
+    // The public coordination contract deliberately bounds one reconciliation
+    // request. Drain older backlogs in exact, acknowledged batches before the
+    // final session/reset request; never truncate IDs and silently clear them.
+    for (let batch = 0; batch < 64; batch += 1) {
+      const pendingFences = storedSessionRequestFences();
+      if (pendingFences === undefined) throw sessionCoordinationError();
+      if (pendingFences.length <= SESSION_COORDINATION_MAX_RECONCILE_FENCES) break;
+      await request(
+        '/api/session', {}, SESSION_BOOTSTRAP_TIMEOUT_MS, '会话恢复超时。', false,
+      );
+      if (batch === 63) {
+        const remaining = storedSessionRequestFences();
+        if (
+          remaining === undefined
+          || remaining.length > SESSION_COORDINATION_MAX_RECONCILE_FENCES
+        ) throw sessionCoordinationError();
+      }
+    }
     let resetRequired = sessionResetRequired;
     let data;
     if (resetRequired) {
@@ -2152,6 +2528,10 @@ async function repairUploadedImageHistory() {
         ['retry_connection'],
       );
     }
+    const remainingFences = storedSessionRequestFences();
+    if (remainingFences === undefined || remainingFences.length) {
+      throw sessionCoordinationError();
+    }
     resolveFailureNotice('connection');
     resolveFailureNotice('session-recovery');
     if (!isBusy) setStatus('ready', '准备就绪');
@@ -2201,6 +2581,23 @@ async function repairUploadedImageHistory() {
           action: 'retry_connection', request_id: createRequestId(), search_id: sessionContext.search_id || '',
         },
       );
+    } else if (
+      error?.layer === 'login'
+      && error?.code === 'LOGIN_REQUIRED'
+      && error?.action === 'relogin'
+    ) {
+      resolveFailureNotice('session-recovery');
+      setStatus('error', '需要重新登录');
+      showFailureNotice(
+        'connection',
+        '登录状态已失效，请重新登录。',
+        ['relogin'],
+        {
+          status: error.status, layer: error.layer, code: error.code,
+          retryable: error.retryable, action: error.action,
+          request_id: error.requestId, search_id: error.searchId,
+        },
+      );
     } else {
       setStatus('error', '暂时无法连接');
       showFailureNotice(
@@ -2217,9 +2614,17 @@ async function repairUploadedImageHistory() {
 function runSessionBootstrap() {
   if (sessionBootstrapPending && sessionBootstrap) return sessionBootstrap;
   sessionBootstrapPending = true;
-  const pending = repairUploadedImageHistory().finally(() => {
-    if (sessionBootstrap === pending) sessionBootstrapPending = false;
-  });
+  let ready = false;
+  const pending = repairUploadedImageHistory()
+    .then((result) => {
+      ready = result;
+      return result;
+    })
+    .finally(() => {
+      if (sessionBootstrap !== pending) return;
+      sessionBootstrapPending = false;
+      if (!ready) sessionBootstrap = null;
+    });
   sessionBootstrap = pending;
   return pending;
 }
@@ -2287,6 +2692,28 @@ function retireSessionForExternalReset() {
   renderHistory();
   closeLightbox();
   setStatus('ready', '会话已在另一页面重置');
+}
+
+function retireSessionForCoordinationConflict() {
+  // Unlike an observed reset, a non-blocking task-lock miss may happen while
+  // this same tab is completing a safe session read. Invalidate the stale UI
+  // projection without aborting that read; its authoritative response may
+  // still reconcile the tab normally.
+  operationVersion += 1;
+  invalidateTaskStateContext();
+  setBusy(false);
+  clearHistory({ preserveStoredHistory: true });
+  sessionResetRequired = false;
+  sessionResetActivityAt = 0;
+  pendingSessionExpiredNotice = false;
+  sessionContext = {
+    session_valid: false, phase: 'IDLE', has_active_image: false,
+    task_revision: 0, candidate_generation: '', candidate_count: 0, search_id: '', a3: null,
+    a3WorkflowId: '', a3WorkflowRevision: 0,
+  };
+  renderHistory();
+  closeLightbox();
+  setStatus('error', '等待重新连接');
 }
 
 function expireHistoryIfNeeded() {
@@ -2518,6 +2945,8 @@ async function request(
   const requestId = createRequestId();
   const headers = new Headers(options?.headers || {});
   headers.set('x-request-id', requestId);
+  applySessionCoordinationHeaders(headers, sessionRequestFence);
+  assertSessionRequestCoordination(sessionRequestFence, url);
   if (track) activeController = controller;
   const timer = setTimeout(() => controller.abort('timeout'), timeoutMs);
   try {
@@ -2530,27 +2959,48 @@ async function request(
       await response.text();
     }
     if (!response.ok) {
-      assertSessionRequestLease(sessionRequestFence);
+      assertSessionRequestCoordination(
+        sessionRequestFence,
+        url,
+        { authoritativeResponse: true },
+      );
+      if (
+        response.status === 401
+        && isAuthenticationTerminalNoUpdate(data)
+      ) {
+        resolveSessionRequestFenceFromEnvelope(data, sessionRequestFence);
+        throw safeHttpError(response.status, data, requestId);
+      }
+      assertSessionRequestFenceAcknowledged(data, sessionRequestFence);
       consumeTaskStateResponse(taskStateRequest, data, { error: true });
+      const fenceResolved = resolveSessionRequestFenceFromEnvelope(
+        data,
+        sessionRequestFence,
+      );
       const emptyResetApplied = applyAuthoritativeEmptyError(
         url,
         data,
         { sessionRequestFence },
       );
       if (emptyResetApplied === false) throw sessionCoordinationError();
-      if (emptyResetApplied === null) {
-        resolveSessionRequestFenceFromEnvelope(data, sessionRequestFence);
-      }
+      if (!fenceResolved) throw sessionCoordinationError();
       throw safeHttpError(response.status, data, requestId);
     }
     if (!contentType.includes('application/json')) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
-    assertSessionRequestLease(sessionRequestFence);
+    assertSessionRequestCoordination(
+      sessionRequestFence,
+      url,
+      { authoritativeResponse: true },
+    );
+    assertSessionRequestFenceAcknowledged(data, sessionRequestFence);
     consumeTaskStateResponse(taskStateRequest, data);
     if (!publishAuthoritativeReset(url, data, { sessionRequestFence })) {
       applyAuthoritativeEmptyAfterCoordinationFailure(data, sessionRequestFence);
       throw sessionCoordinationError();
     }
-    resolveSessionRequestFenceFromEnvelope(data, sessionRequestFence);
+    if (!resolveSessionRequestFenceFromEnvelope(data, sessionRequestFence)) {
+      throw sessionCoordinationError();
+    }
     return data;
   } catch (error) {
     if (error.name === 'AbortError') {
@@ -2604,6 +3054,8 @@ async function requestStream(
   const requestId = createRequestId();
   const headers = new Headers(options?.headers || {});
   headers.set('x-request-id', requestId);
+  applySessionCoordinationHeaders(headers, sessionRequestFence);
+  assertSessionRequestCoordination(sessionRequestFence, url);
   activeController = controller;
   let timer;
   const renewTimeout = () => {
@@ -2616,17 +3068,31 @@ async function requestStream(
     if (!response.ok) {
       let data = {};
       try { data = await response.json(); } catch (_error) { data = {}; }
-      assertSessionRequestLease(sessionRequestFence);
+      assertSessionRequestCoordination(
+        sessionRequestFence,
+        url,
+        { authoritativeResponse: true },
+      );
+      if (
+        response.status === 401
+        && isAuthenticationTerminalNoUpdate(data)
+      ) {
+        resolveSessionRequestFenceFromEnvelope(data, sessionRequestFence);
+        throw safeHttpError(response.status, data, requestId);
+      }
+      assertSessionRequestFenceAcknowledged(data, sessionRequestFence);
       consumeTaskStateResponse(taskStateRequest, data, { error: true });
+      const fenceResolved = resolveSessionRequestFenceFromEnvelope(
+        data,
+        sessionRequestFence,
+      );
       const emptyResetApplied = applyAuthoritativeEmptyError(
         url,
         data,
         { sessionRequestFence },
       );
       if (emptyResetApplied === false) throw sessionCoordinationError();
-      if (emptyResetApplied === null) {
-        resolveSessionRequestFenceFromEnvelope(data, sessionRequestFence);
-      }
+      if (!fenceResolved) throw sessionCoordinationError();
       throw safeHttpError(response.status, data, requestId);
     }
     if (!response.body) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
@@ -2647,7 +3113,12 @@ async function requestStream(
         }
         if (event.type === 'result') {
           const terminalResult = event.data;
-          assertSessionRequestLease(sessionRequestFence);
+          assertSessionRequestCoordination(
+            sessionRequestFence,
+            url,
+            { authoritativeResponse: true },
+          );
+          assertSessionRequestFenceAcknowledged(terminalResult, sessionRequestFence);
           consumeTaskStateResponse(taskStateRequest, terminalResult);
           if (!publishAuthoritativeReset(
             url,
@@ -2660,24 +3131,33 @@ async function requestStream(
             );
             throw sessionCoordinationError();
           }
-          resolveSessionRequestFenceFromEnvelope(terminalResult, sessionRequestFence);
+          if (!resolveSessionRequestFenceFromEnvelope(terminalResult, sessionRequestFence)) {
+            throw sessionCoordinationError();
+          }
           clearTimeout(timer);
           try { await reader.cancel(); } catch (_error) { /* terminal result already won */ }
           if (!terminalResult) throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
           return terminalResult;
         }
         if (event.type === 'error') {
-          assertSessionRequestLease(sessionRequestFence);
+          assertSessionRequestCoordination(
+            sessionRequestFence,
+            url,
+            { authoritativeResponse: true },
+          );
+          assertSessionRequestFenceAcknowledged(event, sessionRequestFence);
           consumeTaskStateResponse(taskStateRequest, event, { error: true });
+          const fenceResolved = resolveSessionRequestFenceFromEnvelope(
+            event,
+            sessionRequestFence,
+          );
           const emptyResetApplied = applyAuthoritativeEmptyError(
             url,
             event,
             { sessionRequestFence },
           );
           if (emptyResetApplied === false) throw sessionCoordinationError();
-          if (emptyResetApplied === null) {
-            resolveSessionRequestFenceFromEnvelope(event, sessionRequestFence);
-          }
+          if (!fenceResolved) throw sessionCoordinationError();
           throw streamedError(event);
         }
       }

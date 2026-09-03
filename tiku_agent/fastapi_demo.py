@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
-from functools import partial
+from functools import partial, wraps
 from io import BytesIO
 import inspect
 import json
@@ -119,6 +119,15 @@ _IMAGE_JSON_TASK_STATE_CAPABILITIES = TaskStateEntryCapabilities(
 _IMAGE_STREAM_TASK_STATE_CAPABILITIES = _IMAGE_JSON_TASK_STATE_CAPABILITIES
 FEEDBACK_MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 MAX_FEEDBACK_BYTES = 128 * 1024
+SESSION_COORDINATION_VERSION = "6"
+SESSION_COORDINATION_VERSION_HEADER = "X-Session-Coordination-Version"
+SESSION_REQUEST_FENCE_HEADER = "X-Session-Request-Fence"
+SESSION_RECONCILE_FENCES_HEADER = "X-Session-Reconcile-Fences"
+SESSION_COORDINATION_ACK_FIELD = "session_coordination"
+_SESSION_COORDINATION_MAX_RECONCILE_FENCES = 64
+_SESSION_COORDINATION_RETENTION_SECONDS = 2 * 60 * 60
+_SESSION_COORDINATION_FUTURE_SKEW_SECONDS = 5 * 60
+_SESSION_REQUEST_FENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$")
 FEEDBACK_TAGS = {
     "positive": {
         "found_answer", "relevant_results", "clear_reply", "fast", "other",
@@ -206,6 +215,345 @@ class _QueuedStreamEvent:
     body: str
     response_record: ResponseRecord | None = None
     terminal_recorder: Callable[[], None] | None = None
+
+
+@dataclass(frozen=True)
+class _SessionCoordinationHeaders:
+    versioned: bool
+    request_fence: str = ""
+    reconcile_fences: tuple[str, ...] = ()
+
+
+class _SessionCoordinationGate:
+    """Serialize one session's v6 admission and reconciliation boundary."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._busy = False
+        self._completed_fences: dict[str, float] = {}
+        self._last_used = time.monotonic()
+
+    def _prune_completed_locked(self, now: float) -> None:
+        expired = [
+            fence_id
+            for fence_id, expires_at in self._completed_fences.items()
+            if expires_at <= now
+        ]
+        for fence_id in expired:
+            self._completed_fences.pop(fence_id, None)
+
+    def begin_task(self, fence_id: str) -> bool:
+        clean_fence = str(fence_id or "")
+        with self._condition:
+            contended = self._busy
+            while self._busy:
+                self._condition.wait()
+            now = time.monotonic()
+            self._prune_completed_locked(now)
+            self._busy = True
+            self._last_used = now
+            admitted = (
+                not contended
+                and (
+                    not clean_fence
+                    or clean_fence not in self._completed_fences
+                )
+            )
+            # Every request that reaches this serialized boundary is terminal
+            # for its exact fence, including a contender that must fail closed.
+            # Otherwise that contender could retry after the winner finishes
+            # and unexpectedly execute as a fresh task.
+            if clean_fence:
+                self._completed_fences[clean_fence] = (
+                    now + _SESSION_COORDINATION_RETENTION_SECONDS
+                )
+            return admitted
+
+    def finish_task(self, fence_id: str, admitted: bool) -> None:
+        clean_fence = str(fence_id or "")
+        with self._condition:
+            now = time.monotonic()
+            if clean_fence:
+                self._completed_fences[clean_fence] = (
+                    now + _SESSION_COORDINATION_RETENTION_SECONDS
+                )
+            self._last_used = now
+            self._busy = False
+            self._condition.notify_all()
+
+    @contextmanager
+    def task(self, fence_id: str):
+        admitted = self.begin_task(fence_id)
+        try:
+            yield admitted
+        finally:
+            self.finish_task(fence_id, admitted)
+
+    @contextmanager
+    def reconcile(
+        self,
+        fence_ids: tuple[str, ...],
+        request_fence: str = "",
+    ):
+        clean_request_fence = str(request_fence or "")
+        with self._condition:
+            while self._busy:
+                self._condition.wait()
+            now = time.monotonic()
+            self._prune_completed_locked(now)
+            self._busy = True
+            self._last_used = now
+            for fence_id in fence_ids:
+                self._completed_fences[fence_id] = (
+                    now + _SESSION_COORDINATION_RETENTION_SECONDS
+                )
+            admitted = (
+                not clean_request_fence
+                or clean_request_fence not in self._completed_fences
+            )
+            if admitted and clean_request_fence:
+                self._completed_fences[clean_request_fence] = (
+                    now + _SESSION_COORDINATION_RETENTION_SECONDS
+                )
+        try:
+            yield admitted
+        finally:
+            with self._condition:
+                now = time.monotonic()
+                if admitted and clean_request_fence:
+                    self._completed_fences[clean_request_fence] = (
+                        now + _SESSION_COORDINATION_RETENTION_SECONDS
+                    )
+                self._last_used = now
+                self._busy = False
+                self._condition.notify_all()
+
+    def expired(self, now: float) -> bool:
+        with self._condition:
+            self._prune_completed_locked(now)
+            return (
+                not self._busy
+                and not self._completed_fences
+                and now - self._last_used >= _SESSION_COORDINATION_RETENTION_SECONDS
+            )
+
+
+class _SessionCoordinationRegistry:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._gates: dict[str, _SessionCoordinationGate] = {}
+        self._pins: dict[str, int] = {}
+        self._last_sweep = time.monotonic()
+
+    def _pin(self, session_id: str) -> tuple[str, _SessionCoordinationGate]:
+        clean_session_id = str(session_id or "").strip()
+        if not clean_session_id:
+            raise ValueError("session_id is required for session coordination")
+        with self._lock:
+            now = time.monotonic()
+            if now - self._last_sweep >= 60:
+                self._gates = {
+                    key: candidate
+                    for key, candidate in self._gates.items()
+                    if self._pins.get(key, 0) or not candidate.expired(now)
+                }
+                self._pins = {
+                    key: count
+                    for key, count in self._pins.items()
+                    if key in self._gates and count > 0
+                }
+                self._last_sweep = now
+            gate = self._gates.get(clean_session_id)
+            if gate is None:
+                gate = _SessionCoordinationGate()
+                self._gates[clean_session_id] = gate
+            self._pins[clean_session_id] = self._pins.get(clean_session_id, 0) + 1
+            return clean_session_id, gate
+
+    def _unpin(self, session_id: str, gate: _SessionCoordinationGate) -> None:
+        with self._lock:
+            if self._gates.get(session_id) is not gate:
+                raise RuntimeError("session coordination gate identity changed while pinned")
+            pins = self._pins.get(session_id, 0)
+            if pins <= 0:
+                raise RuntimeError("session coordination gate pin underflow")
+            if pins == 1:
+                self._pins.pop(session_id, None)
+            else:
+                self._pins[session_id] = pins - 1
+
+    @contextmanager
+    def task(self, session_id: str, fence_id: str):
+        clean_session_id, gate = self._pin(session_id)
+        try:
+            with gate.task(fence_id) as admitted:
+                yield admitted
+        finally:
+            self._unpin(clean_session_id, gate)
+
+    @contextmanager
+    def reconcile(
+        self,
+        session_id: str,
+        fence_ids: tuple[str, ...],
+        request_fence: str = "",
+    ):
+        clean_session_id, gate = self._pin(session_id)
+        try:
+            with gate.reconcile(fence_ids, request_fence) as admitted:
+                yield admitted
+        finally:
+            self._unpin(clean_session_id, gate)
+
+def _same_origin_browser_request(request: Request) -> bool:
+    return str(request.headers.get("sec-fetch-site") or "").strip().lower() == "same-origin"
+
+
+def _valid_session_request_fence(value: object) -> bool:
+    return isinstance(value, str) and bool(_SESSION_REQUEST_FENCE_RE.fullmatch(value.strip()))
+
+
+def _current_session_request_fence(value: object) -> bool:
+    """Accept only a recent v6 task/read fence minted from browser Date.now()."""
+
+    if not _valid_session_request_fence(value):
+        return False
+    timestamp_text = str(value).strip().split(":", 1)[0]
+    if not timestamp_text.isdigit() or len(timestamp_text) != 13:
+        return False
+    timestamp_ms = int(timestamp_text)
+    now_ms = int(time.time() * 1000)
+    oldest_ms = now_ms - (_SESSION_COORDINATION_RETENTION_SECONDS * 1000)
+    newest_ms = now_ms + (_SESSION_COORDINATION_FUTURE_SKEW_SECONDS * 1000)
+    return oldest_ms <= timestamp_ms <= newest_ms
+
+
+def _parse_session_coordination_headers(
+    request: Request,
+    *,
+    task_request: bool,
+) -> tuple[_SessionCoordinationHeaders | None, str]:
+    header_names = (
+        SESSION_COORDINATION_VERSION_HEADER,
+        SESSION_REQUEST_FENCE_HEADER,
+        SESSION_RECONCILE_FENCES_HEADER,
+    )
+    supplied = any(name in request.headers for name in header_names)
+    if not supplied:
+        if task_request and _same_origin_browser_request(request):
+            return None, "same-origin browser task is missing v6 coordination headers"
+        return _SessionCoordinationHeaders(versioned=False), ""
+
+    version = str(request.headers.get(SESSION_COORDINATION_VERSION_HEADER) or "").strip()
+    if version != SESSION_COORDINATION_VERSION:
+        return None, "unsupported session coordination version"
+
+    raw_reconcile = request.headers.get(SESSION_RECONCILE_FENCES_HEADER)
+    reconcile_fences: tuple[str, ...] = ()
+    if raw_reconcile is not None:
+        try:
+            decoded = json.loads(raw_reconcile)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None, "invalid reconciliation fence list"
+        if (
+            not isinstance(decoded, list)
+            or len(decoded) > _SESSION_COORDINATION_MAX_RECONCILE_FENCES
+            or any(not _valid_session_request_fence(value) for value in decoded)
+        ):
+            return None, "invalid reconciliation fence list"
+        normalized = tuple(str(value).strip() for value in decoded)
+        if len(set(normalized)) != len(normalized):
+            return None, "duplicate reconciliation fence"
+        reconcile_fences = normalized
+
+    raw_request_fence = request.headers.get(SESSION_REQUEST_FENCE_HEADER)
+    if task_request:
+        if not _current_session_request_fence(raw_request_fence):
+            return None, "v6 task is missing a current request fence"
+        if reconcile_fences:
+            return None, "task request cannot reconcile pending fences"
+        return _SessionCoordinationHeaders(
+            versioned=True,
+            request_fence=str(raw_request_fence).strip(),
+        ), ""
+    if raw_request_fence is not None and not _current_session_request_fence(
+        raw_request_fence
+    ):
+        return None, "reconciliation request has a non-current request fence"
+    clean_request_fence = str(raw_request_fence or "").strip()
+    if clean_request_fence and clean_request_fence in reconcile_fences:
+        return None, "request fence cannot also be reconciled"
+    return _SessionCoordinationHeaders(
+        versioned=True,
+        request_fence=clean_request_fence,
+        reconcile_fences=reconcile_fences,
+    ), ""
+
+
+def _coordination_completed_fences(
+    coordination: _SessionCoordinationHeaders,
+) -> tuple[str, ...]:
+    values = (*coordination.reconcile_fences, coordination.request_fence)
+    return tuple(dict.fromkeys(value for value in values if value))
+
+
+def _with_session_coordination_ack(
+    payload: dict[str, object],
+    fence_ids: tuple[str, ...],
+) -> dict[str, object]:
+    payload[SESSION_COORDINATION_ACK_FIELD] = {
+        "version": SESSION_COORDINATION_VERSION,
+        "completed_fences": list(fence_ids),
+    }
+    return payload
+
+
+def _mark_session_coordination_ack(
+    request: Request,
+    fence_ids: tuple[str, ...] = (),
+) -> None:
+    request.state.session_coordination_versioned = True
+    existing = tuple(
+        str(value)
+        for value in getattr(
+            request.state,
+            "session_coordination_completed_fences",
+            (),
+        )
+        if value
+    )
+    request.state.session_coordination_completed_fences = tuple(
+        dict.fromkeys((*existing, *fence_ids))
+    )
+
+
+def _attach_session_coordination_ack(
+    response: Response,
+    request: Request,
+) -> Response:
+    if not getattr(request.state, "session_coordination_versioned", False):
+        return response
+    if not isinstance(response, JSONResponse):
+        return response
+    try:
+        payload = json.loads(bytes(response.body))
+    except (TypeError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return response
+    if not isinstance(payload, dict):
+        return response
+    fence_ids = tuple(
+        str(value)
+        for value in getattr(
+            request.state,
+            "session_coordination_completed_fences",
+            (),
+        )
+        if value
+    )
+    _with_session_coordination_ack(payload, fence_ids)
+    response.body = response.render(payload)
+    response.headers["content-length"] = str(len(response.body))
+    return response
 
 
 class _AgentPayload(dict[str, object]):
@@ -333,6 +681,8 @@ def create_app(
     )
     app.state.response_store = response_store
     app.state.trace_event_recorder = trace_event_recorder
+    session_coordination = _SessionCoordinationRegistry()
+    app.state.session_coordination = session_coordination
     app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
 
     def invite_login_rejection(
@@ -462,7 +812,7 @@ def create_app(
         # decoration path. Preserve the same request correlation header while
         # respecting any explicitly supplied value.
         result.headers.setdefault("X-Request-ID", _request_id(request))
-        return result
+        return _attach_session_coordination_ack(result, request)
 
     @app.exception_handler(HTTPException)
     async def public_http_error(request: Request, exc: HTTPException) -> Response:
@@ -720,6 +1070,11 @@ def create_app(
                     )
                     if identity is None and not public_path:
                         if request.url.path.startswith("/api/"):
+                            # Authentication failed before business execution.
+                            # Do not acknowledge client fences here: a request
+                            # that passed authentication concurrently may not
+                            # have reached its per-session gate yet. The browser
+                            # keeps those fences and reconciles them after login.
                             result = request_protocol_response(
                                 request,
                                 "请先使用有效邀请码登录。",
@@ -1142,7 +1497,313 @@ def create_app(
         )
         return {"status": "ok", "trace_events": trace_health}
 
+    def coordination_stale_response(
+        session_id: str,
+        *,
+        request_id: str,
+        capabilities: TaskStateEntryCapabilities,
+    ) -> AgentResponse:
+        try:
+            captured = runtime.session_response_snapshot_v1(
+                session_id,
+                capabilities=capabilities,
+                response_frozen=True,
+            )
+        except Exception as exc:
+            setattr(exc, "_response_snapshot_attempted", True)
+            _carry_frozen_task_state_failure(
+                exc,
+                runtime,
+                legacy_snapshot=_exception_response_snapshot(exc),
+                task_state=_exception_task_state_snapshot(exc),
+            )
+            raise
+        if not _has_exact_response_task_state_pair(
+            captured.legacy_session if type(captured) is SessionResponseSnapshotV1 else None,
+            captured.task_state if type(captured) is SessionResponseSnapshotV1 else None,
+        ):
+            exc = RuntimeError("session coordination rejection snapshot is incomplete")
+            setattr(exc, "_response_snapshot_attempted", True)
+            _carry_frozen_task_state_failure(
+                exc,
+                runtime,
+                legacy_snapshot=(
+                    captured.legacy_session
+                    if type(captured) is SessionResponseSnapshotV1
+                    else None
+                ),
+                task_state=(
+                    captured.task_state
+                    if type(captured) is SessionResponseSnapshotV1
+                    else None
+                ),
+            )
+            raise exc
+        snapshot = dict(captured.legacy_session)
+        response = AgentResponse(
+            text="这个请求已经失效，请重新连接后再试。",
+            intent="stale_action",
+            protocol=RequestProtocol.from_code(
+                "STALE_ACTION",
+                request_id=request_id,
+                search_id=str(snapshot.get("search_id") or ""),
+            ).to_dict(),
+        )
+        response.response_snapshot = snapshot
+        response.response_projection_snapshot = dict(snapshot)
+        response.response_task_state_snapshot = captured.task_state
+        response.response_media_snapshot_captured = True
+        response.uploaded_image_path = captured.uploaded_image_path
+        return response
+
+    def coordination_http_rejection(
+        request: Request,
+        session_id: str,
+        reason: str,
+    ) -> JSONResponse:
+        snapshot: Mapping[str, object] = {}
+        task_state: object = None
+        if session_id:
+            stale = coordination_stale_response(
+                session_id,
+                request_id=_request_id(request),
+                capabilities=_JSON_TASK_STATE_CAPABILITIES,
+            )
+            snapshot = stale.response_snapshot
+            task_state = stale.response_task_state_snapshot
+        return request_protocol_response(
+            request,
+            reason,
+            RequestProtocol.from_code(
+                "STALE_ACTION",
+                request_id=_request_id(request),
+                search_id=str(snapshot.get("search_id") or ""),
+            ),
+            status_code=409,
+            headers={"Cache-Control": "private, no-store"},
+            response_snapshot=snapshot,
+            response_task_state_snapshot=task_state,
+            response_snapshot_attempted=bool(session_id),
+        )
+
+    async def coordinated_task_preflight(
+        request: Request,
+    ) -> tuple[_SessionCoordinationHeaders | None, Response | None]:
+        """Validate browser task coordination before consuming request input."""
+
+        coordination, rejection = _parse_session_coordination_headers(
+            request,
+            task_request=True,
+        )
+        if rejection:
+            session_id = _session_id(request, cookie_name=session_cookie)
+
+            def reject() -> JSONResponse:
+                # Serialize the authoritative rejection snapshot with any
+                # already-running task, but do not acknowledge an invalid or
+                # absent fence as completed.
+                with session_coordination.task(session_id, ""):
+                    return coordination_http_rejection(
+                        request,
+                        session_id,
+                        rejection,
+                    )
+
+            return None, await asyncio.to_thread(reject)
+        assert coordination is not None
+        if coordination.versioned:
+            # Input validation still precedes the admission boundary.  An
+            # error raised before the gate therefore carries an empty ACK and
+            # leaves the exact browser fence available for reconciliation.
+            _mark_session_coordination_ack(request)
+        return coordination, None
+
+    def coordination_stale_json_response(
+        request: Request,
+        session_id: str,
+        *,
+        capabilities: TaskStateEntryCapabilities,
+    ) -> JSONResponse:
+        stale = coordination_stale_response(
+            session_id,
+            request_id=_request_id(request),
+            capabilities=capabilities,
+        )
+        return _agent_json(
+            stale,
+            runtime,
+            session_id,
+            uploaded_image=_task_state_uploaded_image(stale, runtime),
+            response_store=response_store,
+            identity_key=_identity_key(request) or "local",
+            secure_cookie=_is_secure_request(request),
+            cookie_name=session_cookie,
+            task_state_capabilities=capabilities,
+        )
+
+    async def run_coordinated_json_task(
+        request: Request,
+        coordination: _SessionCoordinationHeaders,
+        session_id: str,
+        execute: Callable[[], Response],
+        *,
+        capabilities: TaskStateEntryCapabilities,
+    ) -> Response:
+        """Hold the per-session gate for the complete synchronous task path."""
+
+        if not coordination.versioned:
+            # Headerless non-browser callers predate browser coordination and
+            # retain their existing runtime admission/queue semantics.
+            return await asyncio.to_thread(execute)
+
+        def coordinated_execute() -> Response:
+            with session_coordination.task(
+                session_id,
+                coordination.request_fence,
+            ) as admitted:
+                _mark_session_coordination_ack(
+                    request,
+                    _coordination_completed_fences(coordination),
+                )
+                if admitted:
+                    return execute()
+                return coordination_stale_json_response(
+                    request,
+                    session_id,
+                    capabilities=capabilities,
+                )
+
+        result = await asyncio.to_thread(coordinated_execute)
+        return _attach_session_coordination_ack(result, request)
+
+    def coordinated_stream_response(
+        request: Request,
+        coordination: _SessionCoordinationHeaders,
+        session_id: str,
+        execute: Callable[[Callable[[str, str], None]], dict[str, object]],
+        *,
+        capabilities: TaskStateEntryCapabilities,
+    ) -> StreamingResponse:
+        """Bind a stream's gate to the real worker, including cancellation."""
+
+        request_id = _request_id(request)
+        identity_key = _identity_key(request)
+        completed_fences = _coordination_completed_fences(coordination)
+        crossed_boundary = threading.Event()
+
+        def coordinated_execute(
+            progress: Callable[[str, str], None],
+        ) -> dict[str, object]:
+            with session_coordination.task(
+                session_id,
+                coordination.request_fence,
+            ) as admitted:
+                if coordination.versioned:
+                    _mark_session_coordination_ack(
+                        request,
+                        completed_fences,
+                    )
+                    crossed_boundary.set()
+                if admitted:
+                    return execute(progress)
+                stale = coordination_stale_response(
+                    session_id,
+                    request_id=request_id,
+                    capabilities=capabilities,
+                )
+                return _agent_payload(
+                    stale,
+                    runtime,
+                    session_id,
+                    uploaded_image=_task_state_uploaded_image(stale, runtime),
+                    response_store=response_store,
+                    identity_key=identity_key or "local",
+                    response_mode="stream",
+                    defer_authoritative=True,
+                    include_task_state=True,
+                    task_state_capabilities=capabilities,
+                )
+
+        def completed_ack() -> tuple[str, ...] | None:
+            if not coordination.versioned or not crossed_boundary.is_set():
+                return None
+            return completed_fences
+
+        worker_execute = coordinated_execute if coordination.versioned else execute
+        acknowledgement = completed_ack if coordination.versioned else None
+
+        result = StreamingResponse(
+            _stream_agent_events(
+                worker_execute,
+                request_id=request_id,
+                trace_context=_request_trace_context(request),
+                trace_event_session=current_trace_event_session(),
+                trace_meta=_current_public_trace_meta(),
+                runtime=runtime,
+                response_store=response_store,
+                session_id=session_id,
+                identity_key=identity_key or "local",
+                task_state_capabilities=capabilities,
+                session_coordination_ack=acknowledgement,
+            ),
+            media_type="application/x-ndjson",
+        )
+        _set_session_cookie(
+            result,
+            session_id,
+            secure_cookie=_is_secure_request(request),
+            cookie_name=session_cookie,
+        )
+        return result
+
+    def coordinated_reconciliation_endpoint(*, mint_session: bool):
+        def decorate(endpoint):
+            @wraps(endpoint)
+            def wrapped(request: Request):
+                if mint_session:
+                    session_id = _session_id(request, cookie_name=session_cookie)
+                else:
+                    session_id = str(request.cookies.get(session_cookie) or "").strip()
+                    if session_id:
+                        session_id = _session_id(request, cookie_name=session_cookie)
+                coordination, rejection = _parse_session_coordination_headers(
+                    request,
+                    task_request=False,
+                )
+                if coordination is not None and coordination.versioned:
+                    _mark_session_coordination_ack(request)
+                if not session_id:
+                    if rejection:
+                        return coordination_http_rejection(request, "", rejection)
+                    return _attach_session_coordination_ack(endpoint(request), request)
+                if rejection:
+                    with session_coordination.reconcile(session_id, ()):
+                        return coordination_http_rejection(request, session_id, rejection)
+                assert coordination is not None
+                with session_coordination.reconcile(
+                    session_id,
+                    coordination.reconcile_fences,
+                    coordination.request_fence,
+                ) as admitted:
+                    if coordination.versioned:
+                        _mark_session_coordination_ack(
+                            request,
+                            _coordination_completed_fences(coordination),
+                        )
+                    if not admitted:
+                        return coordination_http_rejection(
+                            request,
+                            session_id,
+                            "session coordination request fence was already completed",
+                        )
+                    return _attach_session_coordination_ack(endpoint(request), request)
+
+            return wrapped
+
+        return decorate
+
     @app.get("/api/session")
+    @coordinated_reconciliation_endpoint(mint_session=True)
     def session(request: Request) -> JSONResponse:
         session_id = _session_id(request, cookie_name=session_cookie)
         try:
@@ -1211,6 +1872,10 @@ def create_app(
 
     @app.post("/api/message")
     async def message(request: Request) -> Response:
+        coordination, coordination_rejection = await coordinated_task_preflight(request)
+        if coordination_rejection is not None:
+            return coordination_rejection
+        assert coordination is not None
         try:
             payload = await request.json()
         except Exception as exc:  # noqa: BLE001 - malformed external input.
@@ -1269,10 +1934,20 @@ def create_app(
         # The JSON compatibility endpoint runs the same synchronous model and
         # search pipeline as the streaming endpoint. Keep it off the ASGI event
         # loop so /health remains responsive during a long provider call.
-        return await asyncio.to_thread(execute)
+        return await run_coordinated_json_task(
+            request,
+            coordination,
+            session_id,
+            execute,
+            capabilities=_JSON_TASK_STATE_CAPABILITIES,
+        )
 
     @app.post("/api/message/stream")
-    async def message_stream(request: Request) -> StreamingResponse:
+    async def message_stream(request: Request) -> Response:
+        coordination, coordination_rejection = await coordinated_task_preflight(request)
+        if coordination_rejection is not None:
+            return coordination_rejection
+        assert coordination is not None
         try:
             payload = await request.json()
         except Exception as exc:  # noqa: BLE001 - malformed external input.
@@ -1285,7 +1960,6 @@ def create_app(
         session_id = _session_id(request, cookie_name=session_cookie)
         request_id = _request_id(request)
         identity_key = _identity_key(request)
-        trace_context = _request_trace_context(request)
 
         def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
             action_context = payload.get("action_context")
@@ -1331,30 +2005,16 @@ def create_app(
                 task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
             )
 
-        result = StreamingResponse(
-            _stream_agent_events(
-                execute,
-                request_id=request_id,
-                trace_context=trace_context,
-                trace_event_session=current_trace_event_session(),
-                trace_meta=_current_public_trace_meta(),
-                runtime=runtime,
-                response_store=response_store,
-                session_id=session_id,
-                identity_key=identity_key or "local",
-                task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
-            ),
-            media_type="application/x-ndjson",
-        )
-        _set_session_cookie(
-            result,
+        return coordinated_stream_response(
+            request,
+            coordination,
             session_id,
-            secure_cookie=_is_secure_request(request),
-            cookie_name=session_cookie,
+            execute,
+            capabilities=_STREAM_TASK_STATE_CAPABILITIES,
         )
-        return result
 
     @app.post("/api/reset")
+    @coordinated_reconciliation_endpoint(mint_session=False)
     def reset(request: Request) -> JSONResponse:
         session_id = str(request.cookies.get(session_cookie) or "").strip()
         search_id = ""
@@ -1472,29 +2132,30 @@ def create_app(
 
     @app.post("/api/image")
     async def image(request: Request) -> Response:
+        coordination, coordination_rejection = await coordinated_task_preflight(request)
+        if coordination_rejection is not None:
+            return coordination_rejection
+        assert coordination is not None
         content, filename, content_type = await _read_image_upload(request)
-        incoming = _write_incoming_image(
+        incoming_suffix = _validated_incoming_image_suffix(
             content,
             filename,
             content_type,
-            incoming_dir=incoming_dir,
         )
         # Missing, oversized, and undecodable input is rejected before a new
         # session exists. A failed upload must not mint a Cookie merely so the
         # HTTP error can carry task state.
-        try:
-            session_id = _session_id(request, cookie_name=session_cookie)
-            request_id = _request_id(request)
-            identity_key = _identity_key(request)
-            secure_cookie = _is_secure_request(request)
-        except BaseException:
-            # The worker-level finally below has not been installed yet.  A
-            # failed request/session initialization must not orphan the file
-            # that input validation just persisted.
-            incoming.unlink(missing_ok=True)
-            raise
+        session_id = _session_id(request, cookie_name=session_cookie)
+        request_id = _request_id(request)
+        identity_key = _identity_key(request)
+        secure_cookie = _is_secure_request(request)
 
         def execute() -> Response:
+            incoming = _write_validated_incoming_image(
+                content,
+                incoming_suffix,
+                incoming_dir=incoming_dir,
+            )
             try:
                 response = _handle_image(
                     runtime,
@@ -1505,37 +2166,50 @@ def create_app(
                     task_state_capabilities=_IMAGE_JSON_TASK_STATE_CAPABILITIES,
                 )
                 uploaded_image = _task_state_uploaded_image(response, runtime)
+                return _agent_json(
+                    response,
+                    runtime,
+                    session_id,
+                    uploaded_image=uploaded_image,
+                    response_store=response_store,
+                    identity_key=identity_key or "local",
+                    secure_cookie=secure_cookie,
+                    cookie_name=session_cookie,
+                    task_state_capabilities=_IMAGE_JSON_TASK_STATE_CAPABILITIES,
+                )
             finally:
                 incoming.unlink(missing_ok=True)
-            return _agent_json(
-                response,
-                runtime,
-                session_id,
-                uploaded_image=uploaded_image,
-                response_store=response_store,
-                identity_key=identity_key or "local",
-                secure_cookie=secure_cookie,
-                cookie_name=session_cookie,
-                task_state_capabilities=_IMAGE_JSON_TASK_STATE_CAPABILITIES,
-            )
 
-        return await asyncio.to_thread(execute)
+        return await run_coordinated_json_task(
+            request,
+            coordination,
+            session_id,
+            execute,
+            capabilities=_IMAGE_JSON_TASK_STATE_CAPABILITIES,
+        )
 
     @app.post("/api/image/stream")
-    async def image_stream(request: Request) -> StreamingResponse:
+    async def image_stream(request: Request) -> Response:
+        coordination, coordination_rejection = await coordinated_task_preflight(request)
+        if coordination_rejection is not None:
+            return coordination_rejection
+        assert coordination is not None
         content, filename, content_type = await _read_image_upload(request)
         session_id = _session_id(request, cookie_name=session_cookie)
-        incoming = _write_incoming_image(
+        incoming_suffix = _validated_incoming_image_suffix(
             content,
             filename,
             content_type,
-            incoming_dir=incoming_dir,
         )
         request_id = _request_id(request)
         identity_key = _identity_key(request)
-        trace_context = _request_trace_context(request)
 
         def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
+            incoming = _write_validated_incoming_image(
+                content,
+                incoming_suffix,
+                incoming_dir=incoming_dir,
+            )
             try:
                 response = _handle_image(
                     runtime,
@@ -1562,28 +2236,13 @@ def create_app(
             finally:
                 incoming.unlink(missing_ok=True)
 
-        result = StreamingResponse(
-            _stream_agent_events(
-                execute,
-                request_id=request_id,
-                trace_context=trace_context,
-                trace_event_session=current_trace_event_session(),
-                trace_meta=_current_public_trace_meta(),
-                runtime=runtime,
-                response_store=response_store,
-                session_id=session_id,
-                identity_key=identity_key or "local",
-                task_state_capabilities=_IMAGE_STREAM_TASK_STATE_CAPABILITIES,
-            ),
-            media_type="application/x-ndjson",
-        )
-        _set_session_cookie(
-            result,
+        return coordinated_stream_response(
+            request,
+            coordination,
             session_id,
-            secure_cookie=_is_secure_request(request),
-            cookie_name=session_cookie,
+            execute,
+            capabilities=_IMAGE_STREAM_TASK_STATE_CAPABILITIES,
         )
-        return result
 
     @app.get("/api/upload/{filename}")
     def get_upload(filename: str, request: Request) -> FileResponse:
@@ -1614,6 +2273,12 @@ def create_app(
 
         @app.post("/api/a3/select")
         async def a3_select(request: Request) -> Response:
+            coordination, coordination_rejection = await coordinated_task_preflight(
+                request
+            )
+            if coordination_rejection is not None:
+                return coordination_rejection
+            assert coordination is not None
             try:
                 payload = await request.json()
             except Exception as exc:  # noqa: BLE001 - malformed external input.
@@ -1637,25 +2302,41 @@ def create_app(
             }
             if identity_key:
                 kwargs["identity_key"] = identity_key
-            response = runtime.select_unit(  # type: ignore[attr-defined]
+
+            def execute() -> Response:
+                response = runtime.select_unit(  # type: ignore[attr-defined]
+                    session_id,
+                    unit_id,
+                    **kwargs,
+                )
+                return _agent_json(
+                    response,
+                    runtime,
+                    session_id,
+                    submitted_crop=response.submitted_crop_path,
+                    response_store=response_store,
+                    identity_key=_identity_key(request) or "local",
+                    secure_cookie=_is_secure_request(request),
+                    cookie_name=session_cookie,
+                    task_state_capabilities=_JSON_TASK_STATE_CAPABILITIES,
+                )
+
+            return await run_coordinated_json_task(
+                request,
+                coordination,
                 session_id,
-                unit_id,
-                **kwargs,
-            )
-            return _agent_json(
-                response,
-                runtime,
-                session_id,
-                submitted_crop=response.submitted_crop_path,
-                response_store=response_store,
-                identity_key=_identity_key(request) or "local",
-                secure_cookie=_is_secure_request(request),
-                cookie_name=session_cookie,
-                task_state_capabilities=_JSON_TASK_STATE_CAPABILITIES,
+                execute,
+                capabilities=_JSON_TASK_STATE_CAPABILITIES,
             )
 
         @app.post("/api/a3/select/stream")
-        async def a3_select_stream(request: Request) -> StreamingResponse:
+        async def a3_select_stream(request: Request) -> Response:
+            coordination, coordination_rejection = await coordinated_task_preflight(
+                request
+            )
+            if coordination_rejection is not None:
+                return coordination_rejection
+            assert coordination is not None
             try:
                 payload = await request.json()
             except Exception as exc:  # noqa: BLE001 - malformed external input.
@@ -1672,7 +2353,6 @@ def create_app(
             session_id = _session_id(request, cookie_name=session_cookie)
             request_id = _request_id(request)
             identity_key = _identity_key(request)
-            trace_context = _request_trace_context(request)
 
             def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
                 kwargs: dict[str, object] = {
@@ -1702,31 +2382,22 @@ def create_app(
                     task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
                 )
 
-            result = StreamingResponse(
-                _stream_agent_events(
-                    execute,
-                    request_id=request_id,
-                    trace_context=trace_context,
-                    trace_event_session=current_trace_event_session(),
-                    trace_meta=_current_public_trace_meta(),
-                    runtime=runtime,
-                    response_store=response_store,
-                    session_id=session_id,
-                    identity_key=identity_key or "local",
-                    task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
-                ),
-                media_type="application/x-ndjson",
-            )
-            _set_session_cookie(
-                result,
+            return coordinated_stream_response(
+                request,
+                coordination,
                 session_id,
-                secure_cookie=_is_secure_request(request),
-                cookie_name=session_cookie,
+                execute,
+                capabilities=_STREAM_TASK_STATE_CAPABILITIES,
             )
-            return result
 
         @app.post("/api/a3/prepare/stream")
-        async def a3_prepare_stream(request: Request) -> StreamingResponse:
+        async def a3_prepare_stream(request: Request) -> Response:
+            coordination, coordination_rejection = await coordinated_task_preflight(
+                request
+            )
+            if coordination_rejection is not None:
+                return coordination_rejection
+            assert coordination is not None
             try:
                 payload = await request.json()
             except Exception as exc:  # noqa: BLE001 - malformed external input.
@@ -1743,7 +2414,6 @@ def create_app(
             session_id = _session_id(request, cookie_name=session_cookie)
             request_id = _request_id(request)
             identity_key = _identity_key(request)
-            trace_context = _request_trace_context(request)
 
             def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
                 kwargs: dict[str, object] = {
@@ -1772,31 +2442,22 @@ def create_app(
                     task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
                 )
 
-            result = StreamingResponse(
-                _stream_agent_events(
-                    execute,
-                    request_id=request_id,
-                    trace_context=trace_context,
-                    trace_event_session=current_trace_event_session(),
-                    trace_meta=_current_public_trace_meta(),
-                    runtime=runtime,
-                    response_store=response_store,
-                    session_id=session_id,
-                    identity_key=identity_key or "local",
-                    task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
-                ),
-                media_type="application/x-ndjson",
-            )
-            _set_session_cookie(
-                result,
+            return coordinated_stream_response(
+                request,
+                coordination,
                 session_id,
-                secure_cookie=_is_secure_request(request),
-                cookie_name=session_cookie,
+                execute,
+                capabilities=_STREAM_TASK_STATE_CAPABILITIES,
             )
-            return result
 
         @app.post("/api/a3/crop/stream")
-        async def a3_crop_stream(request: Request) -> StreamingResponse:
+        async def a3_crop_stream(request: Request) -> Response:
+            coordination, coordination_rejection = await coordinated_task_preflight(
+                request
+            )
+            if coordination_rejection is not None:
+                return coordination_rejection
+            assert coordination is not None
             try:
                 payload = await request.json()
             except Exception as exc:  # noqa: BLE001 - malformed external input.
@@ -1813,7 +2474,6 @@ def create_app(
             session_id = _session_id(request, cookie_name=session_cookie)
             request_id = _request_id(request)
             identity_key = _identity_key(request)
-            trace_context = _request_trace_context(request)
 
             def execute(progress: Callable[[str, str], None]) -> dict[str, object]:
                 kwargs: dict[str, object] = {
@@ -1844,28 +2504,13 @@ def create_app(
                     task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
                 )
 
-            result = StreamingResponse(
-                _stream_agent_events(
-                    execute,
-                    request_id=request_id,
-                    trace_context=trace_context,
-                    trace_event_session=current_trace_event_session(),
-                    trace_meta=_current_public_trace_meta(),
-                    runtime=runtime,
-                    response_store=response_store,
-                    session_id=session_id,
-                    identity_key=identity_key or "local",
-                    task_state_capabilities=_STREAM_TASK_STATE_CAPABILITIES,
-                ),
-                media_type="application/x-ndjson",
-            )
-            _set_session_cookie(
-                result,
+            return coordinated_stream_response(
+                request,
+                coordination,
                 session_id,
-                secure_cookie=_is_secure_request(request),
-                cookie_name=session_cookie,
+                execute,
+                capabilities=_STREAM_TASK_STATE_CAPABILITIES,
             )
-            return result
 
         @app.get("/api/a3/crop/{unit_id}")
         def get_a3_crop(
@@ -2590,8 +3235,21 @@ def _write_incoming_image(
     incoming_dir: str | Path = INCOMING_DIR,
 ) -> Path:
     """Verify image bytes and choose the temporary suffix from the detected format."""
+    suffix = _validated_incoming_image_suffix(content, filename, content_type)
     target_dir = Path(incoming_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
+    output = target_dir / f"{uuid4().hex}{suffix}"
+    output.write_bytes(content)
+    return output
+
+
+def _validated_incoming_image_suffix(
+    content: bytes,
+    filename: str,
+    content_type: str = "",
+) -> str:
+    """Validate image bytes without creating an incoming runtime file."""
+
     try:
         with Image.open(BytesIO(content)) as image:
             detected_format = str(image.format or "").upper()
@@ -2610,6 +3268,17 @@ def _write_incoming_image(
             normalized_type,
             detected_type,
         )
+    return suffix
+
+
+def _write_validated_incoming_image(
+    content: bytes,
+    suffix: str,
+    *,
+    incoming_dir: str | Path = INCOMING_DIR,
+) -> Path:
+    target_dir = Path(incoming_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
     output = target_dir / f"{uuid4().hex}{suffix}"
     output.write_bytes(content)
     return output
@@ -3865,6 +4534,11 @@ async def _stream_agent_events(
     session_id: str = "",
     identity_key: str = "local",
     task_state_capabilities: TaskStateEntryCapabilities | None = None,
+    session_coordination_ack: (
+        tuple[str, ...]
+        | Callable[[], tuple[str, ...] | None]
+        | None
+    ) = None,
 ):
     if (
         task_state_capabilities is not None
@@ -3876,6 +4550,14 @@ async def _stream_agent_events(
     queue: asyncio.Queue[_QueuedStreamEvent | None] = asyncio.Queue()
     delivery_cancelled = threading.Event()
     unexposed_responses: dict[str, ResponseRecord] = {}
+
+    def current_coordination_ack() -> tuple[str, ...] | None:
+        value = (
+            session_coordination_ack()
+            if callable(session_coordination_ack)
+            else session_coordination_ack
+        )
+        return value if isinstance(value, tuple) else None
 
     def serialized_event(event: Mapping[str, object]) -> str:
         return json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -4082,6 +4764,12 @@ async def _stream_agent_events(
         ):
             try:
                 payload = await asyncio.to_thread(execute, progress)
+                coordination_ack = current_coordination_ack()
+                if coordination_ack is not None:
+                    _with_session_coordination_ack(
+                        payload,
+                        coordination_ack,
+                    )
                 draft = getattr(payload, "authoritative_draft", None)
                 response_task_state: object = None
                 try:
@@ -4161,6 +4849,12 @@ async def _stream_agent_events(
                     error_payload,
                     error_task_state,
                 )
+                coordination_ack = current_coordination_ack()
+                if coordination_ack is not None:
+                    _with_session_coordination_ack(
+                        error_payload,
+                        coordination_ack,
+                    )
                 response_record = await finalize_error_event(
                     error_payload,
                     snapshot=snapshot,
@@ -4201,6 +4895,12 @@ async def _stream_agent_events(
                     error_payload,
                     error_task_state,
                 )
+                coordination_ack = current_coordination_ack()
+                if coordination_ack is not None:
+                    _with_session_coordination_ack(
+                        error_payload,
+                        coordination_ack,
+                    )
                 response_record = await finalize_error_event(
                     error_payload,
                     snapshot=snapshot,

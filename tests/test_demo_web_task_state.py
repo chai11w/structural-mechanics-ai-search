@@ -594,7 +594,7 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260901-refresh-recovery-v5"'
+        demo_asset = 'src="/assets/demo.js?v=20260903-fence-login-v8"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
@@ -771,7 +771,13 @@ assert.equal(harness.empty(), false);
             request_block.index("await fetch(url"),
         )
         error_consume = "consumeTaskStateResponse(taskStateRequest, data, { error: true })"
-        self.assertLess(request_block.index(error_consume), request_block.index("throw safeHttpError"))
+        generic_error_block = request_block.split(
+            "assertSessionRequestFenceAcknowledged(data, sessionRequestFence);", 1
+        )[1].split("if (!contentType.includes('application/json'))", 1)[0]
+        self.assertLess(
+            generic_error_block.index(error_consume),
+            generic_error_block.index("throw safeHttpError"),
+        )
         success_consume = "consumeTaskStateResponse(taskStateRequest, data);"
         self.assertLess(request_block.index(success_consume), request_block.index("return data;"))
 
@@ -1260,7 +1266,18 @@ const retryHarness = createRetryHarness();
     def test_real_transport_lifecycle_updates_session_and_does_not_replay_a3(self):
         fixtures = {
             "empty": contract.empty_task_state_snapshot().to_dict(),
+            "a2": _a2_snapshot().to_dict(),
             "a3": _a3_action_snapshot().to_dict(),
+            "a3_active": _a3_action_snapshot(
+                phase="A2_ACTIVE",
+                allowed_actions=(),
+                unit_statuses=(
+                    contract.UNIT_ACTIVE,
+                    contract.UNIT_PREPARED,
+                    contract.UNIT_COMPLETED,
+                    contract.UNIT_CLOSED,
+                ),
+            ).to_dict(),
             "inconsistent": _inconsistent_workflow_snapshot().to_dict(),
         }
         demo_source = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(
@@ -1280,10 +1297,6 @@ const retryHarness = createRetryHarness();
             upload_source.index("await sessionTaskStartAllowed()"),
             upload_source.index("validateImage(selected)"),
         )
-        self.assertIn(
-            "const pending = sessionBootstrap || runSessionBootstrap();",
-            demo_source,
-        )
         self.assertIn("withSessionFallbackLock(lockKind, runLocked)", demo_source)
         self.assertIn("empty.hidden = history.length > 0;", demo_source)
         self.assertIn("window.addEventListener('storage'", demo_source)
@@ -1300,17 +1313,23 @@ const fixtures = globalThis.__a3Fixtures;
 const source = fs.readFileSync('./tiku_agent/demo_web/demo.js', 'utf8');
 let sessionLockGate = null;
 let sessionLockTail = Promise.resolve();
+let sessionLockPending = 0;
 const sessionLockManager = {
-  request: (_name, _options, callback) => {
+  request: (name, options, callback) => {
+    if (options?.ifAvailable && (sessionLockPending > 0 || sessionLockGate)) {
+      return Promise.resolve().then(() => callback(null));
+    }
     const previous = sessionLockTail;
     let release;
     sessionLockTail = new Promise((resolve) => { release = resolve; });
+    sessionLockPending += 1;
     return (async () => {
       await previous;
       if (sessionLockGate) await sessionLockGate;
       try {
-        return await callback();
+        return await callback({ name, mode: options?.mode || 'exclusive' });
       } finally {
+        sessionLockPending -= 1;
         release();
       }
     })();
@@ -1352,7 +1371,8 @@ const retireSessionSource = block('function retireSessionForExternalReset()', 'f
 const restoreHistorySource = block('function restoreHistory()', 'function flushStartupNotices()');
 const expirySource = block('function expireHistoryIfNeeded()', 'function showSessionExpiredNotice()');
 
-const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
+const createHarness = new Function('taskStateV1', 'sharedSessionStorage', 'controls', `
+  controls ||= {};
   ${constants}
   const RECOVERY_ACTION_LABELS = {
     relogin: '重新登录', reupload: '重新上传题图', new_chat: '开始新对话',
@@ -1372,6 +1392,7 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
   let lastHandledSessionRequestFenceId = '';
   let sessionBootstrap = null;
   let sessionBootstrapPending = false;
+  let sessionRequestLockDepth = 0;
   let pendingSessionExpiredNotice = false;
   let pendingHistoryStorageNotice = '';
   let activeController = null;
@@ -1389,9 +1410,15 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
   const SESSION_RESET_EVENT_KEY = 'session-reset-event';
   const SESSION_STORAGE_PROBE_KEY = 'session-storage-probe';
   const SESSION_REQUEST_FENCE_KEY = 'session-request-fence';
+  const SESSION_REQUEST_FENCE_PREFIX = SESSION_REQUEST_FENCE_KEY + ':pending:';
+  const SESSION_REQUEST_FENCE_RESOLVED_PREFIX = SESSION_REQUEST_FENCE_KEY + ':resolved:';
+  const SESSION_COORDINATION_VERSION = '6';
+  const SESSION_COORDINATION_MAX_RECONCILE_FENCES = 64;
   const SESSION_REQUEST_LOCK_NAME = 'session-request-lock';
   const SESSION_FALLBACK_LOCK_PREFIX = SESSION_REQUEST_LOCK_NAME + ':fallback:';
   const SESSION_FALLBACK_LOCK_TTL_MS = 120000;
+  const SESSION_FALLBACK_CHOOSING_TTL_MS = 2000;
+  const SESSION_FALLBACK_LOCK_WAIT_MS = 5000;
   const SESSION_FALLBACK_LOCK_POLL_MS = 25;
   const OPERATIONAL_NOTICE_KEYS = new Set([
     'connection', 'session-recovery', 'history-storage',
@@ -1424,13 +1451,18 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
   let clearA3WorkflowCount = 0;
   let storedHistory = null;
   const sharedStorage = sharedSessionStorage || {
-    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '', lockRecords: {},
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '',
+    fenceRecords: {}, resolvedFenceRecords: {}, lockRecords: {}, probeRecords: {},
   };
+  sharedStorage.fenceRecords ||= {};
+  sharedStorage.resolvedFenceRecords ||= {};
   sharedStorage.lockRecords ||= {};
+  sharedStorage.probeRecords ||= {};
   let storageFailures = { get: false, set: false, remove: false, resetSet: false };
   const resetEvents = [];
   const fetchPlans = [];
   const fetchUrls = [];
+  const fetchRequests = [];
   const failureNotices = [];
   const resolvedFailureNotices = [];
   const statusUpdates = [];
@@ -1441,6 +1473,7 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
     timeoutDelays.push(Number(delay));
     if (immediateTimeout) callback();
     else if (Number(delay) === SESSION_FALLBACK_LOCK_POLL_MS) {
+      controls.onFallbackPoll?.(Number(delay), sharedStorage);
       globalThis.setTimeout(callback, 0);
     }
     return id;
@@ -1494,9 +1527,20 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
       if (key === SESSION_ACTIVITY_KEY) return sharedStorage.activityAt ? String(sharedStorage.activityAt) : null;
       if (key === SESSION_RESET_EVENT_KEY) return sharedStorage.resetEventId || null;
       if (key === SESSION_STORAGE_PROBE_KEY) return sharedStorage.probe || null;
+      if (key.startsWith(SESSION_STORAGE_PROBE_KEY + ':')) {
+        return sharedStorage.probeRecords[key] || null;
+      }
       if (key === SESSION_REQUEST_FENCE_KEY) return sharedStorage.requestFenceId || null;
+      if (key.startsWith(SESSION_REQUEST_FENCE_PREFIX)) {
+        return sharedStorage.fenceRecords[key] || null;
+      }
+      if (key.startsWith(SESSION_REQUEST_FENCE_RESOLVED_PREFIX)) {
+        return sharedStorage.resolvedFenceRecords[key] || null;
+      }
       if (key.startsWith(SESSION_FALLBACK_LOCK_PREFIX)) {
-        return sharedStorage.lockRecords[key] || null;
+        const value = sharedStorage.lockRecords[key] || null;
+        controls.afterStorageGet?.(key, value, sharedStorage);
+        return value;
       }
       if (key === HISTORY_KEY || key === LEGACY_HISTORY_KEY) {
         return storedHistory === null ? null : JSON.stringify(storedHistory);
@@ -1518,10 +1562,20 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
         resetEvents.push(sharedStorage.resetEventId);
       }
       if (key === SESSION_STORAGE_PROBE_KEY) sharedStorage.probe = String(value || '');
+      if (key.startsWith(SESSION_STORAGE_PROBE_KEY + ':')) {
+        sharedStorage.probeRecords[key] = String(value || '');
+      }
       if (key === SESSION_REQUEST_FENCE_KEY) sharedStorage.requestFenceId = String(value || '');
+      if (key.startsWith(SESSION_REQUEST_FENCE_PREFIX)) {
+        sharedStorage.fenceRecords[key] = String(value || '');
+      }
+      if (key.startsWith(SESSION_REQUEST_FENCE_RESOLVED_PREFIX)) {
+        sharedStorage.resolvedFenceRecords[key] = String(value || '');
+      }
       if (key.startsWith(SESSION_FALLBACK_LOCK_PREFIX)) {
         sharedStorage.lockRecords[key] = String(value || '');
       }
+      controls.afterStorageSet?.(key, String(value || ''), sharedStorage);
     },
     removeItem(key) {
       if (storageFailures.remove) {
@@ -1531,14 +1585,27 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
       }
       if (key === SESSION_ACTIVITY_KEY) sharedStorage.activityAt = 0;
       if (key === SESSION_STORAGE_PROBE_KEY) sharedStorage.probe = '';
+      if (key.startsWith(SESSION_STORAGE_PROBE_KEY + ':')) delete sharedStorage.probeRecords[key];
       if (key === SESSION_REQUEST_FENCE_KEY) sharedStorage.requestFenceId = '';
+      if (key.startsWith(SESSION_REQUEST_FENCE_PREFIX)) delete sharedStorage.fenceRecords[key];
+      if (key.startsWith(SESSION_REQUEST_FENCE_RESOLVED_PREFIX)) {
+        delete sharedStorage.resolvedFenceRecords[key];
+      }
       if (key.startsWith(SESSION_FALLBACK_LOCK_PREFIX)) delete sharedStorage.lockRecords[key];
     },
     get length() {
-      return Object.keys(sharedStorage.lockRecords).length;
+      return Object.keys(sharedStorage.lockRecords).length
+        + Object.keys(sharedStorage.probeRecords).length
+        + Object.keys(sharedStorage.fenceRecords).length
+        + Object.keys(sharedStorage.resolvedFenceRecords).length;
     },
     key(index) {
-      return Object.keys(sharedStorage.lockRecords)[index] || null;
+      return [
+        ...Object.keys(sharedStorage.lockRecords),
+        ...Object.keys(sharedStorage.probeRecords),
+        ...Object.keys(sharedStorage.fenceRecords),
+        ...Object.keys(sharedStorage.resolvedFenceRecords),
+      ][index] || null;
     },
   };
   function createMessageId() { return 'transport-lifecycle'; }
@@ -1559,12 +1626,45 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
     };
   }
 
-  function queueDeferredJson(data) {
+  function sessionCoordinationIds(options) {
+    const headers = options?.headers;
+    const ids = [];
+    const own = String(headers?.get?.('X-Session-Request-Fence') || '');
+    if (own) ids.push(own);
+    const serialized = String(headers?.get?.('X-Session-Reconcile-Fences') || '');
+    if (serialized) {
+      const reconciled = JSON.parse(serialized);
+      assert.ok(Array.isArray(reconciled));
+      ids.push(...reconciled);
+    }
+    return [...new Set(ids)];
+  }
+
+  function acknowledgeEnvelope(data, options, ack = true) {
+    if (!ack || !data || typeof data !== 'object' || Array.isArray(data)) return data;
+    if (typeof ack === 'function') {
+      data.session_coordination = ack(sessionCoordinationIds(options));
+      return data;
+    }
+    data.session_coordination = {
+      version: SESSION_COORDINATION_VERSION,
+      completed_fences: sessionCoordinationIds(options),
+    };
+    return data;
+  }
+
+  function acknowledgeEvent(event, options, ack = true) {
+    if (ack && event?.type === 'result') acknowledgeEnvelope(event.data, options, ack);
+    if (ack && event?.type === 'error') acknowledgeEnvelope(event, options, ack);
+    return event;
+  }
+
+  function queueDeferredJson(data, { ack = true } = {}) {
     let release;
     const response = new Promise((resolve) => {
-      release = () => resolve(jsonResponse(data));
+      release = () => resolve(data);
     });
-    fetchPlans.push({ kind: 'deferred-json', response });
+    fetchPlans.push({ kind: 'deferred-json', response, ack });
     return release;
   }
 
@@ -1587,26 +1687,32 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
     };
   }
 
-  function queueDeferredHttpError(data, status = 409) {
+  function queueDeferredHttpError(data, status = 409, { ack = true } = {}) {
     let release;
     const response = new Promise((resolve) => {
-      release = () => resolve(jsonResponse(data, { ok: false, status }));
+      release = () => resolve(data);
     });
-    fetchPlans.push({ kind: 'deferred-response', response });
+    fetchPlans.push({ kind: 'deferred-http-error', response, status, ack });
     return release;
   }
 
-  function queueDeferredEvent(event) {
+  function queueDeferredEvent(event, { ack = true } = {}) {
     let release;
     const response = new Promise((resolve) => {
-      release = () => resolve(streamResponse(event));
+      release = () => resolve(event);
     });
-    fetchPlans.push({ kind: 'deferred-response', response });
+    fetchPlans.push({ kind: 'deferred-event', response, ack });
     return release;
   }
 
   async function fetch(url, options = {}) {
     fetchUrls.push(String(url));
+    fetchRequests.push({
+      url: String(url),
+      headers: options.headers && typeof options.headers.entries === 'function'
+        ? Object.fromEntries(options.headers.entries())
+        : {},
+    });
     const plan = fetchPlans.shift();
     assert.ok(plan, 'missing fetch plan for ' + url);
     if (options.signal?.aborted) throw abortError();
@@ -1615,13 +1721,31 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
         options.signal.addEventListener('abort', () => reject(abortError()), { once: true });
       });
     }
-    if (plan.kind === 'deferred-json') return plan.response;
-    if (plan.kind === 'deferred-response') return plan.response;
-    if (plan.kind === 'json') return jsonResponse(plan.data);
-    if (plan.kind === 'http-error') {
-      return jsonResponse(plan.data, { ok: false, status: plan.status });
+    if (plan.kind === 'deferred-json') {
+      const data = await plan.response;
+      return jsonResponse(acknowledgeEnvelope(data, options, plan.ack));
     }
-    return streamResponse(plan.event);
+    if (plan.kind === 'deferred-http-error') {
+      const data = await plan.response;
+      return jsonResponse(
+        acknowledgeEnvelope(data, options, plan.ack),
+        { ok: false, status: plan.status },
+      );
+    }
+    if (plan.kind === 'deferred-event') {
+      const event = await plan.response;
+      return streamResponse(acknowledgeEvent(event, options, plan.ack));
+    }
+    if (plan.kind === 'json') {
+      return jsonResponse(acknowledgeEnvelope(plan.data, options, plan.ack));
+    }
+    if (plan.kind === 'http-error') {
+      return jsonResponse(
+        acknowledgeEnvelope(plan.data, options, plan.ack),
+        { ok: false, status: plan.status },
+      );
+    }
+    return streamResponse(acknowledgeEvent(plan.event, options, plan.ack));
   }
 
   ${requestIdSource}
@@ -1659,7 +1783,11 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
         crop_available: unit.status === 'PREPARED',
         preparation_status: unit.status === 'PREPARED' ? 'ready' : 'pending',
       })),
-      selected_unit: { unit_id: '', display_label: '', context_text: '' },
+      selected_unit: raw.current_unit ? {
+        unit_id: raw.current_unit.unit_id,
+        display_label: raw.current_unit.display_label,
+        context_text: '',
+      } : { unit_id: '', display_label: '', context_text: '' },
       crop_draft: {},
       task_revision: raw.workflow.task_revision,
     };
@@ -1687,23 +1815,26 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
     repairUploadedImageHistory,
     runSessionBootstrap,
     sessionTaskStartAllowed,
+    sessionResetCoordinationAvailable,
+    withSessionRequestLock,
     restoreHistory,
     duplicateLastEnvelope: (data) => consumeTaskStateResponse(lastTaskStateRequest, data),
     envelope,
-    queueJson: (data) => fetchPlans.push({ kind: 'json', data }),
-    queueHttpError: (data, status = 409) => fetchPlans.push({
-      kind: 'http-error', data, status,
+    queueJson: (data, { ack = true } = {}) => fetchPlans.push({ kind: 'json', data, ack }),
+    queueHttpError: (data, status = 409, { ack = true } = {}) => fetchPlans.push({
+      kind: 'http-error', data, status, ack,
     }),
     queueDeferredJson,
     queueDeferredHttpError,
     queueDeferredEvent,
-    queueEvent: (event) => fetchPlans.push({ kind: 'stream', event }),
+    queueEvent: (event, { ack = true } = {}) => fetchPlans.push({ kind: 'stream', event, ack }),
     queueTimeout: () => fetchPlans.push({ kind: 'timeout' }),
     setImmediateTimeout: (value) => { immediateTimeout = Boolean(value); },
     lifecycle: () => [...lifecycle],
     model: () => taskStateContext,
     session: () => structuredClone(sessionContext),
     fetchUrls: () => [...fetchUrls],
+    fetchRequests: () => structuredClone(fetchRequests),
     syncA3Count: () => syncA3Count,
     clearHistoryCount: () => clearHistoryCount,
     clearA3WorkflowCount: () => clearA3WorkflowCount,
@@ -1713,7 +1844,7 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', `
     resetRequired: () => sessionResetRequired,
     sourceState: () => ({ url: a3SourceUrl, workflowKey: a3SourceWorkflowKey }),
     resetEvents: () => [...resetEvents],
-    requestFenceId: () => sharedStorage.requestFenceId,
+    requestFenceId: () => storedSessionRequestFenceId(),
     failureNotices: () => structuredClone(failureNotices),
     resolvedFailureNotices: () => [...resolvedFailureNotices],
     statusUpdates: () => structuredClone(statusUpdates),
@@ -1749,6 +1880,132 @@ const harness = createHarness(taskStateV1);
   lazyBootstrapHarness.queueJson(lazyBootstrapHarness.envelope(fixtures.a3));
   assert.equal(await lazyBootstrapHarness.sessionTaskStartAllowed(), true);
   assert.deepEqual(lazyBootstrapHarness.fetchUrls(), ['/api/session']);
+  assert.equal(
+    lazyBootstrapHarness.fetchRequests()[0].headers['x-session-coordination-version'],
+    '6',
+  );
+  assert.ok(
+    lazyBootstrapHarness.fetchRequests()[0].headers['x-session-request-fence'],
+    'a fresh coordinated read must carry its unique request fence',
+  );
+
+  for (const testCase of [
+    { name: 'missing', ack: false },
+    {
+      name: 'wrong-version',
+      ack: () => ({ version: '5', completed_fences: [] }),
+    },
+    {
+      name: 'partial',
+      ack: (ids) => ({ version: '6', completed_fences: ids.slice(0, -1) }),
+    },
+    {
+      name: 'extra',
+      ack: (ids) => ({ version: '6', completed_fences: [...ids, 'unexpected-fence'] }),
+    },
+  ]) {
+    for (const mode of ['json', 'json-http-error', 'stream-result', 'stream-error']) {
+      const sharedStorage = {
+        activityAt: 0, resetEventId: '', probe: '', requestFenceId: '',
+        fenceRecords: {}, resolvedFenceRecords: {}, lockRecords: {}, probeRecords: {},
+      };
+      for (let index = 0; index < (testCase.inherited || 0); index += 1) {
+        const id = `170000000000${index}:req_ack_${testCase.name}_${index}`;
+        const key = 'session-request-fence:pending:' + encodeURIComponent(id);
+        sharedStorage.fenceRecords[key] = id;
+      }
+      const badAckHarness = createHarness(taskStateV1, sharedStorage);
+      const envelope = badAckHarness.envelope(fixtures.a3);
+      let badAckError;
+      if (mode === 'json') {
+        badAckHarness.queueJson(envelope, { ack: testCase.ack });
+        badAckError = await badAckHarness.request(
+          '/api/session', {}, 1000, 'session timeout',
+        ).then(() => null, (error) => error);
+      } else if (mode === 'json-http-error') {
+        badAckHarness.queueHttpError({
+          ...envelope,
+          status: 'ERROR', layer: 'queue', code: 'QUEUE_FULL',
+          retryable: true, action: 'retry_request', message: 'queue full',
+        }, 409, { ack: testCase.ack });
+        badAckError = await badAckHarness.request(
+          '/api/message', { method: 'POST' }, 1000, 'message timeout',
+        ).then(() => null, (error) => error);
+      } else {
+        const event = mode === 'stream-result'
+          ? { type: 'result', data: envelope }
+          : {
+            type: 'error', status: 'ERROR', layer: 'queue', code: 'QUEUE_FULL',
+            retryable: true, action: 'retry_request', message: 'queue full',
+            task_state: fixtures.a3,
+          };
+        badAckHarness.queueEvent(event, { ack: testCase.ack });
+        badAckError = await badAckHarness.requestStream(
+          mode === 'stream-result' ? '/api/image/stream' : '/api/a3/select/stream',
+          { method: 'POST' },
+          1000,
+          'stream timeout',
+        ).then(() => null, (error) => error);
+      }
+      assert.equal(badAckError?.code, 'RESPONSE_INVALID', `${testCase.name}/${mode}`);
+      assert.ok(
+        badAckHarness.requestFenceId(),
+        `${testCase.name}/${mode}: untrusted ACK must preserve the pending fence`,
+      );
+    }
+  }
+
+  const batchStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '',
+    fenceRecords: {}, resolvedFenceRecords: {}, lockRecords: {}, probeRecords: {},
+  };
+  for (let index = 0; index < 65; index += 1) {
+    const id = `1700000000000:req_batch_${String(index).padStart(2, '0')}`;
+    const key = 'session-request-fence:pending:' + encodeURIComponent(id);
+    batchStorage.fenceRecords[key] = id;
+  }
+  const batchHarness = createHarness(taskStateV1, batchStorage);
+  batchHarness.queueJson(batchHarness.envelope(fixtures.a3));
+  batchHarness.queueJson(batchHarness.envelope(fixtures.a3));
+  assert.equal(await batchHarness.runSessionBootstrap(), true);
+  assert.deepEqual(batchHarness.fetchUrls(), ['/api/session', '/api/session']);
+  const batchHeaders = batchHarness.fetchRequests().map((entry) => (
+    JSON.parse(entry.headers['x-session-reconcile-fences'])
+  ));
+  assert.deepEqual(batchHeaders.map((ids) => ids.length), [64, 1]);
+  assert.equal(batchHarness.requestFenceId(), '');
+  assert.deepEqual(batchStorage.fenceRecords, {});
+
+  const webLockStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '',
+    fenceRecords: {}, resolvedFenceRecords: {}, lockRecords: {}, probeRecords: {},
+  };
+  const webLockHolder = createHarness(taskStateV1, webLockStorage);
+  const webLockFollower = createHarness(taskStateV1, webLockStorage);
+  const releaseWebLockHolder = webLockHolder.queueDeferredJson(
+    webLockHolder.envelope(fixtures.a3),
+  );
+  const webLockHolderRequest = webLockHolder.request(
+    '/api/session', {}, 1000, 'session timeout',
+  );
+  await waitForFetch(webLockHolder, '/api/session');
+  let webLockFollowerCallbackCount = 0;
+  const webLockFollowerError = await webLockFollower.withSessionRequestLock(
+    '/api/image/stream',
+    () => {
+      webLockFollowerCallbackCount += 1;
+      return Promise.resolve('must-not-run');
+    },
+  ).then(() => null, (error) => error);
+  assert.equal(webLockFollowerError?.code, 'STALE_ACTION');
+  assert.equal(
+    webLockFollowerCallbackCount,
+    0,
+    'a Web Lock miss must not run the stale task callback',
+  );
+  assert.deepEqual(webLockFollower.fetchUrls(), []);
+  releaseWebLockHolder();
+  await webLockHolderRequest;
 
   const noLockGateHarness = createHarness(taskStateV1);
   noLockGateHarness.queueJson({
@@ -1761,9 +2018,15 @@ const harness = createHarness(taskStateV1);
     },
   });
   globalThis.navigator.locks = null;
+  const noLockGateAllowed = await noLockGateHarness.sessionTaskStartAllowed();
   assert.equal(
-    await noLockGateHarness.sessionTaskStartAllowed(), true,
-    'fresh no-lock bootstrap must allow task start',
+    noLockGateAllowed, true,
+    'fresh no-lock bootstrap must allow task start: ' + JSON.stringify({
+      fetchUrls: noLockGateHarness.fetchUrls(),
+      notices: noLockGateHarness.failureNotices(),
+      status: noLockGateHarness.statusUpdates(),
+      fence: noLockGateHarness.requestFenceId(),
+    }),
   );
   noLockGateHarness.queueEvent({
     type: 'result', data: noLockGateHarness.envelope(fixtures.a3),
@@ -1794,6 +2057,29 @@ const harness = createHarness(taskStateV1);
     'inherited no-lock fence must reconcile against the empty session',
   );
   assert.equal(inheritedFenceHarness.requestFenceId(), '');
+  assert.deepEqual(
+    JSON.parse(
+      inheritedFenceHarness.fetchRequests()[0]
+        .headers['x-session-reconcile-fences'],
+    ),
+    ['pending-before-reload'],
+  );
+  assert.equal(
+    inheritedFenceHarness.fetchRequests()[0]
+      .headers['x-session-request-fence'],
+    undefined,
+  );
+  assert.equal(
+    inheritedFenceStorage.requestFenceId,
+    'pending-before-reload',
+    'v6 must retire a legacy fence with a tombstone instead of deleting its shared key',
+  );
+  assert.equal(
+    Object.values(inheritedFenceStorage.resolvedFenceRecords)
+      .includes('pending-before-reload'),
+    true,
+    'the legacy fence id must have a matching resolved tombstone',
+  );
   assert.equal(
     await inheritedFenceHarness.sessionTaskStartAllowed(), true,
     'reconciled no-lock session must allow the next upload',
@@ -1813,6 +2099,171 @@ const harness = createHarness(taskStateV1);
   assert.equal(
     inheritedFenceHarness.failureNotices().some((notice) => notice.key === 'session-recovery'),
     false,
+  );
+
+  const liveIdleA3 = {
+    enabled: true,
+    auto_crop_enabled: false,
+    auto_prepare_all_enabled: true,
+    auto_prepare_all_units: false,
+    phase: 'IDLE',
+    page_finished: false,
+    units: [],
+    selected_unit: { unit_id: '', display_label: '', context_text: '' },
+    auto_crop_overlay_available: false,
+    crop_review_required: false,
+    crop_review_code: '',
+    crop_draft: { bounds: {}, available: false },
+    task_revision: 0,
+  };
+  const liveIdleEnvelope = {
+    task_state: fixtures.empty,
+    uploaded_image: '',
+    session: {
+      session_valid: false, phase: 'IDLE', has_active_image: false,
+      task_revision: 0, candidate_generation: '', candidate_count: 0,
+      search_id: '', a3: liveIdleA3,
+    },
+  };
+  const liveIdleStorage = {
+    activityAt: 0, resetEventId: '', probe: '',
+    requestFenceId: 'pending-before-live-idle-reload', lockRecords: {},
+  };
+  const liveIdleHarness = createHarness(taskStateV1, liveIdleStorage);
+  liveIdleHarness.queueJson(structuredClone(liveIdleEnvelope));
+  globalThis.navigator.locks = null;
+  assert.equal(
+    await liveIdleHarness.runSessionBootstrap(), true,
+    'the live empty-session A3 capability shape must reconcile an inherited fence',
+  );
+  assert.equal(liveIdleHarness.requestFenceId(), '');
+  assert.equal(
+    liveIdleHarness.failureNotices().some((notice) => notice.key === 'session-recovery'),
+    false,
+  );
+  assert.equal(await liveIdleHarness.sessionTaskStartAllowed(), true);
+  liveIdleHarness.queueEvent({
+    type: 'result', data: liveIdleHarness.envelope(fixtures.a3),
+  });
+  await liveIdleHarness.requestStream(
+    '/api/image/stream', { method: 'POST' }, 1000, 'image timeout',
+  );
+  globalThis.navigator.locks = sessionLockManager;
+  assert.deepEqual(
+    liveIdleHarness.fetchUrls(),
+    ['/api/session', '/api/image/stream'],
+  );
+
+  const standaloneA2Storage = {
+    activityAt: 0, resetEventId: '', probe: '',
+    requestFenceId: 'pending-standalone-a2', lockRecords: {},
+  };
+  const standaloneA2Harness = createHarness(taskStateV1, standaloneA2Storage);
+  const standaloneA2Envelope = structuredClone(liveIdleEnvelope);
+  standaloneA2Envelope.task_state = fixtures.a2;
+  standaloneA2Harness.queueJson(standaloneA2Envelope);
+  globalThis.navigator.locks = null;
+  assert.equal(
+    await standaloneA2Harness.runSessionBootstrap(), false,
+    'an idle A3 capability must not make a standalone A2 canonical snapshot consistent',
+  );
+  globalThis.navigator.locks = sessionLockManager;
+  assert.equal(standaloneA2Harness.requestFenceId(), 'pending-standalone-a2');
+  assert.equal(
+    standaloneA2Harness.failureNotices().at(-1)?.key,
+    'session-recovery',
+  );
+  assert.deepEqual(standaloneA2Harness.fetchUrls(), ['/api/session']);
+
+  for (const poison of [
+    (envelope) => { envelope.session.session_valid = true; },
+    (envelope) => { envelope.session.a3.phase = 'WAIT_SELECTION'; },
+    (envelope) => { envelope.session.a3.task_revision = 1; },
+  ]) {
+    const inconsistentIdleStorage = {
+      activityAt: 0, resetEventId: '', probe: '',
+      requestFenceId: 'pending-inconsistent-idle', lockRecords: {},
+    };
+    const inconsistentIdleHarness = createHarness(taskStateV1, inconsistentIdleStorage);
+    const inconsistentIdleEnvelope = structuredClone(liveIdleEnvelope);
+    poison(inconsistentIdleEnvelope);
+    inconsistentIdleHarness.queueJson(inconsistentIdleEnvelope);
+    globalThis.navigator.locks = null;
+    assert.equal(
+      await inconsistentIdleHarness.runSessionBootstrap(), false,
+      'a non-idle legacy projection must not be accepted for an empty canonical task',
+    );
+    globalThis.navigator.locks = sessionLockManager;
+    assert.equal(inconsistentIdleHarness.requestFenceId(), 'pending-inconsistent-idle');
+    assert.equal(
+      inconsistentIdleHarness.failureNotices().at(-1)?.key,
+      'session-recovery',
+    );
+    assert.deepEqual(inconsistentIdleHarness.fetchUrls(), ['/api/session']);
+  }
+
+  const inheritedActiveStorage = {
+    activityAt: 0, resetEventId: '', probe: '',
+    requestFenceId: 'pending-active-before-reload', lockRecords: {},
+  };
+  const inheritedActiveHarness = createHarness(taskStateV1, inheritedActiveStorage);
+  inheritedActiveHarness.queueJson(inheritedActiveHarness.envelope(fixtures.a3_active));
+  globalThis.navigator.locks = null;
+  assert.equal(
+    await inheritedActiveHarness.runSessionBootstrap(), true,
+    'an authoritative active A3 session must reconcile an inherited no-lock fence',
+  );
+  assert.equal(inheritedActiveHarness.requestFenceId(), '');
+  assert.equal(inheritedActiveHarness.session().session_valid, true);
+  assert.equal(
+    inheritedActiveHarness.failureNotices().some((notice) => notice.key === 'session-recovery'),
+    false,
+  );
+  assert.equal(await inheritedActiveHarness.sessionTaskStartAllowed(), true);
+  inheritedActiveHarness.queueEvent({
+    type: 'result', data: inheritedActiveHarness.envelope(fixtures.a3),
+  });
+  await inheritedActiveHarness.requestStream(
+    '/api/image/stream', { method: 'POST' }, 1000, 'image timeout',
+  );
+  globalThis.navigator.locks = sessionLockManager;
+  assert.deepEqual(
+    inheritedActiveHarness.fetchUrls(),
+    ['/api/session', '/api/image/stream'],
+  );
+  assert.equal(inheritedActiveHarness.requestFenceId(), '');
+
+  const retryOnTaskStorage = {
+    activityAt: 0, resetEventId: '', probe: '',
+    requestFenceId: 'pending-invalid-bootstrap', lockRecords: {},
+  };
+  const retryOnTaskHarness = createHarness(taskStateV1, retryOnTaskStorage);
+  retryOnTaskHarness.queueJson({ ok: true });
+  globalThis.navigator.locks = null;
+  assert.equal(await retryOnTaskHarness.runSessionBootstrap(), false);
+  assert.deepEqual(retryOnTaskHarness.fetchUrls(), ['/api/session']);
+  assert.equal(retryOnTaskHarness.requestFenceId(), 'pending-invalid-bootstrap');
+  retryOnTaskHarness.queueJson(retryOnTaskHarness.envelope(fixtures.a3_active));
+  assert.equal(
+    await retryOnTaskHarness.sessionTaskStartAllowed(), true,
+    'the next task start must rerun a failed bootstrap instead of reusing false',
+  );
+  assert.deepEqual(retryOnTaskHarness.fetchUrls(), ['/api/session', '/api/session']);
+  assert.equal(retryOnTaskHarness.requestFenceId(), '');
+  retryOnTaskHarness.queueEvent({
+    type: 'result', data: retryOnTaskHarness.envelope(fixtures.a3),
+  });
+  await retryOnTaskHarness.requestStream(
+    '/api/image/stream', { method: 'POST' }, 1000, 'image timeout',
+  );
+  globalThis.navigator.locks = sessionLockManager;
+  assert.deepEqual(
+    retryOnTaskHarness.fetchUrls(),
+    ['/api/session', '/api/session', '/api/image/stream'],
+  );
+  assert.equal(
+    retryOnTaskHarness.resolvedFailureNotices().includes('session-recovery'),
+    true,
   );
 
   const noLockSharedStorage = {
@@ -1847,6 +2298,16 @@ const harness = createHarness(taskStateV1);
     '/api/image/stream', { method: 'POST' }, 1000, 'image timeout',
   );
   await waitForFetch(noLockTabA, '/api/image/stream');
+  assert.equal(
+    noLockSharedStorage.requestFenceId,
+    '',
+    'v6 requests must not overwrite the legacy single-key fence',
+  );
+  assert.equal(
+    Object.keys(noLockSharedStorage.fenceRecords).length,
+    1,
+    'an in-flight v6 request must own one unique pending fence record',
+  );
   noLockTabB.queueEvent({
     type: 'result', data: noLockTabB.envelope(fixtures.a3),
   });
@@ -1866,8 +2327,96 @@ const harness = createHarness(taskStateV1);
     'contending no-lock tab must receive explicit recovery',
   );
   assert.deepEqual(noLockTabB.fetchUrls(), ['/api/session']);
-  assert.equal(noLockSharedStorage.requestFenceId, '');
+  assert.equal(noLockTabA.requestFenceId(), '');
+  assert.deepEqual(noLockSharedStorage.fenceRecords, {});
   assert.deepEqual(noLockSharedStorage.lockRecords, {});
+
+  const contendedCallbackStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '', lockRecords: {},
+  };
+  const contendedHolder = createHarness(taskStateV1, contendedCallbackStorage);
+  const contendedFollower = createHarness(taskStateV1, contendedCallbackStorage);
+  const releaseContendedHolder = contendedHolder.queueDeferredEvent({
+    type: 'result', data: contendedHolder.envelope(fixtures.a3),
+  });
+  globalThis.navigator.locks = null;
+  const contendedHolderRequest = contendedHolder.requestStream(
+    '/api/image/stream', { method: 'POST' }, 1000, 'image timeout',
+  );
+  await waitForFetch(contendedHolder, '/api/image/stream');
+  let contendedCallbackCount = 0;
+  const contendedCallbackError = await contendedFollower.withSessionRequestLock(
+    '/api/image/stream',
+    () => {
+      contendedCallbackCount += 1;
+      return Promise.resolve('must-not-run');
+    },
+  ).then(() => null, (error) => error);
+  assert.equal(contendedCallbackError?.code, 'STALE_ACTION');
+  assert.equal(contendedCallbackCount, 0, 'a contended task must not enter its callback');
+  assert.deepEqual(contendedFollower.fetchUrls(), []);
+  releaseContendedHolder();
+  await contendedHolderRequest;
+  globalThis.navigator.locks = sessionLockManager;
+  assert.equal(contendedHolder.requestFenceId(), '');
+  assert.deepEqual(contendedCallbackStorage.fenceRecords, {});
+  assert.deepEqual(contendedCallbackStorage.lockRecords, {});
+
+  const cleanupStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '', lockRecords: {},
+  };
+  const expiredLockId = 'expired-task-lock';
+  const expiredLockKey = 'session-request-lock:fallback:' + expiredLockId;
+  const expiredLockRaw = JSON.stringify({
+    id: expiredLockId,
+    kind: 'task',
+    choosing: false,
+    ticket: 1,
+    expiresAt: Date.now() - 1,
+  });
+  cleanupStorage.lockRecords[expiredLockKey] = expiredLockRaw;
+  const invalidLockKey = 'session-request-lock:fallback:invalid-lock';
+  cleanupStorage.lockRecords[invalidLockKey] = '{invalid-json';
+  const cleanupHarness = createHarness(taskStateV1, cleanupStorage);
+  cleanupHarness.queueJson(cleanupHarness.envelope(fixtures.a3_active));
+  globalThis.navigator.locks = null;
+  await cleanupHarness.request('/api/session', {}, 1000, 'session timeout');
+  globalThis.navigator.locks = sessionLockManager;
+  assert.equal(
+    cleanupStorage.lockRecords[expiredLockKey],
+    expiredLockRaw,
+    'expired foreign records must be ignored without cross-tab cleanup',
+  );
+  assert.equal(
+    cleanupStorage.lockRecords[invalidLockKey],
+    '{invalid-json',
+    'invalid foreign records must be ignored without cross-tab cleanup',
+  );
+  assert.deepEqual(cleanupHarness.fetchUrls(), ['/api/session']);
+
+  const probeStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '',
+    lockRecords: {}, probeRecords: {},
+  };
+  const probeTabB = createHarness(taskStateV1, probeStorage);
+  let probeTabBResult = null;
+  let nestedProbeStarted = false;
+  const probeTabA = createHarness(taskStateV1, probeStorage, {
+    afterStorageSet: (key) => {
+      if (
+        nestedProbeStarted
+        || !(key === 'session-storage-probe' || key.startsWith('session-storage-probe:'))
+      ) return;
+      nestedProbeStarted = true;
+      probeTabBResult = probeTabB.sessionResetCoordinationAvailable();
+    },
+  });
+  const probeTabAResult = probeTabA.sessionResetCoordinationAvailable();
+  assert.equal(nestedProbeStarted, true);
+  assert.equal(probeTabAResult, true, 'tab A must retain its unique storage probe');
+  assert.equal(probeTabBResult, true, 'tab B must retain its unique storage probe');
+  assert.equal(probeStorage.probe, '');
+  assert.deepEqual(probeStorage.probeRecords, {});
 
   const choosingStorage = {
     activityAt: 0, resetEventId: '', probe: '', requestFenceId: '', lockRecords: {},
@@ -1924,7 +2473,40 @@ const harness = createHarness(taskStateV1);
   globalThis.navigator.locks = sessionLockManager;
   assert.equal(lostLeaseError?.code, 'RESPONSE_INVALID');
   assert.equal(lostLeaseError?.recoveryActions?.includes('retry_connection'), true);
-  assert.ok(lostLeaseStorage.requestFenceId, 'lost lease must preserve pending fence');
+  assert.ok(lostLeaseHarness.requestFenceId(), 'lost lease must preserve pending fence');
+
+  const expiredOwnLeaseStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '', lockRecords: {},
+  };
+  const expiredOwnLeaseHarness = createHarness(taskStateV1, expiredOwnLeaseStorage);
+  const releaseExpiredOwnLease = expiredOwnLeaseHarness.queueDeferredEvent({
+    type: 'result', data: expiredOwnLeaseHarness.envelope(fixtures.a3),
+  });
+  globalThis.navigator.locks = null;
+  const expiredOwnLeaseRequest = expiredOwnLeaseHarness.requestStream(
+    '/api/image/stream', { method: 'POST' }, 1000, 'image timeout',
+  ).then(() => null, (error) => error);
+  await waitForFetch(expiredOwnLeaseHarness, '/api/image/stream');
+  const [expiredOwnLeaseKey] = Object.keys(expiredOwnLeaseStorage.lockRecords);
+  assert.ok(expiredOwnLeaseKey);
+  const expiredOwnLeaseRecord = JSON.parse(
+    expiredOwnLeaseStorage.lockRecords[expiredOwnLeaseKey],
+  );
+  expiredOwnLeaseRecord.expiresAt = Date.now() - 1;
+  const expiredOwnLeaseRaw = JSON.stringify(expiredOwnLeaseRecord);
+  expiredOwnLeaseStorage.lockRecords[expiredOwnLeaseKey] = expiredOwnLeaseRaw;
+  releaseExpiredOwnLease();
+  const expiredOwnLeaseError = await expiredOwnLeaseRequest;
+  globalThis.navigator.locks = sessionLockManager;
+  assert.equal(expiredOwnLeaseError?.code, 'RESPONSE_INVALID');
+  const expiredOwnLeaseAfter = expiredOwnLeaseStorage.lockRecords[expiredOwnLeaseKey];
+  assert.equal(
+    !expiredOwnLeaseAfter
+      || JSON.parse(expiredOwnLeaseAfter).expiresAt <= expiredOwnLeaseRecord.expiresAt,
+    true,
+    'an expired lease must be removed or stay expired, never be refreshed back to life',
+  );
+  assert.ok(expiredOwnLeaseHarness.requestFenceId());
 
   const resetRaceStorage = {
     activityAt: 0, resetEventId: '', probe: '', requestFenceId: '', lockRecords: {},
@@ -1952,7 +2534,7 @@ const harness = createHarness(taskStateV1);
   await resetRaceRequest;
   globalThis.navigator.locks = sessionLockManager;
   assert.ok(resetRaceStorage.resetEventId);
-  assert.equal(resetRaceStorage.requestFenceId, '');
+  assert.equal(resetRaceTabA.requestFenceId(), '');
   assert.deepEqual(resetRaceStorage.lockRecords, {});
 
   const noLockStorageDeniedHarness = createHarness(taskStateV1);
@@ -2009,20 +2591,27 @@ const harness = createHarness(taskStateV1);
   const repair = harness.repairUploadedImageHistory();
 
   const latestEnvelope = harness.envelope(fixtures.a3);
-  harness.queueEvent({ type: 'result', data: latestEnvelope });
-  const latestRequest = harness.requestStream(
+  const blockedLatestError = await harness.requestStream(
     '/api/a3/select/stream', { method: 'POST' }, 1000, 'select timeout',
-  );
+  ).then(() => null, (error) => error);
+  assert.equal(blockedLatestError?.code, 'STALE_ACTION');
   releaseStaleSession();
   await repair;
-  const latestData = await latestRequest;
+  harness.queueEvent({ type: 'result', data: latestEnvelope });
+  const latestData = await harness.requestStream(
+    '/api/a3/select/stream', { method: 'POST' }, 1000, 'select timeout',
+  );
   harness.responseItem(latestData);
   const latestSession = harness.session();
 
   assert.equal(harness.model().reason, 'OK');
   assert.deepEqual(harness.session(), latestSession);
-  assert.equal(harness.clearHistoryCount(), 0, 'stale /api/session must not clear history');
-  assert.equal(harness.historyLength(), 1);
+  assert.equal(
+    harness.clearHistoryCount(),
+    1,
+    'the serialized authoritative invalid session must clear local history',
+  );
+  assert.equal(harness.historyLength(), 0);
   assert.deepEqual(
     harness.lifecycle().slice(-6),
     ['begin', 'consume', 'finish', 'begin', 'consume', 'finish'],
@@ -2115,8 +2704,15 @@ const harness = createHarness(taskStateV1);
     ['/api/a3/select/stream'],
     'queue failure must not replay the A3 action',
   );
-  assert.equal(harness.requestFenceId(), '', 'queue no-update must resolve its fence');
+  assert.equal(
+    harness.requestFenceId(),
+    '',
+    'an exactly acknowledged queue rejection must retire its fence',
+  );
   assert.deepEqual(harness.lifecycle().slice(-2), ['begin', 'finish']);
+  harness.queueJson(harness.envelope(fixtures.a3));
+  await harness.request('/api/session', {}, 1000, 'session timeout');
+  assert.equal(harness.requestFenceId(), '', 'session reconciliation must clear queue fence');
 
   for (const [layer, code] of [
     ['session', 'QUEUE_FULL'],
@@ -2136,7 +2732,7 @@ const harness = createHarness(taskStateV1);
     const nonAdmissionError = await nonAdmissionQueueHarness.requestStream(
       '/api/a3/select/stream', { method: 'POST' }, 1000, 'select timeout',
     ).then(() => null, (error) => error);
-    assert.equal(nonAdmissionError?.code, code, `${layer}/${code}`);
+    assert.equal(nonAdmissionError?.code, 'RESPONSE_INVALID', `${layer}/${code}`);
     assert.ok(
       nonAdmissionQueueHarness.requestFenceId(),
       `${layer}/${code}: only registered queue admission no-update may resolve`,
@@ -2374,10 +2970,15 @@ const harness = createHarness(taskStateV1);
   assert.equal(await failedResetHarness.runSessionBootstrap(), false);
   failedResetHarness.setImmediateTimeout(false);
   assert.equal(failedResetHarness.resetRequired(), true);
-  assert.equal(await failedResetHarness.sessionTaskStartAllowed(), false);
-  assert.deepEqual(failedResetHarness.fetchUrls(), ['/api/reset']);
-  assert.equal(failedResetHarness.resetEvents().length, 0);
-  assert.ok(failedResetHarness.requestFenceId());
+  failedResetHarness.queueJson({ ok: true, task_state: fixtures.empty });
+  assert.equal(
+    await failedResetHarness.sessionTaskStartAllowed(), true,
+    'task start must retry an expired-session reset that timed out',
+  );
+  assert.deepEqual(failedResetHarness.fetchUrls(), ['/api/reset', '/api/reset']);
+  assert.equal(failedResetHarness.resetRequired(), false);
+  assert.equal(failedResetHarness.resetEvents().length, 1);
+  assert.equal(failedResetHarness.requestFenceId(), '');
 
   const transientTimeoutHarness = createHarness(taskStateV1);
   transientTimeoutHarness.queueTimeout();
@@ -2388,23 +2989,21 @@ const harness = createHarness(taskStateV1);
   assert.ok(transientTimeoutHarness.requestFenceId());
   assert.equal(transientTimeoutHarness.historyLength(), 1);
   assert.equal(transientTimeoutHarness.timeoutDelays().includes(15000), true);
-  const transientFetchesBeforeTask = transientTimeoutHarness.fetchUrls();
   const transientClearsBeforeTask = transientTimeoutHarness.clearHistoryCount();
-  assert.equal(await transientTimeoutHarness.sessionTaskStartAllowed(), false);
-  assert.deepEqual(transientTimeoutHarness.fetchUrls(), transientFetchesBeforeTask);
-  assert.equal(transientTimeoutHarness.clearHistoryCount(), transientClearsBeforeTask);
-  assert.equal(transientTimeoutHarness.historyLength(), 1);
-  assert.ok(transientTimeoutHarness.requestFenceId());
   const transientTimeoutNotice = transientTimeoutHarness.failureNotices().at(-1);
   assert.equal(transientTimeoutNotice.key, 'connection');
   assert.deepEqual(transientTimeoutNotice.recoveryActions, ['retry_connection']);
   assert.equal(transientTimeoutNotice.recoveryActions.includes('new_chat'), false);
   const timeoutReconciliation = transientTimeoutHarness.envelope(fixtures.a3);
   transientTimeoutHarness.queueJson(timeoutReconciliation);
-  assert.equal(await transientTimeoutHarness.runSessionBootstrap(), true);
+  assert.equal(
+    await transientTimeoutHarness.sessionTaskStartAllowed(), true,
+    'task start must retry a bootstrap that timed out',
+  );
+  assert.deepEqual(transientTimeoutHarness.fetchUrls(), ['/api/session', '/api/session']);
   assert.equal(transientTimeoutHarness.requestFenceId(), '');
+  assert.equal(transientTimeoutHarness.clearHistoryCount(), transientClearsBeforeTask);
   assert.equal(transientTimeoutHarness.historyLength(), 1);
-  assert.equal(await transientTimeoutHarness.sessionTaskStartAllowed(), true);
   assert.equal(
     transientTimeoutHarness.resolvedFailureNotices().includes('connection'),
     true,
@@ -2415,12 +3014,7 @@ const harness = createHarness(taskStateV1);
   assert.equal(await unreconciledHarness.runSessionBootstrap(), false);
   assert.deepEqual(unreconciledHarness.fetchUrls(), ['/api/session']);
   assert.ok(unreconciledHarness.requestFenceId());
-  const unreconciledFetchesBeforeTask = unreconciledHarness.fetchUrls();
   const unreconciledClearsBeforeTask = unreconciledHarness.clearHistoryCount();
-  assert.equal(await unreconciledHarness.sessionTaskStartAllowed(), false);
-  assert.deepEqual(unreconciledHarness.fetchUrls(), unreconciledFetchesBeforeTask);
-  assert.equal(unreconciledHarness.clearHistoryCount(), unreconciledClearsBeforeTask);
-  assert.equal(unreconciledHarness.historyLength(), 1);
   const unreconciledNotice = unreconciledHarness.failureNotices().at(-1);
   assert.equal(unreconciledNotice.key, 'session-recovery');
   assert.equal(
@@ -2440,12 +3034,81 @@ const harness = createHarness(taskStateV1);
   const unreconciledHistory = unreconciledHarness.historyMessages();
   const authoritativeReconciliation = unreconciledHarness.envelope(fixtures.a3);
   unreconciledHarness.queueJson(authoritativeReconciliation);
-  assert.equal(await unreconciledHarness.runSessionBootstrap(), true);
+  assert.equal(
+    await unreconciledHarness.sessionTaskStartAllowed(), true,
+    'task start must retry an unreconciled bootstrap',
+  );
+  assert.deepEqual(unreconciledHarness.fetchUrls(), ['/api/session', '/api/session']);
   assert.equal(unreconciledHarness.requestFenceId(), '');
+  assert.equal(unreconciledHarness.clearHistoryCount(), unreconciledClearsBeforeTask);
   assert.deepEqual(unreconciledHarness.historyMessages(), unreconciledHistory);
-  assert.equal(await unreconciledHarness.sessionTaskStartAllowed(), true);
   assert.equal(
     unreconciledHarness.resolvedFailureNotices().includes('session-recovery'),
+    true,
+  );
+
+  const expiredLoginHarness = createHarness(taskStateV1);
+  expiredLoginHarness.queueHttpError({
+    detail: '请先使用有效邀请码登录。',
+    status: 'NEEDS_INPUT', layer: 'login', code: 'LOGIN_REQUIRED',
+    retryable: false, action: 'relogin', request_id: 'req_login_expired',
+    search_id: '', schema_version: 1,
+  }, 401);
+  assert.equal(await expiredLoginHarness.runSessionBootstrap(), false);
+  assert.deepEqual(expiredLoginHarness.fetchUrls(), ['/api/session']);
+  assert.equal(
+    expiredLoginHarness.requestFenceId(),
+    '',
+    'an exactly acknowledged login rejection must retire its request fence',
+  );
+  assert.deepEqual(expiredLoginHarness.statusUpdates().at(-1), {
+    state: 'error', message: '需要重新登录',
+  });
+  const expiredLoginNotice = expiredLoginHarness.failureNotices().at(-1);
+  assert.equal(expiredLoginNotice.message, '登录状态已失效，请重新登录。');
+  assert.deepEqual(expiredLoginNotice.recoveryActions, ['relogin']);
+  assert.equal(expiredLoginNotice.protocol.code, 'LOGIN_REQUIRED');
+
+  const sharedExpiredLoginStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '',
+    fenceRecords: {}, resolvedFenceRecords: {}, lockRecords: {}, probeRecords: {},
+  };
+  const unacknowledgedLoginHarness = createHarness(
+    taskStateV1,
+    sharedExpiredLoginStorage,
+  );
+  unacknowledgedLoginHarness.queueHttpError({
+    detail: '请先使用有效邀请码登录。',
+    status: 'NEEDS_INPUT', layer: 'login', code: 'LOGIN_REQUIRED',
+    retryable: false, action: 'relogin', request_id: 'req_login_reconcile',
+    search_id: '', schema_version: 1,
+  }, 401, { ack: false });
+  assert.equal(await unacknowledgedLoginHarness.runSessionBootstrap(), false);
+  const pendingLoginFence = unacknowledgedLoginHarness.requestFenceId();
+  assert.ok(
+    pendingLoginFence,
+    'an unacknowledged login rejection must preserve its pending fence',
+  );
+  assert.deepEqual(unacknowledgedLoginHarness.statusUpdates().at(-1), {
+    state: 'error', message: '需要重新登录',
+  });
+  assert.deepEqual(
+    unacknowledgedLoginHarness.failureNotices().at(-1).recoveryActions,
+    ['relogin'],
+  );
+
+  const reloggedHarness = createHarness(taskStateV1, sharedExpiredLoginStorage);
+  reloggedHarness.queueJson(reloggedHarness.envelope(fixtures.a3));
+  assert.equal(await reloggedHarness.runSessionBootstrap(), true);
+  assert.equal(
+    reloggedHarness.requestFenceId(),
+    '',
+    'the first authenticated reconciliation must retire the preserved fence',
+  );
+  assert.equal(
+    JSON.parse(
+      reloggedHarness.fetchRequests()[0].headers['x-session-reconcile-fences'],
+    ).includes(pendingLoginFence),
     true,
   );
 
@@ -2520,6 +3183,7 @@ const harness = createHarness(taskStateV1);
   const delayedResetEventId = 'external-reset-before-lock-grant';
   const beforeQueuedReset = queuedAfterResetHarness.expiryState();
   queuedAfterResetHarness.commitExternalReset(delayedResetEventId);
+  assert.equal(queuedAfterResetHarness.deliverExternalReset(delayedResetEventId), true);
   releaseQueuedTaskLock();
   const queuedTaskError = await queuedTask;
   sessionLockGate = null;
@@ -2600,7 +3264,7 @@ const harness = createHarness(taskStateV1);
     assert.equal(tabBError?.code, 'STALE_ACTION', mode);
     assert.deepEqual(tabB.fetchUrls(), ['/api/session'], `${mode}: stale request must not fetch`);
     assert.equal(sharedStorage.resetEventId, '', `${mode}: failed commit is not a reset`);
-    assert.ok(sharedStorage.requestFenceId, `${mode}: pending fence must survive`);
+    assert.ok(tabA.requestFenceId(), `${mode}: pending fence must survive`);
     assert.equal(tabA.historyLength(), 0, mode);
     const tabBAfter = tabB.expiryState();
     assert.equal(tabBAfter.operationVersion, tabBBefore.operationVersion + 1, mode);
@@ -2624,7 +3288,7 @@ const harness = createHarness(taskStateV1);
   explicitTimeoutTabA.setImmediateTimeout(false);
   assert.equal(explicitTimeoutError?.code, 'REQUEST_TIMEOUT');
   assert.equal(explicitTimeoutStorage.resetEventId, '');
-  assert.ok(explicitTimeoutStorage.requestFenceId);
+  assert.ok(explicitTimeoutTabA.requestFenceId());
   assert.deepEqual(explicitTimeoutTabB.session(), explicitTimeoutTabBSession);
   assert.deepEqual(explicitTimeoutTabB.fetchUrls(), ['/api/session']);
   explicitTimeoutTabB.queueJson({ ok: true, task_state: fixtures.empty });
@@ -2635,15 +3299,16 @@ const harness = createHarness(taskStateV1);
   globalThis.navigator.locks = sessionLockManager;
   assert.equal(reconciledReset.task_state.workflow.exists, false);
   assert.ok(explicitTimeoutStorage.resetEventId);
-  assert.equal(explicitTimeoutStorage.requestFenceId, '');
+  assert.equal(explicitTimeoutTabB.requestFenceId(), '');
   assert.deepEqual(explicitTimeoutTabB.fetchUrls(), ['/api/session', '/api/reset']);
 
   const replacedFenceStorage = {
     activityAt: 0, resetEventId: '', probe: '', requestFenceId: 'older-pending-fence',
   };
   const replacedFenceHarness = createHarness(taskStateV1, replacedFenceStorage);
+  const replacedFenceEnvelope = replacedFenceHarness.envelope(fixtures.a3);
   const releaseReplacedFence = replacedFenceHarness.queueDeferredJson(
-    replacedFenceHarness.envelope(fixtures.a3),
+    replacedFenceEnvelope,
   );
   globalThis.navigator.locks = null;
   const replacedFenceRequest = replacedFenceHarness.request(
@@ -2654,11 +3319,69 @@ const harness = createHarness(taskStateV1);
   releaseReplacedFence();
   const replacedFenceError = await replacedFenceRequest;
   globalThis.navigator.locks = sessionLockManager;
-  assert.equal(replacedFenceError?.code, 'RESPONSE_INVALID');
+  assert.equal(
+    replacedFenceError,
+    null,
+    'resolving legacy fence A must succeed even when legacy fence C appears later',
+  );
   assert.equal(
     replacedFenceStorage.requestFenceId,
     'newer-pending-fence',
-    'an older reconciliation must not compare-remove a newer fence',
+    'an older reconciliation must not delete a newer legacy fence',
+  );
+  assert.equal(
+    replacedFenceHarness.requestFenceId(),
+    'newer-pending-fence',
+    'resolving fence A must not treat later fence C as resolved',
+  );
+  assert.equal(
+    Object.values(replacedFenceStorage.resolvedFenceRecords)
+      .includes('older-pending-fence'),
+    true,
+    'only the inherited legacy fence A must receive a tombstone',
+  );
+  assert.equal(
+    Object.values(replacedFenceStorage.resolvedFenceRecords)
+      .includes('newer-pending-fence'),
+    false,
+    'the later legacy fence C must remain unresolved',
+  );
+
+  const uniqueFenceAId = 'unique-pending-fence-a';
+  const uniqueFenceCId = 'unique-pending-fence-c';
+  const uniqueFenceAKey = 'session-request-fence:pending:' + encodeURIComponent(uniqueFenceAId);
+  const uniqueFenceCKey = 'session-request-fence:pending:' + encodeURIComponent(uniqueFenceCId);
+  const preciseFenceStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '',
+    fenceRecords: { [uniqueFenceAKey]: uniqueFenceAId },
+  };
+  const preciseFenceHarness = createHarness(taskStateV1, preciseFenceStorage);
+  const releasePreciseFence = preciseFenceHarness.queueDeferredJson(
+    preciseFenceHarness.envelope(fixtures.a3),
+  );
+  globalThis.navigator.locks = null;
+  const preciseFenceRequest = preciseFenceHarness.request(
+    '/api/session', {}, 1000, 'session timeout',
+  );
+  await waitForFetch(preciseFenceHarness, '/api/session');
+  preciseFenceStorage.fenceRecords[uniqueFenceCKey] = uniqueFenceCId;
+  releasePreciseFence();
+  await preciseFenceRequest;
+  globalThis.navigator.locks = sessionLockManager;
+  assert.equal(
+    Object.hasOwn(preciseFenceStorage.fenceRecords, uniqueFenceAKey),
+    false,
+    'reconciliation must clear its exact inherited unique fence A',
+  );
+  assert.equal(
+    preciseFenceStorage.fenceRecords[uniqueFenceCKey],
+    uniqueFenceCId,
+    'reconciliation of A must not remove later unique fence C',
+  );
+  assert.equal(
+    preciseFenceHarness.requestFenceId(),
+    uniqueFenceCId,
+    'later unique fence C must remain pending after A completes',
   );
 
   const nonEmptyResetStorage = {
@@ -2678,7 +3401,7 @@ const harness = createHarness(taskStateV1);
     nonEmptyResetEnvelope,
   );
   assert.equal(nonEmptyResetStorage.resetEventId, '');
-  assert.equal(nonEmptyResetStorage.requestFenceId, '');
+  assert.equal(nonEmptyResetTabA.requestFenceId(), '');
   assert.deepEqual(nonEmptyResetTabB.session(), nonEmptyResetTabBSession);
 
   const storageDeniedHarness = createHarness(taskStateV1);
