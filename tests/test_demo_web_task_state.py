@@ -594,7 +594,7 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260903-fence-login-v8"'
+        demo_asset = 'src="/assets/demo.js?v=20260903-answer-session-v9"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
@@ -1278,6 +1278,27 @@ const retryHarness = createRetryHarness();
                     contract.UNIT_CLOSED,
                 ),
             ).to_dict(),
+            "a3_answer_wait": _a3_action_snapshot(
+                phase="WAIT_UNIT_SELECTION",
+                allowed_actions=contract.WORKFLOW_PHASE_CONTRACTS[
+                    "WAIT_UNIT_SELECTION"
+                ].action_candidates,
+                unit_statuses=(
+                    contract.UNIT_COMPLETED,
+                    contract.UNIT_AVAILABLE,
+                ),
+            ).to_dict(),
+            "a3_answer_complete": _a3_action_snapshot(
+                phase="COMPLETE",
+                allowed_actions=contract.WORKFLOW_PHASE_CONTRACTS[
+                    "COMPLETE"
+                ].action_candidates,
+                unit_statuses=(contract.UNIT_COMPLETED,),
+            ).to_dict(),
+            "a3_next_upload": _a3_action_snapshot(
+                workflow_id="search_frontend_next_upload_12345678",
+                task_revision=1,
+            ).to_dict(),
             "inconsistent": _inconsistent_workflow_snapshot().to_dict(),
         }
         demo_source = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(
@@ -1875,7 +1896,182 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', 'contr
 
 const harness = createHarness(taskStateV1);
 
+function completedAnswerEnvelope(targetHarness, raw, unitId = 'g1-u1') {
+  const data = targetHarness.envelope(raw);
+  const selected = data.session.a3.units.find((unit) => unit.unit_id === unitId);
+  assert.ok(selected, `missing completed answer unit: ${unitId}`);
+  selected.selected = true;
+  data.session.a3.selected_unit = {
+    unit_id: selected.unit_id,
+    display_label: selected.display_label,
+    context_text: 'answer display context',
+  };
+  data.intent = 'select_candidate';
+  data.text = `${selected.display_label} 的题库答案找到了。`;
+  data.images = ['/api/media/answer.jpg'];
+  return data;
+}
+
 (async () => {
+  for (const [name, terminalSnapshot] of [
+    ['wait-next-unit', fixtures.a3_answer_wait],
+    ['complete-page', fixtures.a3_answer_complete],
+  ]) {
+    const answerHarness = createHarness(taskStateV1);
+    answerHarness.queueJson(answerHarness.envelope(fixtures.a3_active));
+    assert.equal(await answerHarness.runSessionBootstrap(), true, `${name}: bootstrap`);
+
+    const answerEnvelope = completedAnswerEnvelope(answerHarness, terminalSnapshot);
+    answerHarness.queueEvent({ type: 'result', data: answerEnvelope });
+    const answerData = await answerHarness.requestStream(
+      '/api/message/stream', { method: 'POST' }, 1000, 'answer timeout',
+    );
+    const answerItem = answerHarness.responseItem(answerData);
+    assert.deepEqual(answerItem.images, ['/api/media/answer.jpg'], `${name}: answer visible`);
+    assert.equal(answerItem.a3.selected_unit.unit_id, 'g1-u1', `${name}: answer label context`);
+    assert.equal(answerHarness.model().reason, 'OK', `${name}: canonical state accepted`);
+    assert.equal(answerHarness.requestFenceId(), '', `${name}: answer fence resolved`);
+    assert.equal(await answerHarness.sessionTaskStartAllowed(), true, `${name}: next upload allowed`);
+
+    answerHarness.queueEvent({
+      type: 'result', data: answerHarness.envelope(fixtures.a3_next_upload),
+    });
+    await answerHarness.requestStream(
+      '/api/image/stream', { method: 'POST' }, 1000, 'next image timeout',
+    );
+    assert.deepEqual(
+      answerHarness.fetchUrls(),
+      ['/api/session', '/api/message/stream', '/api/image/stream'],
+      `${name}: complete answer-to-next-upload transport`,
+    );
+    assert.equal(answerHarness.requestFenceId(), '', `${name}: next upload fence resolved`);
+    assert.equal(answerHarness.clearHistoryCount(), 0, `${name}: history retained`);
+  }
+
+  const historicalSelectionPoisons = [
+    {
+      name: 'available-selection',
+      envelope: (targetHarness) => completedAnswerEnvelope(
+        targetHarness, fixtures.a3_answer_wait, 'g1-u2',
+      ),
+    },
+    {
+      name: 'closed-selection',
+      envelope: (targetHarness) => completedAnswerEnvelope(targetHarness, fixtures.a3, 'g1-u4'),
+    },
+    {
+      name: 'mismatched-label',
+      envelope: (targetHarness) => {
+        const data = completedAnswerEnvelope(targetHarness, fixtures.a3_answer_complete);
+        data.session.a3.selected_unit.display_label = 'poison';
+        return data;
+      },
+    },
+    {
+      name: 'multiple-selected',
+      envelope: (targetHarness) => {
+        const data = completedAnswerEnvelope(targetHarness, fixtures.a3_answer_wait);
+        data.session.a3.units[1].selected = true;
+        return data;
+      },
+    },
+  ];
+  for (const poison of historicalSelectionPoisons) {
+    const poisonHarness = createHarness(taskStateV1);
+    const poisonedEnvelope = poison.envelope(poisonHarness);
+    poisonHarness.queueEvent({ type: 'result', data: poisonedEnvelope });
+    const poisonError = await poisonHarness.requestStream(
+      '/api/message/stream', { method: 'POST' }, 1000, 'poison timeout',
+    ).then(() => null, (error) => error);
+    assert.equal(poisonError?.code, 'RESPONSE_INVALID', poison.name);
+    assert.ok(poisonHarness.requestFenceId(), `${poison.name}: fence must remain pending`);
+    assert.equal(poisonHarness.model().reason, 'MISSING', poison.name);
+  }
+
+  const pendingAfterBootstrapStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '',
+    fenceRecords: {}, resolvedFenceRecords: {}, lockRecords: {}, probeRecords: {},
+  };
+  const pendingAfterBootstrapHarness = createHarness(
+    taskStateV1, pendingAfterBootstrapStorage,
+  );
+  pendingAfterBootstrapHarness.queueJson(
+    pendingAfterBootstrapHarness.envelope(fixtures.a3_active),
+  );
+  assert.equal(await pendingAfterBootstrapHarness.runSessionBootstrap(), true);
+  pendingAfterBootstrapStorage.requestFenceId = 'pending-after-cached-bootstrap';
+  pendingAfterBootstrapHarness.queueJson(
+    completedAnswerEnvelope(pendingAfterBootstrapHarness, fixtures.a3_answer_complete),
+  );
+  assert.equal(
+    await pendingAfterBootstrapHarness.sessionTaskStartAllowed(),
+    true,
+    'a new pending fence must force reconciliation instead of reusing a settled bootstrap',
+  );
+  assert.deepEqual(
+    pendingAfterBootstrapHarness.fetchUrls(),
+    ['/api/session', '/api/session'],
+  );
+  assert.equal(pendingAfterBootstrapHarness.requestFenceId(), '');
+  assert.equal(pendingAfterBootstrapHarness.clearHistoryCount(), 0);
+  assert.equal(pendingAfterBootstrapHarness.historyLength(), 1);
+
+  const inFlightFenceStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '',
+    fenceRecords: {}, resolvedFenceRecords: {}, lockRecords: {}, probeRecords: {},
+  };
+  const inFlightFenceHarness = createHarness(taskStateV1, inFlightFenceStorage);
+  const releaseInitialBootstrap = inFlightFenceHarness.queueDeferredJson(
+    inFlightFenceHarness.envelope(fixtures.a3_active),
+  );
+  const initialBootstrap = inFlightFenceHarness.runSessionBootstrap();
+  await waitForFetch(inFlightFenceHarness, '/api/session');
+  inFlightFenceStorage.requestFenceId = 'pending-during-bootstrap';
+  inFlightFenceHarness.queueJson(
+    inFlightFenceHarness.envelope(fixtures.a3_answer_complete),
+  );
+  const gatedStart = inFlightFenceHarness.sessionTaskStartAllowed();
+  releaseInitialBootstrap();
+  assert.equal(await initialBootstrap, false);
+  assert.equal(await gatedStart, true);
+  assert.deepEqual(
+    inFlightFenceHarness.fetchUrls(),
+    ['/api/session', '/api/session'],
+    'a fence appearing during bootstrap must trigger a second reconciliation',
+  );
+  assert.equal(inFlightFenceHarness.requestFenceId(), '');
+  assert.equal(inFlightFenceHarness.clearHistoryCount(), 0);
+
+  pendingAfterBootstrapHarness.queueEvent({
+    type: 'result', data: pendingAfterBootstrapHarness.envelope(fixtures.a3_next_upload),
+  });
+  await pendingAfterBootstrapHarness.requestStream(
+    '/api/image/stream', { method: 'POST' }, 1000, 'reconciled image timeout',
+  );
+  assert.deepEqual(
+    pendingAfterBootstrapHarness.fetchUrls(),
+    ['/api/session', '/api/session', '/api/image/stream'],
+  );
+  assert.equal(pendingAfterBootstrapHarness.requestFenceId(), '');
+
+  const failedPendingStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '',
+    fenceRecords: {}, resolvedFenceRecords: {}, lockRecords: {}, probeRecords: {},
+  };
+  const failedPendingHarness = createHarness(taskStateV1, failedPendingStorage);
+  failedPendingHarness.queueJson(failedPendingHarness.envelope(fixtures.a3_active));
+  assert.equal(await failedPendingHarness.runSessionBootstrap(), true);
+  failedPendingStorage.requestFenceId = 'pending-before-failed-reconciliation';
+  failedPendingHarness.queueJson({ ok: true });
+  assert.equal(await failedPendingHarness.sessionTaskStartAllowed(), false);
+  assert.deepEqual(failedPendingHarness.fetchUrls(), ['/api/session', '/api/session']);
+  assert.equal(
+    failedPendingHarness.requestFenceId(),
+    'pending-before-failed-reconciliation',
+  );
+  assert.equal(failedPendingHarness.clearHistoryCount(), 0);
+  assert.equal(failedPendingHarness.historyLength(), 1);
+
   const lazyBootstrapHarness = createHarness(taskStateV1);
   lazyBootstrapHarness.queueJson(lazyBootstrapHarness.envelope(fixtures.a3));
   assert.equal(await lazyBootstrapHarness.sessionTaskStartAllowed(), true);

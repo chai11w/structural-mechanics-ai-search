@@ -1775,6 +1775,12 @@ def create_app(
                 if not session_id:
                     if rejection:
                         return coordination_http_rejection(request, "", rejection)
+                    assert coordination is not None
+                    if coordination.versioned:
+                        _mark_session_coordination_ack(
+                            request,
+                            _coordination_completed_fences(coordination),
+                        )
                     return _attach_session_coordination_ack(endpoint(request), request)
                 if rejection:
                     with session_coordination.reconcile(session_id, ()):

@@ -1407,13 +1407,33 @@ function taskStateAllowsA3Action(action, target, a3 = a3Current()) {
 
 function a3SnapshotMatchesTaskState(a3, target) {
   if (!workflowActionTargetMatchesA3(target, a3)) return false;
-  const stateUnits = taskStateContext?.snapshot?.units || [];
+  const snapshot = taskStateContext?.snapshot;
+  const stateUnits = snapshot?.units || [];
   if (a3.units.length !== stateUnits.length) return false;
   const legacyUnits = new Map();
   for (const unit of a3.units) {
     if (!unit.unit_id || legacyUnits.has(unit.unit_id)) return false;
     legacyUnits.set(unit.unit_id, unit);
   }
+  const currentUnit = snapshot?.current_unit || null;
+  const legacySelectedUnitId = String(a3.selected_unit?.unit_id || '');
+  let projectedSelectedUnit = currentUnit;
+  if (!projectedSelectedUnit && legacySelectedUnitId) {
+    const historicalSelectionAllowed = (
+      snapshot?.active_child_task === null
+      && ['WAIT_UNIT_SELECTION', 'COMPLETE'].includes(String(snapshot?.workflow?.phase || ''))
+    );
+    projectedSelectedUnit = historicalSelectionAllowed
+      ? stateUnits.find((unit) => unit.unit_id === legacySelectedUnitId) || null
+      : null;
+    if (projectedSelectedUnit?.status !== 'COMPLETED') return false;
+  }
+  const projectedSelectedUnitId = String(projectedSelectedUnit?.unit_id || '');
+  if (legacySelectedUnitId !== projectedSelectedUnitId) return false;
+  if (
+    String(a3.selected_unit?.display_label || '')
+    !== String(projectedSelectedUnit?.display_label || '')
+  ) return false;
   for (const unit of stateUnits) {
     const legacyUnit = legacyUnits.get(unit.unit_id);
     const preparationStatus = String(legacyUnit?.preparation_status || '');
@@ -1423,7 +1443,7 @@ function a3SnapshotMatchesTaskState(a3, target) {
       || legacyUnit.display_label !== unit.display_label
       || legacyUnit.completed !== (unit.status === 'COMPLETED')
       || legacyUnit.searched !== (unit.status === 'CLOSED')
-      || legacyUnit.selected !== (unit.status === 'ACTIVE')
+      || legacyUnit.selected !== (unit.unit_id === projectedSelectedUnitId)
       || !['pending', 'located', 'manual', 'ready'].includes(preparationStatus)
     ) return false;
     if (!legacyUnit.completed && !legacyUnit.searched && !legacyUnit.selected) {
@@ -1431,13 +1451,7 @@ function a3SnapshotMatchesTaskState(a3, target) {
       if ((preparationStatus === 'ready') !== (unit.status === 'PREPARED')) return false;
     }
   }
-  const currentUnit = taskStateContext.snapshot?.current_unit || null;
-  const currentUnitId = String(currentUnit?.unit_id || '');
-  if (String(a3.selected_unit?.unit_id || '') !== currentUnitId) return false;
-  if (String(a3.selected_unit?.display_label || '') !== String(currentUnit?.display_label || '')) {
-    return false;
-  }
-  return a3.units.every((unit) => unit.selected === (unit.unit_id === currentUnitId));
+  return true;
 }
 
 function a3SnapshotIsIdleCapability(a3, session) {
@@ -2631,8 +2645,42 @@ function runSessionBootstrap() {
 
 async function sessionTaskStartAllowed() {
   refreshHistoryActivityFromStorage();
-  const pending = sessionBootstrap || runSessionBootstrap();
-  if (!(await pending)) return false;
+  // A fence can appear while an earlier bootstrap request is still in flight
+  // (for example, another tab may start a task at that exact moment).  Do not
+  // let the already-settled/in-flight promise certify a new task.  Re-read
+  // storage after each bootstrap and perform a bounded fresh reconciliation;
+  // the request lock remains the final fail-closed guard for a late race.
+  const initialFences = storedSessionRequestFences();
+  if (initialFences === undefined) return false;
+  const bootstrapWasInFlight = Boolean(sessionBootstrapPending && sessionBootstrap);
+  // A fence already pending at entry is an explicit recovery state.  The
+  // exception is an older bootstrap that was already in flight: its response
+  // may have been formed before that fence appeared, so allow one fresh
+  // reconciliation after it settles.  Never retry a failed, already-settled
+  // reconciliation that started with a pending fence.
+  const mayRetryAfterLateFence = initialFences.length === 0 || bootstrapWasInFlight;
+  let ready = false;
+  let retried = false;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const unresolvedFences = attempt === 0
+      ? initialFences
+      : storedSessionRequestFences();
+    const pending = (
+      sessionBootstrap
+      && unresolvedFences !== undefined
+      && unresolvedFences.length === 0
+    ) ? sessionBootstrap : runSessionBootstrap();
+    ready = await pending;
+    const remainingFences = storedSessionRequestFences();
+    if (remainingFences === undefined) return false;
+    if (remainingFences.length) {
+      if (retried || !mayRetryAfterLateFence) return false;
+      retried = true;
+      continue;
+    }
+    break;
+  }
+  if (!ready) return false;
   if (!sessionResetRequired) return true;
   setStatus('error', '需要先重新建立会话');
   showFailureNotice(
