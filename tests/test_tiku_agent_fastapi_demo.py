@@ -269,6 +269,16 @@ class FakeRuntime:
 
 
 class FastApiDemoTest(unittest.TestCase):
+    def test_brand_is_display_only(self):
+        page = (
+            Path(__file__).resolve().parents[1]
+            / "tiku_agent"
+            / "demo_web"
+            / "index.html"
+        ).read_text(encoding="utf-8")
+        self.assertIn('<div class="brand">', page)
+        self.assertNotIn('<a class="brand"', page)
+
     def setUp(self):
         super().setUp()
         # Ignored runtime directories are absent in a clean worktree.

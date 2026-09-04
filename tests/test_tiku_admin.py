@@ -225,6 +225,10 @@ class TikuAdminTest(unittest.TestCase):
         script = (
             Path(__file__).resolve().parents[1] / "tiku_admin" / "web" / "admin.js"
         ).read_text(encoding="utf-8")
+        self.assertIn('<div class="auth-brand">', script)
+        self.assertIn('<div class="brand">', script)
+        self.assertNotIn('<a class="auth-brand"', script)
+        self.assertNotIn('<a class="brand"', script)
         self.assertIn("<th>用户</th><th>状态</th><th>邀请码</th>", script)
         self.assertIn('<dt>用户</dt><dd>${escapeHtml(feedbackUserLabel(data))}</dd>', script)
         self.assertIn('for="filter-invite">用户</label>', script)
