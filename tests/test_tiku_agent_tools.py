@@ -191,6 +191,47 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertTrue(result.data["dimension_filter"]["applied"])
         self.assertEqual(result.data["dimension_filter"]["mismatches"], 1)
 
+    def test_dimension_filter_hard_filters_full_candidates_against_single_query(self):
+        recognizer = Mock()
+        recognizer.recognize_dimensions.return_value = {
+            "normalized": {
+                "dimensions_verified": True,
+                "dimension_state": "single",
+                "single_side": "2L",
+            },
+            "from_cache": False,
+        }
+        scan = self._dimension_scan(11)
+        scan.dimensions_by_name = {
+            name: {
+                "long_width": "2L×L" if index <= 6 else "L×L",
+                "single_side": "",
+            }
+            for index, name in enumerate(scan.dimensions_by_name, 1)
+        }
+        config = AgentToolConfig(dimension_filter_enabled=True)
+        with patch(
+            "tiku_agent.tools.search.scan_chapter_candidates",
+            return_value=scan,
+        ), patch(
+            "tiku_agent.tools.search.resolve_question_path",
+            side_effect=lambda name, **_kwargs: (Path(name), name, False),
+        ), patch("tiku_agent.tools._make_qwen", return_value=recognizer):
+            result = coarse_search_tool(
+                [{"type": "集中", "raw": "P"}],
+                chapter="4力法",
+                route="symbolic",
+                structure_type="钢架",
+                query_image_path="query.jpg",
+                config=config,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(len(result.data["candidates"]), 6)
+        self.assertEqual(result.data["dimension_filter"]["matches"], 6)
+        self.assertEqual(result.data["dimension_filter"]["mismatches"], 5)
+        self.assertEqual(result.data["dimension_filter"]["skipped"], 0)
+
     def test_dimension_filter_model_failure_keeps_original_candidates(self):
         recognizer = Mock()
         recognizer.recognize_dimensions.side_effect = RuntimeError("timeout")

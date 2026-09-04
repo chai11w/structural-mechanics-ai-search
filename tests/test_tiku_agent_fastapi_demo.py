@@ -628,6 +628,58 @@ class FastApiDemoTest(unittest.TestCase):
                 self.assertFalse(any(call[0] == "image" for call in runtime.calls))
                 self.assertEqual(list((root / "incoming").glob("*")), [])
 
+    def test_v6_reset_without_cookie_does_not_acknowledge_or_register_fences(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            media_path = Path(temp_dir) / "media.jpg"
+            Image.new("RGB", (4, 4), "white").save(media_path)
+            runtime = FakeRuntime(media_path)
+            app = create_app(runtime=runtime)
+            client = TestClient(app)
+            registry = app.state.session_coordination
+
+            cases = (
+                ("request", (), (_v6_fence("reset-no-cookie-request"),)),
+                ("reconcile", (_v6_fence("reset-no-cookie-reconcile"),), ()),
+                (
+                    "combined",
+                    (_v6_fence("reset-no-cookie-old"),),
+                    (_v6_fence("reset-no-cookie-current"),),
+                ),
+            )
+            for name, reconcile_fences, request_fences in cases:
+                with self.subTest(name=name):
+                    headers = {
+                        "Sec-Fetch-Site": "same-origin",
+                        "X-Session-Coordination-Version": "6",
+                    }
+                    if reconcile_fences:
+                        headers["X-Session-Reconcile-Fences"] = json.dumps(
+                            reconcile_fences
+                        )
+                    if request_fences:
+                        headers["X-Session-Request-Fence"] = request_fences[0]
+
+                    response = client.post("/api/reset", headers=headers)
+
+                    self.assertEqual(response.status_code, 200, response.text)
+                    payload = response.json()
+                    self.assertEqual(payload["code"], "SESSION_RESET")
+                    self.assertEqual(
+                        payload["task_state"],
+                        empty_task_state_snapshot().to_dict(),
+                    )
+                    self.assertEqual(
+                        payload[SESSION_COORDINATION_ACK_FIELD],
+                        {"version": "6", "completed_fences": []},
+                    )
+                    self.assertNotIn(SESSION_COOKIE, client.cookies)
+                    with registry._lock:
+                        self.assertEqual(registry._gates, {})
+                        self.assertEqual(registry._pins, {})
+
+            self.assertEqual(runtime.session_capture_calls, [])
+            self.assertFalse(any(call[0] == "clear" for call in runtime.calls))
+
     def test_v6_session_and_reset_wait_for_an_admitted_image_stream(self):
         image_bytes = io.BytesIO()
         Image.new("RGB", (4, 4), "white").save(image_bytes, format="JPEG")
@@ -6307,7 +6359,7 @@ class FastApiDemoTest(unittest.TestCase):
         for expected in (
             'href="/assets/demo.css?v=20260822-feedback-v1"',
             'src="/assets/task_state.js?v=20260830-task-state-3-4-5"',
-            'src="/assets/demo.js?v=20260903-fence-login-v8"',
+            'src="/assets/demo.js?v=20260903-answer-session-v9"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',

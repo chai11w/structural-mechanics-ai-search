@@ -203,7 +203,7 @@ class DimensionEvidenceFilterTests(unittest.TestCase):
         self.assertEqual(dimension_evidence("3L×0", "", "钢架").state, "conflict")
         self.assertEqual(dimension_evidence("3L×L", "", "梁").state, "conflict")
 
-    def test_single_side_equality_is_soft_and_inequality_never_deletes(self):
+    def test_single_side_equality_matches_and_inequality_is_a_hard_mismatch(self):
         query = DimensionEvidence(single="3L", state="single")
         self.assertEqual(
             dimension_evidence_verdict(query, dimension_evidence("4L×3L", "", "钢架"), "钢架"),
@@ -211,10 +211,10 @@ class DimensionEvidenceFilterTests(unittest.TestCase):
         )
         self.assertEqual(
             dimension_evidence_verdict(query, dimension_evidence("4L×L", "", "钢架"), "钢架"),
-            "skip",
+            "mismatch",
         )
 
-    def test_single_side_reorders_matches_but_keeps_nonmatches(self):
+    def test_single_side_hard_filters_comparable_nonmatches(self):
         candidates = [
             {"rank": 1, "name": "other", "long_width": "4L×L", "single_side": ""},
             {"rank": 2, "name": "same", "long_width": "", "single_side": "3L"},
@@ -225,10 +225,26 @@ class DimensionEvidenceFilterTests(unittest.TestCase):
             DimensionEvidence(single="3L", state="single"),
             "钢架",
         )
-        self.assertEqual([item["name"] for item in filtered], ["same", "other", "also-other"])
-        self.assertEqual(len(filtered), 3)
+        self.assertEqual([item["name"] for item in filtered], ["same"])
+        self.assertEqual(len(filtered), 1)
         self.assertEqual(trace["matches"], 1)
-        self.assertEqual(trace["mismatches"], 0)
+        self.assertEqual(trace["mismatches"], 2)
+
+    def test_full_query_hard_filters_comparable_single_side_nonmatch(self):
+        candidates = [
+            {"rank": 1, "name": "wrong", "long_width": "", "single_side": "2L"},
+            {"rank": 2, "name": "same", "long_width": "", "single_side": "3L"},
+            {"rank": 3, "name": "unknown", "long_width": "", "single_side": ""},
+        ]
+        filtered, trace = filter_ranked_candidates_by_dimensions(
+            candidates,
+            dimension_evidence("3L×L", "", "钢架"),
+            "钢架",
+        )
+        self.assertEqual([item["name"] for item in filtered], ["same", "unknown"])
+        self.assertEqual(trace["matches"], 1)
+        self.assertEqual(trace["mismatches"], 1)
+        self.assertEqual(trace["skipped"], 1)
 
     def test_only_full_full_mismatches_are_deleted(self):
         candidates = [
