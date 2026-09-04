@@ -96,6 +96,41 @@ class A3PageParserTests(unittest.TestCase):
 
         self.assertEqual(build_display_label(result.groups[0].units[0], 1), "3-15")
 
+    def test_duplicate_labels_in_one_group_receive_stable_subnumbers(self):
+        payload = valid_payload()
+        payload["groups"][0]["parent_question_label"] = "3"
+        for unit in payload["groups"][0]["units"]:
+            unit["parent_question_label"] = "3"
+            unit["question_label"] = "3"
+
+        result = parse_a3_page_understanding(payload)
+        output = result.to_dict(include_derived=True)
+
+        self.assertEqual(
+            [unit["display_label"] for unit in output["groups"][0]["units"]],
+            ["3-1", "3-2"],
+        )
+        self.assertEqual(result.display_label(result.groups[0].units[0]), "3-1")
+        self.assertEqual(result.display_label(result.groups[0].units[1]), "3-2")
+
+    def test_duplicate_label_suffixes_do_not_collide_with_explicit_labels(self):
+        payload = valid_payload()
+        units = payload["groups"][0]["units"]
+        duplicate = deepcopy(units[1])
+        duplicate["unit_id"] = "g1-u3"
+        units.append(duplicate)
+        units[0]["question_label"] = "1"
+        units[1]["question_label"] = "四"
+        units[2]["question_label"] = "四"
+
+        result = parse_a3_page_understanding(payload)
+        output = result.to_dict(include_derived=True)
+
+        self.assertEqual(
+            [unit["display_label"] for unit in output["groups"][0]["units"]],
+            ["四-1", "四-2", "四-3"],
+        )
+
     def test_compact_unit_contract_derives_parent_and_shared_stem(self):
         payload = valid_payload()
         unit = payload["groups"][0]["units"][0]

@@ -138,6 +138,11 @@ class A3PageGroup:
         include_derived: bool = False,
         ordinal_offset: int = 0,
     ) -> dict[str, Any]:
+        display_labels = (
+            _build_group_display_labels(self.units, ordinal_offset)
+            if include_derived
+            else []
+        )
         data: dict[str, Any] = {
             "group_id": self.group_id,
             "parent_question_label": self.parent_question_label,
@@ -145,9 +150,7 @@ class A3PageGroup:
             "shared_stem_text": self.shared_stem_text,
             "units": [
                 unit.to_dict(
-                    display_label=build_display_label(unit, ordinal_offset + index + 1)
-                    if include_derived
-                    else None
+                    display_label=display_labels[index] if include_derived else None
                 )
                 for index, unit in enumerate(self.units)
             ],
@@ -181,8 +184,14 @@ class A3PageUnderstanding:
         return tuple(unit for unit in self.units if unit.searchability == "searchable_candidate")
 
     def display_label(self, unit: A3PageUnit) -> str:
-        index = next(index for index, item in enumerate(self.units, start=1) if item.unit_id == unit.unit_id)
-        return build_display_label(unit, index)
+        ordinal_offset = 0
+        for group in self.groups:
+            labels = _build_group_display_labels(group.units, ordinal_offset)
+            for index, item in enumerate(group.units):
+                if item.unit_id == unit.unit_id:
+                    return labels[index]
+            ordinal_offset += len(group.units)
+        raise StopIteration(unit.unit_id)
 
     def to_dict(self, *, include_derived: bool = False) -> dict[str, Any]:
         groups: list[dict[str, Any]] = []
@@ -283,6 +292,33 @@ def build_display_label(unit: A3PageUnit, ordinal: int) -> str:
     if unit.parent_question_label:
         return unit.parent_question_label
     return f"未标号题{ordinal}"
+
+
+def _build_group_display_labels(
+    units: tuple[A3PageUnit, ...],
+    ordinal_offset: int = 0,
+) -> list[str]:
+    labels = [
+        build_display_label(unit, ordinal_offset + index + 1)
+        for index, unit in enumerate(units)
+    ]
+    counts = {label: labels.count(label) for label in labels}
+    used = {label for label in labels if counts[label] == 1}
+    next_suffix: dict[str, int] = {}
+    resolved: list[str] = []
+    for label in labels:
+        if counts[label] == 1:
+            resolved.append(label)
+            continue
+        suffix = next_suffix.get(label, 1)
+        candidate = f"{label}-{suffix}"
+        while candidate in used:
+            suffix += 1
+            candidate = f"{label}-{suffix}"
+        next_suffix[label] = suffix + 1
+        used.add(candidate)
+        resolved.append(candidate)
+    return resolved
 
 
 def build_a2_context_text(
