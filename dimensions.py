@@ -409,10 +409,9 @@ def dimension_evidence_verdict(
 ) -> str:
     """Return ``match``/``mismatch``/``skip`` for complete and single evidence.
 
-    A hard ``mismatch`` is possible only when both sides have valid complete
-    dimensions. If either side has only one known side, equality is a positive
-    soft match; inequality remains ``skip`` so incomplete evidence never deletes
-    a candidate.
+    Whenever both sides provide reliable evidence, a shared side is a match and
+    no shared side is a hard mismatch. ``skip`` is reserved for missing,
+    conflicting, or otherwise unusable evidence.
     """
 
     if not compares_width(structure_type):
@@ -436,7 +435,7 @@ def dimension_evidence_verdict(
     else:
         candidate_sides = (str(candidate.single or ""),)
     common = (set(query_sides) & set(candidate_sides)) - {""}
-    return "match" if common else "skip"
+    return "match" if common else "mismatch"
 
 
 def filter_ranked_candidates_by_dimensions(
