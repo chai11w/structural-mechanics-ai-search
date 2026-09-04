@@ -50,7 +50,7 @@
 
 - Planner 结构化计划、权限契约、有界执行、选择性自主等阶段在 8892 验证完成前暂停；恢复前以 8890 规范文档的验收门为准。
 
-### 当前（阶段 3 已完成）：Agent 工程化梳理与可恢复运行基础
+### 当前（阶段 4 IN_PROGRESS）：关键阶段结构化保存与证据生命周期
 
 目标是降低现有系统的理解成本、排错成本和改动风险；不以暂停/继续为理由一次性重写主线。各阶段按依赖顺序推进，前一阶段稳定后才进入下一阶段：
 
@@ -67,8 +67,13 @@
    - 3.5.2 8896 契约烟测：DONE；该批次当时未部署 8790。使用固定 linked checkout、完整提交、绝对 Git/Python/PowerShell/runtime 和硬化 watchdog；HTTP 与停服后 SQLite 证据通过，14 个 evidence request 对应 28 条 trace event 和 3 条 Response Store 记录。真实浏览器加载 task-state 页面无控制台错误、资源缺失或横向溢出；watchdog、agent 和 8896 listener 均精确清理。Windows 空 listener 的结构化 no-match 已收口，其他查询错误继续 fail-closed；全程未触碰 8788/8790/8794/8795。
    - 3.5.3 只读 live 对照：DONE，结论为 BLOCKED。静态证据确认旧启动链/watchdog 从可变主工作区启动，不能证明实际提交，且缺少固定 release/manifest 和匹配回退锚点；按原安全边界停止并重新确认，没有把仓库 HEAD 当作线上证据。
    - 3.5.4 remediation 与精确启用 8790：DONE。用户随后明确授权本次限定 remediation 与精确启用后，watchdog 强制完整提交、manifest、干净 linked checkout、绝对入口/Python/runtime 和每次启动复验，并修复 Limited 任务环境下中文 Git 路径解析。受限备份包含 Git bundle、任务 XML、8 份 SQLite 在线一致副本及 control key 配对；精确切换后任务 Running、父子链/唯一 listener/1/2/55/control 引用、health/Trace 和完整巡检周期均通过。真实浏览器邀请页无控制台错误或横向溢出，Web Lock 可用，live `task_state.js` 哈希与 release 一致；8788/8794/8795 监听身份前后不变。
-   - 3.5.4 后续 refresh-recovery 热修复：IMPLEMENTED，LIVE ACCEPTANCE DEFERRED。启动/重连只经权威 `/api/session` 对账，bootstrap 超时 15 秒；瞬时错误保留 pending fence、只给 `retry_connection`，成功对账清除临时 recovery notice，cache-buster 为 `20260901-refresh-recovery-v2`。固定 release、受限备份、NATAPP watchdog 持久化和全仓 1222 项回归已完成，但真实已登录会话恢复仍未闭环；用户现继续实际试用。本项不改变 V1，不开始阶段 4，也不涉及 8888。
-4. **关键阶段结构化保存中间结果（PLANNED）**：保存识图、裁图、章节、荷载、分层候选数、失败原因及版本；以 `artifact_id` 受控关联短期原图、裁图和 overlay，查看、延长保留、删除均审计，路径不进 trace/公共输出，支持诊断、复用和 checkpoint。
+   - 3.5.4 后续 refresh-recovery 热修复：IMPLEMENTED，LIVE ACCEPTANCE DEFERRED。启动/重连只经权威 `/api/session` 对账，bootstrap 超时 15 秒；瞬时错误保留 pending fence、只给 `retry_connection`，成功对账清除临时 recovery notice，cache-buster 为 `20260901-refresh-recovery-v2`。固定 release、受限备份、NATAPP watchdog 持久化和全仓 1222 项回归已完成，但真实已登录会话恢复仍未闭环；用户现继续实际试用。本项不改变 V1，也不涉及 8888。
+4. **关键阶段结构化保存中间结果（IN_PROGRESS）**：建立有界、可审计、可过期的 Checkpoint/Artifact 证据链；不替代 Task State，不授权动作或恢复执行。
+   - 4.1 Checkpoint V1 契约与现状盘点：DONE。冻结 `trace_id -> checkpoint_id -> artifact_id` 关系、九阶段模型、父子 revision、字段白名单、候选分数截断、失败语义和隐私边界；普通结构化 Checkpoint 30 天，普通/失败图片 3/7 天，反馈/调查证据默认 30 天并最多延长至 365/90 天，禁止永久 hold。部署配置必须显式提供 Checkpoint/Artifact/证据审计/Trace 行数、Artifact 总字节、磁盘最小余量和单 Checkpoint Artifact 数七项容量参数；证据审计不含 8795 控制库管理员审计。4.1 只有纯数据契约与测试，无 Store/I/O，也未接 A2/A3 runtime 或生产采集；33 项契约及全仓 1274 项回归通过。
+   - 4.2 存储生命周期与容量门：NEXT / A2-A3 CAPTURE GATE。实现独立 Checkpoint/Artifact Store、真实 TTL 读取拒绝、七项写前容量门、证据审计有限轮转及清理写入余量、周期 retention plan/apply、孤儿清理与审计，并补齐批准范围内的 Trace 周期清理；容量满时停止新增诊断证据、搜索继续且健康状态降级。真实 apply、容量保护和周期调度验收通过前，禁止接入 A2/A3 自动采集。
+   - 4.3 A2 单题采集：PLANNED。对真正进入业务处理的逻辑搜索，在已到达的阶段边界分别保存有界 Checkpoint，包括上传图元信息、章节、结构、荷载、工程尺寸、粗筛/复筛分数、最终选择及稳定失败码；health、登录、配额/队列拒绝和媒体 GET 不创建记录。
+   - 4.4 A3 父子采集：PLANNED。保存整页理解、unit、bbox、裁图及校验结果，并受控关联各子 A2 Checkpoint；覆盖单题自动下行、多题并发与人工裁剪回退，同一图片只保存一份 Artifact。
+   - 4.5 诊断读取与阶段验收：PLANNED。支持从 Trace 定位 Checkpoint 和受权 Artifact，查看、延长和删除均审计；验证脱敏、截断、过期、容量压力、证据写入 fail-open、读取/管理 fail-closed，以及不改变 A2/A3 排名和公共输出。
 5. **幂等执行与父子任务控制（PLANNED）**：统一任务版本、幂等键、执行锁和 A3→A2 父子生命周期，避免重复点击、网络重试或恢复造成重复执行和重复计费。
 6. **长任务与 HTTP 流逐步解耦（PLANNED）**：让后台任务持有执行生命周期，HTTP/updates 流只负责提交、观察和控制；页面刷新或连接断开不再等于任务状态丢失。
 7. **暂停/继续（DEFERRED）**：只有前述能力稳定且真实数据证明需求存在时，才在安全阶段边界实现 `PAUSE_REQUESTED → PAUSED → RESUMING`；已发出的模型调用不承诺中途冻结。
@@ -83,12 +88,12 @@
 
 Trace/Response Store 与诊断层必须独立于 8795；任何可视化界面都只是只读消费者。
 
-依赖关系固定为 `输出可控 → 过程可追踪 → 状态权威 → 结果可恢复 → 执行幂等 → 任务与连接解耦 → 可暂停/继续`。即使最终不实现暂停，前六阶段仍必须各自产生独立产品价值。
+依赖关系固定为 `输出可控 → 过程可追踪 → 状态权威 → 留存与容量受控 → A2/A3 结果可诊断 → 执行幂等 → 任务与连接解耦 → 可暂停/继续`。即使最终不实现暂停，前六阶段仍必须各自产生独立产品价值。
 
 ## Acceptance Gates
 
 - 工程化整理不得改变现有正确的 A2/A3 业务输出、章节边界、候选排序和答案交付；每阶段使用现有固定行为和测试作为回归基线。
-- 统一 trace 不得记录密钥、邀请码明文、完整模型原文或无必要的整段对话；问题案例只保留定位根因所需的图片、裁图、回复和反馈证据，并遵守过期策略。
+- Trace/Checkpoint/Artifact 不得记录密钥、邀请码明文、完整 Prompt、模型原文、reasoning、全文 OCR、绝对路径或任意异常正文；4.2 的真实 TTL、周期 retention apply，以及 Checkpoint/Artifact/证据审计/Trace 行数、Artifact 总字节、磁盘最小余量和单 Checkpoint Artifact 数容量门验收前，禁止启用 A2/A3 Checkpoint 自动采集。
 - 在任务状态、阶段结果、幂等与后台生命周期未稳定前，不开放暂停/继续按钮。
 - 8790、8793、8788 在开发期间持续可用，运行数据无交叉。
 - 普通快速路径不调用 Planner，现有明确指令和按钮行为不回退。
