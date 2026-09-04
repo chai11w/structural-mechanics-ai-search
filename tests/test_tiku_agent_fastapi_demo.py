@@ -137,6 +137,16 @@ class FakeRuntime:
 
 
 class FastApiDemoTest(unittest.TestCase):
+    def test_brand_is_display_only(self):
+        page = (
+            Path(__file__).resolve().parents[1]
+            / "tiku_agent"
+            / "demo_web"
+            / "index.html"
+        ).read_text(encoding="utf-8")
+        self.assertIn('<div class="brand">', page)
+        self.assertNotIn('<a class="brand"', page)
+
     def _terminal_for_request(self, store, request_id, *, recorder=None):
         if recorder is not None:
             recorder.flush()
