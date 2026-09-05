@@ -16,6 +16,7 @@ from tiku_agent.feedback_store import (
     SQLiteFeedbackStore,
     scope_feedback_conversation,
 )
+from tiku_diagnostics.sqlite_reader import readonly_connection, table_columns
 from tiku_shared.model_costs import estimate_cost
 
 
@@ -72,6 +73,12 @@ _STAGE_ORDER = {
 _QUESTION_SEARCH_TASK_KINDS = frozenset({"image", "a3_verified_image"})
 _TRUSTED_CLIENT_TIMESTAMP_LAG = timedelta(minutes=30)
 
+_OPERATIONS_SCHEMA_VERSION = 1
+_OPERATIONS_MAX_WINDOW = timedelta(days=7)
+_OPERATIONS_MAX_LIMIT = 10_000
+_OPERATIONS_SEARCH_CODES = ("REQUEST_SUCCEEDED", "CHAPTER_REQUIRED", "NO_MATCH")
+_OPERATIONS_TERMINAL_TYPES = ("public_response_finalized", "request_failed")
+
 # ``image_triage`` runs once against the parent workflow search id for every
 # newly uploaded page, including A1 stops and direct A2 images.  Older A3
 # deployments can lack that record, so their page-scoped stages are accepted
@@ -92,6 +99,7 @@ class AdminReporter:
         control_store: SQLiteControlStore,
         cost_database: str | Path | None = None,
         cost_databases: Sequence[str | Path] | None = None,
+        trace_database: str | Path | None = None,
         feedback_store: SQLiteFeedbackStore,
     ) -> None:
         self.control_store = control_store
@@ -105,6 +113,11 @@ class AdminReporter:
                 resolved.append(path)
         self.cost_databases = tuple(resolved)
         self.cost_database = resolved[0] if resolved else Path("model_costs.sqlite3").resolve()
+        self.trace_database = (
+            Path(trace_database).resolve()
+            if trace_database is not None
+            else self.cost_database.parent / "trace_events.sqlite3"
+        )
         self.feedback_store = feedback_store
 
     def overview(self) -> dict[str, object]:
@@ -166,6 +179,162 @@ class AdminReporter:
             "invites": invite_rows,
             "recent_feedback": self._feedback_summaries(recent),
         }
+
+    def operations_summary(
+        self,
+        *,
+        since: str = "",
+        until: str = "",
+        limit: int = _OPERATIONS_MAX_LIMIT,
+    ) -> dict[str, object]:
+        """Return a bounded, read-only operations summary.
+
+        This intentionally reads the diagnostic databases through the shared
+        ``mode=ro`` reader. It exposes only aggregate counts; identifiers,
+        request/session fields, paths and raw event attributes stay private.
+        """
+        started_at, finished_at = _operations_window(since, until)
+        if type(limit) is not int or not 1 <= limit <= _OPERATIONS_MAX_LIMIT:
+            raise ValueError("limit must be between 1 and 10000")
+        terminals, trace_source = self._operation_terminals(
+            started_at, finished_at, limit
+        )
+        model_errors, cost_source = self._operation_model_errors(
+            started_at, finished_at, limit
+        )
+        searches = [
+            item for item in terminals if item["operation"] == "search"
+        ]
+        by_code: dict[str, int] = {}
+        for item in searches:
+            code = str(item["protocol_code"])
+            by_code[code] = by_code.get(code, 0) + 1
+        by_code_rows = [
+            {"name": code, "count": count}
+            for code, count in sorted(
+                by_code.items(), key=lambda pair: (-pair[1], pair[0])
+            )
+        ]
+        model_rows = [
+            {
+                "provider": provider,
+                "model": model,
+                "call_type": call_type,
+                "count": count,
+            }
+            for (provider, model, call_type), count in sorted(
+                model_errors.items(),
+                key=lambda pair: (-pair[1], pair[0]),
+            )
+        ]
+        return {
+            "schema_version": _OPERATIONS_SCHEMA_VERSION,
+            "query": {
+                "since": started_at.isoformat(),
+                "until": finished_at.isoformat(),
+                "limit": limit,
+            },
+            "sources": [trace_source, cost_source],
+            "search": {
+                "total": len(searches),
+                "success": sum(
+                    1
+                    for item in searches
+                    if item["protocol_code"] == "REQUEST_SUCCEEDED"
+                ),
+                "success_rate": (
+                    sum(
+                        1
+                        for item in searches
+                        if item["protocol_code"] == "REQUEST_SUCCEEDED"
+                    )
+                    / len(searches)
+                    if searches
+                    else None
+                ),
+                "by_code": by_code_rows,
+                "counted_codes": list(_OPERATIONS_SEARCH_CODES),
+            },
+            "model_errors": {
+                "total": sum(model_errors.values()),
+                "by_call": model_rows,
+            },
+        }
+
+    def _operation_terminals(
+        self, started_at: datetime, finished_at: datetime, limit: int
+    ) -> tuple[list[dict[str, str]], dict[str, object]]:
+        path = getattr(self, "trace_database", self.cost_database.parent / "trace_events.sqlite3")
+        source = {"name": "trace_events", "file": path.name, "status": "missing", "record_count": 0}
+        required = {"trace_id", "response_id", "event_type", "occurred_at", "protocol_code", "protocol_layer"}
+        if not path.is_file():
+            return [], source
+        try:
+            with readonly_connection(path) as connection:
+                columns = table_columns(connection, "trace_events")
+                if not required.issubset(columns):
+                    source["status"] = "schema_mismatch"
+                    return [], source
+                rows = connection.execute(
+                    "SELECT trace_id, response_id, protocol_code, protocol_layer "
+                    "FROM trace_events WHERE event_type IN (?, ?) "
+                    "AND occurred_at >= ? AND occurred_at < ? "
+                    "ORDER BY occurred_at ASC, rowid ASC LIMIT ?",
+                    (*_OPERATIONS_TERMINAL_TYPES, started_at.isoformat(), finished_at.isoformat(), limit + 1),
+                ).fetchall()
+        except (OSError, sqlite3.Error):
+            source["status"] = "query_failed"
+            return [], source
+        truncated = len(rows) > limit
+        unique: dict[str, dict[str, str]] = {}
+        for row in rows[:limit]:
+            code = str(row["protocol_code"] or "").strip().upper()
+            identity = str(row["trace_id"] or row["response_id"] or "").strip()
+            if not identity or not code:
+                continue
+            unique[identity] = {
+                "protocol_code": code,
+                "operation": "search" if str(row["protocol_layer"] or "").lower() == "tool" else "other",
+            }
+        source["status"] = "partial" if truncated else "ok"
+        source["record_count"] = len(unique)
+        if truncated:
+            source["reason"] = "result_truncated"
+        return list(unique.values()), source
+
+    def _operation_model_errors(
+        self, started_at: datetime, finished_at: datetime, limit: int
+    ) -> tuple[dict[tuple[str, str, str], int], dict[str, object]]:
+        path = self.cost_database
+        source = {"name": "model_costs", "file": path.name, "status": "missing", "record_count": 0}
+        required = {"provider", "model", "call_type", "status", "finished_at"}
+        if not path.is_file():
+            return {}, source
+        try:
+            with readonly_connection(path) as connection:
+                columns = table_columns(connection, "model_cost_calls")
+                if not required.issubset(columns):
+                    source["status"] = "schema_mismatch"
+                    return {}, source
+                rows = connection.execute(
+                    "SELECT provider, model, call_type FROM model_cost_calls "
+                    "WHERE status = 'error' AND finished_at >= ? AND finished_at < ? "
+                    "ORDER BY finished_at ASC, rowid ASC LIMIT ?",
+                    (started_at.isoformat(), finished_at.isoformat(), limit + 1),
+                ).fetchall()
+        except (OSError, sqlite3.Error):
+            source["status"] = "query_failed"
+            return {}, source
+        truncated = len(rows) > limit
+        groups: dict[tuple[str, str, str], int] = {}
+        for row in rows[:limit]:
+            key = tuple(str(row[index] or "").strip() or "unknown" for index in range(3))
+            groups[key] = groups.get(key, 0) + 1
+        source["status"] = "partial" if truncated else "ok"
+        source["record_count"] = len(rows[:limit])
+        if truncated:
+            source["reason"] = "result_truncated"
+        return groups, source
 
     def invitation_rows(self, *, include_archived: bool = False) -> list[dict[str, object]]:
         overview = self.overview()
@@ -753,6 +922,25 @@ def _today_window(timezone_name: str) -> tuple[str, str]:
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     end = start + timedelta(days=1)
     return start.astimezone(UTC).isoformat(), end.astimezone(UTC).isoformat()
+
+
+def _operations_window(since: str, until: str) -> tuple[datetime, datetime]:
+    clean_since = str(since or "").strip()
+    clean_until = str(until or "").strip()
+    if not clean_since and not clean_until:
+        finished_at = datetime.now(UTC)
+        return finished_at - timedelta(hours=24), finished_at
+    if not clean_since or not clean_until:
+        raise ValueError("since and until must be supplied together")
+    started_at = _parse_iso_datetime(clean_since)
+    finished_at = _parse_iso_datetime(clean_until)
+    if started_at is None or finished_at is None:
+        raise ValueError("since and until must be ISO-8601 timestamps")
+    if finished_at <= started_at:
+        raise ValueError("until must follow since")
+    if finished_at - started_at > _OPERATIONS_MAX_WINDOW:
+        raise ValueError("query window cannot exceed 7 days")
+    return started_at, finished_at
 
 
 def _date_window(value: str, timezone_name: str) -> tuple[str, str]:

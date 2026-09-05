@@ -181,6 +181,15 @@ def create_admin_app(
             raise HTTPException(status_code=404, detail="诊断记录不存在。")
         return package
 
+    @app.get("/api/admin/operations/summary")
+    def operations_summary(
+        since: str = "", until: str = "", limit: int = 10_000
+    ) -> dict[str, object]:
+        try:
+            return reporter.operations_summary(since=since, until=until, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/api/admin/invitations")
     def invitations(include_archived: bool = False) -> dict[str, object]:
         return {"items": reporter.invitation_rows(include_archived=include_archived)}
