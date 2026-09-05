@@ -17,6 +17,7 @@ from tiku_admin.control_store import SQLiteControlStore
 from tiku_admin.invite_vault import InvitationCodeVault
 from tiku_admin.reporting import AdminReporter
 from tiku_agent.feedback_store import SQLiteFeedbackStore
+from tiku_diagnostics import DiagnosticQueryService
 
 
 DEFAULT_ADMIN_RUNTIME = BASE / ".tmp_tiku_admin_8795"
@@ -49,10 +50,12 @@ def build_app(
         ),
         feedback_store=feedback_store,
     )
+    diagnostic_query = DiagnosticQueryService(source_root)
     return create_admin_app(
         control_store=control_store,
         reporter=reporter,
         feedback_store=feedback_store,
+        diagnostic_query=diagnostic_query,
         allow_local_setup=allow_local_setup,
     )
 

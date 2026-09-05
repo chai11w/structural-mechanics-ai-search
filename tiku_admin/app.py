@@ -17,6 +17,7 @@ from tiku_agent.feedback_store import (
     SQLiteFeedbackStore,
     scope_feedback_conversation,
 )
+from tiku_diagnostics import DiagnosticQueryError, DiagnosticQueryService, QuerySpec
 from tiku_shared.http_security import (
     FailureRateLimiter,
     RequestBodyError,
@@ -34,6 +35,7 @@ def create_admin_app(
     control_store: SQLiteControlStore,
     reporter: AdminReporter,
     feedback_store: SQLiteFeedbackStore,
+    diagnostic_query: DiagnosticQueryService | None = None,
     allow_local_setup: bool = True,
 ) -> FastAPI:
     auth = AdminSessionAuth(control_store)
@@ -156,6 +158,28 @@ def create_admin_app(
     @app.get("/api/admin/overview")
     def overview() -> dict[str, object]:
         return reporter.overview()
+
+    @app.get("/api/admin/operations/traces/{trace_id}")
+    def trace_detail(trace_id: str, limit: int = 100) -> dict[str, object]:
+        if diagnostic_query is None:
+            raise HTTPException(status_code=503, detail="诊断服务暂不可用，请稍后再试。")
+        try:
+            package = diagnostic_query.query(
+                QuerySpec(
+                    trace_id=trace_id,
+                    limit=limit,
+                    association_mode="authoritative-only",
+                )
+            )
+        except DiagnosticQueryError as exc:
+            if str(exc) == "invalid trace_id":
+                raise HTTPException(status_code=400, detail="Trace 编号无效。") from exc
+            if str(exc) == "limit must be between 1 and 100":
+                raise HTTPException(status_code=400, detail="查询条数必须在 1 到 100 之间。") from exc
+            raise HTTPException(status_code=503, detail="诊断服务暂不可用，请稍后再试。") from exc
+        if int(package.get("summary", {}).get("trace_count", 0)) < 1:
+            raise HTTPException(status_code=404, detail="诊断记录不存在。")
+        return package
 
     @app.get("/api/admin/invitations")
     def invitations(include_archived: bool = False) -> dict[str, object]:
