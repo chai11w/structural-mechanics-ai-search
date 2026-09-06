@@ -7,7 +7,7 @@
 - 8790 读取 8795 控制库；A1/A2/A3 与子 A2 统一计费，队列为 1 运行/2 排队/55 秒，支持 FIFO、流关闭撤队和同锁去重。Trace/Response 独立于可替换的 8795；8 个 live SQLite 库及反馈、费用、停用闭环已验收。
 - 8790 由 `answer-session-v9` 固定 release 运行；身份链、健康/Trace、静态资源、认证及含任务 XML/Git bundle/9 库的回退均已验收。
 - 已创建 3 个独立、7 天、每日 3 元模型估算额度的内测邀请码并验证；明文只经 8795 受控复制，不进入日志或项目文件。
-- 阶段 4 IN_PROGRESS；4.1 已完成，4.2 的真实 TTL、容量门和周期 apply 验收前禁止接入 A2/A3。
+- 阶段 4 IN_PROGRESS；4.1、4.2 已完成，4.3/4.4 尚未开始。4.2 不接入 A2/A3 自动 Checkpoint 采集，后续仍须单独受控开发和启用。
 
 ## Implemented
 
@@ -20,6 +20,7 @@
 - 8790/8795 看门狗核对端口、PID、Python 和 argv；8790/8896 另绑定固定 checkout/入口，身份不明时 fail-closed。8790 启动复验 manifest、完整提交、干净 worktree 和 runtime；Limited 任务显式使用 UTF-8 与 `core.quotePath=false`。
 - 阶段 3 已冻结 `TaskStateSnapshotV1`，完成纯构造、锁内单读、异常 fail-closed、跨出口一致快照、前端 branded 动作授权及固定 release；动作绑定 identity/revision/target，拒绝 stale/ABA，未知结果不自动重放，refresh-recovery 仅经 `/api/session` 对账并保留 pending fence/限定历史态补偿。
 - 阶段 4.1 已冻结九阶段、父子 revision、输入指纹与 Artifact descriptor；结构化 Checkpoint 30 天，普通/失败图片 3/7 天，反馈/调查最多 365/90 天，无永久 hold；没有 Store/I/O、runtime 或生产采集，33 项契约及全仓 1274 项回归通过。
+- 阶段 4.2 已完成独立 Checkpoint/Artifact Store、可信 TTL 与过期读取拒绝、七项写前容量门、有限审计与清理槽位、Artifact tombstone/孤儿清理、Checkpoint/Trace retention plan/apply、SQLite 在线备份与 manifest 校验、持久 Trace store identity、共享维护锁及 8790 周期 runner；定向 62 项及全仓回归通过。A2/A3 自动采集仍关闭。
 
 ## In Progress
 
@@ -27,12 +28,12 @@
 - 方向评估未实现：已提交 9×4 基线为 RapidOrientation/PP-LCNet `33/36`；主工作区另有未提交的 frontdoor 6×4 与 evaluator/manifest，`real_cases` 仍为空。OCR `20/24`、Rapid `17/24`，尚无安全阈值。
 - 主工作区落后远端且脏；旧 `fence-login-v9` 会移除最终补偿和无 Cookie 测试，不得并入。`a3_routing_baseline/` 15 图重复；治理前禁止 pull/reset/删除。
 - 远端主线在 8790 release 后新增可比单尺寸硬过滤及测试，尚未部署 8790，不能视作当前生产行为。
-- 阶段 4.2 待实现 Store、TTL 读取拒绝、周期 plan/apply、孤儿清理和审计；部署须显式限制 Checkpoint/Artifact/证据审计/Trace 行数、Artifact 总字节、磁盘最小余量和单 Checkpoint Artifact 数，并为清理审计留余量。容量满则停增证据、搜索继续、health 降级；验收前禁止 A2/A3 自动采集。
+- 阶段 4.3/4.4 尚未开始；A2/A3 自动 Checkpoint 采集保持关闭，直到后续受控采集方案完成评审和验收。
 
 ## Not Implemented
 
 - Cloudflare Access、边缘登录限速和测试者邮箱名单仍需账户侧配置；应用内限速不能替代边缘策略。
-- 阶段 4.2～6 尚未实现；4.2 是 4.3/4.4 自动采集的强制前置门。
+- 阶段 4.3～6 尚未实现；4.2 是 4.3/4.4 自动采集的强制前置门，当前已具备门禁能力但未启用采集。
 - 尚无可复用的 8790 计划任务 release 发布器；`switch_tiku_agent_8790_control.ps1` 仅迁移控制库，不负责任务切换或代码回退。
 - RapidOrientation 封装、阈值、8896 影子和 8790 发布未实现；需提取 ONNX 置信度并固定版本/模型哈希。
 - Paddle splitter、全自动裁剪及自动/人工回退属于 A3 V2，暂不继续。
@@ -56,7 +57,7 @@
 - Qwen 冷调用有长尾；1/2/55 队列下第 4 个同时任务直接繁忙，等待超 55 秒需重试。
 - 旧 `parse_chapter` 会把“第4章”映射为 `4力法`；严格入口对纯数字返回 `uncertain`，未迁移入口仍可能误搜。
 - 邀请码转发会共享额度，完成后落账可能使最后一个在途任务略超阈值。
-- 现有 Trace retention 尚未周期 apply；4.1 不落库，若在 4.2 门禁前误接采集仍会持续增长。证据写入 fail-open，读取与管理 fail-closed。
+- 4.2 已提供 Trace/Checkpoint 周期 retention plan/apply 和共享维护锁；A2/A3 采集仍关闭，后续接入时须继续遵守证据写入 fail-open、读取与管理 fail-closed。
 - 无 Web Lock 时任务入口 fail-closed，只允许会话对账；8896 浏览器完整路径已通过，发放前仍需覆盖测试者浏览器。
 - NATAPP 静态资源和健康可达不证明公网登录恢复闭环。
 - 8790 冷启动约 15～18 秒；须等 PID 链稳定并跨 watchdog 周期复核，回退只停已捕获 PID。
@@ -77,7 +78,7 @@
 ## Next Best Step
 
 1. 在已有登录 Cookie 的浏览器实际使用 8790，完成连续两题、答案返回和刷新恢复；若再出现会话提示，保留页面、操作顺序和题图，先停止继续操作并对照 8896 定位。
-2. 在阶段 4 独立 worktree 完成 4.2 Store、TTL、七项容量门和周期 apply；门禁通过后才开始 4.3 A2 采集。
+2. 在独立 worktree 规划并评审 4.3 A2 受控采集；接入前沿用 4.2 的七项容量、TTL、retention 和健康降级门禁。
 3. 账户侧配置 8790/8795 的 Cloudflare Access 与边缘限速后，再受控发放邀请码。
 
 ## Important Commands

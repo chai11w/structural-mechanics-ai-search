@@ -29,10 +29,25 @@
 新的 Agent 有独立的本地网页入口，不复用现有飞书机器人的端口、配置或运行状态：
 
 ```powershell
+$EvidenceArgs = @(
+  "--max-checkpoint-rows", $env:TIKU_MAX_CHECKPOINT_ROWS,
+  "--max-artifact-rows", $env:TIKU_MAX_ARTIFACT_ROWS,
+  "--max-audit-rows", $env:TIKU_MAX_AUDIT_ROWS,
+  "--max-trace-rows", $env:TIKU_MAX_TRACE_ROWS,
+  "--max-artifact-bytes", $env:TIKU_MAX_ARTIFACT_BYTES,
+  "--min-free-bytes", $env:TIKU_MIN_FREE_BYTES,
+  "--max-artifacts-per-checkpoint", $env:TIKU_MAX_ARTIFACTS_PER_CHECKPOINT,
+  "--checkpoint-retention-backup-root", "F:\cc\_backups\7-题库检索",
+  "--checkpoint-retention-interval-seconds", $env:TIKU_RETENTION_INTERVAL_SECONDS,
+  "--checkpoint-retention-backup-keep-runs", $env:TIKU_RETENTION_BACKUP_KEEP_RUNS
+)
 python -B scripts/run_tiku_agent_8790.py --port 8790 `
   --runtime-dir .tmp_tiku_agent_v2_prod_8790 `
-  --control-db .tmp_tiku_admin_8795/control.sqlite3
+  --control-db .tmp_tiku_admin_8795/control.sqlite3 @EvidenceArgs
 ```
+
+阶段 4.2 要求七项容量和 retention 参数显式提供，不能依赖启动器默认值。变量取值、
+容量证据和 plan/apply 验收见 [`阶段 4.2 runbook`](docs/checkpoint_phase4_2_runbook.md)。
 
 打开 `http://127.0.0.1:8790` 后可发题图或直接文字对话。页面采用单会话聊天画布：顶部菜单可打开临时会话抽屉，桌面和移动端入口一致，不伪造尚未实现的多会话历史。上传、拖放、候选题卡片选择、答案查看和图片大图预览均在同一条消息内完成；顶部栏和底部组合输入区固定，只有中间消息区滚动。识别到章节、用户补充章节或确认全局搜索后，同一个临时气泡会按真实执行阶段更新搜索状态，完成后由正式结果替换。
 
@@ -45,9 +60,7 @@ python -B scripts/run_tiku_agent_8790.py --port 8790 `
 8790 是网页主线和邀请制内测入口；8793 暂时保留为旧稳定演示/回退快照，8896 保留为同内核隔离验收线。正式入口读取 8795 控制库中的邀请码状态和动态估算费用软额度，并在 A3 父流程最外层限制为 1 个活动任务、最多 2 个排队任务、排队 55 秒超时。该门禁覆盖分流、整页理解、框选、校验和子 A2，不只限制单题检索后半段。反馈后台可查看当前记录，但单条反馈费用仍按检索标识和时间范围兼容估算，不能当作供应商实扣或 Trace 权威关联：
 
 ```powershell
-python -B scripts/run_tiku_agent_8790.py --port 8790 `
-  --runtime-dir .tmp_tiku_agent_v2_prod_8790 `
-  --control-db .tmp_tiku_admin_8795/control.sqlite3
+# 8790 生产启动仍使用上面的显式 EvidenceArgs；不要省略容量或 retention 参数。
 ```
 
 通用本地 Demo 和 8896 默认仍不限制并发，避免改变单人调试语义；生产专用 `run_tiku_agent_8790.py` 与 8790 看门狗都默认启用上述队列。8790 邀请登录和 8795 管理员登录还分别有应用层失败限速，但这不能替代公网边缘保护。邀请用户前必须为 8790、8795 分别配置 Cloudflare Tunnel、Access 白名单和两条精确登录路径限速规则；不得复用 8788 飞书隧道，也不得直接做路由器端口映射。小规模内测步骤见 [`docs/8790_8795_public_beta_runbook.md`](docs/8790_8795_public_beta_runbook.md)。

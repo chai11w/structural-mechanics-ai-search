@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import partial, wraps
 from io import BytesIO
 import inspect
@@ -621,6 +622,9 @@ def create_app(
     feedback_retention_days_provider: Callable[[], int] | None = None,
     output_watchdog: object | None = None,
     trace_event_recorder: TraceEventRecorder | None = None,
+    checkpoint_evidence_health_provider: Callable[[], Mapping[str, object]] | None = None,
+    checkpoint_retention_runner: Callable[[], object] | None = None,
+    checkpoint_retention_interval_seconds: float = 0.0,
     media_cache_seconds: float = 0.0,
 ) -> FastAPI:
     """Create a local-only demo app without any existing Feishu configuration."""
@@ -643,17 +647,34 @@ def create_app(
         except Exception:  # noqa: BLE001 - an observer is strictly optional.
             pass
     cleaner = getattr(runtime, "purge_expired", None)
+    retention_interval = float(checkpoint_retention_interval_seconds)
+    if checkpoint_retention_runner is not None and (
+        not math.isfinite(retention_interval) or retention_interval <= 0
+    ):
+        raise ValueError("checkpoint retention interval must be greater than zero")
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         cleanup_task = None
+        checkpoint_retention_task = None
         if callable(cleaner) and cleanup_interval_seconds > 0:
             cleanup_task = asyncio.create_task(
                 _periodic_session_cleanup(cleaner, cleanup_interval_seconds)
             )
+        if checkpoint_retention_runner is not None:
+            checkpoint_retention_task = asyncio.create_task(
+                _periodic_checkpoint_retention(
+                    checkpoint_retention_runner,
+                    retention_interval,
+                )
+            )
         try:
             yield
         finally:
+            if checkpoint_retention_task is not None:
+                checkpoint_retention_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await checkpoint_retention_task
             if cleanup_task is not None:
                 cleanup_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -681,6 +702,10 @@ def create_app(
     )
     app.state.response_store = response_store
     app.state.trace_event_recorder = trace_event_recorder
+    app.state.checkpoint_evidence_health_provider = (
+        checkpoint_evidence_health_provider
+    )
+    app.state.checkpoint_retention_runner = checkpoint_retention_runner
     session_coordination = _SessionCoordinationRegistry()
     app.state.session_coordination = session_coordination
     app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
@@ -1495,7 +1520,21 @@ def create_app(
                 "last_failure_at": "",
             }
         )
-        return {"status": "ok", "trace_events": trace_health}
+        checkpoint_health = _checkpoint_evidence_health(
+            checkpoint_evidence_health_provider
+        )
+        return {
+            "status": (
+                "degraded"
+                if (
+                    trace_health.get("status") == "degraded"
+                    or checkpoint_health["status"] == "degraded"
+                )
+                else "ok"
+            ),
+            "trace_events": trace_health,
+            "checkpoint_evidence": checkpoint_health,
+        }
 
     def coordination_stale_response(
         session_id: str,
@@ -5019,3 +5058,106 @@ async def _periodic_session_cleanup(cleaner: Callable[[], None], interval_second
             await asyncio.to_thread(cleaner)
         except Exception:  # noqa: BLE001 - cleanup failure must not stop the web service.
             logger.exception("periodic session cleanup failed")
+
+
+async def _periodic_checkpoint_retention(
+    runner: Callable[[], object],
+    interval_seconds: float,
+) -> None:
+    interval = max(0.01, float(interval_seconds))
+    while True:
+        try:
+            await asyncio.to_thread(runner)
+        except Exception:  # noqa: BLE001 - evidence maintenance is fail-open for search.
+            logger.error("periodic checkpoint retention failed")
+        await asyncio.sleep(interval)
+
+
+def _checkpoint_evidence_health(
+    provider: Callable[[], Mapping[str, object]] | None,
+) -> dict[str, object]:
+    disabled: dict[str, object] = {
+        "status": "disabled",
+        "current_reasons": [],
+        "counters": {},
+        "pending": 0,
+        "queue_capacity": 0,
+        "accepting": False,
+        "last_failure_code": "",
+        "last_failure_at": "",
+    }
+    if provider is None:
+        return disabled
+    try:
+        raw = provider()
+    except Exception:  # noqa: BLE001 - public health never includes exception details.
+        return {
+            **disabled,
+            "status": "degraded",
+            "current_reasons": ["health_unavailable"],
+            "last_failure_code": "health_unavailable",
+        }
+    if not isinstance(raw, Mapping):
+        return {
+            **disabled,
+            "status": "degraded",
+            "current_reasons": ["health_invalid"],
+            "last_failure_code": "health_invalid",
+        }
+
+    status = str(raw.get("status") or "").strip().lower()
+    status = status if status in {"ok", "degraded"} else "degraded"
+    raw_reasons = raw.get("current_reasons")
+    reasons = []
+    if isinstance(raw_reasons, (list, tuple)):
+        reasons = [
+            str(item)
+            for item in raw_reasons[:32]
+            if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", str(item))
+        ]
+    raw_counters = raw.get("counters")
+    counters: dict[str, int] = {}
+    if isinstance(raw_counters, Mapping):
+        for key, value in list(raw_counters.items())[:32]:
+            name = str(key)
+            if (
+                re.fullmatch(r"[a-z][a-z0-9_]{0,63}", name)
+                and type(value) is int
+                and value >= 0
+            ):
+                counters[name] = min(value, 9_007_199_254_740_991)
+
+    failure_code = str(raw.get("last_failure_code") or "")
+    if failure_code and not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", failure_code):
+        failure_code = "health_invalid"
+        status = "degraded"
+    failure_at = str(raw.get("last_failure_at") or "")
+    if failure_at:
+        try:
+            parsed_failure_at = datetime.fromisoformat(
+                failure_at.replace("Z", "+00:00")
+            )
+            if (
+                parsed_failure_at.tzinfo is None
+                or parsed_failure_at.utcoffset() is None
+            ):
+                raise ValueError
+            failure_at = parsed_failure_at.astimezone(UTC).isoformat()
+        except ValueError:
+            failure_at = ""
+            status = "degraded"
+
+    def safe_count(name: str) -> int:
+        value = raw.get(name)
+        return min(value, 9_007_199_254_740_991) if type(value) is int and value >= 0 else 0
+
+    return {
+        "status": status,
+        "current_reasons": reasons,
+        "counters": counters,
+        "pending": safe_count("pending"),
+        "queue_capacity": safe_count("queue_capacity"),
+        "accepting": raw.get("accepting") is True,
+        "last_failure_code": failure_code,
+        "last_failure_at": failure_at,
+    }

@@ -5,7 +5,7 @@ from pathlib import Path
 import json
 import shutil
 import sqlite3
-from threading import Event, get_ident
+from threading import Barrier, Event, get_ident
 import unittest
 from uuid import uuid4
 
@@ -16,9 +16,14 @@ from tiku_shared.trace_context import (
     trace_context_scope,
 )
 from tiku_shared.trace_events import (
+    MAX_TRACE_EVENT_ROWS,
     TRACE_EVENT_SCHEMA_VERSION,
+    TRACE_EVENT_HEALTH_COUNTER_MAX,
     SQLiteTraceEventStore,
+    TraceCleanupDriftError,
+    TraceCleanupSnapshot,
     TraceEvent,
+    TraceEventCapacityError,
     TraceEventRecorder,
     TraceEventValidationError,
     bind_trace_event_dimensions,
@@ -47,6 +52,288 @@ class TraceEventStoreTest(unittest.TestCase):
         recorder = TraceEventRecorder(store)
         self.addCleanup(recorder.close)
         return recorder, store
+
+    @staticmethod
+    def make_event(trace_id: str, occurred_at: str) -> TraceEvent:
+        return TraceEvent.create(
+            trace_id=trace_id,
+            event_type="stage_started",
+            stage="candidate_rerank",
+            outcome="started",
+            occurred_at=occurred_at,
+            call_id=uuid4().hex,
+        )
+
+    def test_max_rows_is_explicit_and_unconfigured_store_remains_compatible(self):
+        directory = self.make_directory()
+        unconfigured = SQLiteTraceEventStore(directory / "unbounded.sqlite3")
+        first = TraceContext.create()
+        second = TraceContext.create()
+        unconfigured.write(self.make_event(first.trace_id, "2026-08-01T00:00:00Z"))
+        unconfigured.write(self.make_event(second.trace_id, "2026-08-02T00:00:00Z"))
+
+        self.assertIsNone(unconfigured.max_rows)
+        self.assertEqual(
+            unconfigured.capacity_snapshot(),
+            {
+                "available": True,
+                "configured": False,
+                "max_rows": None,
+                "current_rows": 2,
+                "remaining_rows": None,
+                "at_capacity": False,
+            },
+        )
+        for invalid in (True, 0, -1, MAX_TRACE_EVENT_ROWS + 1):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    SQLiteTraceEventStore(directory / "invalid.sqlite3", max_rows=invalid)
+
+    def test_capacity_snapshot_and_cleanup_plan_do_not_create_an_absent_database(self):
+        path = self.make_directory() / "absent.sqlite3"
+        store = SQLiteTraceEventStore(path, max_rows=4)
+
+        capacity = store.capacity_snapshot()
+        snapshot = store.cleanup_candidates(cutoff="2026-08-06T00:00:00Z")
+
+        self.assertFalse(path.exists())
+        self.assertEqual(capacity["current_rows"], 0)
+        self.assertEqual(capacity["remaining_rows"], 4)
+        self.assertEqual(snapshot.candidate_count, 0)
+        self.assertEqual(snapshot.event_count, 0)
+        self.assertEqual(
+            TraceCleanupSnapshot.from_dict(
+                json.loads(json.dumps(snapshot.to_dict()))
+            ),
+            snapshot,
+        )
+
+    def test_existing_empty_or_partial_database_is_not_initialized(self):
+        for kind in ("empty", "partial"):
+            with self.subTest(kind=kind):
+                path = self.make_directory() / f"{kind}.sqlite3"
+                if kind == "empty":
+                    path.touch()
+                else:
+                    with sqlite3.connect(path) as connection:
+                        connection.execute(
+                            "CREATE TABLE trace_events (event_id TEXT)"
+                        )
+                before = path.read_bytes()
+                store = SQLiteTraceEventStore(path)
+
+                with self.assertRaises(TraceCleanupDriftError):
+                    store.ensure_store_identity()
+                with self.assertRaises(TraceCleanupDriftError):
+                    store.store_id()
+
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_corrupt_existing_database_is_not_replaced(self):
+        path = self.make_directory() / "corrupt.sqlite3"
+        original = b"this is not a sqlite database"
+        path.write_bytes(original)
+        store = SQLiteTraceEventStore(path)
+
+        with self.assertRaises(TraceCleanupDriftError):
+            store.ensure_store_identity()
+
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_two_store_instances_atomically_compete_for_the_last_row(self):
+        path = self.make_directory() / "trace_events.sqlite3"
+        stores = (
+            SQLiteTraceEventStore(path, max_rows=1, write_timeout_seconds=2),
+            SQLiteTraceEventStore(path, max_rows=1, write_timeout_seconds=2),
+        )
+        traces = (TraceContext.create(), TraceContext.create())
+        events = tuple(
+            self.make_event(trace.trace_id, "2026-09-05T00:00:00Z")
+            for trace in traces
+        )
+        gate = Barrier(2)
+
+        def compete(index: int) -> str:
+            gate.wait(timeout=3)
+            try:
+                stores[index].write(events[index])
+            except TraceEventCapacityError:
+                return "capacity"
+            return "written"
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(compete, range(2)))
+
+        self.assertEqual(sorted(results), ["capacity", "written"])
+        with sqlite3.connect(path) as connection:
+            persisted = connection.execute(
+                "SELECT event_id FROM trace_events"
+            ).fetchall()
+        self.assertEqual(len(persisted), 1)
+        self.assertIn(persisted[0][0], {event.event_id for event in events})
+        self.assertTrue(stores[0].capacity_snapshot()["at_capacity"])
+
+    def test_cleanup_uses_complete_timelines_and_inclusive_cutoff(self):
+        store = SQLiteTraceEventStore(
+            self.make_directory() / "trace_events.sqlite3"
+        )
+        expired = TraceContext.create()
+        mixed = TraceContext.create()
+        fresh = TraceContext.create()
+        cutoff = "2026-08-06T00:00:00+00:00"
+        store.write(self.make_event(expired.trace_id, "2026-08-01T00:00:00Z"))
+        store.write(self.make_event(expired.trace_id, cutoff))
+        store.write(self.make_event(mixed.trace_id, "2026-07-01T00:00:00Z"))
+        store.write(self.make_event(mixed.trace_id, "2026-08-07T00:00:00Z"))
+
+        snapshot = store.cleanup_candidates(cutoff=cutoff)
+
+        self.assertEqual(snapshot.candidate_count, 1)
+        self.assertEqual(snapshot.event_count, 2)
+        self.assertEqual(snapshot.candidates[0].trace_id, expired.trace_id)
+        self.assertEqual(snapshot.candidates[0].max_occurred_at, cutoff)
+        self.assertRegex(snapshot.snapshot_hash, r"^[0-9a-f]{64}$")
+
+        store.write(self.make_event(fresh.trace_id, "2026-09-05T00:00:00Z"))
+        result = store.apply_cleanup(snapshot)
+
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(result["deleted_trace_count"], 1)
+        self.assertEqual(result["deleted_event_count"], 2)
+        self.assertEqual(store.events_for_trace(expired.trace_id), [])
+        self.assertEqual(len(store.events_for_trace(mixed.trace_id)), 2)
+        self.assertEqual(len(store.events_for_trace(fresh.trace_id)), 1)
+
+    def test_cleanup_rejects_a_fresh_event_added_to_a_candidate_trace(self):
+        store = SQLiteTraceEventStore(
+            self.make_directory() / "trace_events.sqlite3"
+        )
+        trace = TraceContext.create()
+        store.write(self.make_event(trace.trace_id, "2026-08-01T00:00:00Z"))
+        snapshot = store.cleanup_candidates(cutoff="2026-08-06T00:00:00Z")
+        store.write(self.make_event(trace.trace_id, "2026-08-07T00:00:00Z"))
+
+        with self.assertRaisesRegex(TraceCleanupDriftError, "changed"):
+            store.apply_cleanup(snapshot)
+
+        self.assertEqual(len(store.events_for_trace(trace.trace_id)), 2)
+
+    def test_cleanup_rejects_new_candidates_and_candidate_content_drift(self):
+        for drift_kind in ("new_candidate", "content_change"):
+            with self.subTest(drift_kind=drift_kind):
+                path = self.make_directory() / "trace_events.sqlite3"
+                store = SQLiteTraceEventStore(path)
+                original = TraceContext.create()
+                event = self.make_event(original.trace_id, "2026-08-01T00:00:00Z")
+                store.write(event)
+                snapshot = store.cleanup_candidates(cutoff="2026-08-06T00:00:00Z")
+                if drift_kind == "new_candidate":
+                    added = TraceContext.create()
+                    store.write(
+                        self.make_event(added.trace_id, "2026-08-02T00:00:00Z")
+                    )
+                else:
+                    with sqlite3.connect(path) as connection:
+                        connection.execute(
+                            "UPDATE trace_events SET safe_attributes_json = ? "
+                            "WHERE event_id = ?",
+                            ('{"operation":"candidate_rerank"}', event.event_id),
+                        )
+
+                with self.assertRaisesRegex(TraceCleanupDriftError, "changed"):
+                    store.apply_cleanup(snapshot)
+
+                self.assertEqual(len(store.events_for_trace(original.trace_id)), 1)
+
+    def test_cleanup_snapshot_round_trip_rejects_serialized_tampering(self):
+        store = SQLiteTraceEventStore(
+            self.make_directory() / "trace_events.sqlite3"
+        )
+        trace = TraceContext.create()
+        store.write(self.make_event(trace.trace_id, "2026-08-01T00:00:00Z"))
+        snapshot = store.cleanup_candidates(cutoff="2026-08-06T00:00:00Z")
+        payload = json.loads(json.dumps(snapshot.to_dict()))
+
+        self.assertEqual(TraceCleanupSnapshot.from_dict(payload), snapshot)
+        payload["candidates"][0]["events_hash"] = "0" * 64
+        with self.assertRaisesRegex(TraceEventValidationError, "snapshot_hash"):
+            TraceCleanupSnapshot.from_dict(payload)
+
+        payload = json.loads(json.dumps(snapshot.to_dict()))
+        payload["candidates"][0]["events_hash"] = int("1" * 64)
+        with self.assertRaisesRegex(TraceEventValidationError, "events_hash"):
+            TraceCleanupSnapshot.from_dict(payload)
+
+    def test_cleanup_apply_is_idempotent_after_the_original_traces_are_gone(self):
+        store = SQLiteTraceEventStore(
+            self.make_directory() / "trace_events.sqlite3"
+        )
+        trace = TraceContext.create()
+        store.write(self.make_event(trace.trace_id, "2026-08-01T00:00:00Z"))
+        snapshot = store.cleanup_candidates(cutoff="2026-08-06T00:00:00Z")
+
+        first = store.apply_cleanup(snapshot)
+        second = store.apply_cleanup(snapshot)
+
+        self.assertEqual(first["status"], "applied")
+        self.assertEqual(first["deleted_event_count"], 1)
+        self.assertEqual(second["status"], "already_satisfied")
+        self.assertEqual(second["deleted_trace_count"], 1)
+        self.assertEqual(second["deleted_event_count"], 1)
+
+    def test_capacity_failure_is_fail_open_and_health_fields_are_bounded_and_safe(self):
+        store = SQLiteTraceEventStore(
+            self.make_directory() / "trace_events.sqlite3", max_rows=1
+        )
+        recorder = TraceEventRecorder(store)
+        self.addCleanup(recorder.close)
+        first_trace = TraceContext.create()
+        second_trace = TraceContext.create()
+
+        first = recorder.record(
+            self.make_event(first_trace.trace_id, "2026-09-05T00:00:00Z")
+        )
+        recorder.flush()
+        second = recorder.record(
+            self.make_event(second_trace.trace_id, "2026-09-05T00:00:01Z")
+        )
+        recorder.flush()
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(len(store.events_for_trace(first_trace.trace_id)), 1)
+        self.assertEqual(store.events_for_trace(second_trace.trace_id), [])
+        health = recorder.health()
+        self.assertEqual(health["written"], 1)
+        self.assertEqual(health["dropped"], 1)
+        self.assertEqual(health["write_failures"], 1)
+        self.assertEqual(health["last_failure_kind"], "TraceEventCapacityError")
+        self.assertEqual(
+            health["current_reasons"],
+            ["write_failures", "capacity_exhausted"],
+        )
+        self.assertEqual(
+            health["capacity"],
+            {
+                "available": True,
+                "configured": True,
+                "max_rows": 1,
+                "current_rows": 1,
+                "remaining_rows": 0,
+                "at_capacity": True,
+            },
+        )
+        self.assertNotIn(str(store.path), json.dumps(health))
+
+        with recorder._lock:
+            recorder._dropped = TRACE_EVENT_HEALTH_COUNTER_MAX
+            recorder._validation_rejections = TRACE_EVENT_HEALTH_COUNTER_MAX
+        recorder.reject_validation("TraceEventValidationError")
+        saturated = recorder.health()
+        self.assertEqual(saturated["dropped"], TRACE_EVENT_HEALTH_COUNTER_MAX)
+        self.assertEqual(
+            saturated["validation_rejections"], TRACE_EVENT_HEALTH_COUNTER_MAX
+        )
 
     def test_event_ids_schema_and_trace_query_are_stable_and_ordered(self):
         recorder, store = self.make_recorder()

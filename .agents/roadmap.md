@@ -70,7 +70,7 @@
    - 3.5.4 后续 refresh-recovery 热修复：IMPLEMENTED，LIVE ACCEPTANCE DEFERRED。启动/重连只经权威 `/api/session` 对账，bootstrap 超时 15 秒；瞬时错误保留 pending fence、只给 `retry_connection`，成功对账清除临时 recovery notice，cache-buster 为 `20260901-refresh-recovery-v2`。固定 release、受限备份、NATAPP watchdog 持久化和全仓 1222 项回归已完成，但真实已登录会话恢复仍未闭环；用户现继续实际试用。本项不改变 V1，也不涉及 8888。
 4. **关键阶段结构化保存中间结果（IN_PROGRESS）**：建立有界、可审计、可过期的 Checkpoint/Artifact 证据链；不替代 Task State，不授权动作或恢复执行。
    - 4.1 Checkpoint V1 契约与现状盘点：DONE。冻结 `trace_id -> checkpoint_id -> artifact_id` 关系、九阶段模型、父子 revision、字段白名单、候选分数截断、失败语义和隐私边界；普通结构化 Checkpoint 30 天，普通/失败图片 3/7 天，反馈/调查证据默认 30 天并最多延长至 365/90 天，禁止永久 hold。部署配置必须显式提供 Checkpoint/Artifact/证据审计/Trace 行数、Artifact 总字节、磁盘最小余量和单 Checkpoint Artifact 数七项容量参数；证据审计不含 8795 控制库管理员审计。4.1 只有纯数据契约与测试，无 Store/I/O，也未接 A2/A3 runtime 或生产采集；33 项契约及全仓 1274 项回归通过。
-   - 4.2 存储生命周期与容量门：NEXT / A2-A3 CAPTURE GATE。实现独立 Checkpoint/Artifact Store、真实 TTL 读取拒绝、七项写前容量门、证据审计有限轮转及清理写入余量、周期 retention plan/apply、孤儿清理与审计，并补齐批准范围内的 Trace 周期清理；容量满时停止新增诊断证据、搜索继续且健康状态降级。真实 apply、容量保护和周期调度验收通过前，禁止接入 A2/A3 自动采集。
+   - 4.2 存储生命周期与容量门：DONE / A2-A3 CAPTURE GATE READY。已实现独立 Checkpoint/Artifact Store、可信 TTL 与过期读取拒绝、七项写前容量门、证据审计有限轮转及清理写入余量、周期 retention plan/apply、孤儿清理与审计，并补齐批准范围内的 Trace 周期清理；容量满时停止新增诊断证据、搜索继续且健康状态降级。定向 62 项及全仓回归通过。4.2 不接入 A2/A3 自动 Checkpoint 采集；4.3/4.4 仍须另行受控开发和启用。
    - 4.3 A2 单题采集：PLANNED。对真正进入业务处理的逻辑搜索，在已到达的阶段边界分别保存有界 Checkpoint，包括上传图元信息、章节、结构、荷载、工程尺寸、粗筛/复筛分数、最终选择及稳定失败码；health、登录、配额/队列拒绝和媒体 GET 不创建记录。
    - 4.4 A3 父子采集：PLANNED。保存整页理解、unit、bbox、裁图及校验结果，并受控关联各子 A2 Checkpoint；覆盖单题自动下行、多题并发与人工裁剪回退，同一图片只保存一份 Artifact。
    - 4.5 诊断读取与阶段验收：PLANNED。支持从 Trace 定位 Checkpoint 和受权 Artifact，查看、延长和删除均审计；验证脱敏、截断、过期、容量压力、证据写入 fail-open、读取/管理 fail-closed，以及不改变 A2/A3 排名和公共输出。

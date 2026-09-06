@@ -4,6 +4,16 @@ param(
     [int]$MaxConcurrentTasks = 1,
     [int]$MaxQueuedTasks = 2,
     [int]$QueueWaitSeconds = 55,
+    [Parameter(Mandatory = $true)][long]$MaxCheckpointRows,
+    [Parameter(Mandatory = $true)][long]$MaxArtifactRows,
+    [Parameter(Mandatory = $true)][long]$MaxAuditRows,
+    [Parameter(Mandatory = $true)][long]$MaxTraceRows,
+    [Parameter(Mandatory = $true)][long]$MaxArtifactBytes,
+    [Parameter(Mandatory = $true)][long]$MinFreeBytes,
+    [Parameter(Mandatory = $true)][int]$MaxArtifactsPerCheckpoint,
+    [Parameter(Mandatory = $true)][string]$CheckpointRetentionBackupRoot,
+    [Parameter(Mandatory = $true)][int]$CheckpointRetentionIntervalSeconds,
+    [Parameter(Mandatory = $true)][int]$CheckpointRetentionBackupKeepRuns,
     [double]$DailyBudgetCny = 0,
     [double]$PerInviteDailyBudgetCny = 0,
     [string]$InviteConfig,
@@ -23,6 +33,24 @@ $ErrorActionPreference = "Stop"
 if ($Port -ne 8790) {
     throw "This watchdog is restricted to port 8790."
 }
+foreach ($value in @(
+    $MaxCheckpointRows,
+    $MaxArtifactRows,
+    $MaxAuditRows,
+    $MaxTraceRows,
+    $MaxArtifactBytes,
+    $MinFreeBytes,
+    $MaxArtifactsPerCheckpoint,
+    $CheckpointRetentionIntervalSeconds,
+    $CheckpointRetentionBackupKeepRuns
+)) {
+    if ([long]$value -le 0) {
+        throw "Evidence capacity and retention values must be greater than zero."
+    }
+}
+if ($MaxArtifactsPerCheckpoint -gt 50) {
+    throw "MaxArtifactsPerCheckpoint must be between 1 and 50."
+}
 
 $ProjectDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $AgentEntrypoint = (Resolve-Path `
@@ -35,6 +63,12 @@ if (-not $RuntimeDir) {
     $RuntimeDir = Join-Path $ProjectDir $RuntimeDir
 }
 $RuntimeDir = [System.IO.Path]::GetFullPath($RuntimeDir)
+if (-not [System.IO.Path]::IsPathRooted($CheckpointRetentionBackupRoot)) {
+    throw "CheckpointRetentionBackupRoot must be an absolute path."
+}
+$CheckpointRetentionBackupRoot = [System.IO.Path]::GetFullPath(
+    $CheckpointRetentionBackupRoot
+)
 if (-not $ControlDb -and -not $InviteConfig) {
     $ControlDb = Join-Path $ProjectDir ".tmp_tiku_admin_8795\control.sqlite3"
 }
@@ -85,7 +119,17 @@ $BotArguments = @(
     "--runtime-dir", "$RuntimeDir",
     "--max-concurrent-tasks", "$MaxConcurrentTasks",
     "--max-queued-tasks", "$MaxQueuedTasks",
-    "--queue-wait-seconds", "$QueueWaitSeconds"
+    "--queue-wait-seconds", "$QueueWaitSeconds",
+    "--max-checkpoint-rows", "$MaxCheckpointRows",
+    "--max-artifact-rows", "$MaxArtifactRows",
+    "--max-audit-rows", "$MaxAuditRows",
+    "--max-trace-rows", "$MaxTraceRows",
+    "--max-artifact-bytes", "$MaxArtifactBytes",
+    "--min-free-bytes", "$MinFreeBytes",
+    "--max-artifacts-per-checkpoint", "$MaxArtifactsPerCheckpoint",
+    "--checkpoint-retention-backup-root", "$CheckpointRetentionBackupRoot",
+    "--checkpoint-retention-interval-seconds", "$CheckpointRetentionIntervalSeconds",
+    "--checkpoint-retention-backup-keep-runs", "$CheckpointRetentionBackupKeepRuns"
 )
 if ($InviteConfig) {
     $BotArguments += @("--invite-config", "$InviteConfig")
@@ -124,7 +168,7 @@ function Write-Status {
 function Test-Health {
     try {
         $response = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 3
-        return ($response.ok -eq $true) -or ($response.status -eq "ok")
+        return ($response.ok -eq $true) -or ($response.status -in @("ok", "degraded"))
     } catch {
         return $false
     }

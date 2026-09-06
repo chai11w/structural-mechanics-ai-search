@@ -6,12 +6,16 @@ from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import hashlib
 import json
+import os
 from pathlib import Path
 from queue import Empty, Full, Queue
 import re
+import secrets
 import sqlite3
-from threading import Condition, Lock, Thread, current_thread
+import stat
+from threading import Condition, Lock, RLock, Thread, current_thread
 from types import MappingProxyType
 from typing import Any, Iterator, Mapping
 from uuid import uuid4
@@ -21,8 +25,14 @@ from tiku_shared.trace_context import current_request_id, current_trace_id, is_v
 
 
 TRACE_EVENT_SCHEMA_VERSION = 1
+TRACE_CLEANUP_SCHEMA_VERSION = 2
+TRACE_STORE_SCHEMA_VERSION = 1
+TRACE_ABSENT_STORE_ID = "absent"
+TRACE_MAINTENANCE_LOCK_FILENAME = ".checkpoint_retention.lock"
 DEFAULT_TRACE_EVENT_QUEUE_CAPACITY = 1024
 DEFAULT_TRACE_EVENT_SQLITE_TIMEOUT_SECONDS = 0.25
+TRACE_EVENT_HEALTH_COUNTER_MAX = 2_147_483_647
+MAX_TRACE_EVENT_ROWS = TRACE_EVENT_HEALTH_COUNTER_MAX
 
 TRACE_EVENT_TYPES = frozenset(
     {
@@ -58,6 +68,8 @@ TRACE_EVENT_OUTCOMES = frozenset(
 )
 
 _EVENT_ID_RE = re.compile(r"^evt_[0-9a-f]{32}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_TRACE_STORE_ID_RE = re.compile(r"^trs_[0-9a-f]{16}$")
 _STAGE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$")
 _CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
@@ -220,12 +232,294 @@ class TraceEventRecorderClosed(RuntimeError):
     """The recorder no longer accepts events."""
 
 
+class TraceEventCapacityError(RuntimeError):
+    """The configured trace row budget cannot admit another event."""
+
+
+class TraceCleanupDriftError(RuntimeError):
+    """The trace cleanup candidates changed after the read-only snapshot."""
+
+
+class TraceEventMaintenanceError(RuntimeError):
+    """A retention maintenance fence is active for this trace database."""
+
+
+_TRACE_PATH_LOCKS_GUARD = Lock()
+_TRACE_PATH_LOCKS: dict[str, RLock] = {}
+
+
+def _trace_path_key(path: str | Path) -> str:
+    return str(_trace_absolute_path(path)).casefold()
+
+
+def _trace_absolute_path(value: str | Path) -> Path:
+    """Normalize a path without resolving links that must be rejected."""
+
+    return Path(os.path.abspath(os.fspath(Path(value).expanduser())))
+
+
+def _trace_lexists(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _trace_reject_linked_path(path: Path, *, stop: Path | None = None) -> None:
+    current = _trace_absolute_path(path)
+    boundary = _trace_absolute_path(stop) if stop is not None else None
+    while True:
+        try:
+            details = current.lstat()
+        except FileNotFoundError:
+            details = None
+        except OSError as exc:
+            raise TraceEventMaintenanceError(
+                "trace path metadata is unavailable"
+            ) from exc
+        if details is not None and (
+            current.is_symlink()
+            or bool(
+                getattr(details, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            )
+        ):
+            raise TraceEventMaintenanceError("trace path contains a link")
+        if boundary is not None and current == boundary:
+            break
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+
+
+def _trace_path_lock(path: str | Path) -> RLock:
+    key = _trace_path_key(path)
+    with _TRACE_PATH_LOCKS_GUARD:
+        return _TRACE_PATH_LOCKS.setdefault(key, RLock())
+
+
+@contextmanager
+def _trace_writer_maintenance_lock(path: str | Path) -> Iterator[None]:
+    """Take the retention fence without ever waiting on a user request.
+
+    The retention coordinator owns the same lock file for the duration of an
+    apply.  A trace writer therefore either obtains the short-lived lock or
+    fails open immediately; it must never hold up the request thread.
+    """
+
+    path = _trace_absolute_path(path)
+    lock_path = path.parent / TRACE_MAINTENANCE_LOCK_FILENAME
+    try:
+        _trace_reject_linked_path(lock_path, stop=path.parent)
+        if _trace_lexists(lock_path) and not lock_path.is_file():
+            raise OSError("unsafe maintenance lock")
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        descriptor = os.open(lock_path, flags, 0o600)
+        stream = os.fdopen(descriptor, "r+b", buffering=0)
+    except OSError as exc:
+        raise TraceEventMaintenanceError("trace maintenance fence is unavailable") from exc
+
+    locked = False
+    try:
+        # msvcrt.locking requires a byte at the requested position.  Keeping a
+        # one-byte file also makes the lock compatible with the coordinator.
+        stream.seek(0, os.SEEK_END)
+        if stream.tell() == 0:
+            stream.write(b"0")
+            stream.flush()
+        stream.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except (OSError, BlockingIOError) as exc:
+            raise TraceEventMaintenanceError("trace maintenance fence is active") from exc
+        yield
+    finally:
+        if locked:
+            try:
+                stream.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
 def new_event_id() -> str:
     return f"evt_{uuid4().hex}"
 
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+@dataclass(frozen=True)
+class TraceCleanupCandidate:
+    trace_id: str
+    event_count: int
+    first_occurred_at: str
+    max_occurred_at: str
+    events_hash: str
+
+    def __post_init__(self) -> None:
+        if type(self.trace_id) is not str or not is_valid_trace_id(self.trace_id):
+            raise TraceEventValidationError("invalid cleanup trace_id")
+        if type(self.event_count) is not int or self.event_count < 1:
+            raise TraceEventValidationError("invalid cleanup event_count")
+        first = _normalize_timestamp(self.first_occurred_at)
+        maximum = _normalize_timestamp(self.max_occurred_at)
+        if first > maximum:
+            raise TraceEventValidationError("invalid cleanup timestamp order")
+        if type(self.events_hash) is not str or not _SHA256_RE.fullmatch(
+            self.events_hash
+        ):
+            raise TraceEventValidationError("invalid cleanup events_hash")
+        object.__setattr__(self, "first_occurred_at", first)
+        object.__setattr__(self, "max_occurred_at", maximum)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "trace_id": self.trace_id,
+            "event_count": self.event_count,
+            "first_occurred_at": self.first_occurred_at,
+            "max_occurred_at": self.max_occurred_at,
+            "events_hash": self.events_hash,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "TraceCleanupCandidate":
+        if not isinstance(payload, Mapping) or set(payload) != {
+            "trace_id",
+            "event_count",
+            "first_occurred_at",
+            "max_occurred_at",
+            "events_hash",
+        }:
+            raise TraceEventValidationError("invalid cleanup candidate")
+        return cls(
+            trace_id=payload["trace_id"],
+            event_count=payload["event_count"],
+            first_occurred_at=payload["first_occurred_at"],
+            max_occurred_at=payload["max_occurred_at"],
+            events_hash=payload["events_hash"],
+        )
+
+
+@dataclass(frozen=True)
+class TraceCleanupSnapshot:
+    cutoff: str
+    store_id: str
+    candidates: tuple[TraceCleanupCandidate, ...]
+    candidate_count: int
+    event_count: int
+    snapshot_hash: str
+    schema_version: int = TRACE_CLEANUP_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != TRACE_CLEANUP_SCHEMA_VERSION
+        ):
+            raise TraceEventValidationError("unsupported cleanup schema_version")
+        cutoff = _normalize_timestamp(self.cutoff)
+        if type(self.store_id) is not str or not (
+            self.store_id == TRACE_ABSENT_STORE_ID
+            or _TRACE_STORE_ID_RE.fullmatch(self.store_id)
+        ):
+            raise TraceEventValidationError("invalid cleanup store_id")
+        if not isinstance(self.candidates, tuple) or any(
+            not isinstance(item, TraceCleanupCandidate) for item in self.candidates
+        ):
+            raise TraceEventValidationError("invalid cleanup candidates")
+        if tuple(sorted(self.candidates, key=lambda item: item.trace_id)) != self.candidates:
+            raise TraceEventValidationError("cleanup candidates must be ordered")
+        trace_ids = [item.trace_id for item in self.candidates]
+        if len(trace_ids) != len(set(trace_ids)):
+            raise TraceEventValidationError("duplicate cleanup trace_id")
+        if type(self.candidate_count) is not int or self.candidate_count != len(
+            self.candidates
+        ):
+            raise TraceEventValidationError("invalid cleanup snapshot candidate_count")
+        if self.candidate_count and self.store_id == TRACE_ABSENT_STORE_ID:
+            raise TraceEventValidationError("cleanup candidates require a store_id")
+        if any(item.max_occurred_at > cutoff for item in self.candidates):
+            raise TraceEventValidationError("cleanup candidate exceeds cutoff")
+        expected_count = sum(item.event_count for item in self.candidates)
+        if type(self.event_count) is not int or self.event_count != expected_count:
+            raise TraceEventValidationError("invalid cleanup snapshot event_count")
+        if type(self.snapshot_hash) is not str or not _SHA256_RE.fullmatch(
+            self.snapshot_hash
+        ):
+            raise TraceEventValidationError("invalid cleanup snapshot_hash")
+        expected_hash = _trace_cleanup_snapshot_hash(
+            schema_version=self.schema_version,
+            cutoff=cutoff,
+            store_id=self.store_id,
+            candidates=self.candidates,
+            candidate_count=self.candidate_count,
+            event_count=self.event_count,
+        )
+        if self.snapshot_hash != expected_hash:
+            raise TraceEventValidationError("invalid cleanup snapshot_hash")
+        object.__setattr__(self, "cutoff", cutoff)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "cutoff": self.cutoff,
+            "store_id": self.store_id,
+            "candidates": [item.to_dict() for item in self.candidates],
+            "candidate_count": self.candidate_count,
+            "event_count": self.event_count,
+            "snapshot_hash": self.snapshot_hash,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "TraceCleanupSnapshot":
+        if not isinstance(payload, Mapping) or set(payload) != {
+            "schema_version",
+            "cutoff",
+            "store_id",
+            "candidates",
+            "candidate_count",
+            "event_count",
+            "snapshot_hash",
+        }:
+            raise TraceEventValidationError("invalid cleanup snapshot")
+        raw_candidates = payload["candidates"]
+        if not isinstance(raw_candidates, list):
+            raise TraceEventValidationError("invalid cleanup candidates")
+        return cls(
+            schema_version=payload["schema_version"],
+            cutoff=payload["cutoff"],
+            store_id=payload["store_id"],
+            candidates=tuple(
+                TraceCleanupCandidate.from_dict(item) for item in raw_candidates
+            ),
+            candidate_count=payload["candidate_count"],
+            event_count=payload["event_count"],
+            snapshot_hash=payload["snapshot_hash"],
+        )
 
 
 @dataclass(frozen=True)
@@ -365,17 +659,33 @@ class SQLiteTraceEventStore:
         path: str | Path,
         *,
         write_timeout_seconds: float = DEFAULT_TRACE_EVENT_SQLITE_TIMEOUT_SECONDS,
+        max_rows: int | None = None,
     ) -> None:
-        self.path = Path(path)
+        self.path = _trace_absolute_path(path)
+        # Fail closed for existing links or non-regular database paths.  A
+        # missing file remains valid and is created only by an explicit write.
+        _trace_reject_linked_path(self.path)
+        if _trace_lexists(self.path) and not self.path.is_file():
+            raise ValueError("trace database path must be a regular file")
         if isinstance(write_timeout_seconds, bool) or not isinstance(
             write_timeout_seconds, (int, float)
         ):
             raise ValueError("write_timeout_seconds must be a number")
         if write_timeout_seconds < 0 or write_timeout_seconds > 5:
             raise ValueError("write_timeout_seconds must be between 0 and 5")
+        if max_rows is not None and (
+            type(max_rows) is not int or max_rows < 1 or max_rows > MAX_TRACE_EVENT_ROWS
+        ):
+            raise ValueError(f"max_rows must be between 1 and {MAX_TRACE_EVENT_ROWS}")
         self._write_timeout_seconds = float(write_timeout_seconds)
+        self._max_rows = max_rows
         self._lock = Lock()
+        self._path_lock = _trace_path_lock(self.path)
         self._pending_flusher: WeakMethod[Any] | None = None
+
+    @property
+    def max_rows(self) -> int | None:
+        return self._max_rows
 
     def _attach_recorder(self, recorder: "TraceEventRecorder") -> None:
         self._pending_flusher = WeakMethod(recorder.flush)
@@ -386,38 +696,248 @@ class SQLiteTraceEventStore:
         if callback is not None:
             callback()
 
-    def write(self, event: TraceEvent) -> None:
-        if not isinstance(event, TraceEvent):
-            raise TypeError("event must be a TraceEvent")
+    def ensure_store_identity(self) -> str:
+        """Create or migrate the store and return its persistent identity."""
+
+        _trace_reject_linked_path(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock:
+        _trace_reject_linked_path(self.path)
+        if _trace_lexists(self.path) and not self.path.is_file():
+            raise TraceEventMaintenanceError("trace database path is not a regular file")
+        with self._path_lock, self._lock, _trace_writer_maintenance_lock(self.path):
+            _trace_reject_linked_path(self.path)
+            existed = _trace_lexists(self.path)
             with closing(
                 sqlite3.connect(self.path, timeout=self._write_timeout_seconds)
             ) as connection:
-                with connection:
-                    connection.execute("PRAGMA journal_mode=WAL")
-                    _create_schema(connection)
-                    try:
-                        connection.execute(
-                            """
-                            INSERT INTO trace_events (
-                                event_id, schema_version, trace_id, event_type, occurred_at,
-                                stage, outcome, request_id, response_id, session_key,
-                                identity_key, workflow_search_id, search_id, unit_id, run_id,
-                                call_id, provider_request_id, feedback_id, rated_response_id,
-                                protocol_status, protocol_layer, protocol_code,
-                                protocol_retryable, protocol_action, duration_ms,
-                                safe_attributes_json
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            _event_row(event),
+                identity = _prepare_trace_store_for_write(
+                    connection, allow_create=not existed
+                )
+                connection.commit()
+                return identity
+
+    def store_id(self) -> str:
+        """Return the persistent identity without creating or migrating the store."""
+
+        _trace_reject_linked_path(self.path)
+        if not _trace_lexists(self.path):
+            return TRACE_ABSENT_STORE_ID
+        if not self.path.is_file():
+            raise TraceCleanupDriftError("trace database path is not a regular file")
+        with self._path_lock, self._lock:
+            try:
+                with closing(
+                    _open_readonly_sqlite(
+                        self.path, timeout=self._write_timeout_seconds
+                    )
+                ) as connection:
+                    if not _verify_trace_events_readable(connection):
+                        raise TraceCleanupDriftError("trace store schema is unavailable")
+                    return _trace_store_identity_from_connection(connection)
+            except (OSError, sqlite3.Error) as exc:
+                raise TraceCleanupDriftError("trace store identity is unavailable") from exc
+
+    def write(self, event: TraceEvent) -> None:
+        if not isinstance(event, TraceEvent):
+            raise TypeError("event must be a TraceEvent")
+        _trace_reject_linked_path(self.path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        _trace_reject_linked_path(self.path)
+        if _trace_lexists(self.path) and not self.path.is_file():
+            raise TraceEventMaintenanceError("trace database path is not a regular file")
+        with self._path_lock, self._lock, _trace_writer_maintenance_lock(self.path):
+            _trace_reject_linked_path(self.path)
+            existed = _trace_lexists(self.path)
+            with closing(
+                sqlite3.connect(self.path, timeout=self._write_timeout_seconds)
+            ) as connection:
+                _prepare_trace_store_for_write(
+                    connection, allow_create=not existed
+                )
+                connection.commit()
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    if self._max_rows is not None:
+                        current_rows = int(
+                            connection.execute(
+                                "SELECT COUNT(*) FROM trace_events"
+                            ).fetchone()[0]
                         )
-                    except sqlite3.IntegrityError as exc:
-                        if event.event_type in TERMINAL_EVENT_TYPES and self._has_terminal(
-                            connection, event.trace_id
-                        ):
-                            raise DuplicateTerminalEvent("trace terminal already recorded") from exc
-                        raise
+                        if current_rows >= self._max_rows:
+                            raise TraceEventCapacityError("trace event capacity exhausted")
+                    connection.execute(
+                        """
+                        INSERT INTO trace_events (
+                            event_id, schema_version, trace_id, event_type, occurred_at,
+                            stage, outcome, request_id, response_id, session_key,
+                            identity_key, workflow_search_id, search_id, unit_id, run_id,
+                            call_id, provider_request_id, feedback_id, rated_response_id,
+                            protocol_status, protocol_layer, protocol_code,
+                            protocol_retryable, protocol_action, duration_ms,
+                            safe_attributes_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        _event_row(event),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    connection.rollback()
+                    if event.event_type in TERMINAL_EVENT_TYPES and self._has_terminal(
+                        connection, event.trace_id
+                    ):
+                        raise DuplicateTerminalEvent("trace terminal already recorded") from exc
+                    raise
+                except BaseException:
+                    connection.rollback()
+                    raise
+                else:
+                    connection.commit()
+
+    def capacity_snapshot(self) -> dict[str, Any]:
+        """Return bounded row capacity state without creating or changing the database."""
+
+        unavailable = {
+            "available": False,
+            "configured": self._max_rows is not None,
+            "max_rows": self._max_rows,
+            "current_rows": None,
+            "remaining_rows": None,
+            "at_capacity": False,
+        }
+        current_rows = 0
+        try:
+            _trace_reject_linked_path(self.path)
+        except TraceEventMaintenanceError:
+            return unavailable
+        if _trace_lexists(self.path):
+            if not self.path.is_file():
+                return unavailable
+            try:
+                with self._path_lock, self._lock:
+                    with closing(
+                        _open_readonly_sqlite(
+                            self.path, timeout=self._write_timeout_seconds
+                        )
+                    ) as connection:
+                        if not _verify_trace_events_readable(connection):
+                            return unavailable
+                        # A complete table without the persistent identity is
+                        # not the store governed by this contract.
+                        _trace_store_identity_from_connection(connection)
+                        current_rows = int(
+                            connection.execute(
+                                "SELECT COUNT(*) FROM trace_events"
+                            ).fetchone()[0]
+                        )
+            except (OSError, sqlite3.Error, TraceCleanupDriftError, TypeError, ValueError):
+                return unavailable
+        remaining_rows = (
+            None
+            if self._max_rows is None
+            else max(0, self._max_rows - current_rows)
+        )
+        return {
+            "available": True,
+            "configured": self._max_rows is not None,
+            "max_rows": self._max_rows,
+            "current_rows": min(current_rows, TRACE_EVENT_HEALTH_COUNTER_MAX),
+            "remaining_rows": remaining_rows,
+            "at_capacity": self._max_rows is not None and current_rows >= self._max_rows,
+        }
+
+    def cleanup_candidates(self, *, cutoff: str) -> TraceCleanupSnapshot:
+        """Freeze complete trace timelines whose newest event is at or before cutoff."""
+
+        clean_cutoff = _normalize_timestamp(cutoff)
+        self._flush_pending()
+        _trace_reject_linked_path(self.path)
+        if not _trace_lexists(self.path):
+            return _build_trace_cleanup_snapshot(
+                clean_cutoff, TRACE_ABSENT_STORE_ID, ()
+            )
+        if not self.path.is_file():
+            raise TraceCleanupDriftError("trace database path is not a regular file")
+        with self._path_lock, self._lock:
+            try:
+                with closing(
+                    _open_readonly_sqlite(
+                        self.path, timeout=self._write_timeout_seconds
+                    )
+                ) as connection:
+                    connection.row_factory = sqlite3.Row
+                    store_id = _trace_store_identity_from_connection(connection)
+                    return _trace_cleanup_snapshot_from_connection(
+                        connection, clean_cutoff, store_id=store_id
+                    )
+            except (OSError, sqlite3.Error) as exc:
+                raise TraceCleanupDriftError("trace store is unavailable") from exc
+
+    def apply_cleanup(self, snapshot: TraceCleanupSnapshot) -> dict[str, Any]:
+        """Delete an unchanged candidate set atomically, one complete trace at a time."""
+
+        if not isinstance(snapshot, TraceCleanupSnapshot):
+            raise TypeError("snapshot must be a TraceCleanupSnapshot")
+        self._flush_pending()
+        _trace_reject_linked_path(self.path)
+        if not _trace_lexists(self.path):
+            current = _build_trace_cleanup_snapshot(
+                snapshot.cutoff, TRACE_ABSENT_STORE_ID, ()
+            )
+            if current != snapshot:
+                raise TraceCleanupDriftError("trace store identity changed")
+            return _trace_cleanup_result(snapshot, deleted_event_count=0)
+        if not self.path.is_file():
+            raise TraceCleanupDriftError("trace database path is not a regular file")
+
+        with self._path_lock, self._lock:
+            try:
+                connection = _open_existing_sqlite(
+                    self.path, timeout=self._write_timeout_seconds
+                )
+            except (OSError, sqlite3.Error) as exc:
+                raise TraceCleanupDriftError("trace store is unavailable") from exc
+            with closing(connection):
+                connection.row_factory = sqlite3.Row
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    actual_store_id = _trace_store_identity_from_connection(connection)
+                    if actual_store_id != snapshot.store_id:
+                        raise TraceCleanupDriftError("trace store identity changed")
+                    deleted_event_count = 0
+                    status = "applied"
+                    if snapshot.candidates and _cleanup_candidate_traces_absent(
+                        connection, snapshot
+                    ):
+                        status = "already_satisfied"
+                    else:
+                        current = _trace_cleanup_snapshot_from_connection(
+                            connection,
+                            snapshot.cutoff,
+                            store_id=actual_store_id,
+                        )
+                        if current != snapshot:
+                            raise TraceCleanupDriftError(
+                                "trace cleanup candidates changed"
+                            )
+                        for candidate in snapshot.candidates:
+                            cursor = connection.execute(
+                                "DELETE FROM trace_events WHERE trace_id = ?",
+                                (candidate.trace_id,),
+                            )
+                            deleted_event_count += int(cursor.rowcount)
+                        if deleted_event_count != snapshot.event_count:
+                            raise TraceCleanupDriftError(
+                                "trace cleanup delete count changed"
+                            )
+                except BaseException:
+                    connection.rollback()
+                    raise
+                else:
+                    connection.commit()
+        return _trace_cleanup_result(
+            snapshot,
+            status=status,
+            deleted_event_count=deleted_event_count,
+        )
 
     def events_for_trace(self, trace_id: str, *, limit: int = 1000) -> list[TraceEvent]:
         clean_trace_id = str(trace_id or "").strip()
@@ -425,18 +945,25 @@ class SQLiteTraceEventStore:
             raise TraceEventValidationError("invalid trace_id")
         clean_limit = _bounded_query_limit(limit)
         self._flush_pending()
-        if not self.path.is_file():
+        _trace_reject_linked_path(self.path)
+        if not _trace_lexists(self.path):
             return []
-        with self._lock:
-            with closing(sqlite3.connect(self.path)) as connection:
+        if not self.path.is_file():
+            raise TraceCleanupDriftError("trace database path is not a regular file")
+        with self._path_lock, self._lock:
+            with closing(
+                _open_readonly_sqlite(
+                    self.path, timeout=self._write_timeout_seconds
+                )
+            ) as connection:
                 connection.row_factory = sqlite3.Row
-                with connection:
-                    _create_schema(connection)
-                    rows = connection.execute(
-                        "SELECT * FROM trace_events WHERE trace_id = ? "
-                        "ORDER BY occurred_at ASC, rowid ASC LIMIT ?",
-                        (clean_trace_id, clean_limit),
-                    ).fetchall()
+                if not _verify_trace_events_readable(connection):
+                    raise TraceCleanupDriftError("trace store schema is unavailable")
+                rows = connection.execute(
+                    "SELECT * FROM trace_events WHERE trace_id = ? "
+                    "ORDER BY occurred_at ASC, rowid ASC LIMIT ?",
+                    (clean_trace_id, clean_limit),
+                ).fetchall()
         return [_event_from_row(row) for row in rows]
 
     query_trace = events_for_trace
@@ -516,18 +1043,13 @@ class TraceEventRecorder:
 
     def note_duplicate_terminal(self) -> None:
         with self._lock:
-            self._duplicate_terminals += 1
+            self._duplicate_terminals = _saturated_increment(
+                self._duplicate_terminals
+            )
 
     def health(self) -> dict[str, Any]:
         with self._lock:
-            degraded = bool(
-                self._dropped
-                or self._write_failures
-                or self._validation_rejections
-                or self._duplicate_terminals
-            )
-            return {
-                "status": "degraded" if degraded else "ok",
+            result: dict[str, Any] = {
                 "written": self._written,
                 "dropped": self._dropped,
                 "write_failures": self._write_failures,
@@ -539,6 +1061,22 @@ class TraceEventRecorder:
                 "last_failure_kind": self._last_failure_kind,
                 "last_failure_at": self._last_failure_at,
             }
+        capacity, capacity_unavailable = _safe_store_capacity_snapshot(self.store)
+        reasons = []
+        if result["write_failures"]:
+            reasons.append("write_failures")
+        if result["validation_rejections"]:
+            reasons.append("validation_rejections")
+        if result["duplicate_terminals"]:
+            reasons.append("duplicate_terminals")
+        if capacity["at_capacity"]:
+            reasons.append("capacity_exhausted")
+        if capacity_unavailable:
+            reasons.append("capacity_snapshot_unavailable")
+        result["status"] = "degraded" if reasons else "ok"
+        result["current_reasons"] = reasons
+        result["capacity"] = capacity
+        return result
 
     def flush(self) -> None:
         with self._condition:
@@ -625,20 +1163,22 @@ class TraceEventRecorder:
 
     def _finish_write_success(self) -> None:
         with self._condition:
-            self._written += 1
+            self._written = _saturated_increment(self._written)
             self._completed += 1
             self._condition.notify_all()
 
     def _finish_duplicate_terminal(self) -> None:
         with self._condition:
-            self._duplicate_terminals += 1
+            self._duplicate_terminals = _saturated_increment(
+                self._duplicate_terminals
+            )
             self._completed += 1
             self._condition.notify_all()
 
     def _finish_write_failure(self, kind: str) -> None:
         with self._condition:
-            self._dropped += 1
-            self._write_failures += 1
+            self._dropped = _saturated_increment(self._dropped)
+            self._write_failures = _saturated_increment(self._write_failures)
             self._last_failure_kind = _safe_failure_kind(kind)
             self._last_failure_at = utc_now()
             self._completed += 1
@@ -646,15 +1186,17 @@ class TraceEventRecorder:
 
     def _record_validation_rejection(self, kind: str) -> None:
         with self._lock:
-            self._dropped += 1
-            self._validation_rejections += 1
+            self._dropped = _saturated_increment(self._dropped)
+            self._validation_rejections = _saturated_increment(
+                self._validation_rejections
+            )
             self._last_failure_kind = _safe_failure_kind(kind)
             self._last_failure_at = utc_now()
 
     def _record_write_failure(self, kind: str) -> None:
         with self._lock:
-            self._dropped += 1
-            self._write_failures += 1
+            self._dropped = _saturated_increment(self._dropped)
+            self._write_failures = _saturated_increment(self._write_failures)
             self._last_failure_kind = _safe_failure_kind(kind)
             self._last_failure_at = utc_now()
 
@@ -980,6 +1522,346 @@ def _enum_value(value: Any) -> str:
 def _safe_failure_kind(value: str) -> str:
     clean = str(value or "").strip()
     return clean if _SYMBOL_RE.fullmatch(clean) else "ObservabilityError"
+
+
+def _saturated_increment(value: int) -> int:
+    return min(TRACE_EVENT_HEALTH_COUNTER_MAX, value + 1)
+
+
+def _safe_store_capacity_snapshot(
+    store: Any,
+) -> tuple[dict[str, Any], bool]:
+    unavailable = {
+        "available": False,
+        "configured": False,
+        "max_rows": None,
+        "current_rows": None,
+        "remaining_rows": None,
+        "at_capacity": False,
+    }
+    snapshotter = getattr(store, "capacity_snapshot", None)
+    if not callable(snapshotter):
+        return unavailable, False
+    try:
+        raw = snapshotter()
+        if not isinstance(raw, Mapping) or raw.get("available") is not True:
+            raise ValueError("capacity snapshot unavailable")
+        configured = raw.get("configured") is True
+        maximum = raw.get("max_rows")
+        current = raw.get("current_rows")
+        remaining = raw.get("remaining_rows")
+        at_capacity = raw.get("at_capacity")
+        if type(current) is not int or not 0 <= current <= TRACE_EVENT_HEALTH_COUNTER_MAX:
+            raise ValueError("invalid capacity current_rows")
+        if configured:
+            if type(maximum) is not int or not 1 <= maximum <= MAX_TRACE_EVENT_ROWS:
+                raise ValueError("invalid capacity max_rows")
+            if type(remaining) is not int or not 0 <= remaining <= maximum:
+                raise ValueError("invalid capacity remaining_rows")
+        elif maximum is not None or remaining is not None:
+            raise ValueError("invalid unconfigured capacity")
+        if type(at_capacity) is not bool:
+            raise ValueError("invalid capacity status")
+        return {
+            "available": True,
+            "configured": configured,
+            "max_rows": maximum,
+            "current_rows": current,
+            "remaining_rows": remaining,
+            "at_capacity": at_capacity,
+        }, False
+    except Exception:  # noqa: BLE001 - health output must stay fail-open and bounded.
+        return unavailable, True
+
+
+def _trace_cleanup_snapshot_hash(
+    *,
+    schema_version: int,
+    cutoff: str,
+    store_id: str,
+    candidates: tuple[TraceCleanupCandidate, ...],
+    candidate_count: int,
+    event_count: int,
+) -> str:
+    payload = {
+        "schema_version": schema_version,
+        "cutoff": cutoff,
+        "store_id": store_id,
+        "candidates": [item.to_dict() for item in candidates],
+        "candidate_count": candidate_count,
+        "event_count": event_count,
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _build_trace_cleanup_snapshot(
+    cutoff: str,
+    store_id: str,
+    candidates: tuple[TraceCleanupCandidate, ...],
+) -> TraceCleanupSnapshot:
+    clean_cutoff = _normalize_timestamp(cutoff)
+    ordered = tuple(sorted(candidates, key=lambda item: item.trace_id))
+    candidate_count = len(ordered)
+    event_count = sum(item.event_count for item in ordered)
+    return TraceCleanupSnapshot(
+        cutoff=clean_cutoff,
+        store_id=store_id,
+        candidates=ordered,
+        candidate_count=candidate_count,
+        event_count=event_count,
+        snapshot_hash=_trace_cleanup_snapshot_hash(
+            schema_version=TRACE_CLEANUP_SCHEMA_VERSION,
+            cutoff=clean_cutoff,
+            store_id=store_id,
+            candidates=ordered,
+            candidate_count=candidate_count,
+            event_count=event_count,
+        ),
+    )
+
+
+def _open_readonly_sqlite(
+    path: Path,
+    *,
+    timeout: float = DEFAULT_TRACE_EVENT_SQLITE_TIMEOUT_SECONDS,
+) -> sqlite3.Connection:
+    """Open an existing SQLite file without allowing accidental creation."""
+
+    try:
+        _trace_reject_linked_path(path)
+        if not _trace_lexists(path) or not path.is_file():
+            raise FileNotFoundError(str(path))
+        uri = path.resolve(strict=True).as_uri() + "?mode=ro"
+        connection = sqlite3.connect(uri, uri=True, timeout=float(timeout))
+        connection.execute("PRAGMA query_only = ON")
+        return connection
+    except (OSError, sqlite3.Error):
+        raise
+
+
+def _open_existing_sqlite(
+    path: Path,
+    *,
+    timeout: float = DEFAULT_TRACE_EVENT_SQLITE_TIMEOUT_SECONDS,
+) -> sqlite3.Connection:
+    """Open an existing SQLite file read-write, never creating a replacement."""
+
+    _trace_reject_linked_path(path)
+    if not _trace_lexists(path) or not path.is_file():
+        raise FileNotFoundError(str(path))
+    resolved = path.resolve(strict=True)
+    if not resolved.is_file():
+        raise FileNotFoundError(str(resolved))
+    uri = resolved.as_uri() + "?mode=rw"
+    connection = sqlite3.connect(uri, uri=True, timeout=float(timeout))
+    connection.execute("PRAGMA foreign_keys = ON")
+    return connection
+
+
+def _trace_store_identity_from_connection(connection: sqlite3.Connection) -> str:
+    """Read the identity encoded in SQLite's persistent database header."""
+
+    if not _trace_events_table_exists(connection):
+        raise TraceCleanupDriftError("trace store schema is unavailable")
+    try:
+        application_id = int(connection.execute("PRAGMA application_id").fetchone()[0])
+        user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    except (TypeError, ValueError, sqlite3.Error) as exc:
+        raise TraceCleanupDriftError("trace store identity is unavailable") from exc
+    # SQLite exposes both pragmas as unsigned 32-bit values.  We reserve the
+    # high nibble as a format marker and use the remaining 60 bits for the
+    # random identity, while leaving the visible schema as a single table.
+    value = (application_id << 31) | user_version
+    if value <= 0 or value >> 60 != 0x2:
+        raise TraceCleanupDriftError("trace store identity is invalid")
+    return f"trs_{value:016x}"
+
+
+def _new_trace_store_identity(connection: sqlite3.Connection) -> str:
+    value = (0x2 << 60) | secrets.randbits(60)
+    # Keep both pragma values within SQLite's portable signed range.
+    application_id = (value >> 31) & 0x7FFFFFFF
+    user_version = value & 0x7FFFFFFF
+    if not application_id or not user_version:
+        return _new_trace_store_identity(connection)
+    connection.execute(f"PRAGMA application_id = {application_id}")
+    connection.execute(f"PRAGMA user_version = {user_version}")
+    return f"trs_{value:016x}"
+
+
+def _prepare_trace_store_for_write(
+    connection: sqlite3.Connection, *, allow_create: bool = True
+) -> str:
+    """Create/validate the trace schema and initialize its identity."""
+
+    connection.execute("PRAGMA foreign_keys = ON")
+    if not allow_create:
+        # Validate an existing database before changing journal mode or
+        # creating indexes.  An empty/partial file is evidence of corruption
+        # or replacement, not an absent store that may be initialized.
+        try:
+            valid = _verify_trace_events_readable(connection)
+        except sqlite3.Error as exc:
+            raise TraceCleanupDriftError("trace store schema is invalid") from exc
+        if not valid:
+            raise TraceCleanupDriftError("trace store schema is invalid")
+    connection.execute("PRAGMA journal_mode = WAL")
+    _create_schema(connection)
+    if not _verify_trace_events_readable(connection):
+        raise TraceCleanupDriftError("trace store schema is invalid")
+    try:
+        return _trace_store_identity_from_connection(connection)
+    except TraceCleanupDriftError:
+        application_id = int(connection.execute("PRAGMA application_id").fetchone()[0])
+        user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if application_id != 0 or user_version != 0:
+            raise
+        return _new_trace_store_identity(connection)
+
+
+def _verify_trace_events_readable(connection: sqlite3.Connection) -> bool:
+    """Return whether a connection exposes the complete Trace V1 schema."""
+
+    if not _trace_events_table_exists(connection):
+        return False
+    required = {
+        "event_id",
+        "schema_version",
+        "trace_id",
+        "event_type",
+        "occurred_at",
+        "stage",
+        "outcome",
+        *_DIMENSION_FIELDS,
+        "protocol_status",
+        "protocol_layer",
+        "protocol_code",
+        "protocol_retryable",
+        "protocol_action",
+        "duration_ms",
+        "safe_attributes_json",
+    }
+    try:
+        actual = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(trace_events)")
+        }
+    except sqlite3.Error:
+        return False
+    return required <= actual
+
+
+def _trace_events_table_exists(connection: sqlite3.Connection) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'trace_events'"
+    ).fetchone() is not None
+
+
+def _trace_cleanup_snapshot_from_connection(
+    connection: sqlite3.Connection,
+    cutoff: str,
+    *,
+    store_id: str,
+) -> TraceCleanupSnapshot:
+    clean_cutoff = _normalize_timestamp(cutoff)
+    if not _verify_trace_events_readable(connection):
+        raise TraceCleanupDriftError("trace store schema is unavailable")
+    rows = connection.execute(
+        """
+        WITH eligible AS (
+            SELECT trace_id
+            FROM trace_events
+            GROUP BY trace_id
+            HAVING MAX(occurred_at) <= ?
+        )
+        SELECT events.*
+        FROM trace_events AS events
+        INNER JOIN eligible ON eligible.trace_id = events.trace_id
+        ORDER BY events.trace_id ASC, events.occurred_at ASC, events.event_id ASC
+        """,
+        (clean_cutoff,),
+    )
+    candidates: list[TraceCleanupCandidate] = []
+    trace_id = ""
+    event_count = 0
+    first_occurred_at = ""
+    max_occurred_at = ""
+    digest = hashlib.sha256()
+
+    def finish_candidate() -> None:
+        if not trace_id:
+            return
+        candidates.append(
+            TraceCleanupCandidate(
+                trace_id=trace_id,
+                event_count=event_count,
+                first_occurred_at=first_occurred_at,
+                max_occurred_at=max_occurred_at,
+                events_hash=digest.hexdigest(),
+            )
+        )
+
+    for row in rows:
+        row_trace_id = str(row["trace_id"] or "")
+        occurred_at = _normalize_timestamp(str(row["occurred_at"] or ""))
+        if occurred_at != str(row["occurred_at"]):
+            raise TraceEventValidationError("noncanonical trace occurred_at")
+        if row_trace_id != trace_id:
+            finish_candidate()
+            trace_id = row_trace_id
+            event_count = 0
+            first_occurred_at = occurred_at
+            max_occurred_at = occurred_at
+            digest = hashlib.sha256()
+        event_count += 1
+        max_occurred_at = occurred_at
+        encoded = json.dumps(
+            {key: row[key] for key in row.keys()},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    finish_candidate()
+    return _build_trace_cleanup_snapshot(clean_cutoff, store_id, tuple(candidates))
+
+
+def _trace_cleanup_result(
+    snapshot: TraceCleanupSnapshot,
+    *,
+    status: str = "applied",
+    deleted_event_count: int,
+) -> dict[str, Any]:
+    satisfied = status in {"applied", "already_satisfied"}
+    return {
+        "status": status,
+        "snapshot_hash": snapshot.snapshot_hash,
+        "cutoff": snapshot.cutoff,
+        "candidate_count": snapshot.candidate_count,
+        "event_count": snapshot.event_count,
+        "deleted_trace_count": snapshot.candidate_count if satisfied else 0,
+        "deleted_event_count": (
+            snapshot.event_count if status == "already_satisfied" else deleted_event_count
+        ),
+    }
+
+
+def _cleanup_candidate_traces_absent(
+    connection: sqlite3.Connection,
+    snapshot: TraceCleanupSnapshot,
+) -> bool:
+    return all(
+        connection.execute(
+            "SELECT 1 FROM trace_events WHERE trace_id = ? LIMIT 1",
+            (candidate.trace_id,),
+        ).fetchone()
+        is None
+        for candidate in snapshot.candidates
+    )
 
 
 def _event_row(event: TraceEvent) -> tuple[Any, ...]:
