@@ -4,6 +4,9 @@
 Checkpoint/Artifact 生命周期、容量闸门和 Trace 清理；它不接入 A2/A3
 Checkpoint 自动采集，也不改变检索、排序、计费或公共响应。
 
+人工查看、延长和删除入口见 [4.5 runbook](checkpoint_phase4_5_runbook.md)。显式延期可调整
+调查/反馈保留类别，但不修改中间结果；其逐目标管理计划与本文件的周期清理计划分别管理。
+
 ## 运行目录
 
 - 8790 证据运行根：仓库内 `.tmp_tiku_agent_v2_prod_8790/`

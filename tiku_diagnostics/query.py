@@ -147,6 +147,7 @@ _PUBLIC_RECORD_FIELDS: Mapping[str, tuple[str, ...]] = {
         "protocol_retryable",
         "protocol_action",
         "duration_ms",
+        "checkpoint_id",
     ),
     "responses": tuple(
         field for field in _RESPONSE_COLUMNS if field not in {"session_key", "request_id"}
@@ -948,6 +949,15 @@ def _project_trace(row: sqlite3.Row) -> dict[str, object]:
     result["protocol_retryable"] = (
         None if row["protocol_retryable"] is None else bool(row["protocol_retryable"])
     )
+    raw = row["safe_attributes_json"]
+    if isinstance(raw, str) and len(raw) <= 16_384:
+        try:
+            attributes = json.loads(raw)
+        except (TypeError, ValueError):
+            attributes = None
+        checkpoint_id = attributes.get("checkpoint_id") if isinstance(attributes, dict) else None
+        if isinstance(checkpoint_id, str) and re.fullmatch(r"ckpt_[0-9a-f]{32}", checkpoint_id):
+            result["checkpoint_id"] = checkpoint_id
     return result
 
 

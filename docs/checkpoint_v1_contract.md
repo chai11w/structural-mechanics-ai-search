@@ -352,6 +352,12 @@ Artifact MIME 与上传契约一致，必须支持 JPEG、PNG、WEBP、GIF、BMP
 和读取校验 TTL，不能信任客户端时间。反馈实际天数沿用控制库配置；调查延长必须显式审计，
 不能设置永久 hold。
 
+4.5 的显式管理操作可将未过期证据的 `retention_class` 改为 `investigation` 或 `feedback`，
+同时给出更晚的有限 `expires_at`、稳定原因码并完成 plan/confirm/apply、备份和审计。
+期限上限始终从原 `occurred_at/created_at` 起算；仅变更生命周期元数据及其完整性摘要，
+阶段结果、owner、输入指纹和图片字节保持不可变。Checkpoint 与 Artifact 必须分别延长，
+不因引用、Trace 关联或另一目标延期而自动续期。具体操作见 [4.5 runbook](checkpoint_phase4_5_runbook.md)。
+
 因此所有有效搜索只存在于有限滚动窗口中，而不是形成永久历史库。普通成功、`no_match` 和
 正常跳过均使用 `normal`；明确 `failed` 使用 `failed`。Checkpoint 到期不等待 Artifact，
 Artifact 到期也不因仍有 Checkpoint 引用而续期。

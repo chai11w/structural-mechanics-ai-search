@@ -444,6 +444,7 @@ class EvidenceDeleteResultV1:
     target_kind: str
     deleted: bool
     physical_bytes_released: int = 0
+    physical_cleanup_pending: bool = False
 
 
 @dataclass(frozen=True)
@@ -947,6 +948,33 @@ def _inspect_image(content: bytes) -> tuple[str, int, int]:
     if not 1 <= width <= 100_000 or not 1 <= height <= 100_000:
         raise EvidenceValidationError("invalid artifact dimensions")
     return media_type, width, height
+
+
+@dataclass(frozen=True)
+class CheckpointQueryScopeV1:
+    identity_key: str
+    session_key: str = ""
+    workflow_search_id: str = ""
+    workflow_task_revision: int | None = None
+
+    def __post_init__(self) -> None:
+        _safe_id(self.identity_key, "identity_key")
+        if self.identity_key.upper().startswith("TIKU-"):
+            raise EvidenceValidationError("invitation codes are not accepted")
+        if not isinstance(self.session_key, str) or (self.session_key and not re.fullmatch(r"[0-9a-f]{64}", self.session_key)):
+            raise EvidenceValidationError("invalid session_key")
+        if bool(self.workflow_search_id) != (self.workflow_task_revision is not None):
+            raise EvidenceValidationError("workflow identity requires its revision")
+        if self.workflow_search_id:
+            _safe_id(self.workflow_search_id, "workflow_search_id")
+            if type(self.workflow_task_revision) is not int or not 1 <= self.workflow_task_revision <= 1_000_000:
+                raise EvidenceValidationError("invalid workflow revision")
+
+    def allows(self, owner: CheckpointOwnerV1) -> bool:
+        return (owner.identity_key == self.identity_key and (not self.session_key or owner.session_key == self.session_key)
+                and (not self.workflow_search_id or (
+                    owner.workflow_search_id == self.workflow_search_id
+                    and owner.workflow_task_revision == self.workflow_task_revision)))
 
 
 class SQLiteCheckpointStore:
@@ -1985,6 +2013,94 @@ class SQLiteCheckpointStore:
             return None
         return self.read_checkpoint(selected.checkpoint_id, actor_key=actor_key, expected_owner=selected.owner)
 
+    def query_checkpoints(
+        self, scope: CheckpointQueryScopeV1, *, actor_key: str, trace_id: str = "",
+        checkpoint_id: str = "", after_checkpoint_id: str = "", limit: int = 50,
+    ) -> tuple[tuple[IntermediateCheckpointV1, ...], str]:
+        """Return a bounded scoped page only after all view audits commit."""
+        if type(scope) is not CheckpointQueryScopeV1:
+            raise EvidenceValidationError("checkpoint query requires an exact scope")
+        actor = _safe_id(actor_key, "actor_key")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise EvidenceValidationError("query limit must be between 1 and 100")
+        if trace_id and not re.fullmatch(r"trace_[0-9a-f]{32}", trace_id):
+            raise EvidenceValidationError("invalid trace id")
+        if checkpoint_id and not is_valid_checkpoint_id(checkpoint_id):
+            raise EvidenceValidationError("invalid checkpoint id")
+        if (trace_id and checkpoint_id) or not (trace_id or checkpoint_id or scope.workflow_search_id):
+            raise EvidenceValidationError("query requires one trace, checkpoint or workflow selector")
+        if after_checkpoint_id and (checkpoint_id or not is_valid_checkpoint_id(after_checkpoint_id)):
+            raise EvidenceValidationError("invalid query cursor")
+        if not scope.session_key and (not trace_id or checkpoint_id or scope.workflow_search_id):
+            raise EvidenceValidationError("session discovery requires one explicit trace and identity")
+        now = self._now()
+        where = ["identity_key = ?", "expires_at > ?"]
+        parameters: list[object] = [scope.identity_key, _iso(now)]
+        if scope.session_key:
+            where.append("session_key = ?")
+            parameters.append(scope.session_key)
+        for name, value in (("trace_id", trace_id), ("checkpoint_id", checkpoint_id),
+                            ("workflow_search_id", scope.workflow_search_id)):
+            if value:
+                where.append(name + " = ?")
+                parameters.append(value)
+        if scope.workflow_search_id:
+            where.append("json_extract(owner_json, '$.workflow_task_revision') = ?")
+            parameters.append(scope.workflow_task_revision)
+        predicate = " AND ".join(where)
+        with self._lock:
+            with self._read_connection() as connection:
+                if connection is None:
+                    raise EvidenceNotFoundError("checkpoint store does not exist")
+            with self._audited_query_connection() as connection:
+                connection.execute("CREATE INDEX IF NOT EXISTS checkpoints_trace_lookup_idx "
+                                   "ON checkpoints(identity_key, trace_id, occurred_at, checkpoint_id)")
+                if after_checkpoint_id:
+                    cursor = connection.execute(
+                        "SELECT * FROM checkpoints WHERE " + predicate + " AND checkpoint_id = ?",
+                        (*parameters, after_checkpoint_id),
+                    ).fetchone()
+                    if cursor is None:
+                        raise EvidenceConflictError("query cursor is unavailable")
+                    self._checkpoint_row(connection, cursor)
+                    where.append("(occurred_at, checkpoint_id) > (?, ?)")
+                    parameters.extend((cursor["occurred_at"], after_checkpoint_id))
+                rows = connection.execute(
+                    "SELECT * FROM checkpoints WHERE " + " AND ".join(where)
+                    + " ORDER BY occurred_at, checkpoint_id LIMIT ?", (*parameters, limit + 1),
+                ).fetchall()
+                checkpoints = []
+                for row in rows[:limit]:
+                    checkpoint = self._checkpoint_row(connection, row)
+                    if not scope.allows(checkpoint.owner) or now >= _parse_time(checkpoint.expires_at, "expires_at"):
+                        raise EvidenceOwnershipError("checkpoint scope does not match")
+                    self._insert_audit_locked(connection, action=AUDIT_VIEW_CHECKPOINT,
+                        actor_key=actor, owner_identity_key=scope.identity_key,
+                        target_id=checkpoint.checkpoint_id, result_code="SUCCEEDED", now=now)
+                    checkpoints.append(checkpoint)
+                if not checkpoints:
+                    self._insert_audit_locked(connection, action=AUDIT_VIEW_CHECKPOINT,
+                        actor_key=actor, owner_identity_key=scope.identity_key,
+                        target_id=checkpoint_id or trace_id or scope.workflow_search_id,
+                        result_code="NOT_FOUND", now=now)
+        cursor_id = checkpoints[-1].checkpoint_id if len(rows) > limit else ""
+        return tuple(checkpoints), cursor_id
+
+    @contextmanager
+    def _audited_query_connection(self):
+        try:
+            with self._write_connection() as connection:
+                yield connection
+        except EvidenceAuditError:
+            self._note_failure("audit_failures", "evidence_audit_error")
+            raise
+        except CheckpointStoreError:
+            self._note_failure("read_rejections", "evidence_query_rejected")
+            raise
+        except (OSError, sqlite3.Error) as exc:
+            self._note_failure("read_rejections", "evidence_query_failed")
+            raise EvidenceUnavailableError("checkpoint query is unavailable") from exc
+
     def read_checkpoint(
         self,
         checkpoint_id: str,
@@ -2188,6 +2304,10 @@ class SQLiteCheckpointStore:
         expected_owner: CheckpointOwnerV1,
         new_expires_at: datetime,
         reason_code: str,
+        new_retention_class: str | None = None,
+        expected_fingerprint: str = "",
+        expected_store_id: str = "",
+        operation_deadline: datetime | None = None,
     ) -> IntermediateCheckpointV1 | ArtifactDescriptorV1:
         actor = _safe_id(actor_key, "actor_key")
         reason = _reason_code(reason_code)
@@ -2200,6 +2320,11 @@ class SQLiteCheckpointStore:
         result: IntermediateCheckpointV1 | ArtifactDescriptorV1
         try:
             with self._lock, self._write_connection() as connection:
+                now = self._now()
+                if operation_deadline is not None and now >= _aware_utc(operation_deadline, "operation_deadline"):
+                    raise EvidenceConflictError("evidence management plan expired")
+                if expected_store_id and self._store_id != expected_store_id:
+                    raise EvidenceConflictError("evidence store identity changed")
                 if is_valid_checkpoint_id(target_id):
                     row = connection.execute(
                         "SELECT * FROM checkpoints WHERE checkpoint_id = ?", (target_id,)
@@ -2222,12 +2347,17 @@ class SQLiteCheckpointStore:
                     raise EvidenceValidationError("invalid evidence id")
                 if current.owner != expected_owner:
                     raise EvidenceOwnershipError("evidence owner does not match")
+                if expected_fingerprint and _digest_json(current.to_dict()) != expected_fingerprint:
+                    raise EvidenceConflictError("evidence changed after planning")
                 current_expiry = _parse_time(current.expires_at, "expires_at")
                 if now >= current_expiry:
                     raise EvidenceExpiredError("evidence has expired")
                 if new_expiry <= current_expiry:
                     raise EvidenceValidationError("new expiry must extend retention")
-                policy = RETENTION_POLICIES[current.retention_class]
+                retention_class = new_retention_class or current.retention_class
+                if retention_class != current.retention_class and retention_class not in {"investigation", "feedback"}:
+                    raise EvidenceValidationError("retention change requires investigation or feedback")
+                policy = RETENTION_POLICIES[retention_class]
                 maximum_days = (
                     policy.checkpoint_max_days
                     if resource == "checkpoint"
@@ -2236,7 +2366,7 @@ class SQLiteCheckpointStore:
                 created = _parse_time(current.occurred_at, "occurred_at") if resource == "checkpoint" else _parse_time(current.created_at, "created_at")
                 if new_expiry > created + timedelta(days=maximum_days):
                     raise EvidenceValidationError("new expiry exceeds retention maximum")
-                updated = replace(current, expires_at=_iso(new_expiry))
+                updated = replace(current, expires_at=_iso(new_expiry), retention_class=retention_class)
                 self._insert_audit_locked(
                     connection, action=AUDIT_EXTEND_RETENTION, actor_key=actor,
                     owner_identity_key=current.owner.identity_key,
@@ -2247,7 +2377,7 @@ class SQLiteCheckpointStore:
                     updated_payload = _canonical_json(updated.to_dict())
                     connection.execute(
                         "UPDATE checkpoints SET expires_at = ?, lifecycle_sha256 = ?, "
-                        "payload_json = ? "
+                        "payload_json = ?, retention_class = ?, semantic_sha256 = ? "
                         "WHERE checkpoint_id = ?",
                         (
                             _iso(new_expiry),
@@ -2258,13 +2388,14 @@ class SQLiteCheckpointStore:
                                 retention_class=updated.retention_class,
                                 retention_days=retention_days,
                             ),
-                            updated_payload,
+                            updated_payload, retention_class,
+                            _digest_json(_checkpoint_semantic_payload(updated, retention_days)),
                             target_id,
                         ),
                     )
                 else:
                     connection.execute(
-                        "UPDATE artifacts SET expires_at = ?, lifecycle_sha256 = ? "
+                        "UPDATE artifacts SET expires_at = ?, lifecycle_sha256 = ?, retention_class = ?, logical_key = ? "
                         "WHERE artifact_id = ?",
                         (
                             _iso(new_expiry),
@@ -2272,12 +2403,15 @@ class SQLiteCheckpointStore:
                                 target_id=current.artifact_id,
                                 created_at=current.created_at,
                                 expires_at=updated.expires_at,
-                                retention_class=current.retention_class,
+                                retention_class=retention_class,
                                 retention_days=retention_days,
                                 status=current.status,
                                 purged_at=current.purged_at,
                                 purge_reason=current.purge_reason,
                             ),
+                            retention_class,
+                            _digest_json({"owner": updated.owner.to_dict(), "sha256": updated.sha256,
+                                          "retention_class": retention_class, "retention_days": retention_days}),
                             target_id,
                         ),
                     )
@@ -2406,6 +2540,9 @@ class SQLiteCheckpointStore:
         actor_key: str,
         expected_owner: CheckpointOwnerV1,
         reason_code: str,
+        expected_fingerprint: str = "",
+        expected_store_id: str = "",
+        operation_deadline: datetime | None = None,
     ) -> EvidenceDeleteResultV1:
         actor = _safe_id(actor_key, "actor_key")
         reason = _reason_code(reason_code)
@@ -2416,6 +2553,11 @@ class SQLiteCheckpointStore:
         result: EvidenceDeleteResultV1
         try:
             with self._lock, self._write_connection() as connection:
+                now = self._now()
+                if operation_deadline is not None and now >= _aware_utc(operation_deadline, "operation_deadline"):
+                    raise EvidenceConflictError("evidence management plan expired")
+                if expected_store_id and self._store_id != expected_store_id:
+                    raise EvidenceConflictError("evidence store identity changed")
                 if is_valid_checkpoint_id(target_id):
                     row = connection.execute(
                         "SELECT * FROM checkpoints WHERE checkpoint_id = ?", (target_id,)
@@ -2425,6 +2567,8 @@ class SQLiteCheckpointStore:
                     checkpoint = self._checkpoint_row(connection, row)
                     if checkpoint.owner != expected_owner:
                         raise EvidenceOwnershipError("evidence owner does not match")
+                    if expected_fingerprint and _digest_json(checkpoint.to_dict()) != expected_fingerprint:
+                        raise EvidenceConflictError("evidence changed after planning")
                     self._insert_audit_locked(
                         connection, action=AUDIT_DELETE_EVIDENCE, actor_key=actor,
                         owner_identity_key=checkpoint.owner.identity_key,
@@ -2444,6 +2588,8 @@ class SQLiteCheckpointStore:
                     descriptor = self._descriptor_row(connection, row)
                     if descriptor.owner != expected_owner:
                         raise EvidenceOwnershipError("evidence owner does not match")
+                    if expected_fingerprint and _digest_json(descriptor.to_dict()) != expected_fingerprint:
+                        raise EvidenceConflictError("evidence changed after planning")
                     audit_result = (
                         "ALREADY_PURGED"
                         if descriptor.status == ARTIFACT_PURGED
@@ -2495,8 +2641,12 @@ class SQLiteCheckpointStore:
                 else:
                     raise EvidenceValidationError("invalid evidence id")
             if digest_to_release:
-                released = self._release_zero_ref_blob(digest_to_release)
-                result = replace(result, physical_bytes_released=released)
+                try:
+                    released = self._release_zero_ref_blob(digest_to_release)
+                    result = replace(result, physical_bytes_released=released)
+                except (OSError, sqlite3.Error, CheckpointStoreError):
+                    # The tombstone and audit have committed; retention can retry the bytes.
+                    result = replace(result, physical_cleanup_pending=True)
             return result
         except EvidenceAuditError:
             self._note_failure("audit_failures", "evidence_audit_error")
