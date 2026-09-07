@@ -793,6 +793,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS checkpoints_expiry_idx ON checkpoints(expires_at);
         CREATE INDEX IF NOT EXISTS checkpoints_reuse_idx
             ON checkpoints(identity_key, session_key, workflow_search_id, stage, input_fingerprint);
+        CREATE INDEX IF NOT EXISTS checkpoints_predecessor_idx
+            ON checkpoints(identity_key, session_key, workflow_search_id, search_id, unit_id, outcome, occurred_at);
 
         CREATE TABLE IF NOT EXISTS artifact_blobs (
             sha256 TEXT PRIMARY KEY,
@@ -1951,6 +1953,37 @@ class SQLiteCheckpointStore:
                 self._remove_uncommitted_blob_file(created_blob_path, digest)
             self._note_failure("write_failures", type(exc).__name__)
             raise EvidenceStoreUnavailable("artifact store is unavailable") from exc
+
+    def latest_successful_checkpoint(
+        self, owner: CheckpointOwnerV1, *, actor_key: str,
+    ) -> IntermediateCheckpointV1 | None:
+        """Find a bounded, audited predecessor within the same logical task revision."""
+        if type(owner) is not CheckpointOwnerV1:
+            raise EvidenceValidationError("owner must be CheckpointOwnerV1")
+        _safe_id(actor_key, "actor_key")
+        now = self._now()
+        selected = None
+        with self._lock, self._read_connection() as connection:
+            if connection is None:
+                return None
+            rows = connection.execute(
+                "SELECT * FROM checkpoints WHERE identity_key = ? AND session_key = ? "
+                "AND workflow_search_id = ? AND search_id = ? AND unit_id = ? "
+                "AND outcome = 'success' ORDER BY occurred_at DESC, rowid DESC LIMIT 100",
+                (owner.identity_key, owner.session_key, owner.workflow_search_id, owner.search_id, owner.unit_id),
+            ).fetchall()
+            for row in rows:
+                candidate = self._checkpoint_row(connection, row)
+                if (
+                    candidate.owner.task_revision == owner.task_revision
+                    and replace(candidate.owner, candidate_generation=owner.candidate_generation) == owner
+                    and now < _parse_time(candidate.expires_at, "expires_at")
+                ):
+                    selected = candidate
+                    break
+        if selected is None:
+            return None
+        return self.read_checkpoint(selected.checkpoint_id, actor_key=actor_key, expected_owner=selected.owner)
 
     def read_checkpoint(
         self,

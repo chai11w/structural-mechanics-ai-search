@@ -15,6 +15,9 @@ from typing import Any, Callable, Protocol
 from zoneinfo import ZoneInfo
 
 from tiku_agent.agent import AgentResponse, TikuSearchAgent
+from tiku_agent.a2_checkpoint_recorder import A2CheckpointRecorderV1
+from tiku_agent.checkpoint_capture import A2CheckpointContextV1
+from tiku_agent.checkpoint_capture_gate import A2CaptureAdmissionV1
 from tiku_agent.external_load_screen import (
     ImageSearchCancelled,
     NO_EXTERNAL_LOAD_MESSAGE,
@@ -326,6 +329,7 @@ class AgentSessionRuntime:
         external_load_timeout_seconds: float = 15.0,
         image_triage_authority: object | None = None,
         preserve_artifacts_on_cancel: bool = False,
+        checkpoint_recorder: A2CheckpointRecorderV1 | None = None,
     ) -> None:
         self.store = store
         self.artifacts = artifacts or SessionArtifacts()
@@ -352,6 +356,7 @@ class AgentSessionRuntime:
         )
         self.image_triage_authority = image_triage_authority
         self.preserve_artifacts_on_cancel = bool(preserve_artifacts_on_cancel)
+        self.checkpoint_recorder = checkpoint_recorder
         self._image_executor = (
             ThreadPoolExecutor(max_workers=8, thread_name_prefix="tiku-image-race")
             if external_load_screen is not None
@@ -678,6 +683,11 @@ class AgentSessionRuntime:
         )
         agent = self._make_agent(
             AgentState.from_dict(baseline_state.to_dict()), progress=progress
+        )
+        self._attach_checkpoint_emitter(
+            agent,
+            identity_key=identity_key,
+            request_id=request_id,
         )
         error_context["state"] = agent.state
         deadline = time.monotonic() + self.external_load_timeout_seconds
@@ -1463,6 +1473,11 @@ class AgentSessionRuntime:
                 started_at=started_at.isoformat(),
             )
             agent = self._make_agent(state, progress=progress)
+            self._attach_checkpoint_emitter(
+                agent,
+                identity_key=identity_key,
+                request_id=request_id,
+            )
         except Exception as exc:
             frozen_state, read_status = self._error_snapshot_read_set(error_context)
             self._attach_error_response_snapshot_from_read_set(
@@ -1567,6 +1582,115 @@ class AgentSessionRuntime:
                 session_dir=self.artifacts.session_dir(state.session_id),
             ),
         )
+
+    def _attach_checkpoint_emitter(
+        self,
+        agent: TikuSearchAgent,
+        *,
+        identity_key: str,
+        request_id: str,
+    ) -> None:
+        recorder = self.checkpoint_recorder
+        if recorder is None or not callable(getattr(recorder, "capture_stage", None)):
+            return
+        predecessor = ""
+        last_successful = ""
+        image_digests: dict[str, str] = {}
+        predecessor_loaded = False
+
+        def emit(stage: str, result: Any, payload: dict[str, Any]) -> None:
+            nonlocal predecessor, last_successful, predecessor_loaded
+            state = agent.state
+            revision = state.task_revision
+            clean_identity = str(identity_key or "").strip()
+            context = A2CheckpointContextV1(
+                trace_id=current_trace_id(),
+                session_key=session_key(state.session_id),
+                identity_key=clean_identity,
+                workflow_search_id=state.current_search_id,
+                workflow_task_revision=revision,
+                search_id=state.current_search_id,
+                task_revision=revision,
+                producer=recorder.producer,
+                request_id=request_id,
+                candidate_generation=state.candidate_generation,
+            )
+            admission = A2CaptureAdmissionV1(
+                request_kind="search",
+                authenticated=bool(clean_identity),
+                quota_admitted=True,
+                queue_admitted=True,
+                upload_admitted=True,
+                entered_business_processing=True,
+            )
+            if not recorder.gate.decide(admission).permitted:
+                return
+            from tiku_shared.trace_context import is_valid_trace_id
+            if not is_valid_trace_id(context.trace_id):
+                recorder.input_unavailable()
+                return
+            # A3 unit evidence requires the parent revision contract in 4.4.
+            from tiku_shared.trace_events import current_trace_event_session
+            trace_session = current_trace_event_session()
+            if trace_session is not None and trace_session.dimensions.get("unit_id"):
+                return
+            if not predecessor_loaded:
+                predecessor_loaded = True
+                last_successful = recorder.last_successful(context)
+                predecessor = last_successful
+            from hashlib import sha256
+            from tiku_agent.a2_checkpoint_stages import _candidate_id
+            image_path = state.active_image_path
+            if image_path and image_path not in image_digests:
+                try:
+                    image_digests[image_path] = sha256(recorder.read_image(image_path)).hexdigest()
+                except Exception:
+                    image_digests[image_path] = ""
+                    recorder.input_unavailable()
+            inputs = {
+                "source_image": image_digests.get(image_path, ""),
+                "loads": state.current_loads, "chapter": state.current_chapter,
+                "route": state.current_route, "structure_type": state.current_structure_type,
+                "dimension_filter_enabled": agent.config.dimension_filter_enabled,
+            }
+            if stage == "image_routed":
+                inputs["route_decision"] = payload.get("route_decision", {})
+            if stage in {"rerank_completed", "answer_prepared"}:
+                candidates = payload.get("candidates", state.candidates)
+                inputs["candidates"] = [
+                    {"id": _candidate_id(item, rank), "score": item.get("score"),
+                     "rerank_score": item.get("rerank_score"), "final_score": item.get("final_score")}
+                    for rank, item in enumerate(candidates, 1)
+                ]
+                inputs["selected_rank"] = payload.get("selected_rank")
+                policy = result.data.get("checkpoint_rerank", {})
+                inputs["policy"] = {key: policy[key] for key in ("threshold", "display_all_score", "fallback_limit", "skipped") if key in policy}
+            recorded = recorder.capture_stage(
+                context,
+                admission=admission,
+                stage=stage,
+                tool_result=result,
+                payload={**payload, "inputs": inputs, "source_image_path": state.current_image_path},
+                predecessor_checkpoint_id=predecessor,
+                last_successful_checkpoint_id=last_successful,
+            )
+            if recorded.stored:
+                predecessor = recorded.checkpoint_id
+                if recorded.outcome == "success":
+                    last_successful = recorded.checkpoint_id
+
+        def safe_emit(stage: str, result: Any, payload: dict[str, Any]) -> None:
+            try:
+                emit(stage, result, payload)
+            except Exception:
+                recorder.input_unavailable()
+
+        try:
+            agent.checkpoint_emitter = safe_emit
+            from dataclasses import replace
+            agent.config = replace(agent.config, checkpoint_emitter=safe_emit)
+        except Exception:
+            pass
 
     def purge_expired(self) -> None:
         """Remove expired state and its session-scoped files."""

@@ -47,10 +47,11 @@ class A2CheckpointContextV1:
     unit_id: str = ""
     candidate_generation: str = ""
     request_id: str = ""
+    scope: str = SCOPE_CHILD_TASK
 
     def owner(self) -> CheckpointOwnerV1:
         return CheckpointOwnerV1(
-            scope=SCOPE_CHILD_TASK,
+            scope=self.scope,
             session_key=self.session_key,
             identity_key=self.identity_key,
             workflow_search_id=self.workflow_search_id,
@@ -86,11 +87,16 @@ def checkpoint_failure(
     outcome = checkpoint_outcome(result)
     if outcome not in {OUTCOME_FAILED, OUTCOME_PARTIAL}:
         return None
+    fallback = "retry" if result.retryable else ""
+    if outcome == OUTCOME_PARTIAL and result.code.startswith("RERANK_"):
+        fallback = "coarse_order"
+    elif outcome == OUTCOME_PARTIAL and result.code.startswith("STRUCTURE_"):
+        fallback = "skip_structure"
     return CheckpointFailureV1(
         code=str(result.code or "TOOL_FAILED").upper(),
         kind=str(result.error_category or "tool"),
         retryable=bool(result.retryable),
-        fallback=("retry" if result.retryable else ""),
+        fallback=fallback,
         last_successful_checkpoint_id=last_successful_checkpoint_id,
     )
 

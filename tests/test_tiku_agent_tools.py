@@ -828,7 +828,7 @@ class TikuAgentToolsTest(unittest.TestCase):
             {"rank": 3, "path": "q3.jpg", "score": 0.40, "name": "q3.jpg"},
         ]
 
-        def fake_rerank(query_image_path, rerank_input, top_n=3):
+        def fake_rerank(query_image_path, rerank_input, top_n=3, on_rerank_observed=None):
             self.assertEqual(query_image_path, "query.jpg")
             self.assertEqual([item["path"] for item in rerank_input], ["q1.jpg", "q2.jpg"])
             self.assertEqual(top_n, 3)

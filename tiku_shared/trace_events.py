@@ -115,6 +115,7 @@ _ATTRIBUTE_ALLOWLISTS: dict[str, frozenset[str]] = {
     "stage_started": frozenset({"operation", "attempt_count"}),
     "stage_finished": frozenset(
         {
+            "checkpoint_id",
             "operation",
             "completed",
             "question_count",
@@ -1443,6 +1444,10 @@ def _validate_safe_attributes(event_type: str, attributes: Mapping[str, Any]) ->
 
 
 def _validate_safe_attribute(name: str, value: Any) -> Any:
+    if name == "checkpoint_id":
+        if not isinstance(value, str) or not re.fullmatch(r"ckpt_[0-9a-f]{32}", value):
+            raise TraceEventValidationError("invalid checkpoint_id")
+        return value
     if name in _COUNT_ATTRIBUTES:
         return _bounded_int(value, name)
     if name == "http_status":

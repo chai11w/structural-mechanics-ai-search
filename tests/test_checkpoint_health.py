@@ -24,7 +24,10 @@ class _DegradedTraceRecorder:
 
 
 class CheckpointHealthTest(unittest.TestCase):
-    def test_phase_4_2_does_not_install_a2_or_a3_checkpoint_emitters(self):
+    def test_capture_is_optional_and_runtime_never_writes_the_store_directly(self):
+        import inspect
+        from tiku_agent.session_runtime import AgentSessionRuntime
+        self.assertIsNone(inspect.signature(AgentSessionRuntime).parameters["checkpoint_recorder"].default)
         root = Path(__file__).resolve().parents[1]
         for relative in (
             "tiku_agent/agent.py",
@@ -33,7 +36,7 @@ class CheckpointHealthTest(unittest.TestCase):
             "scripts/run_tiku_agent_8896.py",
         ):
             source = (root / relative).read_text(encoding="utf-8")
-            for emitter in ("CheckpointRecorder", "put_checkpoint", "put_artifact"):
+            for emitter in ("put_checkpoint", "put_artifact"):
                 self.assertNotIn(emitter, source, f"{relative} enabled {emitter}")
 
     def test_health_is_disabled_until_the_control_plane_is_explicitly_supplied(self):

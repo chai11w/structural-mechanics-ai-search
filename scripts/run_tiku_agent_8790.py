@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import math
 import site
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,7 +18,9 @@ if str(BASE) not in sys.path:
 from scripts.run_tiku_agent_8896 import build_runtime as build_a3_runtime
 from tiku_admin.auth import SQLiteInviteAccess
 from tiku_admin.control_store import SQLiteControlStore
-from tiku_agent.checkpoint_contract import EvidenceCapacityPolicyV1
+from tiku_agent.checkpoint_contract import EvidenceCapacityPolicyV1, ProducerVersionV1
+from tiku_agent.a2_checkpoint_recorder import A2CheckpointRecorderV1
+from tiku_agent.checkpoint_capture_gate import A2CheckpointCaptureGateV1
 from tiku_agent.checkpoint_store import SQLiteCheckpointStore
 from tiku_agent.fastapi_demo import SESSION_COOKIE, create_app
 from tiku_agent.feedback_store import SQLiteFeedbackStore
@@ -138,14 +141,17 @@ def _validate_evidence_configuration(
 def _combined_checkpoint_health(
     store: SQLiteCheckpointStore,
     runner: CheckpointRetentionRunner,
+    recorder: A2CheckpointRecorderV1 | None = None,
 ) -> dict[str, object]:
     store_health = store.health()
     retention_health = runner.health()
+    capture_health = recorder.health() if recorder is not None else {"status": "disabled"}
     reasons: list[str] = []
     counters: dict[str, int] = {}
     for prefix, health in (
         ("store", store_health),
         ("retention", retention_health),
+        ("capture", capture_health),
     ):
         raw_reasons = health.get("current_reasons")
         if isinstance(raw_reasons, (list, tuple)):
@@ -161,9 +167,10 @@ def _combined_checkpoint_health(
             )
     failed = store_health.get("status") == "degraded" or retention_health.get(
         "status"
-    ) == "degraded"
+    ) == "degraded" or capture_health.get("status") == "degraded"
     last_failure_code = str(
         retention_health.get("last_failure_code")
+        or capture_health.get("last_failure_code")
         or store_health.get("last_failure_code")
         or ""
     )
@@ -198,6 +205,18 @@ def _validate_queue_settings(
         raise ValueError("queue_wait_seconds must be finite and greater than zero")
 
 
+def _capture_producer(revision: str) -> ProducerVersionV1:
+    producer = ProducerVersionV1(
+        code_revision=revision, component="a2_runtime", component_version="checkpoint-v1",
+        policy_version="a2-capture-v1",
+    )
+    head = subprocess.run(["git", "-C", str(BASE), "rev-parse", "HEAD"], capture_output=True, text=True, check=True, timeout=10).stdout.strip()
+    dirty = subprocess.run(["git", "-C", str(BASE), "status", "--porcelain", "--untracked-files=normal"], capture_output=True, text=True, check=True, timeout=10).stdout.strip()
+    if revision != head or dirty:
+        raise ValueError("A2 capture requires the exact clean release revision")
+    return producer
+
+
 def build_app(
     runtime_dir: str | Path = DEFAULT_RUNTIME_DIR,
     *,
@@ -219,6 +238,8 @@ def build_app(
     checkpoint_retention_backup_root: str | Path | None = None,
     checkpoint_retention_interval_seconds: float | None = None,
     checkpoint_retention_backup_keep_runs: int | None = None,
+    enable_a2_checkpoint_capture: bool = False,
+    checkpoint_code_revision: str = "",
 ):
     _validate_queue_settings(
         max_concurrent_tasks,
@@ -226,6 +247,11 @@ def build_app(
         queue_wait_seconds,
     )
     root = Path(runtime_dir).resolve()
+    if type(enable_a2_checkpoint_capture) is not bool:
+        raise TypeError("enable_a2_checkpoint_capture must be boolean")
+    if enable_a2_checkpoint_capture and evidence_capacity is None:
+        raise ValueError("A2 capture requires evidence capacity and retention")
+    producer = _capture_producer(checkpoint_code_revision) if enable_a2_checkpoint_capture else None
     backup_root = _validate_evidence_configuration(
         evidence_capacity,
         backup_root=checkpoint_retention_backup_root,
@@ -288,6 +314,13 @@ def build_app(
             capacity=evidence_capacity,
             backup_keep_runs=checkpoint_retention_backup_keep_runs,
         )
+    recorder = (
+        A2CheckpointRecorderV1(
+            checkpoint_store, producer=producer, media_root=root / "a2",
+            gate=A2CheckpointCaptureGateV1(enabled=True),
+        ) if producer is not None else None
+    )
+    capture_kwargs = {"checkpoint_recorder": recorder} if recorder is not None else {}
     app = create_app(
         runtime=build_a3_runtime(
             root,
@@ -309,6 +342,7 @@ def build_app(
             max_concurrent_tasks=max_concurrent_tasks,
             max_queued_tasks=max_queued_tasks,
             queue_wait_seconds=queue_wait_seconds,
+            **capture_kwargs,
         ),
         incoming_dir=root / "incoming",
         session_cookie=SESSION_COOKIE,
@@ -330,6 +364,7 @@ def build_app(
                 lambda: _combined_checkpoint_health(
                     checkpoint_store,
                     retention_runner,
+                    recorder,
                 )
             )
             if checkpoint_store is not None and retention_runner is not None
@@ -347,6 +382,7 @@ def build_app(
     if hasattr(app, "state"):
         app.state.checkpoint_evidence_store = checkpoint_store
         app.state.checkpoint_retention_controller = retention_runner
+        app.state.a2_checkpoint_recorder = recorder
     return app
 
 
@@ -359,6 +395,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime-dir", type=Path, default=DEFAULT_RUNTIME_DIR)
     parser.add_argument("--control-db", type=Path)
     parser.add_argument("--invite-config", type=Path)
+    parser.add_argument("--enable-a2-checkpoint-capture", action="store_true", default=False)
+    parser.add_argument("--checkpoint-code-revision", default="")
     parser.add_argument("--max-checkpoint-rows", type=_positive_int, required=True)
     parser.add_argument("--max-artifact-rows", type=_positive_int, required=True)
     parser.add_argument("--max-audit-rows", type=_positive_int, required=True)
@@ -472,6 +510,8 @@ def main() -> int:
             max_queued_tasks=args.max_queued_tasks,
             queue_wait_seconds=args.queue_wait_seconds,
             evidence_capacity=_capacity_from_args(args),
+            enable_a2_checkpoint_capture=args.enable_a2_checkpoint_capture,
+            checkpoint_code_revision=args.checkpoint_code_revision,
             checkpoint_retention_backup_root=(
                 args.checkpoint_retention_backup_root
             ),

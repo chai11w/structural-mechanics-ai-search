@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import search
 from multi_agent_pipeline import (
@@ -43,6 +43,7 @@ from tiku_agent.tool_result import ToolOutcome, ToolResult
 from tiku_shared.request_protocol import RequestAction
 from tiku_shared.model_costs import submit_with_model_cost_context
 from tiku_shared.trace_events import record_trace_event
+from scripts.classify_question_bank import SYSTEM_PROMPT as ANALYSIS_PROMPT
 
 
 BASE = Path(__file__).resolve().parent.parent
@@ -71,6 +72,7 @@ class AgentToolConfig:
     use_qwen_cache: bool = True
     dimension_filter_enabled: bool = False
     dimension_filter_timeout_seconds: int = 30
+    checkpoint_emitter: Callable | None = None
 
     @property
     def qwen_cache_path(self) -> Path:
@@ -222,6 +224,11 @@ def analyze_image_tool(
                 "needs_manual_chapter": needs_manual_chapter,
                 "loads": classified.get("loads", []),
                 "load_details": classified.get("load_details", []),
+            }
+        if isinstance(getattr(qwen, "model", None), str):
+            data["checkpoint_producer"] = {
+                "model_provider": "qwen", "model_name": qwen.model,
+                "prompt_sha256": hashlib.sha256(ANALYSIS_PROMPT.encode("utf-8")).hexdigest(),
             }
         if needs_manual_chapter:
             return ToolResult.needs_input(
@@ -586,6 +593,15 @@ def coarse_search_tool(
                 "has_more": has_more,
                 "remaining_candidate_count": max(0, len(scored) - len(top)),
                 "dimension_filter": dimension_filter,
+                "checkpoint_counts": {
+                    "chapter_scanned": getattr(scan, "chapter_scanned", None) if getattr(scan, "chapter_scanned", None) is not None else len(scan.scored),
+                    "load_scored": len(scan.scored),
+                    "positive_score": sum(score > 0 for score, _ in scan.scored),
+                    "rerank_pool": len(top),
+                    "after_dimension_filter": len(candidates),
+                    "excluded_previous": sum(_candidate_key(chapter, route, name) in excluded for _, name in scan.scored),
+                    "remaining": max(0, len(scored) - len(top)),
+                },
             }
         if not candidates:
             return ToolResult.no_match(
@@ -644,12 +660,22 @@ def global_search_tool(
             error_category="invalid_tool_input",
         )
 
+    def capture(stage, result, payload=None):
+        try:
+            if config.checkpoint_emitter is not None:
+                config.checkpoint_emitter(stage, result, payload or {})
+        except Exception:
+            pass
+
+    stage = "coarse_search_completed"
     try:
+        checkpoint_counts: dict[str, int] = {}
         candidates = _collect_global_perfect_candidates(
             loads,
             route=route,
             structure_type=structure_type,
             threshold=config.global_coarse_threshold,
+            checkpoint_counts=checkpoint_counts,
         )
         coarse_candidate_count = len(candidates)
         candidates, dimension_filter = apply_dimension_prefilter(
@@ -664,6 +690,13 @@ def global_search_tool(
                 else None
             ),
         )
+        capture(stage, ToolResult(
+            outcome=ToolOutcome.SUCCESS if candidates else ToolOutcome.NO_MATCH,
+            code="GLOBAL_COARSE_COMPLETED", data={
+                "candidates": candidates, "dimension_filter": dimension_filter,
+                "checkpoint_counts": {**checkpoint_counts, "rerank_pool": coarse_candidate_count, "after_dimension_filter": len(candidates)},
+            },
+        ))
         if not candidates:
             return ToolResult.no_match(
                 code="NO_GLOBAL_COARSE_CANDIDATES",
@@ -677,6 +710,7 @@ def global_search_tool(
                 },
             )
 
+        stage = "rerank_completed"
         scored = _score_global_candidates(query_image_path, candidates, config=config)
         retry_model_calls = 0
         unfinished = [
@@ -705,6 +739,7 @@ def global_search_tool(
             item for item in scored if item.get("rerank_status") != "completed"
         ]
         if unfinished:
+            capture(stage, ToolResult(outcome=ToolOutcome.ERROR, code="GLOBAL_RERANK_INCOMPLETE", error_category="external_model", retryable=True))
             return ToolResult.partial(
                 code="GLOBAL_RERANK_INCOMPLETE",
                 data={
@@ -737,6 +772,17 @@ def global_search_tool(
             reverse=True,
         )
         visible = _renumber(visible)
+        capture(stage, ToolResult(
+            outcome=ToolOutcome.SUCCESS if visible else ToolOutcome.NO_MATCH,
+            code="GLOBAL_RERANK_COMPLETED", data={
+                "reranked": True, "visible_candidates": visible,
+                "checkpoint_rerank": {
+                    "inputs": candidates, "scores": scored, "skipped": False,
+                    "threshold": config.global_coarse_threshold,
+                    "display_all_score": config.global_final_score_threshold, "fallback_limit": 0,
+                },
+            },
+        ), {"candidates": candidates})
         data = {
                 "candidates": visible,
                 "coarse_candidate_count": coarse_candidate_count,
@@ -758,6 +804,7 @@ def global_search_tool(
         )
     except Exception as exc:  # noqa: BLE001 - tool boundary returns a safe error.
         del exc
+        capture(stage, ToolResult(outcome=ToolOutcome.ERROR, code="GLOBAL_SEARCH_FAILED", error_category="tool", retryable=True))
         return ToolResult.tool_error(
             code="GLOBAL_SEARCH_FAILED",
             error="全局搜索暂时失败，请稍后重试。",
@@ -805,6 +852,7 @@ def _collect_global_perfect_candidates(
     route: Literal["main", "symbolic"],
     structure_type: str,
     threshold: float,
+    checkpoint_counts: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     excel_root = search.ROOT if route == "main" else symbolic_root(search.ROOT)
     filter_type = normalize_structure_type(structure_type)
@@ -820,6 +868,13 @@ def _collect_global_perfect_candidates(
     workers = max(1, min(len(CHAPTERS), 7))
     with ThreadPoolExecutor(max_workers=workers) as executor:
         scans = dict(executor.map(scan_one, CHAPTERS))
+    if checkpoint_counts is not None:
+        valid_scans = [scan for scan in scans.values() if scan is not None]
+        checkpoint_counts.update({
+            "chapter_scanned": sum(getattr(scan, "chapter_scanned", None) if getattr(scan, "chapter_scanned", None) is not None else len(scan.scored) for scan in valid_scans),
+            "load_scored": sum(len(scan.scored) for scan in valid_scans),
+            "positive_score": sum(score > 0 for scan in valid_scans for score, _ in scan.scored),
+        })
 
     for chapter in CHAPTERS:
         scan = scans.get(chapter)
@@ -937,10 +992,29 @@ def rerank_candidates_tool(
     candidate choice after this step.
     """
 
+    observed_scores = []
+
+    def evidence(inputs, results=(), *, skipped=False):
+        provider = rerank_provider or search.DEFAULT_RERANK_PROVIDER
+        prompt = search.DEFAULT_QWEN_RERANK_PROMPT if provider == "qwen" else search.RERANK_PROMPT
+        return {
+            "inputs": inputs,
+            "scores": list(observed_scores if observed_scores and not search.rerank_results_complete(results) else results),
+            "skipped": skipped,
+            "threshold": rerank_threshold_for_route(route),
+            "display_all_score": display_all_score if display_by_rerank_score else search.DISPLAY_ALL_SCORE,
+            "fallback_limit": display_fallback_top_n if display_by_rerank_score else search.DISPLAY_MAX_RESULTS,
+            "producer": {
+                "model_provider": provider,
+                "model_name": rerank_model or search.default_rerank_model(provider),
+                "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            } if not skipped else {},
+        }
+
     if not candidates:
         return ToolResult.no_match(
             code="NO_CANDIDATES_TO_RERANK",
-            data={"reranked": False, "visible_candidates": []},
+            data={"reranked": False, "visible_candidates": [], "checkpoint_rerank": evidence([])},
         )
     coarse_candidates = (
         search.select_rerank_pool(candidates)
@@ -950,7 +1024,8 @@ def rerank_candidates_tool(
     if not query_image_path:
         return ToolResult.partial(
             code="RERANK_SKIPPED_NO_IMAGE",
-            data={"reranked": False, "visible_candidates": _renumber(coarse_candidates), "rerank_note": "无查询图，跳过复筛"},
+            data={"reranked": False, "visible_candidates": _renumber(coarse_candidates), "rerank_note": "无查询图，跳过复筛",
+                  "checkpoint_rerank": evidence(coarse_candidates, skipped=True)},
             error="缺少查询题图，已显示粗筛结果。",
             next_state="WAIT_CANDIDATE_CHOICE",
             error_category="missing_optional_input",
@@ -969,9 +1044,11 @@ def rerank_candidates_tool(
                     "reranked": False,
                     "visible_candidates": [],
                     "rerank_note": "候选未达到当前题库的复筛准入门槛。",
+                    "checkpoint_rerank": evidence([]),
                 },
             )
         rerank_options: dict[str, Any] = {"top_n": rerank_top}
+        rerank_options["on_rerank_observed"] = observed_scores.extend
         optional_policy = {
             "provider": rerank_provider,
             "model": rerank_model,
@@ -1007,6 +1084,7 @@ def rerank_candidates_tool(
                     code="NO_RELIABLE_RERANK_CANDIDATES",
                     data={
                         "reranked": True,
+                        "checkpoint_rerank": evidence(rerank_input, reranked),
                         "visible_candidates": [],
                         "rerank_note": "复筛完成，但没有候选达到80%的可靠相似度门槛。",
                         "best_final_score": max(
@@ -1034,6 +1112,7 @@ def rerank_candidates_tool(
                 "reranked": bool(reranked) and search.rerank_results_complete(reranked),
                 "visible_candidates": visible,
                 "rerank_note": rerank_note,
+                "checkpoint_rerank": evidence(rerank_input, reranked or []),
             }
         if outcome is ToolOutcome.PARTIAL:
             return ToolResult.partial(

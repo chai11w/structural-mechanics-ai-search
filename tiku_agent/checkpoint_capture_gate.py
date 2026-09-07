@@ -55,7 +55,7 @@ class A2CheckpointCaptureGateV1:
             (admission.entered_business_processing, "BUSINESS_PROCESSING_NOT_ENTERED"),
         )
         for passed, reason_code in checks:
-            if not passed:
+            if passed is not True:
                 return A2CaptureDecisionV1(False, reason_code)
         return A2CaptureDecisionV1(True, "CAPTURE_ADMITTED")
 

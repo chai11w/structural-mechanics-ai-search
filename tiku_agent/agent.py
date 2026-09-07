@@ -140,6 +140,7 @@ class TikuSearchAgent:
         enable_author_contact_fallback: bool = False,
         image_search_cancelled: Callable[[], bool] | None = None,
         commit_image_candidates: Callable[[], bool] | None = None,
+        checkpoint_emitter: Callable[[str, ToolResult, dict[str, Any]], None] | None = None,
     ) -> None:
         self.state = state or AgentState()
         self.tools = tools or AgentToolbox()
@@ -153,6 +154,8 @@ class TikuSearchAgent:
         self.enable_author_contact_fallback = bool(enable_author_contact_fallback)
         self.image_search_cancelled = image_search_cancelled
         self.commit_image_candidates = commit_image_candidates
+        self.checkpoint_emitter = checkpoint_emitter
+        self._checkpoint_analysis_data: dict[str, Any] = {}
         self._incoming_search_id = ""
         self._turn_protocol: dict[str, Any] = {}
         self._model_chapter_scope: ChapterScopeResult | None = None
@@ -200,11 +203,16 @@ class TikuSearchAgent:
         self._incoming_search_id = str(search_id or "").strip()
         self._turn_protocol = {}
         self.state.start_search(str(image_path), search_id=self._incoming_search_id or None)
+        self._emit_checkpoint("image_accepted", ToolResult.success(code="IMAGE_ACCEPTED"), {"image_path": str(image_path)})
+        self._emit_checkpoint("image_routed", ToolResult.success(code="A2_ROUTED"), {
+            "route_decision": {"route": "A2", "decision_source": "preanalyzed", "reason_code": "SINGLE_QUESTION_CONFIRMED"},
+        })
         analysis = dict(classified or {})
         analysis.setdefault("loads", list(loads or []))
         analysis.setdefault("chapter_hint", clean_chapter or "unknown")
         analysis.setdefault("chapter_confidence", 1.0 if clean_chapter else 0.0)
         analysis.setdefault("visible_problem_text", str(context_text or "").strip())
+        self._checkpoint_analysis_data = analysis
 
         scope: ChapterScopeResult | None = None
         if self.enable_chapter_scope_fallback:
@@ -218,8 +226,10 @@ class TikuSearchAgent:
             chapter_scope_topic_id=(scope.topic_id or "") if scope is not None else "",
         )
         if scope is not None and scope.status == "unsupported":
+            self._emit_question_checkpoint(ToolResult(outcome=ToolOutcome.NEEDS_INPUT, code="CHAPTER_REQUIRED"))
             return self._chapter_scope_unsupported_response(scope)
         if self.state.phase == "WAIT_CHAPTER":
+            self._emit_question_checkpoint(ToolResult(outcome=ToolOutcome.NEEDS_INPUT, code="CHAPTER_REQUIRED"))
             self.state.offer_global_search()
             return self._response(
                 (
@@ -610,6 +620,7 @@ class TikuSearchAgent:
             image_path,
             search_id=self._incoming_search_id or None,
         )
+        self._emit_checkpoint("image_accepted", ToolResult.success(code="IMAGE_ACCEPTED"), {"image_path": image_path})
         if pending_chapter:
             self.state.set_pending_chapter(pending_chapter)
         if prechecked_single:
@@ -623,6 +634,7 @@ class TikuSearchAgent:
         self._raise_if_image_search_cancelled()
         stopped = self._stop_for_tool_result(multi, allow_partial=True)
         if stopped is not None:
+            self._emit_question_checkpoint(multi)
             return stopped
         self._collect_partial_notice(notices, multi)
         if multi.ok and multi.data.get("is_multi"):
@@ -644,6 +656,9 @@ class TikuSearchAgent:
                 IntentResult("search_image"),
             )
         scope_analysis = multi.data.get("single_analysis") if multi.ok else None
+        self._emit_checkpoint("image_routed", ToolResult.success(code="A2_ROUTED"), {
+            "route_decision": {"route": "A2", "decision_source": "prechecked" if prechecked_single else "a2_multi_analysis", "reason_code": "SINGLE_QUESTION_CONFIRMED"},
+        })
         if isinstance(scope_analysis, dict):
             chapter_hint = str(scope_analysis.get("chapter_hint") or "").strip()
             # `unknown` is a model sentinel, not a chapter name.  Keep the
@@ -669,9 +684,11 @@ class TikuSearchAgent:
             if context_text:
                 analyze_kwargs["context_text"] = context_text
             analyzed = self.tools.analyze_image(image_path, **analyze_kwargs)
+        self._checkpoint_analysis_data = dict(analyzed.data or {})
         self._raise_if_image_search_cancelled()
         stopped = self._stop_for_tool_result(analyzed, allow_needs_input=True)
         if stopped is not None:
+            self._emit_question_checkpoint(analyzed)
             return stopped
         scope: ChapterScopeResult | None = None
         resolved_chapter = pending_chapter or analyzed.data.get("chapter") or ""
@@ -696,10 +713,12 @@ class TikuSearchAgent:
             chapter_scope_topic_id=scope_topic_id,
         )
         if scope is not None and scope.status == "unsupported" and not resolved_chapter:
+            self._emit_question_checkpoint(ToolResult(outcome=ToolOutcome.NEEDS_INPUT, code="CHAPTER_REQUIRED"))
             return self._chapter_scope_unsupported_response(scope)
         if pending_chapter:
             self.state.consume_pending_chapter()
         if self.state.phase == "WAIT_CHAPTER":
+            self._emit_question_checkpoint(ToolResult(outcome=ToolOutcome.NEEDS_INPUT, code="CHAPTER_REQUIRED"))
             self.state.offer_global_search()
             self._raise_if_image_search_cancelled()
             return self._response(
@@ -765,6 +784,7 @@ class TikuSearchAgent:
         notices: list[str] | None = None,
     ) -> AgentResponse:
         notices = list(notices or [])
+        question_source = None
         chapter = self.state.current_chapter
         message = f"正在按「{chapter}」搜索题目…" if chapter else "正在搜索题目…"
         self._report_progress("searching", message)
@@ -777,6 +797,7 @@ class TikuSearchAgent:
             self._raise_if_image_search_cancelled()
             stopped = self._stop_for_tool_result(routed)
             if stopped is not None:
+                self._emit_question_checkpoint(routed)
                 return stopped
             route = str(routed.data.get("route") or "")
             self.state.set_route(route)
@@ -797,10 +818,20 @@ class TikuSearchAgent:
             self._raise_if_image_search_cancelled()
             stopped = self._stop_for_tool_result(structured, allow_partial=True)
             if stopped is not None:
+                self._emit_question_checkpoint(structured)
                 return stopped
             self._collect_partial_notice(notices, structured)
+            if structured.outcome is ToolOutcome.PARTIAL:
+                question_source = structured
             structure_type = str(structured.data.get("structure_type") or "")
             self.state.set_route(route, structure_type=structure_type)
+            self._checkpoint_analysis_data.update({
+                "structure_source": structured.data.get("source", "structure_tool"),
+                "structure_filter_applicable": structured.data.get("filter_applicable", False),
+                "structure_reason_code": structured.code,
+            })
+
+        self._emit_question_checkpoint(question_source)
 
         coarse_kwargs: dict[str, Any] = {
             "chapter": self.state.current_chapter,
@@ -814,6 +845,14 @@ class TikuSearchAgent:
         if continuing:
             coarse_kwargs["exclude_candidate_keys"] = list(self.state.attempted_candidate_keys)
         coarse = self.tools.coarse_search(self.state.current_loads, **coarse_kwargs)
+        self._emit_checkpoint(
+            "coarse_search_completed",
+            coarse,
+            {
+                "candidates": list(coarse.data.get("candidates") or [])
+                if isinstance(coarse.data, dict) else [],
+            },
+        )
         self._raise_if_image_search_cancelled()
         stopped = self._stop_for_tool_result(coarse)
         if stopped is not None:
@@ -822,6 +861,7 @@ class TikuSearchAgent:
         self.state.record_search_batch(candidates, has_more=False)
         if not candidates:
             self.state.set_candidates([])
+            self._emit_checkpoint("answer_prepared", ToolResult.no_match(code="NO_MATCH"), {})
             text = (
                 render.render_no_more_candidates(
                     self.state,
@@ -845,6 +885,11 @@ class TikuSearchAgent:
             route=route,
             rerank_top=self.config.rerank_top,
         )
+        self._emit_checkpoint(
+            "rerank_completed",
+            reranked,
+            {"candidates": candidates},
+        )
         self._raise_if_image_search_cancelled()
         stopped = self._stop_for_tool_result(reranked, allow_partial=True)
         if stopped is not None:
@@ -852,6 +897,7 @@ class TikuSearchAgent:
         self._collect_partial_notice(notices, reranked)
         if reranked.outcome is ToolOutcome.NO_MATCH:
             self.state.set_candidates([])
+            self._emit_checkpoint("answer_prepared", ToolResult.no_match(code="NO_MATCH"), {})
             return self._response(
                 render.render_tool_feedback(reranked, context="no_match"),
                 intent or IntentResult("search_image"),
@@ -908,6 +954,8 @@ class TikuSearchAgent:
         structure_type = str(structured.data.get("structure_type") or "")
         self.state.set_route(route, structure_type=structure_type)
 
+        self._emit_question_checkpoint()
+
         searched = self.tools.global_search(
             self.state.current_loads,
             self._rerank_query_image_path(),
@@ -921,6 +969,7 @@ class TikuSearchAgent:
         candidates = list(searched.data.get("candidates") or [])
         self.state.set_candidates(candidates)
         if not candidates:
+            self._emit_checkpoint("answer_prepared", ToolResult.no_match(code="NO_MATCH"), {})
             return self._response(
                 render.append_notice(
                     render.render_global_no_match(), self._join_notices(notices)
@@ -954,6 +1003,18 @@ class TikuSearchAgent:
             return self._response(render.render_unsupported(str(exc)), intent)
 
         answered = self.tools.answer_candidate(self.state.candidates, rank=rank, config=self.config)
+        self._emit_checkpoint(
+            "answer_prepared",
+            answered,
+            {
+                "selected_rank": rank,
+                "selected_candidate": self.state.candidates[rank - 1]
+                if 1 <= rank <= len(self.state.candidates) else None,
+                "candidate_generation": self.state.candidate_generation,
+                "answer_paths": list(answered.data.get("copied_paths") or answered.data.get("answer_paths") or [])
+                if isinstance(answered.data, dict) else [],
+            },
+        )
         stopped = self._stop_for_tool_result(answered)
         if stopped is not None:
             return stopped
@@ -1132,6 +1193,37 @@ class TikuSearchAgent:
         note = render.render_tool_feedback(result, context="partial")
         if note and note not in notices:
             notices.append(note)
+
+    def _emit_question_checkpoint(self, source: ToolResult | None = None) -> None:
+        if not callable(self.checkpoint_emitter):
+            return
+        data = {
+            **self._checkpoint_analysis_data,
+            "chapter": self.state.current_chapter,
+            "chapter_scope_status": self.state.chapter_scope_status,
+            "loads": self.state.current_loads,
+            "structure_type": self.state.current_structure_type,
+        }
+        source = source or ToolResult.success(code="QUESTION_ANALYZED")
+        projected = ToolResult(
+            outcome=source.outcome, code=source.code, data=data,
+            retryable=source.retryable, error_category=source.error_category,
+        )
+        self._emit_checkpoint("question_analyzed", projected, {})
+
+    def _emit_checkpoint(
+        self,
+        stage: str,
+        result: ToolResult,
+        payload: dict[str, Any],
+    ) -> None:
+        emitter = self.checkpoint_emitter
+        if not callable(emitter):
+            return
+        try:
+            emitter(stage, result, payload)
+        except Exception:  # noqa: BLE001 - evidence capture is fail-open.
+            return
 
     @staticmethod
     def _join_notices(notices: list[str]) -> str:

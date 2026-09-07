@@ -863,6 +863,7 @@ def rerank_candidates(
     retry_max_candidates=None,
     retry_max_workers=None,
     retry_failed_candidates=False,
+    on_rerank_observed=None,
 ):
     """Rerank candidates with the shared bounded-concurrency policy."""
     return rerank_candidates_concurrent(
@@ -891,6 +892,7 @@ def rerank_candidates(
             else retry_max_workers
         ),
         retry_failed_candidates=retry_failed_candidates,
+        on_rerank_observed=on_rerank_observed,
         model=model,
         provider=provider or DEFAULT_RERANK_PROVIDER,
         endpoint=endpoint,
@@ -939,6 +941,7 @@ def rerank_candidates_concurrent(
     provider=None,
     endpoint=None,
     enable_thinking=None,
+    on_rerank_observed=None,
 ):
     """Concurrent rerank with bounded timeouts and a selective retry.
 
@@ -1020,6 +1023,12 @@ def rerank_candidates_concurrent(
                     retried if item.get("path") == first_attempt.get("path") else item
                     for item in scored
                 ]
+
+    if on_rerank_observed is not None:
+        try:
+            on_rerank_observed([dict(item) for item in scored])
+        except Exception:
+            pass
 
     if not rerank_results_complete(scored):
         note = "部分候选两次复筛仍未完成，已回退粗筛排序。"
@@ -1347,6 +1356,7 @@ class ChapterCandidateScan:
     scored: list[tuple[float, str]]
     structure_filter_applied: bool
     dimensions_by_name: dict[str, dict[str, str]]
+    chapter_scanned: int | None = None
 
 
 def scan_chapter_candidates(
@@ -1368,6 +1378,7 @@ def scan_chapter_candidates(
     if df is None:
         return None
 
+    chapter_scanned = len(df)
     filter_type = str(structure_type or "").strip()
     structure_filter_applied = False
     if filter_type and "结构类型" in df.columns:
@@ -1397,6 +1408,7 @@ def scan_chapter_candidates(
         scored=scored,
         structure_filter_applied=structure_filter_applied,
         dimensions_by_name=dimensions_by_name,
+        chapter_scanned=chapter_scanned,
     )
 
 
