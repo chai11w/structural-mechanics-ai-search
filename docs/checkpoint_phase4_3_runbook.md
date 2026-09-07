@@ -23,8 +23,9 @@
 不改变排序、计费、Task State、前端动作授权或执行恢复。
 
 4.4 的 A3 父任务、unit、bbox、裁图和父子 revision 采集不在本次范围。
-Runtime 发现 Trace 中存在 A3 `unit_id` 时跳过自动采集，避免把子题错误标成 standalone；
-8790/8896 的直接 A2 路径使用本阶段能力，A3 自动采集开关未开放。
+仅开启 4.3 时，Runtime 发现 Trace 中存在 A3 `unit_id` 会跳过自动采集，避免把子题错误标成
+standalone；8790/8896 的直接 A2 路径使用本阶段能力。A3 的独立开关和父子采集见
+[4.4 runbook](checkpoint_phase4_4_runbook.md)。
 
 ## 证据语义
 

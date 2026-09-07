@@ -49,7 +49,9 @@ python -B scripts/run_tiku_agent_8790.py --port 8790 `
 阶段 4.2 要求七项容量和 retention 参数显式提供，不能依赖启动器默认值。变量取值、
 容量证据和 plan/apply 验收见 [`阶段 4.2 runbook`](docs/checkpoint_phase4_2_runbook.md)。
 阶段 4.3 的 A2 Checkpoint 采集已提供默认关闭的显式开关，范围、启用条件和隔离验收见
-[`阶段 4.3 runbook`](docs/checkpoint_phase4_3_runbook.md)；普通启动不自动采集，A3 父子采集仍待 4.4。
+[`阶段 4.3 runbook`](docs/checkpoint_phase4_3_runbook.md)；普通启动不自动采集。
+阶段 4.4 的 A3 父子采集使用独立开关并要求同时启用 A2；身份、图片引用和验收见
+[`阶段 4.4 runbook`](docs/checkpoint_phase4_4_runbook.md)。生产采集尚未启用。
 
 打开 `http://127.0.0.1:8790` 后可发题图或直接文字对话。页面采用单会话聊天画布：顶部菜单可打开临时会话抽屉，桌面和移动端入口一致，不伪造尚未实现的多会话历史。上传、拖放、候选题卡片选择、答案查看和图片大图预览均在同一条消息内完成；顶部栏和底部组合输入区固定，只有中间消息区滚动。识别到章节、用户补充章节或确认全局搜索后，同一个临时气泡会按真实执行阶段更新搜索状态，完成后由正式结果替换。
 

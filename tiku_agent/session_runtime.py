@@ -1615,6 +1615,21 @@ class AgentSessionRuntime:
                 request_id=request_id,
                 candidate_generation=state.candidate_generation,
             )
+            from tiku_agent.a3_checkpoint_context import current_a3_checkpoint_binding
+            parent = current_a3_checkpoint_binding.get()
+            if parent is not None:
+                if (parent.recorder is not recorder or parent.session_key != context.session_key
+                        or parent.identity_key != clean_identity):
+                    recorder.input_unavailable()
+                    return
+                if parent.unit_id:
+                    if stage in {"image_accepted", "image_routed"}:
+                        return
+                    context = replace(context, workflow_search_id=parent.workflow_search_id,
+                        workflow_task_revision=parent.workflow_task_revision, unit_id=parent.unit_id)
+                else:
+                    # V1 keeps direct A2 standalone; it has no A3 unit identity.
+                    parent = None
             admission = A2CaptureAdmissionV1(
                 request_kind="search",
                 authenticated=bool(clean_identity),
@@ -1629,10 +1644,9 @@ class AgentSessionRuntime:
             if not is_valid_trace_id(context.trace_id):
                 recorder.input_unavailable()
                 return
-            # A3 unit evidence requires the parent revision contract in 4.4.
             from tiku_shared.trace_events import current_trace_event_session
             trace_session = current_trace_event_session()
-            if trace_session is not None and trace_session.dimensions.get("unit_id"):
+            if parent is None and trace_session is not None and trace_session.dimensions.get("unit_id"):
                 return
             if not predecessor_loaded:
                 predecessor_loaded = True
@@ -1670,7 +1684,8 @@ class AgentSessionRuntime:
                 admission=admission,
                 stage=stage,
                 tool_result=result,
-                payload={**payload, "inputs": inputs, "source_image_path": state.current_image_path},
+                payload={**payload, "inputs": inputs,
+                         "source_image_path": parent.source_page_path if parent is not None else state.current_image_path},
                 predecessor_checkpoint_id=predecessor,
                 last_successful_checkpoint_id=last_successful,
             )

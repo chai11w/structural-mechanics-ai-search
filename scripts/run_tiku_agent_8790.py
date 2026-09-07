@@ -20,6 +20,7 @@ from tiku_admin.auth import SQLiteInviteAccess
 from tiku_admin.control_store import SQLiteControlStore
 from tiku_agent.checkpoint_contract import EvidenceCapacityPolicyV1, ProducerVersionV1
 from tiku_agent.a2_checkpoint_recorder import A2CheckpointRecorderV1
+from tiku_agent.a3_checkpoint_recorder import A3CheckpointRecorderV1
 from tiku_agent.checkpoint_capture_gate import A2CheckpointCaptureGateV1
 from tiku_agent.checkpoint_store import SQLiteCheckpointStore
 from tiku_agent.fastapi_demo import SESSION_COOKIE, create_app
@@ -240,6 +241,7 @@ def build_app(
     checkpoint_retention_backup_keep_runs: int | None = None,
     enable_a2_checkpoint_capture: bool = False,
     checkpoint_code_revision: str = "",
+    enable_a3_checkpoint_capture: bool = False,
 ):
     _validate_queue_settings(
         max_concurrent_tasks,
@@ -249,6 +251,10 @@ def build_app(
     root = Path(runtime_dir).resolve()
     if type(enable_a2_checkpoint_capture) is not bool:
         raise TypeError("enable_a2_checkpoint_capture must be boolean")
+    if type(enable_a3_checkpoint_capture) is not bool:
+        raise TypeError("enable_a3_checkpoint_capture must be boolean")
+    if enable_a3_checkpoint_capture and not enable_a2_checkpoint_capture:
+        raise ValueError("A3 capture requires A2 checkpoint capture")
     if enable_a2_checkpoint_capture and evidence_capacity is None:
         raise ValueError("A2 capture requires evidence capacity and retention")
     producer = _capture_producer(checkpoint_code_revision) if enable_a2_checkpoint_capture else None
@@ -314,13 +320,18 @@ def build_app(
             capacity=evidence_capacity,
             backup_keep_runs=checkpoint_retention_backup_keep_runs,
         )
+    recorder_class = A3CheckpointRecorderV1 if enable_a3_checkpoint_capture else A2CheckpointRecorderV1
+    recorder_kwargs = {"a3_media_root": root / "a3_sessions"} if enable_a3_checkpoint_capture else {}
     recorder = (
-        A2CheckpointRecorderV1(
+        recorder_class(
             checkpoint_store, producer=producer, media_root=root / "a2",
             gate=A2CheckpointCaptureGateV1(enabled=True),
+            **recorder_kwargs,
         ) if producer is not None else None
     )
     capture_kwargs = {"checkpoint_recorder": recorder} if recorder is not None else {}
+    if enable_a3_checkpoint_capture:
+        capture_kwargs["a3_checkpoint_recorder"] = recorder
     app = create_app(
         runtime=build_a3_runtime(
             root,
@@ -383,6 +394,7 @@ def build_app(
         app.state.checkpoint_evidence_store = checkpoint_store
         app.state.checkpoint_retention_controller = retention_runner
         app.state.a2_checkpoint_recorder = recorder
+        app.state.a3_checkpoint_recorder = recorder if enable_a3_checkpoint_capture else None
     return app
 
 
@@ -396,6 +408,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--control-db", type=Path)
     parser.add_argument("--invite-config", type=Path)
     parser.add_argument("--enable-a2-checkpoint-capture", action="store_true", default=False)
+    parser.add_argument("--enable-a3-checkpoint-capture", action="store_true", default=False)
     parser.add_argument("--checkpoint-code-revision", default="")
     parser.add_argument("--max-checkpoint-rows", type=_positive_int, required=True)
     parser.add_argument("--max-artifact-rows", type=_positive_int, required=True)
@@ -511,6 +524,7 @@ def main() -> int:
             queue_wait_seconds=args.queue_wait_seconds,
             evidence_capacity=_capacity_from_args(args),
             enable_a2_checkpoint_capture=args.enable_a2_checkpoint_capture,
+            enable_a3_checkpoint_capture=args.enable_a3_checkpoint_capture,
             checkpoint_code_revision=args.checkpoint_code_revision,
             checkpoint_retention_backup_root=(
                 args.checkpoint_retention_backup_root

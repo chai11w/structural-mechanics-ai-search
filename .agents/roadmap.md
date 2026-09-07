@@ -72,7 +72,7 @@
    - 4.1 Checkpoint V1 契约与现状盘点：DONE。冻结 `trace_id -> checkpoint_id -> artifact_id` 关系、九阶段模型、父子 revision、字段白名单、候选分数截断、失败语义和隐私边界；普通结构化 Checkpoint 30 天，普通/失败图片 3/7 天，反馈/调查证据默认 30 天并最多延长至 365/90 天，禁止永久 hold。部署配置必须显式提供 Checkpoint/Artifact/证据审计/Trace 行数、Artifact 总字节、磁盘最小余量和单 Checkpoint Artifact 数七项容量参数；证据审计不含 8795 控制库管理员审计。4.1 只有纯数据契约与测试，无 Store/I/O，也未接 A2/A3 runtime 或生产采集；33 项契约及全仓 1274 项回归通过。
    - 4.2 存储生命周期与容量门：DONE / A2-A3 CAPTURE GATE READY。已实现独立 Checkpoint/Artifact Store、可信 TTL 与过期读取拒绝、七项写前容量门、证据审计有限轮转及清理写入余量、周期 retention plan/apply、孤儿清理与审计，并补齐批准范围内的 Trace 周期清理；容量满时停止新增诊断证据、搜索继续且健康状态降级。定向 62 项及全仓回归通过。4.2 不接入 A2/A3 自动 Checkpoint 采集；4.3/4.4 仍须另行受控开发和启用。
    - 4.3 A2 单题采集：DONE / DEFAULT OFF。已接入实际上传、单题分流、题目理解、粗筛/尺寸、复筛、答案与失败边界，包含全局搜索内部阶段、真实回退计数、跨请求受权前驱及提交后 Trace 关联。Recorder、启动开关和生产提交校验默认关闭，复用 4.2 容量/retention；隔离真实 Store 串联与回归通过，未部署或重启生产。health、登录、配额/队列拒绝和媒体 GET 不创建记录；A3 unit 自动采集留待 4.4。实现范围和验证见 [`4.3 runbook`](../docs/checkpoint_phase4_3_runbook.md)。
-   - 4.4 A3 父子采集：PLANNED。保存整页理解、unit、bbox、裁图及校验结果，并受控关联各子 A2 Checkpoint；覆盖单题自动下行、多题并发与人工裁剪回退，同一图片只保存一份 Artifact。
+   - 4.4 A3 父子采集：DONE / DEFAULT OFF。已保存实际上传/路由、整页理解、unit、bbox、裁图及六项/外荷载校验；单题自动下行、多题并发校验、人工裁剪和失败回退均接入，子 A2 通过请求内可信父身份分别绑定父子 revision，并受权复用父 unit 的 Artifact 和前驱。Store 对图片物理去重，重复引用不续期；默认关闭的 A3 开关要求 A2、4.2 容量/retention 和干净完整提交。新增 23 项及全仓 1383 项回归通过，未部署或重启生产。范围及边界见 [`4.4 runbook`](../docs/checkpoint_phase4_4_runbook.md)。
    - 4.5 诊断读取与阶段验收：PLANNED。支持从 Trace 定位 Checkpoint 和受权 Artifact，查看、延长和删除均审计；验证脱敏、截断、过期、容量压力、证据写入 fail-open、读取/管理 fail-closed，以及不改变 A2/A3 排名和公共输出。
 5. **幂等执行与父子任务控制（PLANNED）**：统一任务版本、幂等键、执行锁和 A3→A2 父子生命周期，避免重复点击、网络重试或恢复造成重复执行和重复计费。
 6. **长任务与 HTTP 流逐步解耦（PLANNED）**：让后台任务持有执行生命周期，HTTP/updates 流只负责提交、观察和控制；页面刷新或连接断开不再等于任务状态丢失。

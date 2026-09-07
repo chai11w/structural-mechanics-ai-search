@@ -192,7 +192,8 @@ class A2CheckpointRecorderV1:
                 failure = replace(failure, last_successful_checkpoint_id=last_successful_checkpoint_id)
             if checkpoint.outcome == "failed" and payload.get("source_image_path"):
                 try:
-                    source_context = replace(context, scope=SCOPE_WORKFLOW, search_id="", candidate_generation="")
+                    source_context = replace(context, scope=SCOPE_WORKFLOW, search_id="", unit_id="",
+                        candidate_generation="", task_revision=context.workflow_task_revision)
                     descriptor = self.store.put_artifact(
                         source_context.owner(), self.read_image(payload["source_image_path"]), retention_class=RETENTION_FAILED,
                     )
