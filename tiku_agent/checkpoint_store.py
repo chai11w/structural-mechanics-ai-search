@@ -1985,6 +1985,11 @@ class SQLiteCheckpointStore:
     def latest_successful_checkpoint(
         self, owner: CheckpointOwnerV1, *, actor_key: str,
     ) -> IntermediateCheckpointV1 | None:
+        return self.latest_checkpoint(owner, actor_key=actor_key, successful_only=True)
+
+    def latest_checkpoint(
+        self, owner: CheckpointOwnerV1, *, actor_key: str, successful_only: bool = False,
+    ) -> IntermediateCheckpointV1 | None:
         """Find a bounded, audited predecessor within the same logical task revision."""
         if type(owner) is not CheckpointOwnerV1:
             raise EvidenceValidationError("owner must be CheckpointOwnerV1")
@@ -1997,8 +2002,12 @@ class SQLiteCheckpointStore:
             rows = connection.execute(
                 "SELECT * FROM checkpoints WHERE identity_key = ? AND session_key = ? "
                 "AND workflow_search_id = ? AND search_id = ? AND unit_id = ? "
-                "AND outcome = 'success' ORDER BY occurred_at DESC, rowid DESC LIMIT 100",
-                (owner.identity_key, owner.session_key, owner.workflow_search_id, owner.search_id, owner.unit_id),
+                "AND json_extract(owner_json, '$.scope') = ? "
+                "AND json_extract(owner_json, '$.task_revision') = ? "
+                "AND json_extract(owner_json, '$.workflow_task_revision') = ? "
+                "AND (? = 0 OR outcome = 'success') ORDER BY occurred_at DESC, rowid DESC LIMIT 100",
+                (owner.identity_key, owner.session_key, owner.workflow_search_id, owner.search_id, owner.unit_id,
+                 owner.scope, owner.task_revision, owner.workflow_task_revision, int(successful_only)),
             ).fetchall()
             for row in rows:
                 candidate = self._checkpoint_row(connection, row)

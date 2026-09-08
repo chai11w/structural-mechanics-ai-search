@@ -37,6 +37,11 @@ class A2CheckpointLauncherTest(unittest.TestCase):
                     checkpoint_code_revision="4" * 40,
                 )
             recorder = build.call_args.kwargs["checkpoint_recorder"]
+            self.addCleanup(recorder.close)
+            self.assertTrue(callable(recorder.submit_stage))
+            self.assertEqual(create.call_args.kwargs["checkpoint_capture_close"], recorder.close)
+            self.assertEqual(create.call_args.kwargs["checkpoint_capture_start"], recorder.start)
+            self.assertFalse(recorder.health()["worker_alive"])
             self.assertIs(recorder.store, app.state.checkpoint_evidence_store)
             self.assertTrue(recorder.gate.enabled)
             self.assertEqual(recorder.media_root, Path(runtime).resolve() / "a2")

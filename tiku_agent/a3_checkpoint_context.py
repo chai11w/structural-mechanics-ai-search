@@ -21,8 +21,11 @@ current_a3_checkpoint_binding = ContextVar("a3_checkpoint_binding", default=None
 
 @contextmanager
 def a3_checkpoint_request_scope():
+    from tiku_agent.checkpoint_submission_budget import CheckpointSubmissionBudget, current_checkpoint_budget
     token = current_a3_checkpoint_binding.set(None)
+    budget_token = current_checkpoint_budget.set(current_checkpoint_budget.get() or CheckpointSubmissionBudget())
     try:
         yield
     finally:
         current_a3_checkpoint_binding.reset(token)
+        current_checkpoint_budget.reset(budget_token)

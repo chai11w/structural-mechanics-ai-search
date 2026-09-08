@@ -22,6 +22,7 @@ from tiku_agent.checkpoint_contract import EvidenceCapacityPolicyV1, ProducerVer
 from tiku_agent.a2_checkpoint_recorder import A2CheckpointRecorderV1
 from tiku_agent.a3_checkpoint_recorder import A3CheckpointRecorderV1
 from tiku_agent.checkpoint_capture_gate import A2CheckpointCaptureGateV1
+from tiku_agent.checkpoint_async import AsyncCheckpointRecorder
 from tiku_agent.checkpoint_store import SQLiteCheckpointStore
 from tiku_agent.fastapi_demo import SESSION_COOKIE, create_app
 from tiku_agent.feedback_store import SQLiteFeedbackStore
@@ -184,9 +185,9 @@ def _combined_checkpoint_health(
         "status": "degraded" if failed else "ok",
         "current_reasons": reasons,
         "counters": counters,
-        "pending": 0,
-        "queue_capacity": 0,
-        "accepting": store_health.get("accepting") is True,
+        "pending": capture_health.get("pending", 0),
+        "queue_capacity": capture_health.get("queue_capacity", 0),
+        "accepting": store_health.get("accepting") is True and capture_health.get("accepting", True),
         "last_failure_code": last_failure_code,
         "last_failure_at": last_failure_at,
     }
@@ -329,6 +330,9 @@ def build_app(
             **recorder_kwargs,
         ) if producer is not None else None
     )
+    trace_recorder = TraceEventRecorder(trace_store)
+    if recorder is not None:
+        recorder = AsyncCheckpointRecorder(recorder, trace_recorder=trace_recorder, autostart=False)
     capture_kwargs = {"checkpoint_recorder": recorder} if recorder is not None else {}
     if enable_a3_checkpoint_capture:
         capture_kwargs["a3_checkpoint_recorder"] = recorder
@@ -369,7 +373,9 @@ def build_app(
             if control_store is not None
             else None
         ),
-        trace_event_recorder=TraceEventRecorder(trace_store),
+        trace_event_recorder=trace_recorder,
+        checkpoint_capture_start=recorder.start if recorder is not None else None,
+        checkpoint_capture_close=recorder.close if recorder is not None else None,
         checkpoint_evidence_health_provider=(
             (
                 lambda: _combined_checkpoint_health(

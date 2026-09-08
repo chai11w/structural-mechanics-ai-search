@@ -357,6 +357,8 @@ class AgentSessionRuntime:
         self.image_triage_authority = image_triage_authority
         self.preserve_artifacts_on_cancel = bool(preserve_artifacts_on_cancel)
         self.checkpoint_recorder = checkpoint_recorder
+        if checkpoint_recorder is not None and hasattr(checkpoint_recorder, "resource_leases"):
+            self.artifacts.checkpoint_resource_leases = checkpoint_recorder.resource_leases
         self._image_executor = (
             ThreadPoolExecutor(max_workers=8, thread_name_prefix="tiku-image-race")
             if external_load_screen is not None
@@ -1591,15 +1593,19 @@ class AgentSessionRuntime:
         request_id: str,
     ) -> None:
         recorder = self.checkpoint_recorder
-        if recorder is None or not callable(getattr(recorder, "capture_stage", None)):
+        if recorder is None or not any(callable(getattr(recorder, method, None)) for method in ("capture_stage", "submit_stage")):
             return
         predecessor = ""
         last_successful = ""
         image_digests: dict[str, str] = {}
         predecessor_loaded = False
+        from time import perf_counter
+        from tiku_agent.checkpoint_submission_budget import CheckpointSubmissionBudget, current_checkpoint_budget
+        capture_budget = current_checkpoint_budget.get() or CheckpointSubmissionBudget()
 
         def emit(stage: str, result: Any, payload: dict[str, Any]) -> None:
             nonlocal predecessor, last_successful, predecessor_loaded
+            capture_started = perf_counter()
             state = agent.state
             revision = state.task_revision
             clean_identity = str(identity_key or "").strip()
@@ -1674,8 +1680,14 @@ class AgentSessionRuntime:
                 inputs["policy"] = {key: policy[key] for key in ("threshold", "display_all_score", "fallback_limit", "skipped") if key in policy}
             from tiku_agent.checkpoint_stage_input import freeze_a2_stage_input, materialize_a2_stage_input
             frozen = freeze_a2_stage_input(result, {**payload, "inputs": inputs,
+                "capture_image_path": image_path,
                 "source_image_path": parent.source_page_path if parent is not None else state.current_image_path})
+            if callable(getattr(recorder, "submit_stage", None)):
+                recorder.submit_stage(context, frozen, stage=stage, admission=admission,
+                    budget=capture_budget, started=capture_started)
+                return
             result, payload = materialize_a2_stage_input(frozen)
+            payload.pop("capture_image_path", None)
             if not predecessor_loaded:
                 predecessor_loaded = True
                 last_successful = recorder.last_successful(context)

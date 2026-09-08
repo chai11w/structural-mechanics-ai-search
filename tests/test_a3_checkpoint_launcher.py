@@ -29,10 +29,11 @@ class A3CheckpointLauncherTest(unittest.TestCase):
                     checkpoint_retention_backup_keep_runs=3, enable_a2_checkpoint_capture=True,
                     enable_a3_checkpoint_capture=True, checkpoint_code_revision="4" * 40)
             recorder = build.call_args.kwargs["checkpoint_recorder"]
+            self.addCleanup(recorder.close)
             self.assertIs(recorder, build.call_args.kwargs["a3_checkpoint_recorder"])
             self.assertIs(recorder, app.state.a3_checkpoint_recorder)
             self.assertIs(recorder.store, app.state.checkpoint_evidence_store)
-            self.assertEqual(recorder._page_reader.media_root, Path(runtime).resolve() / "a3_sessions")
+            self.assertEqual(recorder.engine._page_reader.media_root, Path(runtime).resolve() / "a3_sessions")
             self.assertIsNotNone(create.call_args.kwargs["checkpoint_retention_runner"])
             recorder.input_unavailable()
             self.assertEqual(create.call_args.kwargs["checkpoint_evidence_health_provider"]()["status"], "degraded")

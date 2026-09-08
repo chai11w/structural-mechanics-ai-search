@@ -6,6 +6,8 @@
 
 ## 入口与权限
 
+优化 4.5.3 启用后采集异步落库，业务响应返回时诊断可能尚未看到最后的 Checkpoint。`CAPTURE_QUEUED` 不提供可查询 ID；以已提交的 Trace 关联或受权查询结果为准。队列限制、丢弃原因和后续停机边界见[优化记录](checkpoint_optimization_phase4_5.md)，本诊断 CLI 不负责等待或重跑采集。
+
 本文件保留上一轮诊断验收编号；新一轮分步优化由[优化阶段 4.5](checkpoint_optimization_phase4_5.md)管理。优化 4.5.2 新增 `bank-image` 子命令，使用下文相同的 `@ScopedArgs`：
 
 ```powershell

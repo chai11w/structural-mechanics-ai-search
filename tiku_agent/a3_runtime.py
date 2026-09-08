@@ -685,6 +685,8 @@ class A3MvpRuntime:
         self.artifacts = artifacts
         self.a2_runtime = a2_runtime
         self.checkpoint_recorder = checkpoint_recorder
+        if checkpoint_recorder is not None and hasattr(checkpoint_recorder, "resource_leases"):
+            self.artifacts.checkpoint_resource_leases = checkpoint_recorder.resource_leases
         self.page_observer = page_observer
         self.crop_verifier = crop_verifier
         self.auto_cropper = auto_cropper

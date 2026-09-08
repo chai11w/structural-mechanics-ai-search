@@ -78,43 +78,62 @@ class A3CheckpointRecorderV1(A2CheckpointRecorderV1):
         decision = self.gate.decide(admission)
         if not decision.permitted:
             return A2CaptureRecordResultV1(False, False, decision.reason_code)
-        context = common = None
+        try:
+            context, frozen = self.freeze_parent(state, identity_key=identity_key, unit_id=unit_id,
+                record=record, method=method, failure_code=failure_code, producer_client=producer_client)
+        except Exception:
+            return self._result(False, "A3_CAPTURE_INVALID")
+        return self.capture_parent_frozen(context, frozen, stage=stage, admission=admission)
+
+    def freeze_parent(self, state, *, identity_key, unit_id="", record=None,
+                      method="automatic", failure_code="", producer_client=None):
+        if not is_valid_trace_id(current_trace_id()):
+            raise ValueError("capture requires a trace")
+        context = A2CheckpointContextV1(
+            trace_id=current_trace_id(), request_id=current_request_id(),
+            session_key=session_key(state.session_id), identity_key=identity_key,
+            workflow_search_id=state.workflow_search_id, search_id="", unit_id=unit_id,
+            workflow_task_revision=state.task_revision, task_revision=state.task_revision,
+            producer=replace(self.producer, component="a3_runtime", policy_version="a3-capture-v1"),
+            scope=SCOPE_WORKFLOW,
+        )
+        context.owner()
+        model = getattr(producer_client, "model", "")
+        prompt = getattr(producer_client, "prompt_path", None)
+        if isinstance(model, str) and model:
+            provider = ("dashscope" if isinstance(producer_client, (QwenA3PageObserver, QwenA3CropVerifier))
+                        else "zhipu" if isinstance(producer_client, GlmA3AutoCropper) else "")
+            context = replace(context, producer=replace(context.producer, model_name=model, model_provider=provider))
+        record_keys = {"path", "bounds", "model_bbox", "bbox", "grounding_status", "reason_codes",
+                       "binding_evidence", "verification_checks", "external_load_status", "validation_status"}
+        return context, FrozenCheckpointInput.capture({
+            "page": page_result(state.page_understanding, state.units) if state.page_understanding else {},
+            "selected": page_result(state.page_understanding, [state.unit(unit_id)]) if unit_id else {},
+            "source_page": str(state.source_page_path), "entry_route": state.entry_route,
+            "crop_page": {key: state.auto_crop_page[key] for key in ("schema_version", "page_status") if key in state.auto_crop_page},
+            "record": {key: value for key, value in (record or {}).items() if key in record_keys},
+            "prompt_path": str(prompt) if isinstance(prompt, Path) else "",
+            "method": method, "failure_code": failure_code,
+        })
+
+    def capture_parent_frozen(self, context, frozen, *, stage, admission,
+                              predecessor_checkpoint_id=None, last_successful_checkpoint_id=None):
+        common = None
         predecessor = ""
         try:
-            if not is_valid_trace_id(current_trace_id()):
-                return self._result(False, "CAPTURE_TRACE_REQUIRED")
-            context = A2CheckpointContextV1(
-                trace_id=current_trace_id(), request_id=current_request_id(),
-                session_key=session_key(state.session_id), identity_key=identity_key,
-                workflow_search_id=state.workflow_search_id, search_id="", unit_id=unit_id,
-                workflow_task_revision=state.task_revision, task_revision=state.task_revision,
-                producer=replace(self.producer, component="a3_runtime", policy_version="a3-capture-v1"),
-                scope=SCOPE_WORKFLOW,
-            )
             context.owner()
-            record_keys = {"path", "bounds", "model_bbox", "bbox", "grounding_status", "reason_codes",
-                           "binding_evidence", "verification_checks", "external_load_status", "validation_status"}
-            snapshot = FrozenCheckpointInput.capture({
-                "page": page_result(state.page_understanding, state.units) if state.page_understanding else {},
-                "selected": page_result(state.page_understanding, [state.unit(unit_id)]) if unit_id else {},
-                "source_page": str(state.source_page_path), "entry_route": state.entry_route,
-                "crop_page": {key: state.auto_crop_page[key] for key in ("schema_version", "page_status") if key in state.auto_crop_page},
-                "record": {key: value for key, value in (record or {}).items() if key in record_keys},
-            }).materialize()
+            snapshot = frozen.materialize()
+            unit_id = context.unit_id
+            method, failure_code = snapshot["method"], snapshot["failure_code"]
             record = snapshot["record"]
             try:
-                model = getattr(producer_client, "model", "")
-                prompt = getattr(producer_client, "prompt_path", None)
-                if isinstance(model, str) and model:
-                    provider = ("dashscope" if isinstance(producer_client, (QwenA3PageObserver, QwenA3CropVerifier))
-                                else "zhipu" if isinstance(producer_client, GlmA3AutoCropper) else "")
-                    context = replace(context, producer=replace(context.producer, model_name=model, model_provider=provider))
-                if isinstance(prompt, Path):
+                if snapshot["prompt_path"]:
                     context = replace(context, producer=replace(context.producer,
-                        prompt_sha256=sha256(prompt.read_text(encoding="utf-8").strip().encode("utf-8")).hexdigest()))
+                        prompt_sha256=sha256(Path(snapshot["prompt_path"]).read_text(encoding="utf-8").strip().encode("utf-8")).hexdigest()))
             except Exception:
                 self._result(False, "A3_PRODUCER_UNAVAILABLE")
-            predecessor = self.last_successful(context)
+            predecessor = self.last_successful(context) if predecessor_checkpoint_id is None else predecessor_checkpoint_id
+            last_successful = predecessor if last_successful_checkpoint_id is None else last_successful_checkpoint_id
             now = self.clock()
             if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
                 return self._result(False, "CAPTURE_CLOCK_INVALID")
@@ -185,7 +204,7 @@ class A3CheckpointRecorderV1(A2CheckpointRecorderV1):
                         source = ToolResult(outcome=ToolOutcome.PARTIAL, code="A3_ARTIFACT_UNAVAILABLE", error_category="evidence")
             checkpoint = build_a2_checkpoint(context, stage=stage, result=result, tool_result=source,
                 artifacts=links, predecessor_checkpoint_id=predecessor,
-                last_successful_checkpoint_id=predecessor, **common)
+                last_successful_checkpoint_id=last_successful, **common)
         except Exception:
             rejected = self._result(False, "A3_CAPTURE_INVALID")
             if context is None or common is None:
@@ -193,7 +212,7 @@ class A3CheckpointRecorderV1(A2CheckpointRecorderV1):
             try:
                 checkpoint = build_a2_checkpoint(context, stage=stage, result={}, **common,
                     tool_result=ToolResult(outcome=ToolOutcome.ERROR, code="A3_CAPTURE_INVALID", error_category="evidence"),
-                    predecessor_checkpoint_id=predecessor, last_successful_checkpoint_id=predecessor)
+                    predecessor_checkpoint_id=predecessor, last_successful_checkpoint_id=last_successful)
             except Exception:
                 return rejected
         return self.record(checkpoint, admission=admission)

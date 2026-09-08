@@ -16,6 +16,10 @@ MAX_CAPTURE_INPUT_NODES = 16_000
 class FrozenCheckpointInput:
     encoded: bytes = field(repr=False)
 
+    def __post_init__(self):
+        if type(self.encoded) is not bytes or len(self.encoded) > MAX_CAPTURE_INPUT_BYTES:
+            raise ValueError("invalid frozen capture bytes")
+
     @classmethod
     def capture(cls, value):
         remaining = MAX_CAPTURE_INPUT_NODES

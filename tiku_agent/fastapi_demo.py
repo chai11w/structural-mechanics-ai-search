@@ -625,6 +625,8 @@ def create_app(
     checkpoint_evidence_health_provider: Callable[[], Mapping[str, object]] | None = None,
     checkpoint_retention_runner: Callable[[], object] | None = None,
     checkpoint_retention_interval_seconds: float = 0.0,
+    checkpoint_capture_start: Callable[[], object] | None = None,
+    checkpoint_capture_close: Callable[[], object] | None = None,
     media_cache_seconds: float = 0.0,
 ) -> FastAPI:
     """Create a local-only demo app without any existing Feishu configuration."""
@@ -657,6 +659,8 @@ def create_app(
     async def lifespan(_app: FastAPI):
         cleanup_task = None
         checkpoint_retention_task = None
+        if checkpoint_capture_start is not None:
+            checkpoint_capture_start()
         if callable(cleaner) and cleanup_interval_seconds > 0:
             cleanup_task = asyncio.create_task(
                 _periodic_session_cleanup(cleaner, cleanup_interval_seconds)
@@ -679,6 +683,8 @@ def create_app(
                 cleanup_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await cleanup_task
+            if checkpoint_capture_close is not None:
+                await asyncio.to_thread(checkpoint_capture_close)
             if trace_event_recorder is not None:
                 await asyncio.to_thread(trace_event_recorder.close)
 

@@ -48,12 +48,14 @@ class A2CheckpointRecorderV1:
         media_root: str | Path | None = None,
         bank_root: str | Path | None = None,
         gate: A2CheckpointCaptureGateV1 | None = None, clock: Any | None = None,
+        trace_recorder=None,
     ) -> None:
         if not callable(getattr(store, "put_checkpoint", None)):
             raise TypeError("checkpoint recorder requires a checkpoint store")
         if type(producer) is not ProducerVersionV1 or producer.code_revision == "0" * 40:
             raise ValueError("checkpoint recorder requires an explicit producer revision")
         self.store = store
+        self.trace_recorder = trace_recorder
         self.producer = producer
         self.media_root = Path(media_root).resolve() if media_root is not None else None
         if bank_root is None:
@@ -244,7 +246,12 @@ class A2CheckpointRecorderV1:
         if type(stored) is not IntermediateCheckpointV1:
             return self._result(False, "STORE_INVALID")
         try:
-            record_trace_event(
+            publish = record_trace_event
+            explicit = {}
+            if self.trace_recorder is not None:
+                publish = lambda event_type, **fields: self.trace_recorder.record(event_type=event_type, **fields)
+                explicit = {"trace_id": stored.trace_id, "request_id": stored.request_id}
+            publish(
                 "stage_finished", stage=stored.stage,
                 outcome="error" if stored.outcome == "failed" else stored.outcome,
                 session_key=stored.owner.session_key,
@@ -253,6 +260,7 @@ class A2CheckpointRecorderV1:
                 search_id=stored.owner.search_id,
                 unit_id=stored.owner.unit_id,
                 safe_attributes={"completed": True, "checkpoint_id": stored.checkpoint_id},
+                **explicit,
             )
         except Exception:
             pass

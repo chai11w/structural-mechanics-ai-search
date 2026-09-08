@@ -63,6 +63,9 @@ class SessionArtifacts:
         target = self.session_dir(session_id)
         if target.parent != self.root:
             raise ValueError("refusing to clear a path outside the session artifact root")
+        leases = getattr(self, "checkpoint_resource_leases", None)
+        if leases is not None and leases.clear_session(target):
+            return
         shutil.rmtree(target, ignore_errors=True)
 
     def clear_sessions(self, session_ids: list[str]) -> None:
