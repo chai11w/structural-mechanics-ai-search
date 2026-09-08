@@ -133,6 +133,16 @@ class ModelCostCollector:
 _ACTIVE_COLLECTOR: ContextVar[ModelCostCollector | None] = ContextVar(
     "active_model_cost_collector", default=None
 )
+_RUN_BINDER: ContextVar[Callable[[str], None] | None] = ContextVar("model_run_binder", default=None)
+
+
+@contextmanager
+def model_run_binding(callback):
+    token = _RUN_BINDER.set(callback)
+    try:
+        yield
+    finally:
+        _RUN_BINDER.reset(token)
 
 
 @contextmanager
@@ -189,7 +199,11 @@ def submit_with_model_cost_context(executor: Any, function: Callable, /, *args: 
 def new_run_id() -> str:
     """Return an independent local identity for one model-cost collector."""
 
-    return f"run_{uuid4().hex}"
+    run_id = f"run_{uuid4().hex}"
+    binder = _RUN_BINDER.get()
+    if binder is not None:
+        binder(run_id)
+    return run_id
 
 
 def utc_now() -> str:

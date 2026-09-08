@@ -37,6 +37,7 @@ from tiku_agent.a3_models import (
     A3UnitAnalyzer,
     CropCompareResult,
 )
+from tiku_agent.execution_runtime import execution_entry, execution_snapshot_scope, bind_snapshot_context, delivery_execution_entry
 from tiku_agent.agent import AgentResponse
 from tiku_agent.a3_checkpoint_context import (
     A3CheckpointBindingV1, a3_checkpoint_request_scope, current_a3_checkpoint_binding,
@@ -377,7 +378,7 @@ def _capture_a3_response_snapshot(method: Callable[..., AgentResponse]):
                 )
             raise
 
-    return wrapped
+    return execution_entry(wrapped)
 _A3_MEDIA_RETRY_TEXTS = frozenset({"重试", "再试一次", "重新发送", "再发一次"})
 _CHINESE_ORDINALS = {
     "一": 1,
@@ -2092,7 +2093,7 @@ class A3MvpRuntime:
     ) -> SessionResponseSnapshotV1:
         """Capture one A3/A2 response read-set while A3 is already locked."""
 
-        with self.a2_runtime._lock(session_id):
+        with self.a2_runtime._lock(session_id), execution_snapshot_scope(self):
             workflow_state, workflow_read_status = read_workflow_state_once(
                 self.store,
                 session_id,
@@ -2102,7 +2103,7 @@ class A3MvpRuntime:
                 self.a2_runtime.store,
                 session_id,
             )
-            return self._response_snapshot_v1_from_read_set(
+            snapshot = self._response_snapshot_v1_from_read_set(
                 session_id,
                 workflow_state=workflow_state,
                 workflow_read_status=workflow_read_status,
@@ -2111,6 +2112,7 @@ class A3MvpRuntime:
                 capabilities=capabilities,
                 response_frozen=response_frozen,
             )
+            return bind_snapshot_context(self, session_id, snapshot)
 
     def _response_snapshot_v1_from_read_set(
         self,
@@ -2358,6 +2360,7 @@ class A3MvpRuntime:
             return persisted
         return self.artifacts.persist_media(clean, source)
 
+    @delivery_execution_entry
     def mark_media_delivery_failed(
         self,
         session_id: str,
@@ -2400,6 +2403,7 @@ class A3MvpRuntime:
                 snapshot_target.update(self.session_snapshot(clean))
             return True
 
+    @delivery_execution_entry
     def mark_media_delivery_failed_v1(
         self,
         session_id: str,
@@ -2524,6 +2528,7 @@ class A3MvpRuntime:
     def record_protocol_event(self, *args: Any, **kwargs: Any) -> None:
         self.a2_runtime.record_protocol_event(*args, **kwargs)
 
+    @execution_entry
     def clear(
         self,
         session_id: str,

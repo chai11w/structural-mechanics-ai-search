@@ -1173,6 +1173,26 @@ function isAuthenticationTerminalNoUpdate(envelope) {
     && envelope?.action === 'relogin';
 }
 
+// Phase 5 metadata is accepted only with the same authoritative task envelope.
+let executionContext = null;
+let executionRequired = false;
+function acceptExecutionContext(envelope) {
+  const value = envelope?.execution;
+  if (value?.schema === 1 && /^[0-9a-f]{32}$/.test(value.epoch)
+      && Number.isSafeInteger(value.state_version) && value.state_version >= 0) {
+    executionContext = Object.freeze({ epoch: value.epoch, state_version: value.state_version });
+    executionRequired = true;
+  } else if (executionRequired) {
+    executionContext = null;
+  }
+}
+function applyExecutionHeaders(headers, fence, url) {
+  if (!executionRequired || url === '/api/session' || !isTaskStateRequestPath(url)) return;
+  if (!executionContext || !fence?.id) throw staleSessionActionError();
+  if (!fence.operation) fence.operation = Object.freeze({ key: fence.id, ...executionContext });
+  headers.set('X-Tiku-Operation', JSON.stringify(fence.operation));
+}
+
 function consumeTaskStateResponse(request, envelope, { error = false } = {}) {
   if (request === null || (error && isTaskStateQueueNoUpdate(envelope))) return;
   const accepted = request === activeTaskStateRequest;
@@ -1195,6 +1215,7 @@ function consumeTaskStateResponse(request, envelope, { error = false } = {}) {
       if (projectionAllowed) {
         if (workflow?.route === 'A3') taskStateEnvelopeBindings.set(envelope, target);
         taskStateAcceptedEnvelopes.set(envelope, acceptedGeneration);
+        acceptExecutionContext(envelope);
       } else {
         invalidateTaskStateContext();
       }
@@ -2994,6 +3015,7 @@ async function request(
   const headers = new Headers(options?.headers || {});
   headers.set('x-request-id', requestId);
   applySessionCoordinationHeaders(headers, sessionRequestFence);
+  applyExecutionHeaders(headers, sessionRequestFence, url);
   assertSessionRequestCoordination(sessionRequestFence, url);
   if (track) activeController = controller;
   const timer = setTimeout(() => controller.abort('timeout'), timeoutMs);
@@ -3103,6 +3125,7 @@ async function requestStream(
   const headers = new Headers(options?.headers || {});
   headers.set('x-request-id', requestId);
   applySessionCoordinationHeaders(headers, sessionRequestFence);
+  applyExecutionHeaders(headers, sessionRequestFence, url);
   assertSessionRequestCoordination(sessionRequestFence, url);
   activeController = controller;
   let timer;

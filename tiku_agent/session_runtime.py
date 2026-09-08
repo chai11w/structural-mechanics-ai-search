@@ -15,6 +15,7 @@ from typing import Any, Callable, Protocol
 from zoneinfo import ZoneInfo
 
 from tiku_agent.agent import AgentResponse, TikuSearchAgent
+from tiku_agent.execution_runtime import execution_entry, execution_snapshot_locked
 from tiku_agent.a2_checkpoint_recorder import A2CheckpointRecorderV1
 from tiku_agent.checkpoint_capture import A2CheckpointContextV1
 from tiku_agent.checkpoint_capture_gate import A2CaptureAdmissionV1
@@ -75,6 +76,7 @@ class SessionResponseSnapshotV1:
     task_state: TaskStateSnapshotV1
     submitted_crop_path: Path | None = None
     feedback_overlay_path: Path | None = None
+    execution_context: dict[str, object] | None = None
 
 
 class SessionResponseSnapshotError(RuntimeError):
@@ -378,6 +380,7 @@ class AgentSessionRuntime:
         self._background_image_futures: dict[str, set[Future]] = {}
         self._error_snapshot_capture_local = threading.local()
 
+    @execution_entry
     def handle_image(
         self,
         session_id: str,
@@ -443,6 +446,7 @@ class AgentSessionRuntime:
             task_state_capabilities=task_state_capabilities,
         )
 
+    @execution_entry
     def handle_preanalyzed_image(
         self,
         session_id: str,
@@ -498,6 +502,7 @@ class AgentSessionRuntime:
             progress=progress,
         )
 
+    @execution_entry
     def handle_prechecked_image(
         self,
         session_id: str,
@@ -952,6 +957,7 @@ class AgentSessionRuntime:
             except Exception:
                 pass
 
+    @execution_entry
     def handle_text(
         self,
         session_id: str,
@@ -1116,6 +1122,7 @@ class AgentSessionRuntime:
             ).to_dict(),
         )
 
+    @execution_entry
     def clear(
         self,
         session_id: str,
@@ -1209,6 +1216,7 @@ class AgentSessionRuntime:
                 raise
             return captured
 
+    @execution_snapshot_locked
     def _response_snapshot_v1_locked(
         self,
         session_id: str,

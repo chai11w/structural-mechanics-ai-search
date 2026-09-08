@@ -355,6 +355,18 @@ PROTOCOL_REASONS: dict[str, ProtocolReason] = {
     ),
 }
 
+# Phase 5 errors retain the five-state public protocol. None authorizes replay.
+for _execution_code in (
+    "EXECUTION_CONTEXT_REQUIRED", "EXECUTION_STALE", "EXECUTION_INPUT_CONFLICT",
+    "EXECUTION_BUSY", "EXECUTION_UNKNOWN", "EXECUTION_RESULT_UNAVAILABLE",
+    "EXECUTION_CAPACITY", "EXECUTION_LEASE_LOST", "EXECUTION_CLOCK_ROLLBACK",
+    "EXECUTION_CLOCK_INVALID", "EXECUTION_VERSION_REQUIRED", "EXECUTION_PARENT_INVALID",
+    "EXECUTION_PARENT_CHANGED", "EXECUTION_PARENT_INPUT_UNAVAILABLE",
+    "EXECUTION_PARENT_INPUT_MISMATCH", "EXECUTION_IDENTITY_INVALID",
+):
+    PROTOCOL_REASONS[_execution_code] = ProtocolReason(RequestStatus.ERROR, RequestLayer.SESSION, False)
+
+
 
 @dataclass(frozen=True)
 class RequestProtocol:

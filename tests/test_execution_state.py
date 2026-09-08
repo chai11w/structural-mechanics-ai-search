@@ -190,12 +190,20 @@ class ExecutionStateTests(unittest.TestCase):
         tools.analyze_image = lambda *a,**kw: ToolResult(ok=True,data={"loads":[{"type":"集中","raw":"P"}],"chapter_hint":"4力法"})
         a2 = AgentSessionRuntime(self.child, artifacts=SessionArtifacts(self.root/"a2"),
             agent_factory=lambda state:TikuSearchAgent(state=state,tools=tools,use_llm_intent=False))
-        self.assertEqual(a2.handle_image("single",self.image).state["phase"],"WAIT_CANDIDATE_CHOICE")
+        from tiku_agent.execution_runtime import attach_execution
+        from tiku_agent.execution_operations import OperationRequest
+        from uuid import uuid4
+        def request(sid):
+            ctx=self.authority.context(sid)
+            return OperationRequest(uuid4().hex,ctx["epoch"],ctx["state_version"])
+        attach_execution(a2,self.authority)
+        self.assertEqual(a2.handle_image("single",self.image,operation_request=request("single")).state["phase"],"WAIT_CANDIDATE_CHOICE")
         a3 = A3MvpRuntime(store=self.parent,artifacts=SessionArtifacts(self.root/"a3"),
             a2_runtime=a2,page_observer=FakeObserver(),crop_verifier=FakeVerifier())
-        a3.handle_image("multi",self.image)
-        a3.select_unit("multi","g1-u1")
-        a3.handle_crop("multi",{"x":0,"y":0,"width":1,"height":1},unit_id="g1-u1")
+        attach_execution(a3,self.authority)
+        a3.handle_image("multi",self.image,operation_request=request("multi"))
+        a3.select_unit("multi","g1-u1",operation_request=request("multi"))
+        a3.handle_crop("multi",{"x":0,"y":0,"width":1,"height":1},unit_id="g1-u1",operation_request=request("multi"))
         children = [t for t in self.authority.tasks("multi") if t["kind"]=="child"]
         self.assertEqual(len(children),1)
         self.assertEqual(children[0]["unit_id"],"g1-u1")

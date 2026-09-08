@@ -15,6 +15,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import time
+import threading
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -31,6 +32,7 @@ class ExecutionPolicy:
     epoch_max_age: int = 30 * 86400
     history_ttl: int = 30 * 86400
     lease_seconds: int = 300
+    max_execution_seconds: int = 1800
     max_sessions: int = 10000
     max_tasks: int = 100000
     max_operations: int = 100000
@@ -72,6 +74,7 @@ def session_key(session_id: str) -> str:
 _READS: ContextVar[dict[tuple[str, str, str], StateVersion]] = ContextVar("execution_state_reads", default={})
 # Installed by the execution coordinator in 5.3. Kept out of persisted JSON.
 _WRITER: ContextVar[Any] = ContextVar("execution_writer", default=None)
+_TRANSACTION: ContextVar[Any] = ContextVar("execution_transaction", default=None)
 
 
 def inherit_state_version(source, target):
@@ -126,15 +129,23 @@ class ExecutionStore:
             migration = conn.execute("SELECT value FROM execution_meta WHERE key='migration'").fetchone()
             if migration is not None and migration[0] != "complete":
                 raise ExecutionError("EXECUTION_MIGRATION_INCOMPLETE")
+            enabled = conn.execute("SELECT value FROM execution_meta WHERE key='execution_enabled'").fetchone()
+            self.require_writer = bool(enabled and enabled[0] == "1")
 
     @contextmanager
     def transaction(self):
+        current = _TRANSACTION.get()
+        if current is not None and current[:2] == (str(self.path), threading.get_ident()):
+            yield current[2]
+            return
         conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
         conn.row_factory = sqlite3.Row
+        token = None
         try:
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("BEGIN IMMEDIATE")
+            token = _TRANSACTION.set((str(self.path), threading.get_ident(), conn))
             yield conn
             if conn.in_transaction:
                 conn.commit()
@@ -143,6 +154,8 @@ class ExecutionStore:
                 conn.rollback()
             raise
         finally:
+            if token is not None:
+                _TRANSACTION.reset(token)
             conn.close()
 
     def clock(self, conn) -> float:
@@ -162,8 +175,11 @@ class ExecutionStore:
             raise ValueError("unknown capacity table")
         if conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] >= limit:
             raise ExecutionError("EXECUTION_CAPACITY")
+        self.storage_capacity()
+
+    def storage_capacity(self, extra=0):
         size = sum(p.stat().st_size for p in (self.path, Path(str(self.path) + "-wal")) if p.exists())
-        if size >= self.policy.max_database_bytes or shutil.disk_usage(self.path.parent).free < self.policy.min_free_bytes:
+        if size + extra >= self.policy.max_database_bytes or shutil.disk_usage(self.path.parent).free < self.policy.min_free_bytes + extra:
             raise ExecutionError("EXECUTION_CAPACITY")
 
     def _session(self, conn, key: str, now: float, *, create=False):
@@ -184,6 +200,8 @@ class ExecutionStore:
             now = self.clock(conn)
             row = self._session(conn, key, now, create=True)
             if not self._valid_session(row, now):
+                if self.writer_required(conn) and conn.execute("SELECT 1 FROM execution_operations WHERE session=? AND epoch=? AND status IN ('RUNNING','UNKNOWN') LIMIT 1",(key,row["epoch"])).fetchone():
+                    return {"schema":1,"epoch":row["epoch"],"state_version":row["version"],"expires_at":row["expires"]}
                 self._rotate(conn, key, now)
                 row = self._session(conn, key, now)
             return {"schema": 1, "epoch": row["epoch"], "state_version": row["version"],
@@ -207,10 +225,16 @@ class ExecutionStore:
             epoch = self._rotate(conn, key, now)
         return epoch
 
+    def writer_required(self, conn):
+        if not self.require_writer:
+            enabled = conn.execute("SELECT value FROM execution_meta WHERE key='execution_enabled'").fetchone()
+            self.require_writer = bool(enabled and enabled[0] == "1")
+        return self.require_writer
+
     def check_writer(self, conn, key, epoch, now):
         writer = _WRITER.get()
         if writer is None:
-            if self.require_writer:
+            if self.writer_required(conn):
                 raise ExecutionError("EXECUTION_CONTEXT_REQUIRED")
             return
         writer.validate(conn, self, key, epoch, now)
@@ -236,6 +260,7 @@ class ExecutionStore:
         encoded = canonical(payload)
         if len(encoded.encode()) > self.policy.max_state_bytes:
             raise ExecutionError("EXECUTION_CAPACITY")
+        self.storage_capacity(extra=2 * len(encoded.encode()))
         with self.transaction() as conn:
             now = self.clock(conn)
             session = self._session(conn, key, now, create=True)
@@ -298,12 +323,19 @@ class ExecutionStore:
                     input_version = digest({"content": source_hash, "bounds": crop.get("bounds", {})})
         old = conn.execute("SELECT * FROM execution_tasks WHERE session=? AND epoch=? AND kind=? AND task_id=? AND task_revision=?", (key, epoch, kind, task_id, revision)).fetchone()
         if old:
-            if (old["parent_id"], old["unit_id"], old["input_version"]) != (parent_id, unit_id, input_version):
+            record_id = old["id"]
+            if kind == "child" and (old["parent_id"], old["unit_id"], old["input_version"]) != (parent_id, unit_id, input_version):
                 raise ExecutionError("EXECUTION_PARENT_CHANGED")
             conn.execute("UPDATE execution_tasks SET phase=?,state_version=?,updated=? WHERE id=?", (payload.get("phase", ""), version, now, old["id"]))
         else:
             self.capacity(conn, "execution_tasks", self.policy.max_tasks)
-            conn.execute("INSERT INTO execution_tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (uuid4().hex, key, epoch, kind, task_id, revision, parent_id, unit_id, input_version, origin, payload.get("phase", ""), version, now, now))
+            record_id = uuid4().hex
+            conn.execute("INSERT INTO execution_tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (record_id, key, epoch, kind, task_id, revision, parent_id, unit_id, input_version, origin, payload.get("phase", ""), version, now, now))
+        writer = _WRITER.get()
+        if self.require_writer and writer is not None:
+            conn.execute("INSERT INTO execution_task_attempts VALUES (?,?,?,?) "
+                         "ON CONFLICT(task_record_id,attempt_id) DO UPDATE SET last_state_version=excluded.last_state_version",
+                         (record_id, writer.attempt_id, version, version))
 
     def clear(self, session_id: str, kind: str):
         key = session_key(session_id)

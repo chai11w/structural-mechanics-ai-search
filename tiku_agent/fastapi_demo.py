@@ -35,6 +35,9 @@ from tiku_agent.intent_contract import CHAPTERS
 from tiku_agent.invite_access import InviteAccess, InviteIdentity
 from tiku_agent.output_watchdog import observe_output, observe_public_output
 from tiku_agent.session_artifacts import session_key
+from tiku_agent.execution_runtime import (MUTATION_PATHS, OPERATION_HEADER, operation_request_scope, execution_message, delivery_context)
+from tiku_agent.execution_operations import OperationRequest
+from tiku_agent.execution_store import ExecutionError
 from tiku_agent.session_runtime import (
     AgentBudgetExceededError,
     AgentProtocolError,
@@ -984,6 +987,9 @@ def create_app(
 
     @app.exception_handler(AgentProtocolError)
     async def protocol_error(request: Request, exc: AgentProtocolError) -> JSONResponse:
+        status_code = 500
+        if exc.code.startswith("EXECUTION_"):
+            status_code = 503 if exc.code in {"EXECUTION_CAPACITY", "EXECUTION_CLOCK_INVALID", "EXECUTION_CLOCK_ROLLBACK"} else 409
         response_snapshot = _exception_response_snapshot(exc)
         response_task_state_snapshot = _exception_task_state_snapshot(exc)
         response_search_id = str(
@@ -997,7 +1003,7 @@ def create_app(
             request,
             str(exc),
             protocol,
-            status_code=500,
+            status_code=status_code,
             headers={"Cache-Control": "no-store"},
             error_kind=type(exc).__name__,
             response_snapshot=response_snapshot,
@@ -1121,7 +1127,26 @@ def create_app(
                         result = RedirectResponse(target, status_code=303)
                         _record_generic_terminal(result.status_code)
                         return result
-                result = await call_next(request)
+                phase5 = getattr(runtime, "execution_operations", None)
+                if phase5 is not None and existing_session and not request.url.path.startswith('/api/invite/'):
+                    try:
+                        phase5.verify_owner(existing_session, _identity_key(request) or "local")
+                    except ExecutionError:
+                        return request_protocol_response(request, execution_message("EXECUTION_STALE"),
+                            RequestProtocol.from_code("EXECUTION_STALE", request_id=_request_id(request)), status_code=409)
+                if phase5 is not None and request.url.path in MUTATION_PATHS and request.method == "POST":
+                    raw = request.headers.get(OPERATION_HEADER, "")
+                    try:
+                        if len(raw) > 1024:
+                            raise ExecutionError("EXECUTION_CONTEXT_REQUIRED")
+                        operation = OperationRequest.parse(json.loads(raw))
+                    except (ValueError, TypeError, ExecutionError):
+                        return request_protocol_response(request, execution_message("EXECUTION_CONTEXT_REQUIRED"),
+                            RequestProtocol.from_code("EXECUTION_CONTEXT_REQUIRED", request_id=_request_id(request)), status_code=409)
+                    with operation_request_scope(operation, _identity_key(request) or "local"):
+                        result = await call_next(request)
+                else:
+                    result = await call_next(request)
                 result.headers["Content-Security-Policy"] = (
                     "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; "
                     "script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'"
@@ -1686,6 +1711,16 @@ def create_app(
             task_state_capabilities=capabilities,
         )
 
+    def phase5_registered(request: Request, session_id: str) -> bool:
+        operations = getattr(runtime, "execution_operations", None)
+        if operations is None:
+            return False
+        try:
+            envelope = OperationRequest.parse(json.loads(request.headers.get(OPERATION_HEADER, "")))
+            return operations.lookup(session_id, _identity_key(request) or "local", envelope) is not None
+        except (ValueError, TypeError, ExecutionError):
+            return False
+
     async def run_coordinated_json_task(
         request: Request,
         coordination: _SessionCoordinationHeaders,
@@ -1710,7 +1745,7 @@ def create_app(
                     request,
                     _coordination_completed_fences(coordination),
                 )
-                if admitted:
+                if admitted or phase5_registered(request, session_id):
                     return execute()
                 return coordination_stale_json_response(
                     request,
@@ -1749,7 +1784,7 @@ def create_app(
                         completed_fences,
                     )
                     crossed_boundary.set()
-                if admitted:
+                if admitted or phase5_registered(request, session_id):
                     return execute(progress)
                 stale = coordination_stale_response(
                     session_id,
@@ -1835,7 +1870,7 @@ def create_app(
                             request,
                             _coordination_completed_fences(coordination),
                         )
-                    if not admitted:
+                    if not admitted and not (request.method == "POST" and phase5_registered(request, session_id)):
                         return coordination_http_rejection(
                             request,
                             session_id,
@@ -1906,6 +1941,10 @@ def create_app(
             setattr(exc, "response_snapshot", dict(captured.legacy_session))
             setattr(exc, "response_task_state_snapshot", captured.task_state)
             raise
+        operations = getattr(runtime, "execution_operations", None)
+        if operations is not None:
+            payload["execution"] = dict(captured.execution_context)
+            operations.verify_owner(session_id, _identity_key(request) or "local", claim=True)
         result = JSONResponse(payload)
         _set_session_cookie(
             result,
@@ -1914,6 +1953,21 @@ def create_app(
             cookie_name=session_cookie,
         )
         return result
+
+    @app.get("/api/operation")
+    def operation_status(request: Request, key: str, epoch: str) -> JSONResponse:
+        operations = getattr(runtime, "execution_operations", None)
+        session_id = str(request.cookies.get(session_cookie) or "").strip()
+        if operations is None or not session_id:
+            raise HTTPException(status_code=404, detail="operation not found")
+        try:
+            envelope = OperationRequest.parse({"key": key, "epoch": epoch, "state_version": 0})
+            result = operations.observe(session_id, _identity_key(request) or "local", envelope)
+        except ExecutionError:
+            raise HTTPException(status_code=400, detail="invalid operation identity") from None
+        if result is None:
+            raise HTTPException(status_code=404, detail="operation not found")
+        return JSONResponse({"operation": result})
 
     @app.post("/api/message")
     async def message(request: Request) -> Response:
@@ -2171,8 +2225,16 @@ def create_app(
             setattr(exc, "response_snapshot", {"session_valid": False})
             setattr(exc, "response_task_state_snapshot", reset_task_state)
             raise
+        operations = getattr(runtime, "execution_operations", None)
+        if operations is not None and session_id:
+            row = operations.lookup(session_id, _identity_key(request) or "local",
+                                    OperationRequest.parse(json.loads(request.headers[OPERATION_HEADER])))
+            reset_payload["execution"] = json.loads(row["result"])["context"]
         result = JSONResponse(reset_payload)
-        result.delete_cookie(session_cookie, secure=_is_secure_request(request), httponly=True, samesite="lax")
+        if operations is not None and session_id:
+            _set_session_cookie(result, session_id, secure_cookie=_is_secure_request(request), cookie_name=session_cookie)
+        else:
+            result.delete_cookie(session_cookie, secure=_is_secure_request(request), httponly=True, samesite="lax")
         return result
 
     @app.post("/api/image")
@@ -2846,6 +2908,8 @@ def _protocol_json_response(
 
 def _public_protocol_message(protocol: RequestProtocol) -> str:
     """Return catalog text for an API-bound protocol error."""
+    if protocol.code.startswith("EXECUTION_"):
+        return execution_message(protocol.code)
 
     message = _PUBLIC_PROTOCOL_MESSAGES.get(protocol.code)
     if message:
@@ -3740,6 +3804,9 @@ def _build_agent_payload(
         dimensions["response_id"] = record.response_id
     bind_trace_event_dimensions(**dimensions)
 
+    if getattr(response, "execution_context", None) is not None:
+        payload["execution"] = dict(delivery_context() or response.execution_context)
+        payload["operation"] = dict(getattr(response, "execution_receipt", {}))
     return payload
 
 
@@ -4449,7 +4516,7 @@ def _validate_action_context(
     task_state_capabilities: TaskStateEntryCapabilities | None = None,
 ) -> AgentResponse | None:
     """Reject a button action unless the frozen V1 child explicitly authorizes it."""
-    if raw_context is None:
+    if raw_context is None or getattr(runtime, "execution_operations", None) is not None:
         return None
     captured = (
         runtime.session_response_snapshot_v1(
