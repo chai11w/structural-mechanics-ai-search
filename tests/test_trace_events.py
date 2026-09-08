@@ -26,6 +26,8 @@ from tiku_shared.trace_events import (
     TraceEventCapacityError,
     TraceEventRecorder,
     TraceEventValidationError,
+    TraceEventMaintenanceError,
+    _trace_writer_maintenance_lock,
     bind_trace_event_dimensions,
     current_trace_event_session,
     new_event_id,
@@ -38,6 +40,28 @@ from tiku_shared.trace_events import (
 
 
 class TraceEventStoreTest(unittest.TestCase):
+    def test_background_writer_waits_for_brief_maintenance_without_losing_event(self):
+        recorder, store = self.make_recorder()
+        context = TraceContext.create()
+        with _trace_writer_maintenance_lock(store.path):
+            recorder.record(trace_id=context.trace_id, event_type="stage_started", stage="test", outcome="started")
+            Event().wait(0.05)
+            self.assertEqual(recorder.health()["written"], 0)
+        self.assertTrue(recorder.flush(timeout=2))
+        self.assertEqual(recorder.health()["written"], 1)
+        self.assertEqual(recorder.health()["dropped"], 0)
+
+    def test_persistent_maintenance_is_bounded_and_direct_writes_remain_nonblocking(self):
+        recorder, store = self.make_recorder()
+        context = TraceContext.create()
+        with _trace_writer_maintenance_lock(store.path):
+            with self.assertRaises(TraceEventMaintenanceError):
+                store.write(self.make_event(context.trace_id, "2026-08-01T00:00:00Z"))
+            recorder.record(trace_id=context.trace_id, event_type="stage_started", stage="test", outcome="started")
+            self.assertTrue(recorder.flush(timeout=1))
+            self.assertEqual(recorder.health()["write_failures"], 1)
+            self.assertEqual(recorder.health()["written"], 0)
+
     def make_directory(self) -> Path:
         directory = (
             Path(__file__).resolve().parents[1]

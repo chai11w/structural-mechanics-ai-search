@@ -6,6 +6,7 @@ from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import errno
 import hashlib
 import json
 import os
@@ -16,7 +17,7 @@ import secrets
 import sqlite3
 import stat
 from threading import Condition, Event, Lock, Thread, current_thread
-from time import monotonic
+from time import monotonic, sleep
 from types import MappingProxyType
 from typing import Any, Iterator, Mapping
 from uuid import uuid4
@@ -26,6 +27,7 @@ from tiku_shared.trace_context import current_request_id, current_trace_id, is_v
 from tiku_shared.evidence_io_budget import (
     EvidenceRLock, check_evidence_budget, evidence_io_budget,
     evidence_sqlite_timeout, configure_evidence_connection,
+    current_evidence_budget,
 )
 
 
@@ -311,8 +313,9 @@ def _trace_writer_maintenance_lock(path: str | Path, *, filename=TRACE_MAINTENAN
     """Take the retention fence without ever waiting on a user request.
 
     The retention coordinator owns the same lock file for the duration of an
-    apply.  A trace writer therefore either obtains the short-lived lock or
-    fails open immediately; it must never hold up the request thread.
+    apply. Budgeted background Trace writes may wait up to 250 ms for a short
+    maintenance run. Synchronous callers and capture admission still fail
+    immediately, and the existing operation deadline/cancellation remains in force.
     """
 
     path = _trace_absolute_path(path)
@@ -338,18 +341,27 @@ def _trace_writer_maintenance_lock(path: str | Path, *, filename=TRACE_MAINTENAN
             stream.write(b"0")
             stream.flush()
         stream.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
+        budget = current_evidence_budget.get()
+        wait_seconds = min(0.25, budget.remaining()) if budget is not None and filename == TRACE_MAINTENANCE_LOCK_FILENAME else 0
+        deadline = monotonic() + wait_seconds
+        while True:
+            check_evidence_budget()
+            try:
+                if os.name == "nt":
+                    import msvcrt
 
-                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
 
-                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            locked = True
-        except (OSError, BlockingIOError) as exc:
-            raise TraceEventMaintenanceError("trace maintenance fence is active") from exc
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except (OSError, BlockingIOError) as exc:
+                remaining = deadline - monotonic()
+                if remaining <= 0 or exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise TraceEventMaintenanceError("trace maintenance fence is active") from exc
+                sleep(min(0.01, remaining))
         yield
     finally:
         if locked:
