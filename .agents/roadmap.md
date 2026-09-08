@@ -6,10 +6,10 @@
 
 ## Current Priority
 
-- 工程化梳理优先于新增自主功能：阶段 3.1～3.4 已完成并合入 `codex/mainline-bounded-autonomy-v1`，A2/A3 动作均由 branded V1 `allowed_actions` 授权并绑定 identity/revision/target；busy/queue 拒绝保持无状态，仍不动 8788/8794，也不提前混入阶段结果或暂停/继续。
-- 主阶段 3 已完成并启用到 8790。3.5.3 只读 live 对照因旧服务缺少固定 release/manifest 和可信回退锚点而正确阻断；用户随后明确授权本次限定 remediation 与精确启用。8790 现由固定干净 release、完整提交和 manifest 启动，计划任务、watchdog→agent→listener、1/2/55、control 引用、回退/备份、完整 watchdog 周期和真实浏览器静态资源均通过；release hardening 全仓 1221 项通过，8788/8794/8795 监听身份前后不变。
-- 3.5.4 后续 refresh-recovery 热修复已实现、推送并以固定 release 部署，全仓 1222 项通过；NATAPP 公网可加载 `20260901-refresh-recovery-v2` 且 `/health` 正常，但真实已登录 `/api/session` 恢复尚未完成。用户现继续实际试用并收集问题；热修复 live acceptance 仍延期，现有 3.5.3/3.5.4 历史状态不回退。
-- 8790 网页已由 A3-V1 接管业务内核并继续使用 8795 控制库邀请码；费用、反馈汇总、动态额度和旧并发队列下一轮恢复。
+- 截至 2026-09-08，工程化主阶段 1～4 已完成；阶段 4 及新优化 4.5.1～4.5.5 已合入本地主线 `codex/mainline-bounded-autonomy-v1`，8790 固定发布 `066c967028b32dbf565ff4ec0f1952a16564fafb` 已显式启用 A2/A3 Checkpoint。本次未推送远端，后续文档提交不等于生产代码升级。
+- 当前重点是用真实样本验证可诊断性：已覆盖单题、多题、选题和答案的五个生产请求，33/33 Checkpoint 成功且 Trace/unit 归属一致；在此基础上继续收集失败记录，不自动推进阶段 5/6 或暂停/继续。
+- 8790 已使用 8795 控制库，统一计费、反馈、动态额度及 1 运行/2 排队/55 秒队列均保留；固定 release/manifest、看门狗身份链、备份和精确回退继续作为发布边界。
+- 阶段 3 的 V1 快照、branded 动作授权及 refresh-recovery 实现已随主线保留；本轮生产验收不扩大为所有浏览器恢复场景均已通过，历史分批验收记录仍按当时范围解释。
 - 8896 保留同内核验收，8897 暂留独立回退；当前重点是 8790 真实样本验收和失败记录收集。Paddle 试验结论保留，不再作为当前阻塞项。
 - 8794 影子规划及有限自主阶段暂停排期；待 8892 固定流程、取消语义和验收样本稳定，且真实失败记录证明固定编排不足后再恢复。
 - 网页产品化复用 8790 已验证能力；生产部署必须使用独立服务器配置与运行状态，不直接公开本机端口，也不影响现有飞书和本地服务。
@@ -50,7 +50,7 @@
 
 - Planner 结构化计划、权限契约、有界执行、选择性自主等阶段在 8892 验证完成前暂停；恢复前以 8890 规范文档的验收门为准。
 
-### 当前（阶段 4 DONE / DEFAULT OFF）：关键阶段结构化保存与证据生命周期
+### 当前（阶段 4 DONE / 8790 ENABLED）：关键阶段结构化保存与证据生命周期
 
 目标是降低现有系统的理解成本、排错成本和改动风险；不以暂停/继续为理由一次性重写主线。各阶段按依赖顺序推进，前一阶段稳定后才进入下一阶段：
 
@@ -68,15 +68,26 @@
    - 3.5.3 只读 live 对照：DONE，结论为 BLOCKED。静态证据确认旧启动链/watchdog 从可变主工作区启动，不能证明实际提交，且缺少固定 release/manifest 和匹配回退锚点；按原安全边界停止并重新确认，没有把仓库 HEAD 当作线上证据。
    - 3.5.4 remediation 与精确启用 8790：DONE。用户随后明确授权本次限定 remediation 与精确启用后，watchdog 强制完整提交、manifest、干净 linked checkout、绝对入口/Python/runtime 和每次启动复验，并修复 Limited 任务环境下中文 Git 路径解析。受限备份包含 Git bundle、任务 XML、8 份 SQLite 在线一致副本及 control key 配对；精确切换后任务 Running、父子链/唯一 listener/1/2/55/control 引用、health/Trace 和完整巡检周期均通过。真实浏览器邀请页无控制台错误或横向溢出，Web Lock 可用，live `task_state.js` 哈希与 release 一致；8788/8794/8795 监听身份前后不变。
    - 3.5.4 后续 refresh-recovery 热修复：IMPLEMENTED，LIVE ACCEPTANCE DEFERRED。启动/重连只经权威 `/api/session` 对账，bootstrap 超时 15 秒；瞬时错误保留 pending fence、只给 `retry_connection`，成功对账清除临时 recovery notice，cache-buster 为 `20260901-refresh-recovery-v2`。固定 release、受限备份、NATAPP watchdog 持久化和全仓 1222 项回归已完成，但真实已登录会话恢复仍未闭环；用户现继续实际试用。本项不改变 V1，也不涉及 8888。
-4. **关键阶段结构化保存中间结果（DONE / DEFAULT OFF）**：已完成有界、可审计、可过期的 Checkpoint/Artifact 证据链及隔离验收；不替代 Task State，不授权动作或恢复执行。A2/A3 生产采集尚未启用，部署须另行按 runbook 验证容量、retention 和完整提交。
-   - 4.1 Checkpoint V1 契约与现状盘点：DONE。冻结 `trace_id -> checkpoint_id -> artifact_id` 关系、九阶段模型、父子 revision、字段白名单、候选分数截断、失败语义和隐私边界；普通结构化 Checkpoint 30 天，普通/失败图片 3/7 天，反馈/调查证据默认 30 天并最多延长至 365/90 天，禁止永久 hold。部署配置必须显式提供 Checkpoint/Artifact/证据审计/Trace 行数、Artifact 总字节、磁盘最小余量和单 Checkpoint Artifact 数七项容量参数；证据审计不含 8795 控制库管理员审计。4.1 只有纯数据契约与测试，无 Store/I/O，也未接 A2/A3 runtime 或生产采集；33 项契约及全仓 1274 项回归通过。
-   - 4.2 存储生命周期与容量门：DONE / A2-A3 CAPTURE GATE READY。已实现独立 Checkpoint/Artifact Store、可信 TTL 与过期读取拒绝、七项写前容量门、证据审计有限轮转及清理写入余量、周期 retention plan/apply、孤儿清理与审计，并补齐批准范围内的 Trace 周期清理；容量满时停止新增诊断证据、搜索继续且健康状态降级。定向 62 项及全仓回归通过。4.2 不接入 A2/A3 自动 Checkpoint 采集；4.3/4.4 仍须另行受控开发和启用。
-   - 4.3 A2 单题采集：DONE / DEFAULT OFF。已接入实际上传、单题分流、题目理解、粗筛/尺寸、复筛、答案与失败边界，包含全局搜索内部阶段、真实回退计数、跨请求受权前驱及提交后 Trace 关联。Recorder、启动开关和生产提交校验默认关闭，复用 4.2 容量/retention；隔离真实 Store 串联与回归通过，未部署或重启生产。health、登录、配额/队列拒绝和媒体 GET 不创建记录；A3 unit 自动采集留待 4.4。实现范围和验证见 [`4.3 runbook`](../docs/checkpoint_phase4_3_runbook.md)。
-   - 4.4 A3 父子采集：DONE / DEFAULT OFF。已保存实际上传/路由、整页理解、unit、bbox、裁图及六项/外荷载校验；单题自动下行、多题并发校验、人工裁剪和失败回退均接入，子 A2 通过请求内可信父身份分别绑定父子 revision，并受权复用父 unit 的 Artifact 和前驱。Store 对图片物理去重，重复引用不续期；默认关闭的 A3 开关要求 A2、4.2 容量/retention 和干净完整提交。新增 23 项及全仓 1383 项回归通过，未部署或重启生产。范围及边界见 [`4.4 runbook`](../docs/checkpoint_phase4_4_runbook.md)。
-   - 4.5 诊断读取与阶段验收：DONE / LOCAL OPERATOR。新增受审计的 Trace/identity 发现、session/workflow revision 范围查询、完整 Checkpoint、受权 Artifact 和有界前驱链；旧诊断入口只增加合法 Checkpoint ID 投影。人工延长/删除经 15 分钟计划、精确哈希、仓库外有界备份和事务内目标/Store/期限检查，有限调查/反馈类别变更不重写结果；物理清理或回执失败准确报告已提交状态。A3 九阶段、standalone A2 六阶段贯通，脱敏、截断、过期、容量压力、证据写入 fail-open、读取/管理 fail-closed 和输出/排序等价已验收。新增 29 项、联合 72 项及全仓 1412 项通过，未部署或重启生产。命令、权限和备份边界见 [`4.5 runbook`](../docs/checkpoint_phase4_5_runbook.md)。
+4. **关键阶段结构化保存中间结果（DONE / 8790 ENABLED）**：Checkpoint/Artifact 证据链、生命周期、异步采集和隔离验收均完成，8790 已受控启用 A2/A3；不替代 Task State，不授权动作或恢复执行。源码开关默认仍关闭，生产通过固定 manifest 和任务显式开启。
+   - 4.1 Checkpoint 契约：DONE。冻结九阶段、父子 revision、输入指纹、字段白名单、候选分数截断和隐私边界；结构化记录 30 天、普通/失败图片 3/7 天，反馈/调查最多 365/90 天，无永久 hold。后续 schema 2 扩展题库引用，新读取器兼容 schema 1 Artifact；见 [契约](../docs/checkpoint_v1_contract.md)。
+   - 4.2 存储生命周期与容量门：DONE。独立 Store、可信 TTL、七项容量门、有限审计、周期 retention plan/apply、孤儿清理、SQLite 在线备份和共享维护锁已启用；容量满拒绝新增证据并降级健康，业务继续，不在采集请求内大批清理。
+   - 4.3 A2 单题采集：DONE / 8790 ENABLED。记录上传、分流、题目理解、荷载/章节/尺寸、粗筛/尺寸筛选计数、复筛候选排名分数、答案与失败边界，保留跨请求受权前驱及提交后 Trace 关联；health、登录、配额/队列拒绝和媒体 GET 不创建 Checkpoint。见 [4.3 runbook](../docs/checkpoint_phase4_3_runbook.md)。
+   - 4.4 A3 父子采集：DONE / 8790 ENABLED。记录原图/路由、整页理解、unit、bbox、裁图与校验；覆盖单题自动下行、多题并发、人工裁剪和失败回退。子 A2 精确绑定父子 revision/unit，Artifact 物理去重且不续期；A3 开关要求 A2。见 [4.4 runbook](../docs/checkpoint_phase4_4_runbook.md)。
+   - 4.5 诊断读取与阶段验收：DONE / LOCAL OPERATOR。提供受范围、TTL 和审计约束的发现、完整记录、Artifact/题库引用及有界前驱链查询；人工延长/删除仍需限时计划、精确哈希、仓库外备份与事务检查。九阶段链、脱敏、截断、过期、容量、业务等价和失败隔离均已验收；见 [原 4.5 runbook](../docs/checkpoint_phase4_5_runbook.md)，其中未上线描述属于当时批次。
+   - 新优化 4.5.1～4.5.5：全部 DONE。依次完成方案/验收冻结、题库引用与不可变输入/裁图、有界异步单消费者、等待预算/熔断/有限停机、真实图片压力验收；详见 [优化计划及结果](../docs/checkpoint_optimization_phase4_5.md)，与原 4.5 诊断批次区别编号。请求侧仅冻结和入队，提交后才关联 Trace；正常隔离样本 2850 阶段无丢失，极端连续突发达到队列上限会拒绝证据，不能承诺任意负载完整留存。
 5. **幂等执行与父子任务控制（PLANNED）**：统一任务版本、幂等键、执行锁和 A3→A2 父子生命周期，避免重复点击、网络重试或恢复造成重复执行和重复计费。
 6. **长任务与 HTTP 流逐步解耦（PLANNED）**：让后台任务持有执行生命周期，HTTP/updates 流只负责提交、观察和控制；页面刷新或连接断开不再等于任务状态丢失。
 7. **暂停/继续（DEFERRED）**：只有前述能力稳定且真实数据证明需求存在时，才在安全阶段边界实现 `PAUSE_REQUESTED → PAUSED → RESUMING`；已发出的模型调用不承诺中途冻结。
+
+#### 阶段 4 主线发布与生产验收（2026-09-08）
+
+- 原开发分支 `codex/phase4-checkpoint-contract-v1` 已完成；经隔离集成分支合入本地主线，保留主线已有后台 Trace 诊断和运营概览。合并提交 `d4d3922`，最终生产修复及验收基线 `066c967028b32dbf565ff4ec0f1952a16564fafb`；本次未推送，8795 进程未重启。
+- 8790 使用固定干净 linked checkout `.worktrees/8790-release-066c967`；runtime `.tmp_tiku_agent_v2_prod_8790`、8795 控制库与原会话不变。计划任务 `Tiku Agent Web 8790` 转发 A2/A3 采集开关和已验证的完整 release commit；同仓 Git common-dir 校验允许 release 使用主工作区既有 runtime。
+- 发布修复了启动维护竞争导致的 Trace 丢弃：维护占锁时保留事件，最多等待 30 秒并响应关闭取消，真正数据库写入仍受 500 ms 预算约束；不重试不确定提交，健康暴露 `maintenance_waiting`。证据单消费者队列含在途最多 128 项、8 MiB、120 秒，满队列明确拒绝，不同步回退。
+- 生产显式容量为 Checkpoint/Artifact 各 10 万行、证据审计 50 万行、Trace 100 万行、图片 10 GiB、磁盘保留 20 GiB、每条最多 20 个 Artifact；每小时维护、保留 3 轮维护备份。该配置属于本次生产 manifest，不是隔离测试容量或源码默认值。
+- 最终全量 **1466 项测试通过**；生产数据库副本冷启动、旧 Trace identity 迁移、维护及认证边界通过。真实维护上传 9/9 Checkpoint 成功；随后用户五个已完成请求共 **33/33 成功**，含单题上传/答案、九图多题页、选择 `g1-u1` 检索/答案，Trace ID 集合及 stage/unit 归属完全一致，12 个不同原图/裁图 Artifact 可读。核验窗口健康正常、无采集失败/丢弃/积压或 Trace 丢失；不代表后续请求或任意负载承诺。
+- 题库候选/答案保存当前位置引用，历史查询读取当前文件；原图与不可变裁图保存 Artifact。当前缺少逐候选尺寸淘汰明细和复筛解释全文；合并诊断预览最多 100 行，长 Trace 须缩小范围核对，预览截断不等于存储丢失。生产请求总耗时未做新的开关对照，不能当成采集增量。
+- [发布与回退报告](F:/cc/_backups/7-题库检索/2026-09-08/phase4-mainline-8790-release/report.md) 保存固定版本、任务 XML、Git bundle、8 库在线备份及配套校验；[用户实测报告](F:/cc/_backups/7-题库检索/2026-09-08/phase4-mainline-8790-release/user-verification-1650/report.md) 保存逐请求核验范围。此次采用受控的一次性发布流程，可复用计划任务发布器仍未实现。8788、8795、8896、8902 进程保持不变。
 
 第 2 主阶段固定拆成 5 个小批次，避免把观测、修错和后台重构一次混做：
 
