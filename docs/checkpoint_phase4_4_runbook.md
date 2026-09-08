@@ -24,6 +24,9 @@
   不伪造模型 bbox。校验保留固定六项检查和 `not_run/not_configured/yes/no/error` 外荷载状态。
 - 并发校验每完成一个 unit 即采集其结果；前驱按 unit 查找，不将另一题的裁图串入本题。
   校验拒绝保持 `needs_input`，模型/写图失败只保存稳定 code，不保存异常正文。
+- 并发裁图任务使用独立 Trace 维度，模型调用开始、结束及费用事件携带该题的 `unit_id`
+  和父 `workflow_search_id`，此时尚无子搜索，`search_id` 为空。任务退出后恢复父上下文；
+  各任务共用请求结束事件的去重状态。Checkpoint 关联事件以已保存记录的 owner 显式填充归属。
 - 父页面源图和每个 unit 裁图由 Store 去重；准备、校验及子 A2 引用兼容的 Artifact。
   普通图片 3 天、失败图片 7 天，重复引用不续期；不同 owner/retention descriptor 可以共享
   同一物理 blob。子题失败的 `source_page` 始终指向父页面，不把裁图误标成原图。
@@ -77,6 +80,10 @@ revision、跨身份/版本/题目拒绝、陈旧动作、缺 Trace、默认关�
 
 2026-09-07 验证：新增 A3 采集/启动测试 23 项、Checkpoint/Store/retention 联合 79 项通过；
 最终全仓 1383 项通过（60.862 秒）。三个 CLI 帮助命令及 `git diff --check` 通过。
+
+2026-09-08 并发 Trace 归属修复：补充乱序完成、模型异常、关闭采集时的调用及费用归属，
+以及上下文恢复、结束事件去重和 Checkpoint owner 显式关联测试。针对性 61 项、全仓
+1417 项通过（74.784 秒）。历史 Trace 不回填；服务加载新版本后新记录生效。
 
 4.5 的诊断查询入口及阶段整体诊断验收见 [4.5 runbook](checkpoint_phase4_5_runbook.md)；
 本阶段采集入口和默认关闭边界保持不变。

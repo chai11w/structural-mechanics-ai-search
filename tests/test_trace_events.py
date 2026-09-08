@@ -31,6 +31,7 @@ from tiku_shared.trace_events import (
     new_event_id,
     record_public_terminal,
     record_trace_event,
+    trace_event_dimensions_scope,
     trace_event_session_scope,
     trace_event_scope,
 )
@@ -660,6 +661,78 @@ class TraceEventStoreTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "TraceEventSession"):
             with trace_event_session_scope(object()):  # type: ignore[arg-type]
                 self.fail("invalid session must not be bound")
+
+    def test_dimension_scope_restores_nested_bindings_after_error(self):
+        recorder, store = self.make_recorder()
+        trace = TraceContext.create(request_id="req_scoped_1234")
+        with trace_context_scope(trace), trace_event_scope(
+            recorder, workflow_search_id="search_workflow_1234", unit_id="parent",
+        ) as parent:
+            with trace_event_dimensions_scope(unit_id="q1") as child:
+                bind_trace_event_dimensions(search_id="search_child_1234")
+                with self.assertRaisesRegex(RuntimeError, "scope failure"):
+                    with trace_event_dimensions_scope(unit_id="q2"):
+                        bind_trace_event_dimensions(search_id="search_nested_1234")
+                        record_trace_event("stage_finished", stage="crop_validated", outcome="success")
+                        raise RuntimeError("scope failure")
+                self.assertIs(current_trace_event_session(), child)
+                record_trace_event("stage_finished", stage="crop_validated", outcome="success")
+            self.assertIs(current_trace_event_session(), parent)
+            self.assertEqual(parent.dimensions["unit_id"], "parent")
+            self.assertNotIn("search_id", parent.dimensions)
+            record_trace_event("stage_finished", stage="page_understood", outcome="success")
+        self.assertIsNone(current_trace_event_session())
+        events = store.events_for_trace(trace.trace_id)
+        self.assertEqual(
+            [(event.unit_id, event.search_id) for event in events],
+            [("q2", "search_nested_1234"), ("q1", "search_child_1234"), ("parent", "")],
+        )
+        self.assertTrue(all(event.request_id == trace.request_id for event in events))
+        self.assertTrue(all(event.workflow_search_id == "search_workflow_1234" for event in events))
+
+    def test_dimension_scope_is_fail_open_without_session_or_with_invalid_dimensions(self):
+        with trace_event_dimensions_scope(unit_id="q1") as session:
+            self.assertIsNone(session)
+            self.assertIsNone(record_trace_event("stage_finished", stage="crop_validated", outcome="success"))
+        recorder, store = self.make_recorder()
+        trace = TraceContext.create()
+        with trace_event_scope(recorder, trace_id=trace.trace_id, unit_id="parent") as parent:
+            with trace_event_dimensions_scope(unit_id="private/path", search_id="search_1234") as child:
+                self.assertIsNot(child, parent)
+                self.assertEqual(child.dimensions, parent.dimensions)
+                bind_trace_event_dimensions(unit_id="q1")
+                record_trace_event("stage_finished", stage="crop_validated", outcome="success")
+            self.assertEqual(parent.dimensions["unit_id"], "parent")
+        self.assertEqual(store.events_for_trace(trace.trace_id)[0].unit_id, "q1")
+        self.assertEqual(recorder.health()["validation_rejections"], 1)
+
+    def test_parallel_dimension_scopes_isolate_bindings_and_share_terminal_guard(self):
+        recorder, store = self.make_recorder()
+        trace = TraceContext.create()
+        barrier = Barrier(2)
+
+        def worker(unit_id):
+            with trace_event_dimensions_scope(unit_id=unit_id):
+                bind_trace_event_dimensions(search_id=f"search_{unit_id}")
+                barrier.wait(timeout=5)
+                event = record_trace_event("stage_finished", stage="crop_validated", outcome="success")
+                terminal = record_public_terminal(stage="public_response", outcome="success")
+                return event, terminal
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            with trace_event_scope(recorder, trace_id=trace.trace_id, unit_id="parent") as parent:
+                futures = [submit_with_trace_context(executor, worker, unit) for unit in ("q1", "q2")]
+                results = [future.result(timeout=10) for future in futures]
+                self.assertEqual(parent.dimensions, {"unit_id": "parent"})
+                self.assertTrue(parent.terminal_attempted)
+                self.assertIsNone(record_public_terminal(stage="public_response", outcome="success"))
+            self.assertIsNone(executor.submit(current_trace_event_session).result(timeout=5))
+
+        self.assertEqual([(event.unit_id, event.search_id) for event, _ in results],
+                         [("q1", "search_q1"), ("q2", "search_q2")])
+        self.assertEqual(sum(terminal is not None for _, terminal in results), 1)
+        self.assertEqual(len(store.events_for_trace(trace.trace_id)), 3)
+        self.assertEqual(recorder.health()["duplicate_terminals"], 2)
 
     def test_invalid_dimension_binding_is_atomic_and_fail_open(self):
         recorder, store = self.make_recorder()

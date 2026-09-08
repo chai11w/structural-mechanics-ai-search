@@ -1203,12 +1203,18 @@ class TraceEventRecorder:
 
 
 @dataclass
+class _TraceTerminalGuard:
+    lock: Lock = field(default_factory=Lock, repr=False)
+    attempted: bool = False
+
+
+@dataclass
 class TraceEventSession:
     recorder: TraceEventRecorder | None
     trace_id: str
     _dimensions: dict[str, str] = field(default_factory=dict, repr=False)
     _lock: Lock = field(default_factory=Lock, repr=False)
-    _terminal_attempted: bool = field(default=False, repr=False)
+    _terminal_guard: _TraceTerminalGuard = field(default_factory=_TraceTerminalGuard, repr=False)
 
     @property
     def dimensions(self) -> dict[str, str]:
@@ -1217,8 +1223,8 @@ class TraceEventSession:
 
     @property
     def terminal_attempted(self) -> bool:
-        with self._lock:
-            return self._terminal_attempted
+        with self._terminal_guard.lock:
+            return self._terminal_guard.attempted
 
     def bind(self, **dimensions: Any) -> bool:
         try:
@@ -1235,11 +1241,11 @@ class TraceEventSession:
         if self.recorder is None:
             return None
         if event_type in TERMINAL_EVENT_TYPES:
-            with self._lock:
-                if self._terminal_attempted:
+            with self._terminal_guard.lock:
+                if self._terminal_guard.attempted:
                     self.recorder.note_duplicate_terminal()
                     return None
-                self._terminal_attempted = True
+                self._terminal_guard.attempted = True
         with self._lock:
             dimensions = dict(self._dimensions)
         explicit_dimensions = {
@@ -1280,6 +1286,23 @@ def trace_event_session_scope(session: TraceEventSession) -> Iterator[TraceEvent
         yield session
     finally:
         _ACTIVE_TRACE_EVENT_SESSION.reset(token)
+
+
+@contextmanager
+def trace_event_dimensions_scope(**dimensions: Any) -> Iterator[TraceEventSession | None]:
+    """Isolate task dimensions while sharing the request's terminal guard."""
+
+    parent = current_trace_event_session()
+    if parent is None:
+        yield None
+        return
+    session = TraceEventSession(
+        parent.recorder, parent.trace_id, parent.dimensions,
+        _terminal_guard=parent._terminal_guard,
+    )
+    session.bind(**dimensions)
+    with trace_event_session_scope(session):
+        yield session
 
 
 @contextmanager

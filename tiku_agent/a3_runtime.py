@@ -72,7 +72,11 @@ from tiku_shared.trace_context import (
     current_trace_id,
     submit_with_trace_context,
 )
-from tiku_shared.trace_events import bind_trace_event_dimensions, record_trace_event
+from tiku_shared.trace_events import (
+    bind_trace_event_dimensions,
+    record_trace_event,
+    trace_event_dimensions_scope,
+)
 
 
 A3_PHASE_IDLE = "IDLE"
@@ -1528,15 +1532,21 @@ class A3MvpRuntime:
 
         results: dict[str, dict[str, Any]] = {}
         if candidates:
+            def validate_unit(unit_id: str) -> dict[str, Any]:
+                with trace_event_dimensions_scope(
+                    workflow_search_id=state.workflow_search_id or state.current_search_id,
+                    search_id="",
+                    unit_id=unit_id,
+                ):
+                    return self._validate_auto_crop(state, unit_id, identity_key=identity_key)
+
             workers = min(self.auto_crop_max_workers, len(candidates))
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {
                     submit_with_trace_context(
                         executor,
-                        self._validate_auto_crop,
-                        state,
+                        validate_unit,
                         unit_id,
-                        identity_key=identity_key,
                     ): unit_id
                     for unit_id in candidates
                 }

@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, UTC
 import json
 import sqlite3
+from threading import Barrier, Event
 import unittest
 from unittest.mock import patch
 
@@ -19,6 +20,8 @@ from tiku_agent.session_artifacts import SessionArtifacts
 from tiku_agent.tool_result import ToolOutcome, ToolResult
 from tiku_agent.checkpoint_contract import CheckpointOwnerV1
 from tiku_shared.trace_context import submit_with_trace_context
+from tiku_shared.trace_events import current_trace_event_session, record_trace_event
+from tiku_shared.model_costs import SQLiteModelCostLedger, timed_model_call
 
 
 class A3CheckpointIntegrationTest(unittest.TestCase):
@@ -99,6 +102,103 @@ class A3CheckpointIntegrationTest(unittest.TestCase):
             response = self.runtime.select_unit("session-test", "g1-u2", identity_key="invite_test")
         self.assertEqual(response.media_kind, "candidates")
         self.assertEqual(self.records()[-1]["owner"]["unit_id"], "g1-u2")
+
+    def test_parallel_trace_attribution_survives_out_of_order_completion_and_failure(self):
+        self.runtime.page_observer = a3_fixture.FakeObserver()
+        self.runtime.auto_cropper = a3_fixture.FakeAutoCropper(second_status="auto_ready")
+        self.runtime.cost_ledger = SQLiteModelCostLedger(self.root / "costs.sqlite3")
+        verify = self.verifier.verify
+        capture = self.runtime._capture_checkpoint
+        for enabled, fail_first in ((True, False), (True, True), (False, False)):
+            with self.subTest(capture_enabled=enabled, fail_first=fail_first):
+                self.recorder.gate = A2CheckpointCaptureGateV1(enabled=enabled)
+                started = Barrier(2)
+                second_completed = Event()
+                path_units = {}
+                completed = []
+                previous_count = len(self.records())
+
+                def compare(page, crop, selected, understanding):
+                    unit_id = selected["unit_id"]
+                    path_units[str(crop)] = unit_id
+
+                    def result():
+                        started.wait(timeout=10)
+                        if unit_id == "g1-u1":
+                            if not second_completed.wait(timeout=10):
+                                raise TimeoutError("second unit did not complete")
+                            if fail_first:
+                                raise RuntimeError("crop comparison failed")
+                        return verify(page, crop, selected, understanding)
+
+                    return timed_model_call(
+                        result, provider="dashscope", model="qwen3.7-plus",
+                        call_type="qwen_a3_crop_compare", usage_getter=lambda _: {},
+                        provider_request_id_getter=lambda _: f"compare_{unit_id}",
+                    )
+
+                def screen(crop):
+                    unit_id = path_units[str(crop)]
+                    return timed_model_call(
+                        lambda: "yes", provider="dashscope", model="qwen3.7-plus",
+                        call_type="external_load_screen", usage_getter=lambda _: {},
+                        provider_request_id_getter=lambda _: f"screen_{unit_id}",
+                    )
+
+                def capture_completed(state, stage, **kwargs):
+                    result = capture(state, stage, **kwargs)
+                    if stage == "crop_validated":
+                        completed.append(kwargs["unit_id"])
+                        if kwargs["unit_id"] == "g1-u2":
+                            second_completed.set()
+                    return result
+
+                with self.business(), patch.object(self.verifier, "verify", side_effect=compare), patch.object(
+                    self.runtime, "external_load_screen", side_effect=screen
+                ), patch.object(self.runtime, "_capture_checkpoint", side_effect=capture_completed):
+                    self.runtime.handle_image("session-test", self.source, identity_key="invite_test")
+                    self.assertEqual(current_trace_event_session().dimensions["unit_id"], "")
+                    record_trace_event("stage_finished", stage="parent_after_validation", outcome="success")
+                self.assertEqual(completed, ["g1-u2", "g1-u1"])
+                self.traces.flush()
+                events = self.trace_store.events_for_trace(self.last_trace.trace_id)
+                workflow = self.runtime.store.load("session-test").workflow_search_id
+                calls = [event for event in events if event.event_type == "model_call_finished"]
+                expected = {("qwen_a3_crop_compare", "g1-u1"), ("qwen_a3_crop_compare", "g1-u2"),
+                            ("external_load_screen", "g1-u2")}
+                if not fail_first:
+                    expected.add(("external_load_screen", "g1-u1"))
+                self.assertEqual({(event.stage, event.unit_id) for event in calls}, expected)
+                self.assertEqual(len(calls), len(expected))
+                for finished in calls:
+                    pair = [event for event in events if event.call_id == finished.call_id]
+                    self.assertEqual([event.event_type for event in pair], ["model_call_started", "model_call_finished"])
+                    for event in pair:
+                        self.assertEqual(event.unit_id, finished.unit_id)
+                        self.assertEqual(event.workflow_search_id, workflow)
+                        self.assertEqual(event.search_id, "")
+                        self.assertEqual(event.identity_key, "invite_test")
+                    if fail_first and finished.unit_id == "g1-u1":
+                        self.assertEqual(finished.outcome, "error")
+                        self.assertEqual(finished.safe_attributes["error_kind"], "RuntimeError")
+                    else:
+                        prefix = "compare" if finished.stage == "qwen_a3_crop_compare" else "screen"
+                        self.assertEqual(finished.provider_request_id, f"{prefix}_{finished.unit_id}")
+                    costs = [event for event in events if event.event_type == "cost_run_written" and event.run_id == finished.run_id]
+                    self.assertEqual(len(costs), 1)
+                    self.assertEqual(costs[0].unit_id, finished.unit_id)
+                records = self.records()[previous_count:]
+                links = [event for event in events if "checkpoint_id" in event.safe_attributes]
+                self.assertEqual(len(records), 7 if enabled else 0)
+                self.assertEqual(len(links), len(records))
+                by_id = {row["checkpoint_id"]: row for row in records}
+                for event in links:
+                    owner = by_id[event.safe_attributes["checkpoint_id"]]["owner"]
+                    for field in ("session_key", "identity_key", "workflow_search_id", "search_id", "unit_id"):
+                        self.assertEqual(getattr(event, field), owner[field])
+                parent_events = [event for event in events if event.stage == "parent_after_validation"]
+                self.assertEqual(len(parent_events), 1)
+                self.assertEqual(parent_events[0].unit_id, "")
 
     def test_manual_fallback_records_real_geometry_and_both_gates(self):
         self.runtime.auto_cropper = None

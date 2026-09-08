@@ -237,7 +237,11 @@ class A2CheckpointRecorderV1:
             record_trace_event(
                 "stage_finished", stage=stored.stage,
                 outcome="error" if stored.outcome == "failed" else stored.outcome,
+                session_key=stored.owner.session_key,
+                identity_key=stored.owner.identity_key,
+                workflow_search_id=stored.owner.workflow_search_id,
                 search_id=stored.owner.search_id,
+                unit_id=stored.owner.unit_id,
                 safe_attributes={"completed": True, "checkpoint_id": stored.checkpoint_id},
             )
         except Exception:

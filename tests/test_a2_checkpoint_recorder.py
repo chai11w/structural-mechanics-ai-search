@@ -10,6 +10,7 @@ from tiku_agent.tool_result import ToolResult
 from unittest.mock import Mock
 from dataclasses import replace
 from tests.test_checkpoint_capture import _context
+from tiku_shared.trace_events import record_trace_event, trace_event_scope
 
 
 NOW = datetime(2026, 9, 7, 8, 0, tzinfo=UTC)
@@ -96,6 +97,30 @@ class A2CheckpointRecorderTest(unittest.TestCase):
         self.assertEqual((result.attempted, result.stored, result.reason_code),
                          (True, True, "CAPTURE_STORED"))
         self.assertEqual(result.checkpoint_id, checkpoint.checkpoint_id)
+
+    def test_checkpoint_trace_uses_stored_owner_without_changing_request_dimensions(self):
+        checkpoint = _checkpoint()
+        store = Mock()
+        store.put_checkpoint.return_value = checkpoint
+        traces = Mock()
+        recorder = A2CheckpointRecorderV1(
+            store, producer=_context().producer, gate=A2CheckpointCaptureGateV1(enabled=True),
+        )
+        with trace_event_scope(
+            traces, trace_id=checkpoint.trace_id, session_key="other_session",
+            identity_key="other_identity", workflow_search_id="other_workflow",
+            search_id="other_search", unit_id="other_unit",
+        ) as session:
+            before = session.dimensions
+            result = recorder.record(checkpoint, admission=_admission())
+            self.assertTrue(result.stored)
+            fields = traces.record.call_args.kwargs
+            for field in ("session_key", "identity_key", "workflow_search_id", "search_id", "unit_id"):
+                self.assertEqual(fields[field], getattr(checkpoint.owner, field))
+            self.assertEqual(fields["safe_attributes"]["checkpoint_id"], checkpoint.checkpoint_id)
+            self.assertEqual(session.dimensions, before)
+            record_trace_event("stage_finished", stage="following_stage", outcome="success")
+            self.assertEqual(traces.record.call_args.kwargs["unit_id"], "other_unit")
 
 
 if __name__ == "__main__":
