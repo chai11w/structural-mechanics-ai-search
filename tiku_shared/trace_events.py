@@ -17,7 +17,7 @@ import secrets
 import sqlite3
 import stat
 from threading import Condition, Event, Lock, Thread, current_thread
-from time import monotonic, sleep
+from time import monotonic
 from types import MappingProxyType
 from typing import Any, Iterator, Mapping
 from uuid import uuid4
@@ -27,7 +27,6 @@ from tiku_shared.trace_context import current_request_id, current_trace_id, is_v
 from tiku_shared.evidence_io_budget import (
     EvidenceRLock, check_evidence_budget, evidence_io_budget,
     evidence_sqlite_timeout, configure_evidence_connection,
-    current_evidence_budget,
 )
 
 
@@ -38,6 +37,7 @@ TRACE_ABSENT_STORE_ID = "absent"
 TRACE_MAINTENANCE_LOCK_FILENAME = ".checkpoint_retention.lock"
 DEFAULT_TRACE_EVENT_QUEUE_CAPACITY = 1024
 DEFAULT_TRACE_EVENT_SQLITE_TIMEOUT_SECONDS = 0.25
+TRACE_MAINTENANCE_WAIT_SECONDS = 30.0
 TRACE_EVENT_HEALTH_COUNTER_MAX = 2_147_483_647
 MAX_TRACE_EVENT_ROWS = TRACE_EVENT_HEALTH_COUNTER_MAX
 
@@ -252,6 +252,10 @@ class TraceEventMaintenanceError(RuntimeError):
     """A retention maintenance fence is active for this trace database."""
 
 
+class TraceEventMaintenanceBusy(TraceEventMaintenanceError):
+    """The fence is held; no database write has started, so waiting is safe."""
+
+
 _TRACE_PATH_LOCKS_GUARD = Lock()
 _TRACE_PATH_LOCKS: dict[str, EvidenceRLock] = {}
 
@@ -313,9 +317,8 @@ def _trace_writer_maintenance_lock(path: str | Path, *, filename=TRACE_MAINTENAN
     """Take the retention fence without ever waiting on a user request.
 
     The retention coordinator owns the same lock file for the duration of an
-    apply. Budgeted background Trace writes may wait up to 250 ms for a short
-    maintenance run. Synchronous callers and capture admission still fail
-    immediately, and the existing operation deadline/cancellation remains in force.
+    apply. Fence acquisition is nonblocking. The asynchronous recorder can keep
+    an event pending outside the write budget until maintenance releases it.
     """
 
     path = _trace_absolute_path(path)
@@ -341,27 +344,20 @@ def _trace_writer_maintenance_lock(path: str | Path, *, filename=TRACE_MAINTENAN
             stream.write(b"0")
             stream.flush()
         stream.seek(0)
-        budget = current_evidence_budget.get()
-        wait_seconds = min(0.25, budget.remaining()) if budget is not None and filename == TRACE_MAINTENANCE_LOCK_FILENAME else 0
-        deadline = monotonic() + wait_seconds
-        while True:
-            check_evidence_budget()
-            try:
-                if os.name == "nt":
-                    import msvcrt
+        check_evidence_budget()
+        try:
+            if os.name == "nt":
+                import msvcrt
 
-                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
 
-                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                locked = True
-                break
-            except (OSError, BlockingIOError) as exc:
-                remaining = deadline - monotonic()
-                if remaining <= 0 or exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
-                    raise TraceEventMaintenanceError("trace maintenance fence is active") from exc
-                sleep(min(0.01, remaining))
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except (OSError, BlockingIOError) as exc:
+            error_type = TraceEventMaintenanceBusy if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK} else TraceEventMaintenanceError
+            raise error_type("trace maintenance fence is active") from exc
         yield
     finally:
         if locked:
@@ -1041,6 +1037,7 @@ class TraceEventRecorder:
         self._last_failure_kind = ""
         self._last_failure_at = ""
         self._active_started = None
+        self._maintenance_waiting = False
         self._cancel = Event()
         self._finalizer = None
         self._finalized = Event()
@@ -1092,6 +1089,7 @@ class TraceEventRecorder:
                 "last_failure_at": self._last_failure_at,
                 "stalled": self._active_started is not None and monotonic() - self._active_started > 0.5,
                 "store_closed": self._store_closed,
+                "maintenance_waiting": self._maintenance_waiting,
             }
             capacity, capacity_unavailable = dict(self._capacity), self._capacity_unavailable
         reasons = []
@@ -1205,11 +1203,8 @@ class TraceEventRecorder:
                         return
                 continue
 
-            with self._condition:
-                self._active_started = monotonic()
             try:
-                with evidence_io_budget(0.5, cancel=self._cancel):
-                    self.store.write(event)
+                self._write_after_maintenance(event)
             except DuplicateTerminalEvent:
                 self._finish_duplicate_terminal()
             except BaseException as exc:  # noqa: BLE001 - the writer must keep draining.
@@ -1220,6 +1215,29 @@ class TraceEventRecorder:
                 self._queue.task_done()
                 with self._condition:
                     self._active_started = None
+                    self._maintenance_waiting = False
+
+    def _write_after_maintenance(self, event: TraceEvent) -> None:
+        deadline = monotonic() + TRACE_MAINTENANCE_WAIT_SECONDS
+        while True:
+            with self._condition:
+                self._active_started = monotonic()
+                self._maintenance_waiting = False
+            try:
+                with evidence_io_budget(0.5, cancel=self._cancel):
+                    self.store.write(event)
+                return
+            except TraceEventMaintenanceBusy:
+                # Only fence acquisition can signal Busy, before any transaction.
+                # Never retry an ambiguous SQLite/commit failure.
+                with self._condition:
+                    self._active_started = None
+                    self._maintenance_waiting = True
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise
+                if self._cancel.wait(min(0.05, remaining)):
+                    raise TimeoutError("trace maintenance wait cancelled") from None
 
     def _refresh_capacity(self):
         if not self._queue.empty():

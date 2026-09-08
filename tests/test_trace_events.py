@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 from threading import Barrier, Event, get_ident
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from tiku_shared.request_protocol import RequestProtocol
@@ -45,8 +46,10 @@ class TraceEventStoreTest(unittest.TestCase):
         context = TraceContext.create()
         with _trace_writer_maintenance_lock(store.path):
             recorder.record(trace_id=context.trace_id, event_type="stage_started", stage="test", outcome="started")
-            Event().wait(0.05)
+            Event().wait(0.35)
             self.assertEqual(recorder.health()["written"], 0)
+            self.assertEqual(recorder.health()["dropped"], 0)
+            self.assertFalse(recorder.health()["stalled"])
         self.assertTrue(recorder.flush(timeout=2))
         self.assertEqual(recorder.health()["written"], 1)
         self.assertEqual(recorder.health()["dropped"], 0)
@@ -54,13 +57,25 @@ class TraceEventStoreTest(unittest.TestCase):
     def test_persistent_maintenance_is_bounded_and_direct_writes_remain_nonblocking(self):
         recorder, store = self.make_recorder()
         context = TraceContext.create()
-        with _trace_writer_maintenance_lock(store.path):
+        with _trace_writer_maintenance_lock(store.path), patch(
+            "tiku_shared.trace_events.TRACE_MAINTENANCE_WAIT_SECONDS", 0.05
+        ):
             with self.assertRaises(TraceEventMaintenanceError):
                 store.write(self.make_event(context.trace_id, "2026-08-01T00:00:00Z"))
             recorder.record(trace_id=context.trace_id, event_type="stage_started", stage="test", outcome="started")
             self.assertTrue(recorder.flush(timeout=1))
             self.assertEqual(recorder.health()["write_failures"], 1)
             self.assertEqual(recorder.health()["written"], 0)
+
+    def test_close_cancels_maintenance_wait_without_late_write(self):
+        recorder, store = self.make_recorder()
+        context = TraceContext.create()
+        with _trace_writer_maintenance_lock(store.path):
+            recorder.record(trace_id=context.trace_id, event_type="stage_started", stage="test", outcome="started")
+            self.assertFalse(recorder.close(timeout=0.1))
+        self.assertTrue(recorder.close(timeout=2))
+        self.assertEqual(recorder.health()["written"], 0)
+        self.assertFalse(recorder.health()["accepting"])
 
     def make_directory(self) -> Path:
         directory = (
