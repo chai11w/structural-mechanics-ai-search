@@ -1095,6 +1095,8 @@ class TraceEventRecorder:
             reasons.append("capacity_snapshot_unavailable")
         if result["stalled"]:
             reasons.append("writer_stalled")
+        if result["last_failure_kind"] == "TraceShutdownTimeout":
+            reasons.append("shutdown_timeout")
         result["status"] = "degraded" if reasons else "ok"
         result["current_reasons"] = reasons
         result["capacity"] = capacity

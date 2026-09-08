@@ -121,6 +121,7 @@ class CaptureResilienceTest(unittest.TestCase):
                 self.assertFalse(self.recorder.close(0.02))
                 self.assertLess(perf_counter() - start, 0.5)
                 health = self.recorder.health()
+                self.assertEqual(health["last_failure_code"], "capture_shutdown_pending")
                 self.assertEqual((health["pending"], health["running"], health["backlog"]), (1, 1, 0))
                 self.assertEqual(health["counters"]["shutdown_dropped"], 4)
                 self.assert_accounted()
@@ -178,6 +179,8 @@ class EvidenceLifecycleTest(unittest.TestCase):
             health = recorder.health()
             self.assertLess(perf_counter() - start, 0.5)
             self.assertEqual((health["pending"], health["dropped"]), (1, 2))
+            self.assertEqual(health["status"], "degraded")
+            self.assertIn("shutdown_timeout", health["current_reasons"])
             self.assertFalse(health["accepting"])
         finally:
             release.set()

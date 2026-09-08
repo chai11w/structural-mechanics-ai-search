@@ -284,6 +284,8 @@ class AsyncCheckpointRecorder:
             stalled = self._stalled()
             circuit = self.clock() < self._open_until
             code = "CAPTURE_CONSUMER_STALLED" if stalled else "CAPTURE_CIRCUIT_OPEN" if circuit else self._last_failure
+            if self._closed and self._pending:
+                code = "CAPTURE_SHUTDOWN_PENDING"
             return {"status": "disabled" if not self.gate.enabled else "degraded" if code else "ok",
                     "current_reasons": [code.lower()] if code else [], "last_failure_code": code.lower(),
                     "counters": {**self._counts}, "pending": self._pending, "pending_bytes": self._bytes,

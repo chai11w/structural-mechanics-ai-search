@@ -26,6 +26,8 @@
 
 ## V1 历史状态
 
+4.5.4 增加后台采集的统一协作预算、维护互斥和熔断恢复，容量不足时交由维护流程清理；Trace 关闭与采集关闭均有有限等待。health 的 `shutdown_pending` 或 `shutdown_timeout` 表示尚有未完成收尾，不代表底层 I/O 已被终止。默认值、故障验收和实际图片性能记录由[优化阶段文档](checkpoint_optimization_phase4_5.md)管理。
+
 本文件冻结阶段 4.1 的内部契约。对应可执行词汇和验证位于
 `tiku_agent/checkpoint_contract.py`，契约测试位于 `tests/test_checkpoint_contract.py`。
 
