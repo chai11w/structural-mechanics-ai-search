@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from hashlib import sha256
+from uuid import uuid4
 import json
 from pathlib import Path
 import re
@@ -3283,7 +3284,7 @@ class A3MvpRuntime:
         target_dir = self.artifacts.session_dir(state.session_id) / "crops"
         target_dir.mkdir(parents=True, exist_ok=True)
         safe_id = sha256(str(unit_id).encode("utf-8")).hexdigest()[:20]
-        target = target_dir / f"{safe_id}.jpg"
+        target = target_dir / f"{safe_id}_{uuid4().hex}.jpg"
         with Image.open(source) as opened:
             image = ImageOps.exif_transpose(opened).convert("RGB")
             width, height = image.size

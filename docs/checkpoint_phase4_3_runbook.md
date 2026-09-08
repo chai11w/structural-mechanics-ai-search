@@ -1,5 +1,7 @@
 # 阶段 4.3 A2 采集与验收
 
+历史验收记录。2026-09-08 的[优化 4.5.2](checkpoint_optimization_phase4_5.md)已将新增候选/答案采集改为题库引用，原图仍为 Artifact；以下答案 Artifact 描述适用于旧版本。新旧兼容语义见[契约扩展](checkpoint_v1_contract.md)。
+
 4.3 实现 A2 单题的 Checkpoint 自动采集，并提供默认关闭的启动开关。
 本阶段的受控验收使用临时目录、真实 Runtime/工具/SQLite Store 和确定性的模型替身；
 没有调用外部模型、读写 live 题库、发布或重启 8788/8790/8795。

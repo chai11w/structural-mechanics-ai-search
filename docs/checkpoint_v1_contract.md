@@ -2,6 +2,28 @@
 
 ## 状态
 
+2026-09-08 优化扩展：含题库引用的记录使用 `schema_version=2`，见下节；本文件其余 V1 内容保留历史契约。新读取器兼容版本 1/2，旧读取器通过版本检查拒绝版本 2。Python 类名 `IntermediateCheckpointV1` 和 SQLite 表结构保留，结果版本由 payload 区分。
+
+## 题库引用扩展（优化 4.5.2）
+
+候选的 `candidate_scores[].question_ref` 和答案的 `delivery.answer_refs[]` 使用以下结构：
+
+```json
+{"bank_id":"main","chapter":"4力法","relative_key":"4力法/答案/3.png","lookup_mode":"current"}
+```
+
+`relative_key` 是题库根下的规范化相对路径，`chapter` 保留阶段章节；引用构造不检查文件、不读图片。根目录是可信本地配置，Recorder 默认使用搜索模块的 `search.ROOT`，隔离测试可显式传入 `bank_root`。禁止绝对路径、盘符、父目录、UNC、反斜线、ADS、转义定位、保留设备名及非图片扩展名。实际读取时重新拒绝符号链接和 Windows reparse point，校验根边界、大小与图片内容；文件缺失不搜索替代位置。
+
+答案引用保持原始答案列表顺序，最多 50 项；`answer_artifact_count=0`，不得混入答案 Artifact。成功必须有非空引用且 `media_status=complete`；引用构造不完整时采集为 `partial / ANSWER_REFERENCE_UNAVAILABLE`，业务答案交付不受影响。无答案仍为 `no_match`、空引用且无 selection。候选分数、排名和可见性仍保存当时结果。
+
+`lookup_mode=current` 表示查看题库当前文件，不保证历史字节不变。Checkpoint 的 30 天窗口控制引用可见性；题库文件不受 Artifact 的 3/7 天 TTL、续期或删除管理。上传原图、每版裁图和旧版答案 Artifact 仍沿用原有 owner/TTL/校验/审计。
+
+诊断先执行受完整 scope、TTL 和完整性约束的 `view_checkpoint` 审计，再解析其中选定的引用；当前没有独立的 bank-image 审计类型。诊断命令的 `current_sha256` 是本次读取内容的摘要，不是采集时的历史摘要。公共 Response、Trace 属性和检索 Skill 不增加题库路径。
+
+阶段采集在首次 Store/图片 I/O 前保存有界 JSON 字节副本，覆盖结果、候选、章节、loads、选题及 A3 裁图几何等必要输入。副本不进入公共协议或持久化日志；上限为 512 KiB、16,000 节点、深度 12、每集合 1,000 项、每字符串 16,384 字符，超限仅拒绝采集。A3 同 unit 每次裁剪使用独立文件名，旧文件由现有会话清理负责。异步队列、资源租约和等待预算属于后续 4.5.3/4.5.4，本次仍同步采集。
+
+## V1 历史状态
+
 本文件冻结阶段 4.1 的内部契约。对应可执行词汇和验证位于
 `tiku_agent/checkpoint_contract.py`，契约测试位于 `tests/test_checkpoint_contract.py`。
 

@@ -6,6 +6,16 @@
 
 ## 入口与权限
 
+本文件保留上一轮诊断验收编号；新一轮分步优化由[优化阶段 4.5](checkpoint_optimization_phase4_5.md)管理。优化 4.5.2 新增 `bank-image` 子命令，使用下文相同的 `@ScopedArgs`：
+
+```powershell
+python -B scripts/tiku_checkpoint_diagnostics.py @ScopedArgs bank-image `
+  --checkpoint-id $env:TIKU_DIAGNOSTIC_CHECKPOINT_ID `
+  --bank-root $env:TIKU_DIAGNOSTIC_BANK_ROOT --answer-ordinal 1
+```
+
+`--bank-root` 必须是可信操作员配置的当前题库实际根，与 Recorder 的 `main` 映射一致。查看候选时将 `--answer-ordinal 1` 换成 `--candidate-id <该记录中的候选ID>`，两者互斥。命令仅能读取受权 Checkpoint 内已有引用，不接受任意文件定位；先提交 `view_checkpoint` 审计，再读当前图片。默认返回引用、字节数和 `current_sha256`，可选 `--include-content` 返回 base64，不落地预览文件。文件改变会返回新内容，缺失或越界则拒绝。旧 Artifact 仍使用 `artifact` 子命令；删除引用或续期不会修改题库文件。
+
 - `scripts/tiku_diagnostics.py` 保持只读，只从 Trace 白名单属性投影格式合法的
   `checkpoint_id`，不导出私有 session key、Checkpoint 内容或图片。
 - `scripts/tiku_checkpoint_diagnostics.py` 使用真实 Store。查询和查看会写证据审计，

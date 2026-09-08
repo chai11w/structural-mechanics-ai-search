@@ -88,6 +88,26 @@ class CheckpointDiagnosticService:
         return self.store.read_artifact(artifact_id, checkpoint_id=checkpoint_id,
             actor_key=self.actor_key, expected_checkpoint_owner=checkpoint.owner)
 
+    def bank_image(self, checkpoint_id, *, catalog, answer_ordinal=None, candidate_id=""):
+        from tiku_agent.checkpoint_bank_reference import BankReferenceV1
+        if (answer_ordinal is None) == (not candidate_id):
+            raise EvidenceValidationError("select one bank reference")
+        # This is an audited scoped Checkpoint read, not an arbitrary path reader.
+        checkpoint = self.checkpoint(checkpoint_id)
+        if answer_ordinal is not None:
+            references = checkpoint.result.get("delivery", {}).get("answer_refs", ())
+            if type(answer_ordinal) is not int or not 1 <= answer_ordinal <= len(references):
+                raise EvidenceNotFoundError("answer reference is unavailable")
+            value = references[answer_ordinal - 1]
+        else:
+            matches = [item["question_ref"] for item in checkpoint.result.get("candidate_scores", ())
+                       if item["candidate_id"] == candidate_id and "question_ref" in item]
+            if len(matches) != 1:
+                raise EvidenceNotFoundError("candidate reference is unavailable")
+            value = matches[0]
+        reference = BankReferenceV1.from_dict(value)
+        return reference, catalog.read(reference)
+
     def chain(self, checkpoint_id, *, limit=20) -> dict:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise EvidenceValidationError("chain limit must be between 1 and 100")

@@ -48,7 +48,7 @@ class A2CheckpointIntegrationTest(unittest.TestCase):
             capacity=self.policy, trace_db_path=self.root / "trace.sqlite3",
         )
         self.recorder = A2CheckpointRecorderV1(
-            self.store, producer=_context().producer, media_root=self.root,
+            self.store, producer=_context().producer, media_root=self.root, bank_root=self.root,
             gate=A2CheckpointCaptureGateV1(enabled=True),
         )
         self.trace_store = SQLiteTraceEventStore(self.root / "trace.sqlite3")
@@ -114,7 +114,11 @@ class A2CheckpointIntegrationTest(unittest.TestCase):
         self.assertEqual((coarse["chapter_scanned"], coarse["load_scored"], coarse["positive_score"]), (7, 2, 2))
         self.assertEqual(records[2]["result"]["structure_decision"]["structure_type"], "梁")
         self.assertEqual(records[-1]["owner"]["candidate_generation"], records[-1]["result"]["selection"]["candidate_generation"])
-        self.assertEqual(records[-1]["result"]["delivery"]["answer_artifact_count"], 1)
+        self.assertEqual(records[-1]["result"]["delivery"]["answer_artifact_count"], 0)
+        self.assertEqual(records[-1]["result"]["delivery"]["answer_refs"][0]["relative_key"], "source.png")
+        for record in records[3:5]:
+            self.assertEqual(record["schema_version"], 2)
+            self.assertEqual(record["result"]["candidate_scores"][0]["question_ref"]["chapter"], "4力法")
         self.assertEqual(records[-1]["predecessor_checkpoint_id"], records[-2]["checkpoint_id"])
         self.assertNotIn(str(self.root), json.dumps(records, ensure_ascii=False))
         self.assertEqual(self.recorder.health()["status"], "ok")
@@ -154,7 +158,7 @@ class A2CheckpointIntegrationTest(unittest.TestCase):
         self.assertEqual(response.media_kind, "candidates")
         self.assertFalse(self.store.path.exists())
 
-    def test_answer_image_failure_records_partial_without_breaking_delivery(self):
+    def test_answer_capture_needs_no_artifact_write(self):
         self.search()
         with self.trace(), patch("tiku_agent.tools.search.find_answer_files", return_value=[self.source]), patch.object(
             self.store, "put_artifact", side_effect=OSError("private failure")
@@ -162,9 +166,21 @@ class A2CheckpointIntegrationTest(unittest.TestCase):
             answer = self.runtime.handle_text("session-test", "1", identity_key="invite_test")
         self.assertEqual(answer.media_kind, "answer")
         record = self.records()[-1]
-        self.assertEqual(record["outcome"], "partial")
-        self.assertEqual(record["failure"]["code"], "ANSWER_ARTIFACT_UNAVAILABLE")
+        self.assertEqual(record["outcome"], "success")
+        self.assertEqual(len(record["result"]["delivery"]["answer_refs"]), 1)
         self.assertEqual(record["result"]["delivery"]["answer_artifact_count"], 0)
+
+    def test_invalid_bank_reference_preserves_business_delivery(self):
+        self.search()
+        with self.trace(), patch("tiku_agent.tools.search.find_answer_files", return_value=[self.source]), patch.object(
+            self.recorder.bank_catalog, "reference", side_effect=ValueError("outside bank")
+        ):
+            answer = self.runtime.handle_text("session-test", "1", identity_key="invite_test")
+        self.assertEqual(answer.media_kind, "answer")
+        record = self.records()[-1]
+        self.assertEqual(record["outcome"], "partial")
+        self.assertEqual(record["failure"]["code"], "ANSWER_REFERENCE_UNAVAILABLE")
+        self.assertEqual(record["result"]["delivery"]["answer_refs"], [])
 
     def test_missing_answer_files_records_no_match_with_no_selection(self):
         self.search()

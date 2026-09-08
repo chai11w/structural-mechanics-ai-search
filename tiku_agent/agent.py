@@ -1011,6 +1011,8 @@ class TikuSearchAgent:
                 "selected_candidate": self.state.candidates[rank - 1]
                 if 1 <= rank <= len(self.state.candidates) else None,
                 "candidate_generation": self.state.candidate_generation,
+                "answer_source_paths": list(answered.data.get("answer_paths") or [])
+                if isinstance(answered.data, dict) else [],
                 "answer_paths": list(answered.data.get("copied_paths") or answered.data.get("answer_paths") or [])
                 if isinstance(answered.data, dict) else [],
             },

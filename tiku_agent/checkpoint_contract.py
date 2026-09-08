@@ -23,6 +23,7 @@ from tiku_shared.trace_context import is_valid_trace_id
 
 CHECKPOINT_CONTRACT = "intermediate_checkpoint"
 CHECKPOINT_SCHEMA_VERSION = 1
+BANK_REFERENCE_CHECKPOINT_SCHEMA_VERSION = 2
 ARTIFACT_SCHEMA_VERSION = 1
 
 SCOPE_WORKFLOW = "workflow"
@@ -484,7 +485,7 @@ SECTION_CONTRACTS: Mapping[str, SectionContractV1] = MappingProxyType(
                 "long_width",
                 "single_side",
             ),
-            ("visible",),
+            ("visible", "question_ref"),
             max_items=50,
         ),
         SECTION_RERANK_POLICY: _section(
@@ -512,7 +513,7 @@ SECTION_CONTRACTS: Mapping[str, SectionContractV1] = MappingProxyType(
         SECTION_DELIVERY: _section(
             "object",
             ("answer_artifact_count", "media_status", "delivery_code"),
-            ("response_id",),
+            ("response_id", "answer_refs"),
         ),
     }
 )
@@ -1004,7 +1005,7 @@ class IntermediateCheckpointV1:
             raise ValueError("checkpoint artifacts must be a tuple")
         if any(type(link) is not ArtifactLinkV1 for link in self.artifacts):
             raise ValueError("checkpoint artifact links must be ArtifactLinkV1")
-        if self.schema_version != CHECKPOINT_SCHEMA_VERSION:
+        if type(self.schema_version) is not int or self.schema_version not in {CHECKPOINT_SCHEMA_VERSION, BANK_REFERENCE_CHECKPOINT_SCHEMA_VERSION}:
             raise ValueError("unsupported checkpoint schema version")
         if not is_valid_checkpoint_id(self.checkpoint_id):
             raise ValueError("invalid checkpoint id")
@@ -1054,6 +1055,8 @@ class IntermediateCheckpointV1:
             raise ValueError("failed checkpoint cannot name itself as last successful")
 
         frozen_result = _freeze_json(self.result)
+        if self.schema_version == CHECKPOINT_SCHEMA_VERSION and has_bank_references(frozen_result):
+            raise ValueError("bank references require checkpoint schema version 2")
         _validate_result(contract, self.outcome, frozen_result)
         object.__setattr__(self, "result", frozen_result)
 
@@ -1062,7 +1065,8 @@ class IntermediateCheckpointV1:
         links = {(link.role, link.ordinal) for link in self.artifacts}
         if len(links) != len(self.artifacts):
             raise ValueError("duplicate checkpoint artifact role and ordinal")
-        _validate_artifact_links(contract, self.outcome, self.artifacts)
+        _validate_artifact_links(contract, self.outcome, self.artifacts,
+                                 answer_references=bool(frozen_result.get(SECTION_DELIVERY, {}).get("answer_refs")))
         _validate_cross_section_invariants(
             self.stage,
             self.outcome,
@@ -1116,6 +1120,11 @@ def _validate_result(
     encoded = json.dumps(_thaw_json(result), ensure_ascii=False, separators=(",", ":"))
     if len(encoded.encode("utf-8")) > MAX_RESULT_BYTES:
         raise ValueError("checkpoint result exceeds size limit")
+
+
+def has_bank_references(result: Mapping[str, Any]) -> bool:
+    return ("answer_refs" in result.get(SECTION_DELIVERY, {})
+            or any("question_ref" in item for item in result.get(SECTION_CANDIDATE_SCORES, ())))
 
 
 def _validate_section(name: str, value: Any) -> None:
@@ -1345,6 +1354,9 @@ def _validate_section_semantics(name: str, items: tuple[Mapping[str, Any], ...])
         ids: list[str] = []
         coarse_ranks: list[int] = []
         for item in items:
+            if "question_ref" in item:
+                from tiku_agent.checkpoint_bank_reference import BankReferenceV1
+                BankReferenceV1.from_dict(item["question_ref"])
             _opaque(item["candidate_id"], "candidate id")
             ids.append(str(item["candidate_id"]))
             _positive_int(item["coarse_rank"], "coarse rank")
@@ -1403,6 +1415,15 @@ def _validate_section_semantics(name: str, items: tuple[Mapping[str, Any], ...])
         _symbol(item["selection_source"], "selection source")
     elif name == SECTION_DELIVERY:
         item = items[0]
+        if "answer_refs" in item:
+            from tiku_agent.checkpoint_bank_reference import BankReferenceV1
+            refs = item["answer_refs"]
+            if not isinstance(refs, tuple) or len(refs) > MAX_COLLECTION_ITEMS:
+                raise ValueError("invalid answer references")
+            for reference in refs:
+                BankReferenceV1.from_dict(reference)
+            if item["answer_artifact_count"] != 0:
+                raise ValueError("answer references cannot mix with copied answer artifacts")
         _nonnegative_int(item["answer_artifact_count"], "answer artifact count")
         _symbol(item["media_status"], "delivery media status")
         _code(item["delivery_code"], "delivery code")
@@ -1518,6 +1539,12 @@ def _validate_cross_section_invariants(
         )
         if result[SECTION_DELIVERY]["answer_artifact_count"] != linked_answers:
             raise ValueError("delivery artifact count does not match checkpoint links")
+        delivery = result[SECTION_DELIVERY]
+        if "answer_refs" in delivery:
+            if outcome == OUTCOME_SUCCESS and (not delivery["answer_refs"] or delivery["media_status"] != "complete"):
+                raise ValueError("successful answer reference delivery must be complete")
+            if outcome == OUTCOME_NO_MATCH and delivery["answer_refs"]:
+                raise ValueError("no-match cannot contain answer references")
     if stage == STAGE_ANSWER_PREPARED and outcome == OUTCOME_NO_MATCH:
         delivery = result[SECTION_DELIVERY]
         if (
@@ -1534,6 +1561,7 @@ def _validate_artifact_links(
     contract: CheckpointStageContractV1,
     outcome: str,
     artifacts: tuple[ArtifactLinkV1, ...],
+    *, answer_references: bool = False,
 ) -> None:
     roles = {link.role for link in artifacts}
     allowed = set(contract.optional_artifact_roles)
@@ -1543,6 +1571,8 @@ def _validate_artifact_links(
         raise ValueError("checkpoint has artifact role not allowed for stage")
     if outcome == OUTCOME_SUCCESS:
         for group in contract.required_artifact_role_groups:
+            if contract.stage == STAGE_ANSWER_PREPARED and answer_references and ARTIFACT_ROLE_ANSWER_IMAGE in group:
+                continue
             if not roles & group:
                 raise ValueError("checkpoint is missing required artifact role")
 

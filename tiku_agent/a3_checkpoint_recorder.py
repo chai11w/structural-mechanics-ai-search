@@ -17,6 +17,7 @@ from tiku_agent.checkpoint_capture_gate import A2CaptureAdmissionV1
 from tiku_agent.checkpoint_contract import ArtifactLinkV1, SCOPE_WORKFLOW, RETENTION_NORMAL, RETENTION_FAILED
 from tiku_agent.session_artifacts import session_key
 from tiku_agent.tool_result import ToolResult, ToolOutcome
+from tiku_agent.checkpoint_stage_input import FrozenCheckpointInput
 from tiku_shared.trace_context import current_trace_id, current_request_id, is_valid_trace_id
 
 
@@ -91,6 +92,16 @@ class A3CheckpointRecorderV1(A2CheckpointRecorderV1):
                 scope=SCOPE_WORKFLOW,
             )
             context.owner()
+            record_keys = {"path", "bounds", "model_bbox", "bbox", "grounding_status", "reason_codes",
+                           "binding_evidence", "verification_checks", "external_load_status", "validation_status"}
+            snapshot = FrozenCheckpointInput.capture({
+                "page": page_result(state.page_understanding, state.units) if state.page_understanding else {},
+                "selected": page_result(state.page_understanding, [state.unit(unit_id)]) if unit_id else {},
+                "source_page": str(state.source_page_path), "entry_route": state.entry_route,
+                "crop_page": {key: state.auto_crop_page[key] for key in ("schema_version", "page_status") if key in state.auto_crop_page},
+                "record": {key: value for key, value in (record or {}).items() if key in record_keys},
+            }).materialize()
+            record = snapshot["record"]
             try:
                 model = getattr(producer_client, "model", "")
                 prompt = getattr(producer_client, "prompt_path", None)
@@ -117,10 +128,10 @@ class A3CheckpointRecorderV1(A2CheckpointRecorderV1):
             if failure_code:
                 source = ToolResult(outcome=ToolOutcome.ERROR, code=failure_code, error_category="a3", retryable=True)
             elif stage == "image_routed":
-                result = {"route_decision": {"route": state.entry_route, "decision_source": "a3_router", "reason_code": "IMAGE_ROUTED"}}
+                result = {"route_decision": {"route": snapshot["entry_route"], "decision_source": "a3_router", "reason_code": "IMAGE_ROUTED"}}
             elif stage == "page_understood":
-                result = page_result(state.page_understanding, state.units)
-                if not state.searchable_units:
+                result = snapshot["page"]
+                if not result["page_summary"]["searchable_unit_count"]:
                     source = ToolResult.no_match(code="NO_SEARCHABLE_UNITS")
             elif stage == "crop_validated":
                 record = dict(record)
@@ -132,7 +143,7 @@ class A3CheckpointRecorderV1(A2CheckpointRecorderV1):
 
             source_content = None
             try:
-                source_content = self.read_image(state.source_page_path)
+                source_content = self.read_image(snapshot["source_page"])
             except Exception:
                 self._result(False, "A3_SOURCE_UNAVAILABLE")
                 if source.outcome is ToolOutcome.SUCCESS:
@@ -151,12 +162,11 @@ class A3CheckpointRecorderV1(A2CheckpointRecorderV1):
                 input_digests["question_crop"] = sha256(crop_content).hexdigest()
                 if stage == "crop_prepared" and not failure_code:
                     with Image.open(BytesIO(source_content)) as image, Image.open(BytesIO(crop_content)) as crop:
-                        result = crop_result(unit_id, record, state.auto_crop_page if method == "automatic" else {},
+                        result = crop_result(unit_id, record, snapshot["crop_page"] if method == "automatic" else {},
                                              source_size=ImageOps.exif_transpose(image).size, crop_size=crop.size, method=method)
             if unit_id:
-                selected = state.unit(unit_id)
-                input_digests["selected_unit"] = self._digest(page_result(state.page_understanding, [selected]))
-                input_digests["page_context"] = self._digest(page_result(state.page_understanding, state.units))
+                input_digests["selected_unit"] = self._digest(snapshot["selected"])
+                input_digests["page_context"] = self._digest(snapshot["page"])
             if stage == "crop_prepared":
                 input_digests["geometry"] = self._digest(result.get("crop_geometry", {}))
             common["input_digests"] = input_digests

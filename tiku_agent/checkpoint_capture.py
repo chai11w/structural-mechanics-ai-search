@@ -13,6 +13,7 @@ from typing import Any, Mapping, Sequence
 
 from tiku_agent.checkpoint_contract import (
     CHECKPOINT_SCHEMA_VERSION,
+    BANK_REFERENCE_CHECKPOINT_SCHEMA_VERSION,
     OUTCOME_FAILED,
     OUTCOME_NEEDS_INPUT,
     OUTCOME_NO_MATCH,
@@ -27,6 +28,7 @@ from tiku_agent.checkpoint_contract import (
     IntermediateCheckpointV1,
     ProducerVersionV1,
     compute_input_fingerprint_v1,
+    has_bank_references,
     new_checkpoint_id,
 )
 from tiku_agent.tool_result import ToolResult, ToolOutcome
@@ -143,7 +145,7 @@ def build_a2_checkpoint(
     )
     effective_retention = RETENTION_FAILED if final_outcome == OUTCOME_FAILED else retention_class
     return IntermediateCheckpointV1(
-        schema_version=CHECKPOINT_SCHEMA_VERSION,
+        schema_version=BANK_REFERENCE_CHECKPOINT_SCHEMA_VERSION if has_bank_references(result) else CHECKPOINT_SCHEMA_VERSION,
         checkpoint_id=checkpoint_id or new_checkpoint_id(),
         trace_id=context.trace_id,
         request_id=context.request_id,

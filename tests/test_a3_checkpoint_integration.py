@@ -32,7 +32,7 @@ class A3CheckpointIntegrationTest(unittest.TestCase):
         a2_fixture.A2CheckpointIntegrationTest.setUp(self)
         self.a2 = self.runtime
         self.recorder = A3CheckpointRecorderV1(
-            self.store, producer=self.recorder.producer, media_root=self.root,
+            self.store, producer=self.recorder.producer, media_root=self.root, bank_root=self.root,
             a3_media_root=self.root / "pages", gate=A2CheckpointCaptureGateV1(enabled=True),
         )
         self.a2.checkpoint_recorder = self.recorder
@@ -382,7 +382,8 @@ class A3CheckpointIntegrationTest(unittest.TestCase):
         self.assertEqual(answer.media_kind, "answer")
         last = self.records()[-1]
         self.assertEqual(last["stage"], "answer_prepared")
-        self.assertEqual({link["role"] for link in last["artifacts"]}, {"answer_image"})
+        self.assertEqual(last["artifacts"], [])
+        self.assertEqual(len(last["result"]["delivery"]["answer_refs"]), 1)
         self.assertEqual(self.recorder.health()["status"], "degraded")
 
     def test_manual_verifier_failure_keeps_failed_crop_evidence(self):

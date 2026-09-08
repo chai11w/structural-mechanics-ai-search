@@ -17,11 +17,13 @@ from PIL import Image
 from tiku_agent.checkpoint_capture_gate import A2CaptureAdmissionV1, A2CheckpointCaptureGateV1
 from tiku_agent.checkpoint_capture import A2CheckpointContextV1, build_a2_checkpoint
 from tiku_agent.checkpoint_contract import (
-    ARTIFACT_ROLE_ANSWER_IMAGE, ARTIFACT_ROLE_SOURCE_PAGE, MAX_ARTIFACT_BYTES,
+    ARTIFACT_ROLE_SOURCE_PAGE, MAX_ARTIFACT_BYTES,
     RETENTION_NORMAL, RETENTION_FAILED, SCOPE_WORKFLOW, ArtifactLinkV1, IntermediateCheckpointV1,
     ProducerVersionV1,
 )
 from tiku_agent.checkpoint_store import CheckpointStoreError
+from tiku_agent.checkpoint_bank_reference import CheckpointBankCatalog
+from tiku_agent.checkpoint_stage_input import freeze_a2_stage_input, materialize_a2_stage_input
 from tiku_agent.a2_checkpoint_stages import (
     build_answer_prepared_checkpoint, build_coarse_search_checkpoint,
     build_question_analyzed_checkpoint, build_rerank_checkpoint,
@@ -44,6 +46,7 @@ class A2CheckpointRecorderV1:
     def __init__(
         self, store: Any, *, producer: ProducerVersionV1,
         media_root: str | Path | None = None,
+        bank_root: str | Path | None = None,
         gate: A2CheckpointCaptureGateV1 | None = None, clock: Any | None = None,
     ) -> None:
         if not callable(getattr(store, "put_checkpoint", None)):
@@ -53,6 +56,10 @@ class A2CheckpointRecorderV1:
         self.store = store
         self.producer = producer
         self.media_root = Path(media_root).resolve() if media_root is not None else None
+        if bank_root is None:
+            from search import ROOT
+            bank_root = ROOT
+        self.bank_catalog = CheckpointBankCatalog({"main": bank_root})
         self.gate = gate or A2CheckpointCaptureGateV1()
         self.clock = clock or (lambda: datetime.now(UTC))
         self._lock = Lock()
@@ -123,6 +130,7 @@ class A2CheckpointRecorderV1:
             if not is_valid_trace_id(context.trace_id):
                 return self._result(False, "CAPTURE_TRACE_REQUIRED")
             context.owner()
+            tool_result, payload = materialize_a2_stage_input(freeze_a2_stage_input(tool_result, payload or {}))
             metadata = tool_result.data.get("checkpoint_producer") or tool_result.data.get("checkpoint_rerank", {}).get("producer", {})
             if metadata:
                 context = replace(context, producer=replace(context.producer, **{
@@ -163,27 +171,29 @@ class A2CheckpointRecorderV1:
             elif stage == "question_analyzed":
                 checkpoint = build_question_analyzed_checkpoint(context, tool_result, **common)
             elif stage == "coarse_search_completed":
-                checkpoint = build_coarse_search_checkpoint(context, tool_result, **common)
+                checkpoint = build_coarse_search_checkpoint(context, tool_result, bank_catalog=self.bank_catalog,
+                    bank_chapter=payload.get("inputs", {}).get("chapter", ""), **common)
             elif stage == "rerank_completed":
-                checkpoint = build_rerank_checkpoint(context, tool_result, candidates=payload.get("candidates", []), **common)
+                checkpoint = build_rerank_checkpoint(context, tool_result, candidates=payload.get("candidates", []),
+                    bank_catalog=self.bank_catalog, bank_chapter=payload.get("inputs", {}).get("chapter", ""), **common)
             elif stage == "answer_prepared":
-                links = []
-                paths = payload.get("answer_paths") or []
+                references = []
+                paths = payload.get("answer_source_paths") or []
                 if tool_result.outcome not in {ToolOutcome.NO_MATCH, ToolOutcome.ERROR}:
-                    limit = min(50, self.store.capacity.max_artifacts_per_checkpoint)
-                    for path in paths[:limit]:
+                    for path in paths[:50]:
                         try:
-                            descriptor = self.store.put_artifact(context.owner(), self.read_image(path), retention_class=RETENTION_NORMAL)
-                            links.append(ArtifactLinkV1(descriptor.artifact_id, ARTIFACT_ROLE_ANSWER_IMAGE, len(links) + 1))
+                            references.append(self.bank_catalog.reference(path,
+                                chapter=(payload.get("selected_candidate") or {}).get("chapter")
+                                or payload.get("inputs", {}).get("chapter", "")).to_dict())
                         except Exception:
-                            self._result(False, "ANSWER_ARTIFACT_UNAVAILABLE")
-                    if not links or len(links) != len(paths):
-                        tool_result = ToolResult(outcome=ToolOutcome.PARTIAL, code="ANSWER_ARTIFACT_UNAVAILABLE", error_category="evidence")
+                            self._result(False, "ANSWER_REFERENCE_UNAVAILABLE")
+                    if not references or len(references) != len(paths):
+                        tool_result = ToolResult(outcome=ToolOutcome.PARTIAL, code="ANSWER_REFERENCE_UNAVAILABLE", error_category="evidence")
                 checkpoint = build_answer_prepared_checkpoint(
                     context, tool_result, selected_rank=int(payload.get("selected_rank") or 1),
                     selected_candidate=payload.get("selected_candidate"),
                     candidate_generation=context.candidate_generation,
-                    answer_artifacts=links, **common,
+                    answer_refs=references, **common,
                 )
             else:
                 return self._result(False, "CAPTURE_STAGE_UNSUPPORTED")

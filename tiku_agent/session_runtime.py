@@ -1648,19 +1648,9 @@ class AgentSessionRuntime:
             trace_session = current_trace_event_session()
             if parent is None and trace_session is not None and trace_session.dimensions.get("unit_id"):
                 return
-            if not predecessor_loaded:
-                predecessor_loaded = True
-                last_successful = recorder.last_successful(context)
-                predecessor = last_successful
             from hashlib import sha256
             from tiku_agent.a2_checkpoint_stages import _candidate_id
             image_path = state.active_image_path
-            if image_path and image_path not in image_digests:
-                try:
-                    image_digests[image_path] = sha256(recorder.read_image(image_path)).hexdigest()
-                except Exception:
-                    image_digests[image_path] = ""
-                    recorder.input_unavailable()
             inputs = {
                 "source_image": image_digests.get(image_path, ""),
                 "loads": state.current_loads, "chapter": state.current_chapter,
@@ -1671,6 +1661,9 @@ class AgentSessionRuntime:
                 inputs["route_decision"] = payload.get("route_decision", {})
             if stage in {"rerank_completed", "answer_prepared"}:
                 candidates = payload.get("candidates", state.candidates)
+                if len(candidates) > 1000:
+                    recorder.input_unavailable()
+                    return
                 inputs["candidates"] = [
                     {"id": _candidate_id(item, rank), "score": item.get("score"),
                      "rerank_score": item.get("rerank_score"), "final_score": item.get("final_score")}
@@ -1679,13 +1672,27 @@ class AgentSessionRuntime:
                 inputs["selected_rank"] = payload.get("selected_rank")
                 policy = result.data.get("checkpoint_rerank", {})
                 inputs["policy"] = {key: policy[key] for key in ("threshold", "display_all_score", "fallback_limit", "skipped") if key in policy}
+            from tiku_agent.checkpoint_stage_input import freeze_a2_stage_input, materialize_a2_stage_input
+            frozen = freeze_a2_stage_input(result, {**payload, "inputs": inputs,
+                "source_image_path": parent.source_page_path if parent is not None else state.current_image_path})
+            result, payload = materialize_a2_stage_input(frozen)
+            if not predecessor_loaded:
+                predecessor_loaded = True
+                last_successful = recorder.last_successful(context)
+                predecessor = last_successful
+            if image_path and image_path not in image_digests:
+                try:
+                    image_digests[image_path] = sha256(recorder.read_image(image_path)).hexdigest()
+                except Exception:
+                    image_digests[image_path] = ""
+                    recorder.input_unavailable()
+            payload["inputs"]["source_image"] = image_digests.get(image_path, "")
             recorded = recorder.capture_stage(
                 context,
                 admission=admission,
                 stage=stage,
                 tool_result=result,
-                payload={**payload, "inputs": inputs,
-                         "source_image_path": parent.source_page_path if parent is not None else state.current_image_path},
+                payload=payload,
                 predecessor_checkpoint_id=predecessor,
                 last_successful_checkpoint_id=last_successful,
             )

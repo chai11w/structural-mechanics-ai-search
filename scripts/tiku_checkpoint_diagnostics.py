@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+from hashlib import sha256
 from pathlib import Path
 import sys
 
@@ -52,6 +53,13 @@ def build_argument_parser():
     artifact.add_argument("--checkpoint-id", required=True)
     artifact.add_argument("--artifact-id", required=True)
     artifact.add_argument("--include-content", action="store_true", help="Include base64 image bytes; no preview file is created")
+    bank = commands.add_parser("bank-image", help="Read the current bank image through an audited checkpoint reference")
+    bank.add_argument("--checkpoint-id", required=True)
+    bank.add_argument("--bank-root", type=Path, required=True, help="Trusted current root for bank id main")
+    selection = bank.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--answer-ordinal", type=int)
+    selection.add_argument("--candidate-id")
+    bank.add_argument("--include-content", action="store_true")
     for operation in ("extend", "delete"):
         plan = commands.add_parser("plan-" + operation, help="Build a finite exact-target management plan")
         plan.add_argument("--checkpoint-id", required=True)
@@ -99,6 +107,15 @@ def main(argv=None):
             result = {"descriptor": artifact.descriptor.to_dict()}
             if args.include_content:
                 result["content_base64"] = base64.b64encode(artifact.content).decode("ascii")
+        elif args.command == "bank-image":
+            from tiku_agent.checkpoint_bank_reference import CheckpointBankCatalog
+            reference, content = service.bank_image(args.checkpoint_id,
+                catalog=CheckpointBankCatalog({"main": args.bank_root}),
+                answer_ordinal=args.answer_ordinal, candidate_id=args.candidate_id or "")
+            result = {"reference": reference.to_dict(), "byte_size": len(content),
+                      "current_sha256": sha256(content).hexdigest()}
+            if args.include_content:
+                result["content_base64"] = base64.b64encode(content).decode("ascii")
         elif args.command.startswith("plan-"):
             result = service.plan(args.command.removeprefix("plan-"), checkpoint_id=args.checkpoint_id,
                 artifact_id=args.artifact_id, new_expires_at=getattr(args, "new_expires_at", ""),

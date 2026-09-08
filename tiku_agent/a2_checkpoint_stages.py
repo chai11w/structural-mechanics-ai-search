@@ -153,7 +153,7 @@ def _candidate_id(item: Mapping[str, Any], rank: int) -> str:
     return "cand_" + sha256(raw.replace("\\", "/").casefold().encode("utf-8")).hexdigest()
 
 
-def _score_item(item: Mapping[str, Any], rank: int, *, visible: bool | None = None) -> dict[str, object]:
+def _score_item(item: Mapping[str, Any], rank: int, *, visible: bool | None = None, bank_catalog=None, bank_chapter="") -> dict[str, object]:
     score = item.get("score")
     result: dict[str, object] = {
         "candidate_id": _candidate_id(item, rank),
@@ -174,6 +174,8 @@ def _score_item(item: Mapping[str, Any], rank: int, *, visible: bool | None = No
     }
     if visible is not None:
         result["visible"] = bool(visible)
+    if bank_catalog is not None:
+        result["question_ref"] = bank_catalog.reference(item["path"], chapter=item.get("chapter") or bank_chapter).to_dict()
     return result
 
 
@@ -204,6 +206,8 @@ def coarse_search_result(
     search_result: ToolResult,
     *,
     candidates: Sequence[Mapping[str, Any]] | None = None,
+    bank_catalog=None,
+    bank_chapter="",
 ) -> dict[str, object]:
     """Project an A2 coarse-search result without exposing paths or raw errors."""
 
@@ -211,7 +215,7 @@ def coarse_search_result(
         return {}
     data = search_result.data if isinstance(search_result.data, Mapping) else {}
     items = list(candidates if candidates is not None else data.get("candidates") or [])
-    stored = tuple(_score_item(item, index) for index, item in enumerate(items[:50], 1))
+    stored = tuple(_score_item(item, index, bank_catalog=bank_catalog, bank_chapter=bank_chapter) for index, item in enumerate(items[:50], 1))
     dimension = _dimension_observations(data)
     filtered = data.get("dimension_filter")
     filtered = filtered if isinstance(filtered, Mapping) else {}
@@ -249,11 +253,13 @@ def build_coarse_search_checkpoint(
     expires_at: str,
     input_digests: Mapping[str, str],
     candidates: Sequence[Mapping[str, Any]] | None = None,
+    bank_catalog=None,
+    bank_chapter="",
     predecessor_checkpoint_id: str = "",
 ) -> IntermediateCheckpointV1:
     if search_result.outcome is ToolOutcome.NEEDS_INPUT:
         search_result = ToolResult(outcome=ToolOutcome.ERROR, code=search_result.code, error_category="invalid_tool_input")
-    result = coarse_search_result(search_result, candidates=candidates)
+    result = coarse_search_result(search_result, candidates=candidates, bank_catalog=bank_catalog, bank_chapter=bank_chapter)
     return build_a2_checkpoint(
         context,
         stage=STAGE_COARSE_SEARCH_COMPLETED,
@@ -273,6 +279,8 @@ def rerank_result(
     threshold: float = 0.8,
     display_all_score: float = 0.95,
     fallback_limit: int = 3,
+    bank_catalog=None,
+    bank_chapter="",
 ) -> dict[str, object]:
     """Project rerank policy and visible candidate scores with bounded detail."""
 
@@ -297,7 +305,7 @@ def rerank_result(
     # Preserve every displayed candidate before filling the bounded diagnostic tail.
     scores_source.sort(key=lambda item: _candidate_id(item, 1) not in visible_ids)
     scores = tuple(
-        _score_item(item, index, visible=(_candidate_id(item, index) in visible_ids))
+        _score_item(item, index, visible=(_candidate_id(item, index) in visible_ids), bank_catalog=bank_catalog, bank_chapter=bank_chapter)
         for index, item in enumerate(scores_source[:50], 1)
     )
     outcome_no_match = rerank_result_value.outcome is ToolOutcome.NO_MATCH
@@ -326,6 +334,8 @@ def build_rerank_checkpoint(
     rerank_result_value: ToolResult,
     *,
     candidates: Sequence[Mapping[str, Any]],
+    bank_catalog=None,
+    bank_chapter="",
     occurred_at: str,
     expires_at: str,
     input_digests: Mapping[str, str],
@@ -335,7 +345,7 @@ def build_rerank_checkpoint(
     return build_a2_checkpoint(
         context,
         stage=STAGE_RERANK_COMPLETED,
-        result=rerank_result(rerank_result_value, candidates=candidates),
+        result=rerank_result(rerank_result_value, candidates=candidates, bank_catalog=bank_catalog, bank_chapter=bank_chapter),
         occurred_at=occurred_at,
         expires_at=expires_at,
         input_digests=input_digests,
@@ -353,6 +363,7 @@ def answer_prepared_result(
     candidate_generation: str,
     answer_artifact_count: int = 0,
     response_id: str = "",
+    answer_refs: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, object]:
     """Project answer delivery, adding selection only for a real candidate."""
 
@@ -368,6 +379,12 @@ def answer_prepared_result(
     }
     if response_id:
         data[SECTION_DELIVERY]["response_id"] = response_id
+    if answer_refs is not None:
+        data[SECTION_DELIVERY]["answer_refs"] = list(answer_refs)
+        data[SECTION_DELIVERY]["media_status"] = (
+            "partial" if answer_result.outcome is ToolOutcome.PARTIAL
+            else "complete" if answer_refs else "not_available"
+        )
     if answer_result.outcome is not ToolOutcome.NO_MATCH and selected_candidate is not None:
         data[SECTION_SELECTION] = {
             "candidate_id": _candidate_id(selected_candidate, selected_rank),
@@ -389,6 +406,7 @@ def build_answer_prepared_checkpoint(
     expires_at: str,
     input_digests: Mapping[str, str],
     answer_artifacts: Sequence[Any] = (),
+    answer_refs: Sequence[Mapping[str, Any]] | None = None,
     response_id: str = "",
     predecessor_checkpoint_id: str = "",
 ) -> IntermediateCheckpointV1:
@@ -400,6 +418,7 @@ def build_answer_prepared_checkpoint(
         selected_candidate=selected_candidate,
         candidate_generation=candidate_generation,
         answer_artifact_count=len(answer_artifacts),
+        answer_refs=answer_refs,
         response_id=response_id,
     )
     return build_a2_checkpoint(
