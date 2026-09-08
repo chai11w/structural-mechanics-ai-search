@@ -15,13 +15,18 @@ import re
 import secrets
 import sqlite3
 import stat
-from threading import Condition, Lock, RLock, Thread, current_thread
+from threading import Condition, Event, Lock, Thread, current_thread
+from time import monotonic
 from types import MappingProxyType
 from typing import Any, Iterator, Mapping
 from uuid import uuid4
 from weakref import WeakMethod
 
 from tiku_shared.trace_context import current_request_id, current_trace_id, is_valid_trace_id
+from tiku_shared.evidence_io_budget import (
+    EvidenceRLock, check_evidence_budget, evidence_io_budget,
+    evidence_sqlite_timeout, configure_evidence_connection,
+)
 
 
 TRACE_EVENT_SCHEMA_VERSION = 1
@@ -246,7 +251,7 @@ class TraceEventMaintenanceError(RuntimeError):
 
 
 _TRACE_PATH_LOCKS_GUARD = Lock()
-_TRACE_PATH_LOCKS: dict[str, RLock] = {}
+_TRACE_PATH_LOCKS: dict[str, EvidenceRLock] = {}
 
 
 def _trace_path_key(path: str | Path) -> str:
@@ -295,14 +300,14 @@ def _trace_reject_linked_path(path: Path, *, stop: Path | None = None) -> None:
         current = parent
 
 
-def _trace_path_lock(path: str | Path) -> RLock:
+def _trace_path_lock(path: str | Path) -> EvidenceRLock:
     key = _trace_path_key(path)
     with _TRACE_PATH_LOCKS_GUARD:
-        return _TRACE_PATH_LOCKS.setdefault(key, RLock())
+        return _TRACE_PATH_LOCKS.setdefault(key, EvidenceRLock())
 
 
 @contextmanager
-def _trace_writer_maintenance_lock(path: str | Path) -> Iterator[None]:
+def _trace_writer_maintenance_lock(path: str | Path, *, filename=TRACE_MAINTENANCE_LOCK_FILENAME) -> Iterator[None]:
     """Take the retention fence without ever waiting on a user request.
 
     The retention coordinator owns the same lock file for the duration of an
@@ -311,7 +316,7 @@ def _trace_writer_maintenance_lock(path: str | Path) -> Iterator[None]:
     """
 
     path = _trace_absolute_path(path)
-    lock_path = path.parent / TRACE_MAINTENANCE_LOCK_FILENAME
+    lock_path = path.parent / filename
     try:
         _trace_reject_linked_path(lock_path, stop=path.parent)
         if _trace_lexists(lock_path) and not lock_path.is_file():
@@ -680,7 +685,7 @@ class SQLiteTraceEventStore:
             raise ValueError(f"max_rows must be between 1 and {MAX_TRACE_EVENT_ROWS}")
         self._write_timeout_seconds = float(write_timeout_seconds)
         self._max_rows = max_rows
-        self._lock = Lock()
+        self._lock = EvidenceRLock()
         self._path_lock = _trace_path_lock(self.path)
         self._pending_flusher: WeakMethod[Any] | None = None
 
@@ -695,7 +700,8 @@ class SQLiteTraceEventStore:
         reference = self._pending_flusher
         callback = reference() if reference is not None else None
         if callback is not None:
-            callback()
+            if callback() is False:
+                raise TimeoutError("trace persistence is still pending")
 
     def ensure_store_identity(self) -> str:
         """Create or migrate the store and return its persistent identity."""
@@ -709,8 +715,9 @@ class SQLiteTraceEventStore:
             _trace_reject_linked_path(self.path)
             existed = _trace_lexists(self.path)
             with closing(
-                sqlite3.connect(self.path, timeout=self._write_timeout_seconds)
+                sqlite3.connect(self.path, timeout=evidence_sqlite_timeout(self._write_timeout_seconds))
             ) as connection:
+                configure_evidence_connection(connection)
                 identity = _prepare_trace_store_for_write(
                     connection, allow_create=not existed
                 )
@@ -739,6 +746,7 @@ class SQLiteTraceEventStore:
                 raise TraceCleanupDriftError("trace store identity is unavailable") from exc
 
     def write(self, event: TraceEvent) -> None:
+        check_evidence_budget()
         if not isinstance(event, TraceEvent):
             raise TypeError("event must be a TraceEvent")
         _trace_reject_linked_path(self.path)
@@ -750,8 +758,9 @@ class SQLiteTraceEventStore:
             _trace_reject_linked_path(self.path)
             existed = _trace_lexists(self.path)
             with closing(
-                sqlite3.connect(self.path, timeout=self._write_timeout_seconds)
+                sqlite3.connect(self.path, timeout=evidence_sqlite_timeout(self._write_timeout_seconds))
             ) as connection:
+                configure_evidence_connection(connection)
                 _prepare_trace_store_for_write(
                     connection, allow_create=not existed
                 )
@@ -780,6 +789,7 @@ class SQLiteTraceEventStore:
                         """,
                         _event_row(event),
                     )
+                    check_evidence_budget()
                 except sqlite3.IntegrityError as exc:
                     connection.rollback()
                     if event.event_type in TERMINAL_EVENT_TYPES and self._has_terminal(
@@ -929,6 +939,7 @@ class SQLiteTraceEventStore:
                             raise TraceCleanupDriftError(
                                 "trace cleanup delete count changed"
                             )
+                    check_evidence_budget()
                 except BaseException:
                     connection.rollback()
                     raise
@@ -1017,6 +1028,12 @@ class TraceEventRecorder:
         self._duplicate_terminals = 0
         self._last_failure_kind = ""
         self._last_failure_at = ""
+        self._active_started = None
+        self._cancel = Event()
+        self._finalizer = None
+        self._finalized = Event()
+        # Health reads memory only; capacity is refreshed by the writer.
+        self._capacity, self._capacity_unavailable = _safe_store_capacity_snapshot(None)
         attach = getattr(store, "_attach_recorder", None)
         if callable(attach):
             attach(self)
@@ -1061,8 +1078,10 @@ class TraceEventRecorder:
                 "accepting": not self._closed,
                 "last_failure_kind": self._last_failure_kind,
                 "last_failure_at": self._last_failure_at,
+                "stalled": self._active_started is not None and monotonic() - self._active_started > 0.5,
+                "store_closed": self._store_closed,
             }
-        capacity, capacity_unavailable = _safe_store_capacity_snapshot(self.store)
+            capacity, capacity_unavailable = dict(self._capacity), self._capacity_unavailable
         reasons = []
         if result["write_failures"]:
             reasons.append("write_failures")
@@ -1074,28 +1093,46 @@ class TraceEventRecorder:
             reasons.append("capacity_exhausted")
         if capacity_unavailable:
             reasons.append("capacity_snapshot_unavailable")
+        if result["stalled"]:
+            reasons.append("writer_stalled")
         result["status"] = "degraded" if reasons else "ok"
         result["current_reasons"] = reasons
         result["capacity"] = capacity
         return result
 
-    def flush(self) -> None:
+    def flush(self, timeout=5.0) -> bool:
         with self._condition:
             if current_thread() is self._worker:
-                return
+                return False
             target = self._accepted
-            while self._completed < target:
-                self._condition.wait()
-        try:
-            self.store.flush()
-        except Exception as exc:  # noqa: BLE001
-            self._record_write_failure(type(exc).__name__)
+            # Store.write returns only after its transaction commits.
+            return self._condition.wait_for(lambda: self._completed >= target, timeout=max(0.0, timeout))
 
-    def close(self) -> None:
+    def close(self, timeout=2.0) -> bool:
         with self._condition:
-            if self._store_closed:
-                return
             self._closed = True
+            if self._finalizer is None:
+                self._finalizer = Thread(target=self._finalize, name="trace-event-finalizer", daemon=True)
+                self._finalizer.start()
+        if self._finalized.wait(max(0.0, timeout)):
+            return True
+        with self._condition:
+            self._cancel.set()
+            while True:
+                try:
+                    self._queue.get_nowait()
+                except Empty:
+                    break
+                self._queue.task_done()
+                self._completed += 1
+                self._dropped = _saturated_increment(self._dropped)
+            self._last_failure_kind = "TraceShutdownTimeout"
+            self._last_failure_at = utc_now()
+            self._condition.notify_all()
+        return False
+
+    def _finalize(self) -> None:
+        with self._condition:
             target = self._accepted
             while self._completed < target:
                 self._condition.wait()
@@ -1113,11 +1150,14 @@ class TraceEventRecorder:
         finally:
             with self._lock:
                 self._store_closed = True
+            self._finalized.set()
 
     def _enqueue(self, event: TraceEvent) -> None:
         with self._condition:
             if self._closed:
                 raise TraceEventRecorderClosed("trace event recorder is closed")
+            if self._active_started is not None and monotonic() - self._active_started > 0.5:
+                raise TimeoutError("trace writer is stalled")
             try:
                 self._queue.put_nowait(event)
             except Full as exc:
@@ -1151,8 +1191,11 @@ class TraceEventRecorder:
                         return
                 continue
 
+            with self._condition:
+                self._active_started = monotonic()
             try:
-                self.store.write(event)
+                with evidence_io_budget(0.5, cancel=self._cancel):
+                    self.store.write(event)
             except DuplicateTerminalEvent:
                 self._finish_duplicate_terminal()
             except BaseException as exc:  # noqa: BLE001 - the writer must keep draining.
@@ -1161,8 +1204,19 @@ class TraceEventRecorder:
                 self._finish_write_success()
             finally:
                 self._queue.task_done()
+                with self._condition:
+                    self._active_started = None
+
+    def _refresh_capacity(self):
+        if not self._queue.empty():
+            return
+        with evidence_io_budget(0.05):
+            capacity, unavailable = _safe_store_capacity_snapshot(self.store)
+        with self._condition:
+            self._capacity, self._capacity_unavailable = capacity, unavailable
 
     def _finish_write_success(self) -> None:
+        self._refresh_capacity()
         with self._condition:
             self._written = _saturated_increment(self._written)
             self._completed += 1
@@ -1177,6 +1231,7 @@ class TraceEventRecorder:
             self._condition.notify_all()
 
     def _finish_write_failure(self, kind: str) -> None:
+        self._refresh_capacity()
         with self._condition:
             self._dropped = _saturated_increment(self._dropped)
             self._write_failures = _saturated_increment(self._write_failures)
@@ -1663,7 +1718,8 @@ def _open_readonly_sqlite(
         if not _trace_lexists(path) or not path.is_file():
             raise FileNotFoundError(str(path))
         uri = path.resolve(strict=True).as_uri() + "?mode=ro"
-        connection = sqlite3.connect(uri, uri=True, timeout=float(timeout))
+        connection = sqlite3.connect(uri, uri=True, timeout=evidence_sqlite_timeout(float(timeout)))
+        configure_evidence_connection(connection)
         connection.execute("PRAGMA query_only = ON")
         return connection
     except (OSError, sqlite3.Error):
@@ -1684,7 +1740,8 @@ def _open_existing_sqlite(
     if not resolved.is_file():
         raise FileNotFoundError(str(resolved))
     uri = resolved.as_uri() + "?mode=rw"
-    connection = sqlite3.connect(uri, uri=True, timeout=float(timeout))
+    connection = sqlite3.connect(uri, uri=True, timeout=evidence_sqlite_timeout(float(timeout)))
+    configure_evidence_connection(connection)
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
 

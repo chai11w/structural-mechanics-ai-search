@@ -5071,12 +5071,26 @@ async def _periodic_checkpoint_retention(
     interval_seconds: float,
 ) -> None:
     interval = max(0.01, float(interval_seconds))
-    while True:
-        try:
-            await asyncio.to_thread(runner)
-        except Exception:  # noqa: BLE001 - evidence maintenance is fail-open for search.
-            logger.error("periodic checkpoint retention failed")
-        await asyncio.sleep(interval)
+    from threading import Event, Thread
+    from tiku_shared.evidence_io_budget import evidence_io_budget
+    stopped = Event()
+    def maintain():
+        while not stopped.is_set():
+            try:
+                with evidence_io_budget(30.0, cancel=stopped):
+                    runner()
+            except Exception:  # noqa: BLE001 - evidence maintenance is fail-open for search.
+                logger.error("periodic checkpoint retention failed")
+            stopped.wait(interval)
+    # One daemon for the lifespan: a stuck OS call cannot occupy the asyncio
+    # default executor and prevent its shutdown, or create overlapping retries.
+    worker = Thread(target=maintain, name="checkpoint-retention", daemon=True)
+    worker.start()
+    try:
+        await asyncio.Future()
+    finally:
+        stopped.set()
+        worker.join(timeout=0.2)
 
 
 def _checkpoint_evidence_health(
@@ -5162,6 +5176,13 @@ def _checkpoint_evidence_health(
         "current_reasons": reasons,
         "counters": counters,
         "pending": safe_count("pending"),
+        "running": safe_count("running"),
+        "backlog": safe_count("backlog"),
+        "pending_bytes": safe_count("pending_bytes"),
+        "stalled": raw.get("stalled") is True,
+        "circuit_open": raw.get("circuit_open") is True,
+        "maintenance_running": safe_count("maintenance_running"),
+        "maintenance_stalled": raw.get("maintenance_stalled") is True,
         "queue_capacity": safe_count("queue_capacity"),
         "accepting": raw.get("accepting") is True,
         "last_failure_code": failure_code,

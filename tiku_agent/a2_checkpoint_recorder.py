@@ -31,6 +31,7 @@ from tiku_agent.a2_checkpoint_stages import (
 from tiku_agent.tool_result import ToolOutcome, ToolResult
 from tiku_shared.trace_events import record_trace_event
 from tiku_shared.trace_context import is_valid_trace_id
+from tiku_shared.evidence_io_budget import check_evidence_budget
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class A2CaptureRecordResultV1:
     reason_code: str
     checkpoint_id: str = ""
     outcome: str = ""
+    evidence_failure_code: str = ""
 
 
 class A2CheckpointRecorderV1:
@@ -101,6 +103,7 @@ class A2CheckpointRecorderV1:
         return sha256(encoded.encode("utf-8")).hexdigest()
 
     def read_image(self, raw_path: object) -> bytes:
+        check_evidence_budget()
         if self.media_root is None:
             raise ValueError("capture media root is required")
         path = Path(str(raw_path))
@@ -114,6 +117,7 @@ class A2CheckpointRecorderV1:
             raise ValueError("capture image is outside the media root")
         with path.open("rb") as stream:
             content = stream.read(MAX_ARTIFACT_BYTES + 1)
+        check_evidence_budget()
         if not content or len(content) > MAX_ARTIFACT_BYTES:
             raise ValueError("capture image exceeds the evidence bound")
         return content
@@ -264,7 +268,9 @@ class A2CheckpointRecorderV1:
             )
         except Exception:
             pass
-        return self._result(True, "CAPTURE_STORED", stored.checkpoint_id, stored.outcome)
+        result = self._result(True, "CAPTURE_STORED", stored.checkpoint_id, stored.outcome)
+        return replace(result, evidence_failure_code=stored.failure.code
+                       if stored.failure is not None and stored.failure.kind == "evidence" else "")
 
 
 __all__ = ["A2CaptureRecordResultV1", "A2CheckpointRecorderV1"]

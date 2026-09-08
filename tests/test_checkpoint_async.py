@@ -327,7 +327,7 @@ class AsyncA3Test(unittest.TestCase):
                 queued = self.recorder.health()["counters"]["queued"]
                 agent._emit_question_checkpoint()
                 self.assertEqual(self.recorder.health()["counters"]["queued"], queued)
-                self.assertEqual(self.recorder.health()["last_failure_code"], "CAPTURE_REQUEST_BUDGET_EXHAUSTED")
+        self.assertEqual(self.recorder.health()["last_failure_code"], "capture_request_budget_exhausted")
 
     def test_parent_child_queue_and_resource_lease_survive_session_clear(self):
         entered, release = Event(), Event()

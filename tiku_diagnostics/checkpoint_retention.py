@@ -18,9 +18,14 @@ import sqlite3
 import stat
 import tempfile
 from threading import Lock
+from time import monotonic
 from typing import Callable, Mapping, Sequence
 
 from tiku_agent.checkpoint_contract import EvidenceCapacityPolicyV1
+from tiku_shared.evidence_io_budget import (
+    evidence_io_budget, check_evidence_budget, evidence_sqlite_timeout,
+    configure_evidence_connection, EvidenceDeadlineExceeded,
+)
 from tiku_agent.checkpoint_store import (
     EvidenceMaintenanceError,
     EvidenceRetentionPlanV1,
@@ -670,8 +675,22 @@ class CheckpointRetentionRunner:
         self._last_plan_hash = ""
         self._last_failure_code = ""
         self._last_failure_at = ""
+        self._active_runs = 0
+        self._started_at = 0.0
 
     def run_once(self) -> dict[str, object]:
+        with self._health_lock:
+            if not self._active_runs:
+                self._started_at = monotonic()
+            self._active_runs += 1
+        try:
+            with evidence_io_budget(30.0):
+                return self._run_once()
+        finally:
+            with self._health_lock:
+                self._active_runs -= 1
+
+    def _run_once(self) -> dict[str, object]:
         current: datetime | str | None = None
         try:
             current = self._clock()
@@ -689,6 +708,7 @@ class CheckpointRetentionRunner:
             code = (
                 exc.code
                 if isinstance(exc, CheckpointRetentionError)
+                else "RETENTION_BUDGET_EXHAUSTED" if isinstance(exc, EvidenceDeadlineExceeded)
                 else RETENTION_APPLY_FAILED
             )
             with self._health_lock:
@@ -721,6 +741,9 @@ class CheckpointRetentionRunner:
     def health(self) -> dict[str, object]:
         with self._health_lock:
             reasons = ["retention_failure"] if self._last_failure_code else []
+            stalled = bool(self._active_runs and monotonic() - self._started_at >= 30.0)
+            if stalled:
+                reasons.append("retention_stalled")
             return {
                 "status": "degraded" if reasons else "ok",
                 "current_reasons": reasons,
@@ -729,7 +752,8 @@ class CheckpointRetentionRunner:
                     "failures": self._failures,
                     "overlap_rejections": self._overlap_rejections,
                 },
-                "pending": 0,
+                "pending": self._active_runs,
+                "stalled": stalled,
                 "queue_capacity": 0,
                 "accepting": True,
                 "last_failure_code": self._last_failure_code,
@@ -1925,10 +1949,13 @@ def _backup_sqlite(source: Path, destination: Path) -> None:
         )
     uri = f"file:{_absolute_path(source).resolve().as_posix()}?mode=ro"
     try:
-        with closing(sqlite3.connect(uri, uri=True, timeout=5.0)) as source_connection:
+        with closing(sqlite3.connect(uri, uri=True, timeout=evidence_sqlite_timeout(5.0))) as source_connection:
+            configure_evidence_connection(source_connection)
             source_connection.execute("PRAGMA query_only=ON")
-            with closing(sqlite3.connect(destination, timeout=5.0)) as destination_connection:
-                source_connection.backup(destination_connection)
+            with closing(sqlite3.connect(destination, timeout=evidence_sqlite_timeout(5.0))) as destination_connection:
+                source_connection.backup(destination_connection, pages=256,
+                    progress=lambda *_: check_evidence_budget(), sleep=0.01)
+                check_evidence_budget()
                 destination_connection.commit()
         # The source stores use WAL.  The backup API can leave destination
         # sidecars beside the copied main file; the retention artifact is a
@@ -2279,6 +2306,18 @@ def _runtime_lock(runtime: Path) -> Lock:
 
 @contextmanager
 def _execution_lock(runtime: Path):
+    check_evidence_budget()
+    from tiku_shared.trace_events import _trace_writer_maintenance_lock, TraceEventMaintenanceError
+    try:
+        with _trace_writer_maintenance_lock(runtime / CHECKPOINT_DATABASE, filename=".checkpoint_capture.lock"):
+            with _execution_lock_unfenced(runtime):
+                yield
+    except TraceEventMaintenanceError as exc:
+        raise CheckpointRetentionError("capture or maintenance is active", code=RETENTION_ALREADY_RUNNING) from exc
+
+
+@contextmanager
+def _execution_lock_unfenced(runtime: Path):
     process_lock = _runtime_lock(runtime)
     if not process_lock.acquire(blocking=False):
         raise CheckpointRetentionError(

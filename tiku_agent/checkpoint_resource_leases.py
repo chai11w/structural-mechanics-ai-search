@@ -27,10 +27,12 @@ class CheckpointResourceLeases:
         now = self.clock()
         return {path for paths, deadline in self._leases.values() if deadline > now for path in paths}
 
-    def release(self, token):
+    def release(self, token, *, cleanup=True):
         from tiku_agent.checkpoint_store import _reject_linked_path, CheckpointStoreError
         with self._lock:
             self._leases.pop(token, None)
+            if not cleanup:
+                return
             ready = self._deferred - self._active_paths()
             self._deferred.difference_update(ready)
         for path in ready:

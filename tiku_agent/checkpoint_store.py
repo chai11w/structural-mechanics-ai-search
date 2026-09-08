@@ -20,13 +20,17 @@ import re
 import shutil
 import sqlite3
 import stat
-from threading import Condition, Lock, RLock, Thread, current_thread, local
+from threading import Condition, Lock, Thread, current_thread, local
 from time import monotonic, sleep
 from typing import Any, Callable, Iterator, Mapping, Sequence
 from uuid import uuid4
 import warnings
 
 from PIL import Image, UnidentifiedImageError
+from tiku_shared.evidence_io_budget import (
+    EvidenceRLock, check_evidence_budget, current_evidence_budget,
+    evidence_sqlite_timeout, configure_evidence_connection,
+)
 
 from tiku_agent.checkpoint_contract import (
     ARTIFACT_AVAILABLE,
@@ -1030,7 +1034,7 @@ class SQLiteCheckpointStore:
         self._disk_usage = disk_usage
         self._trace_row_counter = trace_row_counter
         self._sqlite_timeout_seconds = float(sqlite_timeout_seconds)
-        self._lock = RLock()
+        self._lock = EvidenceRLock()
         self._health_lock = Lock()
         self._health_counts = {
             "capacity_rejections": 0,
@@ -1049,6 +1053,7 @@ class SQLiteCheckpointStore:
         self._pending_physical_cleanup: dict[str, tuple[str, int]] = {}
 
     def _now(self) -> datetime:
+        check_evidence_budget()
         try:
             return _aware_utc(self._clock(), "trusted clock")
         except EvidenceValidationError:
@@ -1058,6 +1063,7 @@ class SQLiteCheckpointStore:
 
     @contextmanager
     def _write_connection(self) -> Iterator[sqlite3.Connection]:
+        check_evidence_budget()
         _reject_linked_path(self.path)
         existed = _lexists(self.path)
         if existed and not self.path.is_file():
@@ -1065,8 +1071,9 @@ class SQLiteCheckpointStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         _reject_linked_path(self.path)
         with closing(
-            sqlite3.connect(self.path, timeout=self._sqlite_timeout_seconds)
+            sqlite3.connect(self.path, timeout=evidence_sqlite_timeout(self._sqlite_timeout_seconds))
         ) as connection:
+            configure_evidence_connection(connection)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             if existed:
@@ -1084,6 +1091,7 @@ class SQLiteCheckpointStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 yield connection
+                check_evidence_budget()
             except BaseException:
                 connection.rollback()
                 self._pending_physical_cleanup.clear()
@@ -1094,6 +1102,7 @@ class SQLiteCheckpointStore:
 
     @contextmanager
     def _read_connection(self) -> Iterator[sqlite3.Connection | None]:
+        check_evidence_budget()
         _reject_linked_path(self.path)
         if not _lexists(self.path):
             self._store_id = None
@@ -1105,9 +1114,10 @@ class SQLiteCheckpointStore:
             sqlite3.connect(
                 self.path.as_uri() + "?mode=ro",
                 uri=True,
-                timeout=self._sqlite_timeout_seconds,
+                timeout=evidence_sqlite_timeout(self._sqlite_timeout_seconds),
             )
         ) as connection:
+            configure_evidence_connection(connection)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA query_only = ON")
             if not _verify_read_schema(connection):
@@ -1375,7 +1385,8 @@ class SQLiteCheckpointStore:
         cleanup_eligible = [
             gate for gate in rejected if gate != "max_artifacts_per_checkpoint"
         ]
-        if cleanup_eligible:
+        budget = current_evidence_budget.get()
+        if cleanup_eligible and not (budget is not None and budget.capture):
             self._purge_expired_locked(connection, now=trusted_now)
             counts, gates = evaluate()
             rejected = [gate for is_rejected, gate in gates if is_rejected]
