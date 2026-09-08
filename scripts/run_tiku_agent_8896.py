@@ -98,6 +98,8 @@ def build_runtime(
     max_concurrent_tasks: int = 0,
     max_queued_tasks: int = 0,
     queue_wait_seconds: float = 90.0,
+    checkpoint_recorder=None,
+    a3_checkpoint_recorder=None,
 ) -> A3MvpRuntime:
     """Build the full A1/A2/A3 route with A3 and its child A2 under one root."""
 
@@ -114,6 +116,7 @@ def build_runtime(
         cost_ledger=shared_cost_ledger,
         control_store=control_store,
         preserve_artifacts_on_cancel=preserve_a2_artifacts_on_cancel,
+        checkpoint_recorder=checkpoint_recorder,
     )
     authority = image_triage_authority
     if authority is None and enable_triage:
@@ -168,6 +171,7 @@ def build_runtime(
         max_concurrent_tasks=max_concurrent_tasks,
         max_queued_tasks=max_queued_tasks,
         queue_wait_seconds=queue_wait_seconds,
+        checkpoint_recorder=a3_checkpoint_recorder,
     )
     if orient_before_routing and a3_page_orienter is not None:
         return FrontdoorOrientationA3Runtime(

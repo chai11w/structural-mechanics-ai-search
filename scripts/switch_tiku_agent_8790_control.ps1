@@ -5,6 +5,16 @@ param(
     [string]$RuntimeDir,
     [string]$ControlDb,
     [string]$LegacyInviteConfig,
+    [Parameter(Mandatory = $true)][long]$MaxCheckpointRows,
+    [Parameter(Mandatory = $true)][long]$MaxArtifactRows,
+    [Parameter(Mandatory = $true)][long]$MaxAuditRows,
+    [Parameter(Mandatory = $true)][long]$MaxTraceRows,
+    [Parameter(Mandatory = $true)][long]$MaxArtifactBytes,
+    [Parameter(Mandatory = $true)][long]$MinFreeBytes,
+    [Parameter(Mandatory = $true)][int]$MaxArtifactsPerCheckpoint,
+    [Parameter(Mandatory = $true)][string]$CheckpointRetentionBackupRoot,
+    [Parameter(Mandatory = $true)][int]$CheckpointRetentionIntervalSeconds,
+    [Parameter(Mandatory = $true)][int]$CheckpointRetentionBackupKeepRuns,
     [Parameter(Mandatory = $true)][string]$ReleaseManifest,
     [Parameter(Mandatory = $true)][string]$ExpectedCommit,
     [Parameter(Mandatory = $true)][string]$BackupProjectRoot,
@@ -16,6 +26,25 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "watchdog_process_guard.ps1")
 . (Join-Path $PSScriptRoot "tiku_agent_watchdog_8790_safety.ps1")
+
+foreach ($value in @(
+    $MaxCheckpointRows,
+    $MaxArtifactRows,
+    $MaxAuditRows,
+    $MaxTraceRows,
+    $MaxArtifactBytes,
+    $MinFreeBytes,
+    $MaxArtifactsPerCheckpoint,
+    $CheckpointRetentionIntervalSeconds,
+    $CheckpointRetentionBackupKeepRuns
+)) {
+    if ([long]$value -le 0) {
+        throw "Evidence capacity and retention values must be greater than zero."
+    }
+}
+if ($MaxArtifactsPerCheckpoint -gt 50) {
+    throw "MaxArtifactsPerCheckpoint must be between 1 and 50."
+}
 
 $ProjectDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $RuntimeDir) { $RuntimeDir = Join-Path $ProjectDir ".tmp_tiku_agent_v2_prod_8790" }
@@ -30,6 +59,12 @@ foreach ($name in @("RuntimeDir", "ControlDb", "LegacyInviteConfig", "PythonExe"
 $RuntimeDir = [System.IO.Path]::GetFullPath($RuntimeDir)
 $ControlDb = [System.IO.Path]::GetFullPath($ControlDb)
 $LegacyInviteConfig = [System.IO.Path]::GetFullPath($LegacyInviteConfig)
+if (-not [System.IO.Path]::IsPathRooted($CheckpointRetentionBackupRoot)) {
+    throw "CheckpointRetentionBackupRoot must be an absolute path."
+}
+$CheckpointRetentionBackupRoot = [System.IO.Path]::GetFullPath(
+    $CheckpointRetentionBackupRoot
+)
 if (-not [System.IO.Path]::IsPathRooted($BackupProjectRoot)) {
     throw "BackupProjectRoot must be an absolute path."
 }
@@ -62,7 +97,7 @@ $PythonExe = $ReleaseIdentity.python
 function Test-Health {
     try {
         $response = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 3
-        return ($response.status -eq "ok") -or ($response.ok -eq $true)
+        return ($response.status -in @("ok", "degraded")) -or ($response.ok -eq $true)
     } catch {
         return $false
     }
@@ -127,7 +162,17 @@ function Start-Watchdog([string]$Mode) {
         "-Port", "$Port", "-RuntimeDir", $RuntimeDir,
         "-ReleaseManifest", $verifiedRelease.manifest,
         "-ExpectedCommit", $verifiedRelease.commit,
-        "-PythonExe", $verifiedRelease.python
+        "-PythonExe", $verifiedRelease.python,
+        "-MaxCheckpointRows", "$MaxCheckpointRows",
+        "-MaxArtifactRows", "$MaxArtifactRows",
+        "-MaxAuditRows", "$MaxAuditRows",
+        "-MaxTraceRows", "$MaxTraceRows",
+        "-MaxArtifactBytes", "$MaxArtifactBytes",
+        "-MinFreeBytes", "$MinFreeBytes",
+        "-MaxArtifactsPerCheckpoint", "$MaxArtifactsPerCheckpoint",
+        "-CheckpointRetentionBackupRoot", "$CheckpointRetentionBackupRoot",
+        "-CheckpointRetentionIntervalSeconds", "$CheckpointRetentionIntervalSeconds",
+        "-CheckpointRetentionBackupKeepRuns", "$CheckpointRetentionBackupKeepRuns"
     )
     if ($Mode -eq "control") {
         $arguments += @("-ControlDb", $ControlDb)

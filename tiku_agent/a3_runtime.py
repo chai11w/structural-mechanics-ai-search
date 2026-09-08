@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from hashlib import sha256
+from uuid import uuid4
 import json
 from pathlib import Path
 import re
@@ -37,6 +38,9 @@ from tiku_agent.a3_models import (
     CropCompareResult,
 )
 from tiku_agent.agent import AgentResponse
+from tiku_agent.a3_checkpoint_context import (
+    A3CheckpointBindingV1, a3_checkpoint_request_scope, current_a3_checkpoint_binding,
+)
 from tiku_agent.image_triage_authority import NO_EXTERNAL_LOAD_REPLY
 from tiku_agent.session_artifacts import SessionArtifacts, session_key
 from tiku_agent.state import AgentState
@@ -69,7 +73,11 @@ from tiku_shared.trace_context import (
     current_trace_id,
     submit_with_trace_context,
 )
-from tiku_shared.trace_events import bind_trace_event_dimensions, record_trace_event
+from tiku_shared.trace_events import (
+    bind_trace_event_dimensions,
+    record_trace_event,
+    trace_event_dimensions_scope,
+)
 
 
 A3_PHASE_IDLE = "IDLE"
@@ -148,6 +156,7 @@ def _capture_a3_response_snapshot(method: Callable[..., AgentResponse]):
     """Bound public work and keep response-time state under the session lock."""
 
     @wraps(method)
+    @a3_checkpoint_request_scope()
     def wrapped(
         runtime: "A3MvpRuntime",
         session_id: str,
@@ -670,10 +679,14 @@ class A3MvpRuntime:
         max_concurrent_tasks: int = 0,
         max_queued_tasks: int = 0,
         queue_wait_seconds: float = 90.0,
+        checkpoint_recorder=None,
     ) -> None:
         self.store = store
         self.artifacts = artifacts
         self.a2_runtime = a2_runtime
+        self.checkpoint_recorder = checkpoint_recorder
+        if checkpoint_recorder is not None and hasattr(checkpoint_recorder, "resource_leases"):
+            self.artifacts.checkpoint_resource_leases = checkpoint_recorder.resource_leases
         self.page_observer = page_observer
         self.crop_verifier = crop_verifier
         self.auto_cropper = auto_cropper
@@ -730,6 +743,7 @@ class A3MvpRuntime:
             )
             self.store.save(state)
             self._bind_trace_state(state, identity_key=identity_key)
+            self._capture_checkpoint(state, "image_accepted", identity_key=identity_key)
             return self._route_persisted_image(
                 state,
                 persisted,
@@ -1521,15 +1535,21 @@ class A3MvpRuntime:
 
         results: dict[str, dict[str, Any]] = {}
         if candidates:
+            def validate_unit(unit_id: str) -> dict[str, Any]:
+                with trace_event_dimensions_scope(
+                    workflow_search_id=state.workflow_search_id or state.current_search_id,
+                    search_id="",
+                    unit_id=unit_id,
+                ):
+                    return self._validate_auto_crop(state, unit_id, identity_key=identity_key)
+
             workers = min(self.auto_crop_max_workers, len(candidates))
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {
                     submit_with_trace_context(
                         executor,
-                        self._validate_auto_crop,
-                        state,
+                        validate_unit,
                         unit_id,
-                        identity_key=identity_key,
                     ): unit_id
                     for unit_id in candidates
                 }
@@ -1544,6 +1564,11 @@ class A3MvpRuntime:
                             "verification_checks": {},
                             "error_type": type(exc).__name__,
                         }
+                    evidence = {**state.auto_crops.get(unit_id, {}), **results[unit_id]}
+                    failed = evidence.get("error_type") and not evidence.get("verification_checks")
+                    self._capture_checkpoint(state, "crop_validated", identity_key=identity_key,
+                        unit_id=unit_id, record=evidence,
+                        failure_code="CROP_VALIDATION_FAILED" if failed else "")
                     if progress is not None:
                         progress(
                             "a3_auto_validating",
@@ -1711,11 +1736,18 @@ class A3MvpRuntime:
             if selected is None:
                 raise ValueError("selected A3 unit is unavailable")
             clean_bounds = _normalize_bounds(bounds)
-            crop_path = self._crop_source(state, clean_bounds)
+            try:
+                crop_path = self._crop_source(state, clean_bounds)
+            except Exception:
+                self._capture_checkpoint(state, "crop_prepared", identity_key=identity_key,
+                    unit_id=state.selected_unit_id, failure_code="CROP_WRITE_FAILED")
+                raise
             state.crop_drafts[state.selected_unit_id] = {
                 "path": str(crop_path),
                 "bounds": clean_bounds,
             }
+            self._capture_checkpoint(state, "crop_prepared", identity_key=identity_key,
+                unit_id=state.selected_unit_id, record=state.crop_drafts[state.selected_unit_id], method="manual")
             state.phase = A3_PHASE_VERIFYING
             state.crop_review_required = False
             state.crop_review_code = ""
@@ -1736,6 +1768,9 @@ class A3MvpRuntime:
                     identity_key=identity_key,
                 )
             except Exception as exc:  # noqa: BLE001 - preserve the crop draft for retry.
+                self._capture_checkpoint(state, "crop_validated", identity_key=identity_key,
+                    unit_id=state.selected_unit_id, record=state.crop_drafts[state.selected_unit_id],
+                    failure_code="CROP_VALIDATION_FAILED")
                 state.phase = A3_PHASE_CROP_REQUIRED
                 state.last_error = type(exc).__name__
                 self.store.save(state)
@@ -1746,6 +1781,7 @@ class A3MvpRuntime:
                     code="SERVICE_UNAVAILABLE",
                 )
             if not verdict.verified:
+                self._capture_crop_validation(state, verdict, "not_run", identity_key=identity_key)
                 state.phase = A3_PHASE_CROP_REQUIRED
                 state.crop_review_required = True
                 state.crop_review_code = _crop_review_code(verdict)
@@ -1771,6 +1807,7 @@ class A3MvpRuntime:
                         )
                     ).strip().lower()
                 except Exception as exc:  # noqa: BLE001 - do not pass an unverified crop to A2.
+                    self._capture_crop_validation(state, verdict, "error", identity_key=identity_key)
                     state.phase = A3_PHASE_CROP_REQUIRED
                     state.crop_review_required = True
                     state.crop_review_code = "LOAD_CHECK_UNAVAILABLE"
@@ -1786,6 +1823,8 @@ class A3MvpRuntime:
                         code="CLARIFICATION_REQUIRED",
                     )
                 if load_verdict != "yes":
+                    self._capture_crop_validation(state, verdict,
+                        "no" if load_verdict == "no" else "error", identity_key=identity_key)
                     state.phase = A3_PHASE_CROP_REQUIRED
                     state.crop_review_required = True
                     state.crop_review_code = "EXTERNAL_LOADS_NOT_FOUND"
@@ -1801,6 +1840,8 @@ class A3MvpRuntime:
                         code="CLARIFICATION_REQUIRED",
                     )
 
+            self._capture_crop_validation(state, verdict,
+                "yes" if self.external_load_screen is not None else "not_configured", identity_key=identity_key)
             if progress is not None:
                 progress("a3_analyzing_unit", "校验通过，正在结合题干识别章节和荷载…")
             context_text = _question_context_text(selected)
@@ -2717,6 +2758,8 @@ class A3MvpRuntime:
                 identity_key=identity_key,
             )
         except Exception as exc:  # noqa: BLE001 - keep the upload available for retry.
+            self._capture_checkpoint(state, "page_understood", identity_key=identity_key,
+                failure_code="PAGE_UNDERSTANDING_FAILED")
             state.phase = A3_PHASE_ERROR
             state.last_error = type(exc).__name__
             self._record_page_error(state, exc, task_kind="a3_page_understanding")
@@ -2760,6 +2803,8 @@ class A3MvpRuntime:
                 identity_key=identity_key,
             )
         except A3ModelError as exc:
+            self._capture_checkpoint(state, "page_understood", identity_key=identity_key,
+                failure_code="PAGE_UNDERSTANDING_FAILED")
             state.last_error = type(exc).__name__
             self._record_page_error(state, exc, task_kind="a3_page_understanding_retry")
             self.store.save(state)
@@ -2799,6 +2844,7 @@ class A3MvpRuntime:
         state.auto_crop_overlay_path = ""
         state.last_error = ""
         state.last_error_detail = ""
+        self._capture_checkpoint(state, "page_understood", identity_key=identity_key)
         searchable = state.searchable_units
         if not searchable:
             state.phase = A3_PHASE_COMPLETE
@@ -2916,6 +2962,9 @@ class A3MvpRuntime:
                 for unit in state.searchable_units
             }
             self._record_page_error(state, exc, task_kind="a3_auto_crop_grounding")
+            for unit in state.searchable_units:
+                self._capture_checkpoint(state, "crop_prepared", identity_key=identity_key,
+                    unit_id=str(unit["unit_id"]), failure_code="CROP_GROUNDING_FAILED")
             state.last_error = ""
             return
 
@@ -2961,6 +3010,9 @@ class A3MvpRuntime:
                     record["reason_codes"] = [*record["reason_codes"], "crop_write_error"]
                     record["error_type"] = type(exc).__name__
             records[target.unit_id] = record
+            self._capture_checkpoint(state, "crop_prepared", identity_key=identity_key,
+                unit_id=target.unit_id, record=record,
+                failure_code="CROP_UNAVAILABLE" if not record.get("path") else "")
         state.auto_crops = records
         has_bounds = any(record.get("bounds") for record in records.values())
         if has_bounds:
@@ -3234,7 +3286,7 @@ class A3MvpRuntime:
         target_dir = self.artifacts.session_dir(state.session_id) / "crops"
         target_dir.mkdir(parents=True, exist_ok=True)
         safe_id = sha256(str(unit_id).encode("utf-8")).hexdigest()[:20]
-        target = target_dir / f"{safe_id}.jpg"
+        target = target_dir / f"{safe_id}_{uuid4().hex}.jpg"
         with Image.open(source) as opened:
             image = ImageOps.exif_transpose(opened).convert("RGB")
             width, height = image.size
@@ -3367,6 +3419,17 @@ class A3MvpRuntime:
         *,
         identity_key: str = "",
     ) -> None:
+        if self.checkpoint_recorder is not None:
+            previous = current_a3_checkpoint_binding.get()
+            clean_identity = str(identity_key or "").strip()
+            if not clean_identity and previous is not None and previous.session_key == session_key(state.session_id):
+                clean_identity = previous.identity_key
+            current_a3_checkpoint_binding.set(A3CheckpointBindingV1(
+                recorder=self.checkpoint_recorder, session_key=session_key(state.session_id),
+                identity_key=clean_identity, workflow_search_id=state.workflow_search_id,
+                workflow_task_revision=state.task_revision, unit_id=state.selected_unit_id,
+                source_page_path=state.source_page_path,
+            ))
         child_search_id = ""
         if state.entry_route == "A2" or state.phase == A3_PHASE_A2_ACTIVE:
             try:
@@ -3397,6 +3460,7 @@ class A3MvpRuntime:
         identity_key: str,
     ) -> None:
         self._bind_trace_state(state, identity_key=identity_key)
+        self._capture_checkpoint(state, "image_routed", identity_key=identity_key)
         route_outcome = "rejected" if route == "A1" else "success"
         record_trace_event(
             "route_decided",
@@ -3419,6 +3483,8 @@ class A3MvpRuntime:
         identity_key: str,
     ) -> None:
         self._bind_trace_state(state, identity_key=identity_key)
+        self._capture_checkpoint(state, "image_routed", identity_key=identity_key,
+            failure_code="IMAGE_ROUTING_FAILED")
         record_trace_event(
             "stage_finished",
             stage="image_routing",
@@ -3429,6 +3495,31 @@ class A3MvpRuntime:
                 "error_kind": type(exc).__name__,
             },
         )
+
+    def _capture_checkpoint(self, state, stage, *, identity_key, **kwargs):
+        recorder = self.checkpoint_recorder
+        if recorder is None:
+            return
+        try:
+            client = {"page_understood": self.page_observer, "crop_prepared": self.auto_cropper,
+                      "crop_validated": self.crop_verifier}.get(stage)
+            if kwargs.get("method") == "manual" and stage == "crop_prepared":
+                client = None
+            recorder.capture_parent(state, stage=stage, identity_key=identity_key, producer_client=client, **kwargs)
+        except Exception:
+            recorder.input_unavailable()
+
+    def _capture_crop_validation(self, state, verdict, external_status, *, identity_key):
+        if self.checkpoint_recorder is None:
+            return
+        record = {
+            **state.crop_drafts[state.selected_unit_id],
+            "verification_checks": dict(verdict.checks),
+            "external_load_status": external_status,
+            "validation_status": "auto_ready" if verdict.verified and external_status in {"yes", "not_configured"} else "manual_required",
+        }
+        self._capture_checkpoint(state, "crop_validated", identity_key=identity_key,
+            unit_id=state.selected_unit_id, record=record, method="manual")
 
     def _call_model(
         self,

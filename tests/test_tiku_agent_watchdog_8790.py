@@ -67,6 +67,33 @@ class TikuAgentWatchdog8790Test(unittest.TestCase):
         self.assertIn('"--max-concurrent-tasks", "$MaxConcurrentTasks"', script)
         self.assertIn('"--max-queued-tasks", "$MaxQueuedTasks"', script)
         self.assertIn('"--queue-wait-seconds", "$QueueWaitSeconds"', script)
+        evidence_parameters = (
+            "MaxCheckpointRows",
+            "MaxArtifactRows",
+            "MaxAuditRows",
+            "MaxTraceRows",
+            "MaxArtifactBytes",
+            "MinFreeBytes",
+            "MaxArtifactsPerCheckpoint",
+            "CheckpointRetentionBackupRoot",
+            "CheckpointRetentionIntervalSeconds",
+            "CheckpointRetentionBackupKeepRuns",
+        )
+        for parameter in evidence_parameters:
+            self.assertIn("[Parameter(Mandatory = $true)]", script.split(f"${parameter}")[0].splitlines()[-1])
+        for option in (
+            "--max-checkpoint-rows",
+            "--max-artifact-rows",
+            "--max-audit-rows",
+            "--max-trace-rows",
+            "--max-artifact-bytes",
+            "--min-free-bytes",
+            "--max-artifacts-per-checkpoint",
+            "--checkpoint-retention-backup-root",
+            "--checkpoint-retention-interval-seconds",
+            "--checkpoint-retention-backup-keep-runs",
+        ):
+            self.assertIn(f'"{option}"', script)
         self.assertIn("[int]$MaxConcurrentTasks = 1", script)
         self.assertIn("[int]$MaxQueuedTasks = 2", script)
         self.assertIn("[int]$QueueWaitSeconds = 55", script)
@@ -84,6 +111,7 @@ class TikuAgentWatchdog8790Test(unittest.TestCase):
         self.assertIn("Test-BotProcess -ProcessId $candidate.Id", script)
         self.assertIn("Test-BotLaunch -ProcessId $candidate.Id", script)
         self.assertIn("Wait-WatchdogProcessReady", script)
+        self.assertIn('$response.status -in @("ok", "degraded")', script)
         self.assertNotIn("Start-Sleep -Seconds 4", script)
         self.assertIn("Stop-Process -InputObject $candidate", script)
         self.assertIn("Stop-Process -InputObject $botProcess", script)
@@ -146,7 +174,12 @@ class TikuAgentWatchdog8790Test(unittest.TestCase):
     def test_control_switch_is_release_bound_and_apply_gated(self):
         script = self.switch_script
 
-        for parameter in ("ReleaseManifest", "ExpectedCommit", "BackupProjectRoot"):
+        for parameter in (
+            "ReleaseManifest",
+            "ExpectedCommit",
+            "BackupProjectRoot",
+            "CheckpointRetentionBackupRoot",
+        ):
             self.assertIn(
                 "[Parameter(Mandatory = $true)][string]$" + parameter,
                 script,
@@ -177,6 +210,19 @@ class TikuAgentWatchdog8790Test(unittest.TestCase):
         self.assertIn('"-ReleaseManifest", $verifiedRelease.manifest', start_body)
         self.assertIn('"-ExpectedCommit", $verifiedRelease.commit', start_body)
         self.assertIn('"-PythonExe", $verifiedRelease.python', start_body)
+        for parameter in (
+            "MaxCheckpointRows",
+            "MaxArtifactRows",
+            "MaxAuditRows",
+            "MaxTraceRows",
+            "MaxArtifactBytes",
+            "MinFreeBytes",
+            "MaxArtifactsPerCheckpoint",
+            "CheckpointRetentionBackupRoot",
+            "CheckpointRetentionIntervalSeconds",
+            "CheckpointRetentionBackupKeepRuns",
+        ):
+            self.assertIn(f'"-{parameter}"', start_body)
         self.assertIn("ConvertTo-Tiku8790CommandLineArgument", start_body)
         self.assertIn("FilePath = $PowerShellExe", start_body)
         self.assertNotIn("Start-Process powershell.exe", start_body)
@@ -197,9 +243,40 @@ class TikuAgentWatchdog8790Test(unittest.TestCase):
         self.assertLess(manage_import, revalidate)
         self.assertLess(revalidate, first_stop)
         self.assertIn("--apply-import", script)
+        self.assertIn(
+            '$response.status -in @("ok", "degraded")',
+            script,
+        )
         pre_apply = script[:apply_gate]
         self.assertNotIn("manage_tiku_admin.py", pre_apply)
         self.assertNotIn("http://127.0.0.1:8795/health", pre_apply)
+
+    @unittest.skipUnless(POWERSHELL, "Windows PowerShell is required")
+    def test_capture_launch_arguments_use_verified_release_and_require_a2(self):
+        arguments = self.script[
+            self.script.index("$BotArguments = @(") : self.script.index("$BotLaunchArguments = @(")
+        ]
+        dependency = self.script[
+            self.script.index("if ($EnableA3CheckpointCapture -and") : self.script.index("foreach ($value")
+        ]
+        result = self._run_powershell(
+            "$ReleaseIdentity = [pscustomobject]@{commit='" + "a" * 40 + "'}\n"
+            "$EnableA2CheckpointCapture = $false; $EnableA3CheckpointCapture = $false\n"
+            + arguments + "\n$disabled = @($BotArguments)\n"
+            "$EnableA2CheckpointCapture = $true; $EnableA3CheckpointCapture = $true\n"
+            + dependency + arguments + "\n$enabled = @($BotArguments)\n"
+            "$EnableA2CheckpointCapture = $false\n$rejected = $false\ntry {\n"
+            + dependency + "\n} catch { $rejected = $_.Exception.Message -like '*requires A2*' }\n"
+            "[pscustomobject]@{disabled=$disabled;enabled=$enabled;rejected=$rejected} | ConvertTo-Json -Compress"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout.strip())
+        self.assertTrue(data["rejected"])
+        for flag in ("--enable-a2-checkpoint-capture", "--enable-a3-checkpoint-capture", "--checkpoint-code-revision"):
+            self.assertNotIn(flag, data["disabled"])
+            self.assertIn(flag, data["enabled"])
+        revision_index = data["enabled"].index("--checkpoint-code-revision") + 1
+        self.assertEqual(data["enabled"][revision_index], "a" * 40)
 
     @unittest.skipUnless(POWERSHELL, "Windows PowerShell is required")
     def test_release_identity_requires_matching_clean_manifest(self):

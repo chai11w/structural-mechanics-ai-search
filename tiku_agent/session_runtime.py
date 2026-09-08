@@ -15,6 +15,9 @@ from typing import Any, Callable, Protocol
 from zoneinfo import ZoneInfo
 
 from tiku_agent.agent import AgentResponse, TikuSearchAgent
+from tiku_agent.a2_checkpoint_recorder import A2CheckpointRecorderV1
+from tiku_agent.checkpoint_capture import A2CheckpointContextV1
+from tiku_agent.checkpoint_capture_gate import A2CaptureAdmissionV1
 from tiku_agent.external_load_screen import (
     ImageSearchCancelled,
     NO_EXTERNAL_LOAD_MESSAGE,
@@ -326,6 +329,7 @@ class AgentSessionRuntime:
         external_load_timeout_seconds: float = 15.0,
         image_triage_authority: object | None = None,
         preserve_artifacts_on_cancel: bool = False,
+        checkpoint_recorder: A2CheckpointRecorderV1 | None = None,
     ) -> None:
         self.store = store
         self.artifacts = artifacts or SessionArtifacts()
@@ -352,6 +356,9 @@ class AgentSessionRuntime:
         )
         self.image_triage_authority = image_triage_authority
         self.preserve_artifacts_on_cancel = bool(preserve_artifacts_on_cancel)
+        self.checkpoint_recorder = checkpoint_recorder
+        if checkpoint_recorder is not None and hasattr(checkpoint_recorder, "resource_leases"):
+            self.artifacts.checkpoint_resource_leases = checkpoint_recorder.resource_leases
         self._image_executor = (
             ThreadPoolExecutor(max_workers=8, thread_name_prefix="tiku-image-race")
             if external_load_screen is not None
@@ -678,6 +685,11 @@ class AgentSessionRuntime:
         )
         agent = self._make_agent(
             AgentState.from_dict(baseline_state.to_dict()), progress=progress
+        )
+        self._attach_checkpoint_emitter(
+            agent,
+            identity_key=identity_key,
+            request_id=request_id,
         )
         error_context["state"] = agent.state
         deadline = time.monotonic() + self.external_load_timeout_seconds
@@ -1463,6 +1475,11 @@ class AgentSessionRuntime:
                 started_at=started_at.isoformat(),
             )
             agent = self._make_agent(state, progress=progress)
+            self._attach_checkpoint_emitter(
+                agent,
+                identity_key=identity_key,
+                request_id=request_id,
+            )
         except Exception as exc:
             frozen_state, read_status = self._error_snapshot_read_set(error_context)
             self._attach_error_response_snapshot_from_read_set(
@@ -1567,6 +1584,147 @@ class AgentSessionRuntime:
                 session_dir=self.artifacts.session_dir(state.session_id),
             ),
         )
+
+    def _attach_checkpoint_emitter(
+        self,
+        agent: TikuSearchAgent,
+        *,
+        identity_key: str,
+        request_id: str,
+    ) -> None:
+        recorder = self.checkpoint_recorder
+        if recorder is None or not any(callable(getattr(recorder, method, None)) for method in ("capture_stage", "submit_stage")):
+            return
+        predecessor = ""
+        last_successful = ""
+        image_digests: dict[str, str] = {}
+        predecessor_loaded = False
+        from time import perf_counter
+        from tiku_agent.checkpoint_submission_budget import CheckpointSubmissionBudget, current_checkpoint_budget
+        capture_budget = current_checkpoint_budget.get() or CheckpointSubmissionBudget()
+
+        def emit(stage: str, result: Any, payload: dict[str, Any]) -> None:
+            nonlocal predecessor, last_successful, predecessor_loaded
+            capture_started = perf_counter()
+            state = agent.state
+            revision = state.task_revision
+            clean_identity = str(identity_key or "").strip()
+            context = A2CheckpointContextV1(
+                trace_id=current_trace_id(),
+                session_key=session_key(state.session_id),
+                identity_key=clean_identity,
+                workflow_search_id=state.current_search_id,
+                workflow_task_revision=revision,
+                search_id=state.current_search_id,
+                task_revision=revision,
+                producer=recorder.producer,
+                request_id=request_id,
+                candidate_generation=state.candidate_generation,
+            )
+            from tiku_agent.a3_checkpoint_context import current_a3_checkpoint_binding
+            parent = current_a3_checkpoint_binding.get()
+            if parent is not None:
+                if (parent.recorder is not recorder or parent.session_key != context.session_key
+                        or parent.identity_key != clean_identity):
+                    recorder.input_unavailable()
+                    return
+                if parent.unit_id:
+                    if stage in {"image_accepted", "image_routed"}:
+                        return
+                    context = replace(context, workflow_search_id=parent.workflow_search_id,
+                        workflow_task_revision=parent.workflow_task_revision, unit_id=parent.unit_id)
+                else:
+                    # V1 keeps direct A2 standalone; it has no A3 unit identity.
+                    parent = None
+            admission = A2CaptureAdmissionV1(
+                request_kind="search",
+                authenticated=bool(clean_identity),
+                quota_admitted=True,
+                queue_admitted=True,
+                upload_admitted=True,
+                entered_business_processing=True,
+            )
+            if not recorder.gate.decide(admission).permitted:
+                return
+            from tiku_shared.trace_context import is_valid_trace_id
+            if not is_valid_trace_id(context.trace_id):
+                recorder.input_unavailable()
+                return
+            from tiku_shared.trace_events import current_trace_event_session
+            trace_session = current_trace_event_session()
+            if parent is None and trace_session is not None and trace_session.dimensions.get("unit_id"):
+                return
+            from hashlib import sha256
+            from tiku_agent.a2_checkpoint_stages import _candidate_id
+            image_path = state.active_image_path
+            inputs = {
+                "source_image": image_digests.get(image_path, ""),
+                "loads": state.current_loads, "chapter": state.current_chapter,
+                "route": state.current_route, "structure_type": state.current_structure_type,
+                "dimension_filter_enabled": agent.config.dimension_filter_enabled,
+            }
+            if stage == "image_routed":
+                inputs["route_decision"] = payload.get("route_decision", {})
+            if stage in {"rerank_completed", "answer_prepared"}:
+                candidates = payload.get("candidates", state.candidates)
+                if len(candidates) > 1000:
+                    recorder.input_unavailable()
+                    return
+                inputs["candidates"] = [
+                    {"id": _candidate_id(item, rank), "score": item.get("score"),
+                     "rerank_score": item.get("rerank_score"), "final_score": item.get("final_score")}
+                    for rank, item in enumerate(candidates, 1)
+                ]
+                inputs["selected_rank"] = payload.get("selected_rank")
+                policy = result.data.get("checkpoint_rerank", {})
+                inputs["policy"] = {key: policy[key] for key in ("threshold", "display_all_score", "fallback_limit", "skipped") if key in policy}
+            from tiku_agent.checkpoint_stage_input import freeze_a2_stage_input, materialize_a2_stage_input
+            frozen = freeze_a2_stage_input(result, {**payload, "inputs": inputs,
+                "capture_image_path": image_path,
+                "source_image_path": parent.source_page_path if parent is not None else state.current_image_path})
+            if callable(getattr(recorder, "submit_stage", None)):
+                recorder.submit_stage(context, frozen, stage=stage, admission=admission,
+                    budget=capture_budget, started=capture_started)
+                return
+            result, payload = materialize_a2_stage_input(frozen)
+            payload.pop("capture_image_path", None)
+            if not predecessor_loaded:
+                predecessor_loaded = True
+                last_successful = recorder.last_successful(context)
+                predecessor = last_successful
+            if image_path and image_path not in image_digests:
+                try:
+                    image_digests[image_path] = sha256(recorder.read_image(image_path)).hexdigest()
+                except Exception:
+                    image_digests[image_path] = ""
+                    recorder.input_unavailable()
+            payload["inputs"]["source_image"] = image_digests.get(image_path, "")
+            recorded = recorder.capture_stage(
+                context,
+                admission=admission,
+                stage=stage,
+                tool_result=result,
+                payload=payload,
+                predecessor_checkpoint_id=predecessor,
+                last_successful_checkpoint_id=last_successful,
+            )
+            if recorded.stored:
+                predecessor = recorded.checkpoint_id
+                if recorded.outcome == "success":
+                    last_successful = recorded.checkpoint_id
+
+        def safe_emit(stage: str, result: Any, payload: dict[str, Any]) -> None:
+            try:
+                emit(stage, result, payload)
+            except Exception:
+                recorder.input_unavailable()
+
+        try:
+            agent.checkpoint_emitter = safe_emit
+            from dataclasses import replace
+            agent.config = replace(agent.config, checkpoint_emitter=safe_emit)
+        except Exception:
+            pass
 
     def purge_expired(self) -> None:
         """Remove expired state and its session-scoped files."""

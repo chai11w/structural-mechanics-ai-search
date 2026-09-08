@@ -67,14 +67,44 @@ class TikuControlRuntimeVerifierTest(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].status, "archived")
 
+    def test_degraded_evidence_health_does_not_block_control_verification(self):
+        root = (
+            Path(__file__).resolve().parents[1]
+            / ".tmp_tests"
+            / f"control_verifier_{uuid4().hex}"
+        )
+        root.mkdir(parents=True)
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        control = SQLiteControlStore(root / "control.sqlite3")
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            _runtime_handler(control, health_status="degraded"),
+        )
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
 
-def _runtime_handler(control: SQLiteControlStore):
+        result = verify_runtime(
+            control_db=control.path,
+            base_url=f"http://127.0.0.1:{server.server_address[1]}",
+        )
+
+        self.assertEqual(result["health"], "degraded")
+        self.assertEqual(result["dynamic_revocation"], "ok")
+
+
+def _runtime_handler(
+    control: SQLiteControlStore,
+    *,
+    health_status: str = "ok",
+):
     sessions: dict[str, tuple[str, int]] = {}
 
     class RuntimeHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == "/health":
-                self._json(200, {"status": "ok"})
+                self._json(200, {"status": health_status})
                 return
             if self.path == "/api/session":
                 token = self._cookie("validation_session")

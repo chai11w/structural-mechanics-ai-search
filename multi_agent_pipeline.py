@@ -656,6 +656,11 @@ def apply_dimension_prefilter(
             structure_type,
         )
         trace.update(filter_trace)
+        trace["long_width"] = (
+            "x".join(str(query.full.get(key) or "") for key in ("long", "width"))
+            if query.full else ""
+        )
+        trace["single_side"] = str(query.single or "")
         trace["enabled"] = True
         trace["from_cache"] = bool(recognized.get("from_cache"))
         trace["reason"] = "applied" if trace.get("applied") else f"query_{query.state}"

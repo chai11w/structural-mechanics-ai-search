@@ -6,15 +6,32 @@ from unittest.mock import patch
 from scripts.run_tiku_agent_8790 import (
     DEFAULT_PORT,
     DEFAULT_RUNTIME_DIR,
+    _capacity_from_args,
     build_app,
     build_argument_parser,
 )
 from tiku_admin.control_store import SQLiteControlStore
 
 
+EVIDENCE_CLI_ARGUMENTS = [
+    "--max-checkpoint-rows", "1000",
+    "--max-artifact-rows", "2000",
+    "--max-audit-rows", "3000",
+    "--max-trace-rows", "4000",
+    "--max-artifact-bytes", "5000000",
+    "--min-free-bytes", "6000000",
+    "--max-artifacts-per-checkpoint", "7",
+    "--checkpoint-retention-backup-root", r"F:\backups\tiku-evidence",
+    "--checkpoint-retention-interval-seconds", "3600",
+    "--checkpoint-retention-backup-keep-runs", "14",
+]
+
+
 class TikuAgent8790A3V1Test(unittest.TestCase):
     def test_launcher_defaults_to_production_port_and_a3_v1(self):
-        defaults = build_argument_parser().parse_args([])
+        with self.assertRaises(SystemExit):
+            build_argument_parser().parse_args([])
+        defaults = build_argument_parser().parse_args(EVIDENCE_CLI_ARGUMENTS)
 
         self.assertEqual(DEFAULT_PORT, 8790)
         self.assertEqual(DEFAULT_RUNTIME_DIR.name, ".tmp_tiku_agent_v2_prod_8790")
@@ -25,21 +42,35 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
         self.assertEqual(defaults.max_concurrent_tasks, 1)
         self.assertEqual(defaults.max_queued_tasks, 2)
         self.assertEqual(defaults.queue_wait_seconds, 55.0)
+        self.assertEqual(
+            _capacity_from_args(defaults).to_dict(),
+            {
+                "max_checkpoint_rows": 1000,
+                "max_artifact_rows": 2000,
+                "max_audit_rows": 3000,
+                "max_trace_rows": 4000,
+                "max_artifact_bytes": 5000000,
+                "min_free_bytes": 6000000,
+                "max_artifacts_per_checkpoint": 7,
+            },
+        )
         self.assertFalse(
-            build_argument_parser().parse_args(["--disable-output-watchdog"]).enable_output_watchdog
+            build_argument_parser().parse_args(
+                [*EVIDENCE_CLI_ARGUMENTS, "--disable-output-watchdog"]
+            ).enable_output_watchdog
         )
         self.assertFalse(
             build_argument_parser()
-            .parse_args(["--disable-a3-text-orientation"])
+            .parse_args([*EVIDENCE_CLI_ARGUMENTS, "--disable-a3-text-orientation"])
             .enable_a3_text_orientation
         )
         self.assertTrue(
             build_argument_parser()
-            .parse_args(["--enable-a3-text-orientation"])
+            .parse_args([*EVIDENCE_CLI_ARGUMENTS, "--enable-a3-text-orientation"])
             .enable_a3_text_orientation
         )
 
-        custom = build_argument_parser().parse_args([
+        custom = build_argument_parser().parse_args([*EVIDENCE_CLI_ARGUMENTS,
             "--max-concurrent-tasks", "3",
             "--max-queued-tasks", "4",
             "--queue-wait-seconds", "66",
@@ -49,7 +80,9 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
         self.assertEqual(custom.queue_wait_seconds, 66.0)
 
         self.assertEqual(
-            build_argument_parser().parse_args(["--max-queued-tasks", "0"]).max_queued_tasks,
+            build_argument_parser().parse_args(
+                [*EVIDENCE_CLI_ARGUMENTS, "--max-queued-tasks", "0"]
+            ).max_queued_tasks,
             0,
         )
         for arguments in (
@@ -60,7 +93,17 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
             ["--queue-wait-seconds", "inf"],
         ):
             with self.assertRaises(SystemExit):
-                build_argument_parser().parse_args(arguments)
+                build_argument_parser().parse_args(
+                    [*EVIDENCE_CLI_ARGUMENTS, *arguments]
+                )
+        with self.assertRaises(SystemExit):
+            build_argument_parser().parse_args(
+                [
+                    *EVIDENCE_CLI_ARGUMENTS[:-8],
+                    "--max-artifacts-per-checkpoint", "51",
+                    *EVIDENCE_CLI_ARGUMENTS[-6:],
+                ]
+            )
 
     def test_production_builder_rejects_queue_settings_that_disable_protection(self):
         with self.assertRaisesRegex(ValueError, "max_concurrent_tasks"):
@@ -154,6 +197,22 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
             self.assertIsNone(
                 build_runtime.call_args.kwargs["a3_page_orienter"]
             )
+
+    def test_existing_trace_database_is_migrated_during_startup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = Path(temp) / "runtime"
+            runtime.mkdir()
+            (runtime / "trace_events.sqlite3").touch()
+            with patch(
+                "scripts.run_tiku_agent_8790.build_a3_runtime",
+                return_value=object(),
+            ), patch(
+                "scripts.run_tiku_agent_8790.SQLiteTraceEventStore.ensure_store_identity"
+            ) as ensure_identity:
+                app = build_app(runtime, enable_triage=False)
+
+            self.assertIsNotNone(app)
+            ensure_identity.assert_called_once()
 
 
 if __name__ == "__main__":

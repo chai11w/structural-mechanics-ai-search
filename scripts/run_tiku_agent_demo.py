@@ -14,6 +14,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from tiku_agent.agent import AgentToolbox, TikuSearchAgent
+from tiku_agent.a2_checkpoint_recorder import A2CheckpointRecorderV1
 from tiku_agent.external_load_screen import ZhipuExternalLoadScreen
 from tiku_agent.fastapi_demo import create_app
 from tiku_agent.feedback_store import SQLiteFeedbackStore
@@ -58,6 +59,7 @@ def build_runtime(
     rerank_policy: dict[str, object] | None = None,
     cost_ledger: SQLiteModelCostLedger | None = None,
     preserve_artifacts_on_cancel: bool = False,
+    checkpoint_recorder: A2CheckpointRecorderV1 | None = None,
 ) -> AgentSessionRuntime:
     """Build the 8790 runtime with bounded safe answers enabled by default."""
     root = Path(runtime_dir).resolve()
@@ -125,6 +127,7 @@ def build_runtime(
         ),
         external_load_timeout_seconds=external_load_timeout_seconds,
         preserve_artifacts_on_cancel=preserve_artifacts_on_cancel,
+        checkpoint_recorder=checkpoint_recorder,
     )
 
 

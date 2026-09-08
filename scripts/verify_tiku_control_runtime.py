@@ -37,8 +37,11 @@ def verify_runtime(
     opener = build_opener(HTTPCookieProcessor(CookieJar()))
     try:
         health = _json_request(opener, f"{clean_url}/health", timeout_seconds)
-        if health.get("status") != "ok" and health.get("ok") is not True:
-            raise RuntimeError("8790 health check did not report ok")
+        health_status = str(health.get("status") or "")
+        if health_status not in {"ok", "degraded"}:
+            if health.get("ok") is not True:
+                raise RuntimeError("8790 health check did not report a live status")
+            health_status = "ok"
         login_request = Request(
             f"{clean_url}/api/invite/login",
             data=urlencode({"code": code}).encode("ascii"),
@@ -62,7 +65,7 @@ def verify_runtime(
         else:
             raise RuntimeError("disabled invitation session remained valid")
         return {
-            "health": "ok",
+            "health": health_status,
             "login": "ok",
             "session": "ok",
             "dynamic_revocation": "ok",
