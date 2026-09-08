@@ -61,6 +61,11 @@ ProgressReporter = Callable[[str, str], None]
 ExternalLoadScreen = Callable[[str | Path], str]
 
 
+def _copy_state_with_version(state: AgentState) -> AgentState:
+    from tiku_agent.execution_store import inherit_state_version
+    return inherit_state_version(state, AgentState.from_dict(state.to_dict()))
+
+
 @dataclass(frozen=True)
 class SessionResponseSnapshotV1:
     """One frozen read-set for a public session-bearing response."""
@@ -684,7 +689,7 @@ class AgentSessionRuntime:
             started_at=started_at.isoformat(),
         )
         agent = self._make_agent(
-            AgentState.from_dict(baseline_state.to_dict()), progress=progress
+            _copy_state_with_version(baseline_state), progress=progress
         )
         self._attach_checkpoint_emitter(
             agent,
@@ -887,7 +892,7 @@ class AgentSessionRuntime:
     def _no_load_response(
         state_before: AgentState, image_path: Path, *, search_id: str
     ) -> tuple[AgentState, AgentResponse]:
-        state = AgentState.from_dict(state_before.to_dict())
+        state = _copy_state_with_version(state_before)
         state.start_search(str(image_path), search_id=search_id)
         state.set_candidates([])
         state.last_error = NO_EXTERNAL_LOAD_MESSAGE
