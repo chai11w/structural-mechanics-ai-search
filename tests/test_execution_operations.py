@@ -103,7 +103,7 @@ class ExecutionOperationsTests(unittest.TestCase):
                 observed = client.get("/api/operation", params={"key": req["key"], "epoch": req["epoch"]})
                 self.assertEqual(observed.status_code, 200, observed.text)
                 op = observed.json()["operation"]
-                self.assertEqual(set(op), {"operation_id", "kind", "status", "attempts"})
+                self.assertEqual(set(op), {"operation_id", "kind", "status", "attempts", "effects", "accounting"})
                 self.assertEqual(op["status"], "SUCCEEDED")
                 self.assertEqual(set(op["attempts"][0]), {"attempt_id", "status"})
             self.assertEqual(self.calls, ["hello"])

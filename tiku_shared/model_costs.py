@@ -24,6 +24,7 @@ from uuid import uuid4
 
 from tiku_shared.trace_context import current_trace_id, submit_with_trace_context
 from tiku_shared.trace_events import record_trace_event
+from tiku_shared.execution_hooks import execution_observer
 
 
 CATALOG_PATH = Path(__file__).with_name("model_price_catalog.json")
@@ -147,11 +148,16 @@ def model_run_binding(callback):
 
 @contextmanager
 def model_cost_scope(collector: ModelCostCollector) -> Iterator[ModelCostCollector]:
+    observer = execution_observer()
+    if observer is not None:
+        observer.collector_started(collector)
     token = _ACTIVE_COLLECTOR.set(collector)
     try:
         yield collector
     finally:
         _ACTIVE_COLLECTOR.reset(token)
+        if observer is not None:
+            observer.collector_closed(collector)
 
 
 def record_model_call(
@@ -236,6 +242,11 @@ def timed_model_call(
     clean_call_type = str(call_type).strip()
     started_at = utc_now()
     started = time.perf_counter()
+    observer = execution_observer()
+    if observer is not None:
+        observer.prepare_model(call_id=call_id, run_id=run_id, provider=clean_provider,
+                               model=clean_model, call_type=clean_call_type)
+        observer.model_sent(call_id)
     _emit_trace_event(
         "model_call_started",
         stage=clean_call_type,
@@ -251,7 +262,7 @@ def timed_model_call(
     )
     try:
         result = function()
-    except Exception as exc:
+    except BaseException as exc:
         failed_attempt_count = _safe_attempt_count(
             getattr(exc, "model_attempt_count", attempt_count)
         )
@@ -269,6 +280,8 @@ def timed_model_call(
             attempt_count=failed_attempt_count,
             error_kind=type(exc).__name__,
         )
+        if observer is not None:
+            observer.model_finished(call_id, record, confirmed=False)
         _emit_model_call_finished(
             record=record,
             provider=clean_provider,
@@ -320,6 +333,8 @@ def timed_model_call(
             )
         except Exception:  # noqa: BLE001 - preserve the original adapter failure.
             failed_record = None
+        if observer is not None:
+            observer.model_finished(call_id, failed_record, confirmed=False)
         _emit_model_call_finished(
             record=failed_record,
             provider=clean_provider,
@@ -333,6 +348,10 @@ def timed_model_call(
             error_kind=type(exc).__name__,
         )
         raise
+    if observer is not None:
+        usage_fields = _object_mapping(usage)
+        usage_known = any(name in usage_fields for name in ("input_tokens", "prompt_tokens", "output_tokens", "completion_tokens", "total_tokens"))
+        observer.model_finished(call_id, record, confirmed=True, usage_known=usage_known)
     _emit_model_call_finished(
         record=record,
         provider=clean_provider,
@@ -475,6 +494,10 @@ def estimate_cost(provider: str, model: str, tokens: Mapping[str, int]) -> dict[
     }
 
 
+class ModelCostConflict(sqlite3.IntegrityError):
+    """An existing run/call identity has different immutable accounting data."""
+
+
 class SQLiteModelCostLedger:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -486,68 +509,49 @@ class SQLiteModelCostLedger:
         *,
         finished_at: str,
         outcome: str,
+        idempotent: bool = False,
     ) -> None:
         records = collector.records()
         call_count = sum(item.attempt_count for item in records)
         total_tokens = sum(item.total_tokens for item in records)
         total_cost = sum(item.estimated_cost_micros for item in records)
         warnings = _warning_codes(records)
+        observer = execution_observer()
+        if observer is not None:
+            observer.prepare_cost(self.path, collector, finished_at=finished_at, outcome=outcome)
+            idempotent = True
+        run_columns = ("run_id", "trace_id", "session_key", "identity_key", "search_key", "task_kind",
+                       "started_at", "finished_at", "outcome", "call_count", "total_tokens",
+                       "estimated_cost_micros", "warning_codes_json", "schema_version")
+        run_values = (collector.run_id, collector.trace_id, collector.session_key, collector.identity_key,
+                      collector.search_key, collector.task_kind, collector.started_at, finished_at, outcome,
+                      call_count, total_tokens, total_cost,
+                      json.dumps(warnings, ensure_ascii=False, separators=(",", ":")), COST_SCHEMA_VERSION)
+        call_columns = ("call_id", "run_id", "sequence", "provider", "model", "call_type", "status",
+                        "started_at", "finished_at", "latency_ms", "input_tokens", "image_tokens",
+                        "cached_tokens", "output_tokens", "total_tokens", "attempt_count", "trace_id",
+                        "provider_request_id", "request_id", "error_kind", "price_version", "pricing_status",
+                        "estimated_cost_micros", "schema_version")
+        call_values = [tuple({**item.to_dict(), "run_id": collector.run_id, "schema_version": COST_SCHEMA_VERSION}[name]
+                             for name in call_columns) for item in records]
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
             with closing(sqlite3.connect(self.path)) as connection, connection:
                 connection.execute("PRAGMA journal_mode=WAL")
                 _create_schema(connection)
-                connection.execute(
-                    """
-                    INSERT INTO model_cost_runs (
-                        run_id, trace_id, session_key, identity_key, search_key, task_kind,
-                        started_at, finished_at,
-                        outcome, call_count, total_tokens, estimated_cost_micros,
-                        warning_codes_json, schema_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        collector.run_id,
-                        collector.trace_id,
-                        collector.session_key,
-                        collector.identity_key,
-                        collector.search_key,
-                        collector.task_kind,
-                        collector.started_at,
-                        finished_at,
-                        outcome,
-                        call_count,
-                        total_tokens,
-                        total_cost,
-                        json.dumps(warnings, ensure_ascii=False, separators=(",", ":")),
-                        COST_SCHEMA_VERSION,
-                    ),
-                )
-                connection.executemany(
-                    """
-                    INSERT INTO model_cost_calls (
-                        call_id, run_id, sequence, provider, model, call_type,
-                        status, started_at, finished_at, latency_ms, input_tokens,
-                        image_tokens, cached_tokens, output_tokens, total_tokens,
-                        attempt_count, trace_id, provider_request_id, request_id,
-                        error_kind, price_version,
-                        pricing_status, estimated_cost_micros, schema_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            item.call_id, collector.run_id, item.sequence, item.provider,
-                            item.model, item.call_type, item.status, item.started_at,
-                            item.finished_at, item.latency_ms, item.input_tokens,
-                            item.image_tokens, item.cached_tokens, item.output_tokens,
-                            item.total_tokens, item.attempt_count, item.trace_id,
-                            item.provider_request_id, item.request_id,
-                            item.error_kind, item.price_version, item.pricing_status,
-                            item.estimated_cost_micros, COST_SCHEMA_VERSION,
-                        )
-                        for item in records
-                    ],
-                )
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(f"SELECT {','.join(run_columns)} FROM model_cost_runs WHERE run_id=?",
+                                              (collector.run_id,)).fetchone() if idempotent else None
+                if existing is not None:
+                    existing_calls = connection.execute(f"SELECT {','.join(call_columns)} FROM model_cost_calls WHERE run_id=? ORDER BY sequence,call_id",
+                                                        (collector.run_id,)).fetchall()
+                    if tuple(existing) != run_values or existing_calls != sorted(call_values, key=lambda item: (item[2], item[0])):
+                        raise ModelCostConflict("immutable model cost run differs")
+                else:
+                    connection.execute(f"INSERT INTO model_cost_runs ({','.join(run_columns)}) VALUES ({','.join('?' for _ in run_columns)})", run_values)
+                    connection.executemany(f"INSERT INTO model_cost_calls ({','.join(call_columns)}) VALUES ({','.join('?' for _ in call_columns)})", call_values)
+        if observer is not None:
+            observer.cost_confirmed(collector.run_id)
         _emit_trace_event(
             "cost_run_written",
             stage=str(collector.task_kind or "model_cost"),

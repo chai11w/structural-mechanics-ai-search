@@ -171,7 +171,7 @@ class ExecutionStore:
         return now
 
     def capacity(self, conn, table: str, limit: int):
-        if table not in {"execution_sessions", "execution_tasks", "execution_operations"}:
+        if table not in {"execution_sessions", "execution_tasks", "execution_operations", "execution_effects"}:
             raise ValueError("unknown capacity table")
         if conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] >= limit:
             raise ExecutionError("EXECUTION_CAPACITY")

@@ -95,6 +95,8 @@ class OperationStore:
             columns={row[1] for row in conn.execute("PRAGMA table_info(execution_operations)")}
             if not {"producer", "target", "previous_operation_id"}.issubset(columns):
                 raise ExecutionError("EXECUTION_SCHEMA_UNSUPPORTED")
+            from tiku_agent.execution_effects import create_effect_schema
+            create_effect_schema(conn)
 
     def lookup(self, sid, identity, request):
         req = OperationRequest.parse(request)
@@ -130,7 +132,13 @@ class OperationStore:
             if status=="RUNNING" and row["lease_until"]<=now:
                 status="UNKNOWN"
             attempts=[{"attempt_id":item["id"],"status":item["status"]} for item in conn.execute("SELECT id,status FROM execution_attempts WHERE operation_id=? ORDER BY created DESC LIMIT 20",(row["id"],))]
-        return {"operation_id":row["id"],"kind":row["kind"],"status":status,"attempts":attempts}
+            effect_counts = {item["status"]: item["count"] for item in conn.execute(
+                "SELECT status,count(*) AS count FROM execution_effects WHERE operation_id=? GROUP BY status", (row["id"],))}
+            pending = conn.execute("SELECT count(*) FROM execution_cost_runs r LEFT JOIN execution_cost_outbox c ON c.run_id=r.run_id "
+                                   "WHERE r.operation_id=? AND (c.status<>'CONFIRMED' OR (c.run_id IS NULL AND EXISTS "
+                                   "(SELECT 1 FROM execution_effects e WHERE e.run_id=r.run_id)))", (row["id"],)).fetchone()[0]
+        return {"operation_id":row["id"],"kind":row["kind"],"status":status,"attempts":attempts,
+                "effects":effect_counts,"accounting":{"pending_runs":pending}}
 
     def register(self, sid, identity, request, kind, inputs):
         req = OperationRequest.parse(request)
@@ -154,6 +162,13 @@ class OperationStore:
             current = store._session(conn, key, now)
             if not store._valid_session(current, now) or current["epoch"] != req.epoch or current["version"] != req.state_version:
                 raise ExecutionError("EXECUTION_STALE")
+            if conn.execute("SELECT 1 FROM execution_cost_outbox WHERE status<>'CONFIRMED' LIMIT 1").fetchone():
+                raise ExecutionError("EXECUTION_COST_PENDING")
+            if conn.execute("SELECT 1 FROM execution_effects e JOIN execution_operations o ON o.id=e.operation_id "
+                            "LEFT JOIN execution_cost_outbox c ON c.run_id=e.run_id "
+                            "WHERE o.status IN ('SUCCEEDED','UNKNOWN','CANCELLED','FAILED') "
+                            "AND (e.status IN ('SENT','UNKNOWN') OR (e.status='CONFIRMED' AND (c.run_id IS NULL OR e.usage_known=0))) LIMIT 1").fetchone():
+                raise ExecutionError("EXECUTION_COST_PENDING")
             store.capacity(conn,"execution_operations",store.policy.max_operations)
             used = conn.execute("SELECT coalesce(sum(result_bytes),0) FROM execution_operations").fetchone()[0]
             reserved = conn.execute("SELECT count(*) FROM execution_operations WHERE status IN ('REGISTERED','RUNNING','UNKNOWN')").fetchone()[0] * store.policy.max_result_bytes
@@ -211,6 +226,7 @@ class OperationStore:
         return writer
 
     def _unknown(self, conn, operation_id, now):
+        conn.execute("UPDATE execution_effects SET status='UNKNOWN',updated=? WHERE operation_id=? AND status='SENT'", (now, operation_id))
         conn.execute("UPDATE execution_operations SET status='UNKNOWN',token='',updated=? WHERE id=?",(now,operation_id))
         conn.execute("UPDATE execution_attempts SET status='UNKNOWN',updated=? WHERE operation_id=? AND status='RUNNING'",(now,operation_id))
 
@@ -231,6 +247,9 @@ class OperationStore:
         with self.authority.transaction() as conn:
             now = self.authority.clock(conn)
             writer.validate(conn,self.authority,writer.session,writer.epoch,now)
+            if conn.execute("SELECT 1 FROM execution_effects WHERE operation_id=? AND status<>'CONFIRMED' LIMIT 1",
+                            (writer.operation_id,)).fetchone():
+                raise ExecutionError("EXECUTION_UNKNOWN")
             session = self.authority._session(conn,writer.session,now)
             if session["epoch"] != writer.epoch:
                 raise ExecutionError("EXECUTION_STALE")
@@ -274,8 +293,13 @@ class OperationStore:
             now = store.clock(conn)
             for row in conn.execute("SELECT id FROM execution_operations WHERE status='RUNNING' AND lease_until<=? LIMIT 100",(now,)).fetchall():
                 self._unknown(conn,row[0],now)
-            removable = conn.execute("SELECT o.id FROM execution_operations o LEFT JOIN execution_sessions s ON s.session=o.session WHERE o.status IN ('SUCCEEDED','FAILED') AND o.updated<? AND (s.epoch<>o.epoch OR s.expires<=?) LIMIT 100",(now-store.policy.history_ttl,now)).fetchall()
+            removable = conn.execute("SELECT o.id FROM execution_operations o LEFT JOIN execution_sessions s ON s.session=o.session WHERE o.status IN ('SUCCEEDED','FAILED') AND o.updated<? AND (s.epoch<>o.epoch OR s.expires<=?) "
+                                     "AND NOT EXISTS (SELECT 1 FROM execution_effects e LEFT JOIN execution_cost_outbox c ON c.run_id=e.run_id WHERE e.operation_id=o.id AND (e.status<>'CONFIRMED' OR e.usage_known=0 OR c.status IS NULL OR c.status<>'CONFIRMED')) "
+                                     "AND NOT EXISTS (SELECT 1 FROM execution_cost_outbox c JOIN execution_cost_runs r ON r.run_id=c.run_id WHERE r.operation_id=o.id AND c.status<>'CONFIRMED') LIMIT 100",(now-store.policy.history_ttl,now)).fetchall()
             for row in removable:
+                conn.execute("DELETE FROM execution_effects WHERE operation_id=?",(row[0],))
+                conn.execute("DELETE FROM execution_collectors WHERE run_id IN (SELECT run_id FROM execution_cost_runs WHERE operation_id=?)",(row[0],))
+                conn.execute("DELETE FROM execution_cost_outbox WHERE run_id IN (SELECT run_id FROM execution_cost_runs WHERE operation_id=?)",(row[0],))
                 conn.execute("DELETE FROM execution_cost_runs WHERE operation_id=?",(row[0],))
                 conn.execute("DELETE FROM execution_attempts WHERE operation_id=?",(row[0],))
                 conn.execute("DELETE FROM execution_operations WHERE id=?",(row[0],))

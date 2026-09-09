@@ -38,6 +38,7 @@ import pandas as pd
 from zhipuai import ZhipuAI
 
 from tiku_shared.model_costs import submit_with_model_cost_context, timed_model_call
+from tiku_shared.execution_hooks import bounded_transport_retries
 from tiku_shared.image_payload import image_to_model_data_url
 
 # ============================================================
@@ -770,7 +771,7 @@ def score_rerank_candidate(
     if provider == "zhipu" and client is None:
         client = ZhipuAI(
             api_key=ZHIPUAI_API_KEY,
-            max_retries=0 if timeout_seconds is not None else 3,
+            max_retries=bounded_transport_retries(0 if timeout_seconds is not None else 3),
         )
     path = Path(candidate["path"])
     started = time.perf_counter() if collect_timing else None
@@ -1046,7 +1047,7 @@ def rerank_candidates_concurrent(
     if provider == "zhipu":
         client = ZhipuAI(
             api_key=ZHIPUAI_API_KEY,
-            max_retries=0 if candidate_timeout_seconds is not None else 3,
+            max_retries=bounded_transport_retries(0 if candidate_timeout_seconds is not None else 3),
         )
     return finalize_rerank_results(
         client,

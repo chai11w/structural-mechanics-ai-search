@@ -480,7 +480,9 @@ def request_json_with_retry(
     retry_delays: tuple[float, ...] = HTTP_RETRY_DELAYS,
 ) -> dict:
     """Read JSON from an HTTP request and retry only transient upstream failures."""
-
+    from tiku_shared.execution_hooks import bounded_transport_retries
+    if bounded_transport_retries(len(retry_delays)) == 0:
+        retry_delays = ()
     for attempt in range(len(retry_delays) + 1):
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:

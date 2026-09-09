@@ -1,8 +1,10 @@
 # 阶段 5：幂等执行与父子任务控制
 
-状态：**5.1～5.3 本地实现与隔离验证 DONE；5.4～5.5 PLANNED，未上线**。
+状态：**5.1～5.3 本地实现与隔离验证 DONE；5.4 IN PROGRESS；5.5 PLANNED，未上线**。
 日期：2026-09-08。当前实现与测试证据见 [5.1 盘点](phase5_1_execution_inventory.md)。
 本文件约束整个阶段的行为。5.2/5.3 已实现的字段、状态及证据见 [数据与迁移契约](phase5_2_state_contract.md) 和 [操作执行契约](phase5_3_execution_contract.md)；其余内容仍是后续要求，均未发布到生产。
+
+5.4 的当前实现、验证和剩余项见 [恢复契约](phase5_4_recovery_contract.md)。
 
 ## 1. 范围与分步
 

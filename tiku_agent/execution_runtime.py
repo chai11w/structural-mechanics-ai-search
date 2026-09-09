@@ -218,7 +218,11 @@ def execution_entry(method):
             worker.start()
             try:
                 from tiku_shared.model_costs import model_run_binding
-                with model_run_binding(lambda run_id:operations.bind_cost_run(writer,run_id)):
+                from tiku_shared.execution_hooks import execution_effect_scope
+                from tiku_agent.execution_effects import ExecutionEffects
+                ledgers = [getattr(target, "cost_ledger", None) for target in (runtime, getattr(runtime, "a2_runtime", None))]
+                ledger_paths = [ledger.path for ledger in ledgers if ledger is not None and getattr(ledger, "path", None) is not None]
+                with model_run_binding(lambda run_id:operations.bind_cost_run(writer,run_id)), execution_effect_scope(ExecutionEffects(operations, writer, ledger_paths=ledger_paths)):
                     response = method(runtime,session_id,*args,**kwargs)
                     child_runtime=getattr(runtime,"a2_runtime",runtime)
                     await_background=getattr(child_runtime,"_await_background_image_work",None)
@@ -255,6 +259,8 @@ def execution_message(code):
         "EXECUTION_UNKNOWN":"上次操作结果尚未确认，请先核对进度，暂不重复执行。",
         "EXECUTION_RESULT_UNAVAILABLE":"该操作已有记录，但保存的结果已不可用，请先核对进度。",
         "EXECUTION_CAPACITY":"执行记录暂时无法接收新操作，请稍后重新连接。",
+        "EXECUTION_COST_PENDING":"已有调用的费用尚待核对，当前结果保留，暂不启动新的操作。",
+        "EXECUTION_COST_CONFLICT":"费用记录存在不一致，需要核对后再继续。",
     }.get(code,"执行状态暂时无法确认，请重新连接后核对进度。")
 
 
