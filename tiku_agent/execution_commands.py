@@ -107,6 +107,10 @@ def _recover(runtime, sid, source_id, conn, operations, writer):
     if conn.execute("SELECT 1 FROM execution_files WHERE operation_id=? AND status<>'PUBLISHED' LIMIT 1", (source_id,)).fetchone():
         raise ExecutionError("EXECUTION_RESULT_UNAVAILABLE")
     handoff = conn.execute("SELECT * FROM execution_handoffs WHERE operation_id=? ORDER BY rowid DESC LIMIT 1", (source_id,)).fetchone()
+    if (handoff is None and hasattr(runtime, "a2_runtime") and conn.execute(
+            "SELECT 1 FROM execution_unit_batches WHERE operation_id=?", (source_id,)).fetchone()):
+        from tiku_agent.execution_units import recover_preparation
+        return recover_preparation(runtime, sid, source, conn, writer)
     child = conn.execute("SELECT version,payload FROM execution_states WHERE session=? AND epoch=? AND kind='child'", (writer.session, writer.epoch)).fetchone()
     if handoff is None or child is None or child["payload"] is None or handoff["child_version"] != child["version"]:
         raise ExecutionError("EXECUTION_RECOVERY_INVALID")

@@ -1519,10 +1519,14 @@ class A3MvpRuntime:
         identity_key: str,
         progress: ProgressReporter | None,
     ) -> tuple[int, int]:
+        from tiku_agent.execution_runtime import execution_snapshot_scope
+        from tiku_agent.execution_units import start_batch, finish_batch
         state.requested_unit_ids = list(requested)
         state.selected_unit_id = ""
         state.phase = A3_PHASE_AUTO_VALIDATING
-        self.store.save(state)
+        with execution_snapshot_scope(self):
+            self.store.save(state)
+            start_batch(self, state, requested)
         candidates = [
             unit_id
             for unit_id in requested
@@ -1539,12 +1543,14 @@ class A3MvpRuntime:
         results: dict[str, dict[str, Any]] = {}
         if candidates:
             def validate_unit(unit_id: str) -> dict[str, Any]:
+                from tiku_agent.execution_units import validate_unit as durable_validate
                 with trace_event_dimensions_scope(
                     workflow_search_id=state.workflow_search_id or state.current_search_id,
                     search_id="",
                     unit_id=unit_id,
                 ):
-                    return self._validate_auto_crop(state, unit_id, identity_key=identity_key)
+                    return durable_validate(self, state, unit_id,
+                        lambda: self._validate_auto_crop(state, unit_id, identity_key=identity_key))
 
             workers = min(self.auto_crop_max_workers, len(candidates))
             with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -1585,7 +1591,9 @@ class A3MvpRuntime:
             elif record.get("validation_status") != "auto_ready":
                 record["validation_status"] = "manual_required"
         state.phase = A3_PHASE_WAIT_SELECTION
-        self.store.save(state)
+        with execution_snapshot_scope(self):
+            self.store.save(state)
+            finish_batch(self)
         ready = sum(
             state.auto_crops.get(unit_id, {}).get("validation_status") == "auto_ready"
             for unit_id in requested
@@ -1593,11 +1601,12 @@ class A3MvpRuntime:
         return ready, len(requested) - ready
 
     def _auto_crop_can_validate(self, state: A3SessionState, unit_id: str) -> bool:
+        from tiku_agent.execution_units import reusable
         record = state.auto_crops.get(unit_id) or {}
         path = Path(str(record.get("path") or ""))
         return (
             record.get("grounding_status") == "auto_ready"
-            and record.get("validation_status") != "auto_ready"
+            and (record.get("validation_status") != "auto_ready" or not reusable(self, state, unit_id))
             and path.is_file()
         )
 
@@ -3108,7 +3117,8 @@ class A3MvpRuntime:
         state.selected_unit_id = unit_id
         self._bind_trace_state(state, identity_key=identity_key)
         auto_record = state.auto_crops.get(unit_id) or {}
-        if state.auto_crop_enabled and auto_record.get("validation_status") == "auto_ready":
+        from tiku_agent.execution_units import reusable
+        if state.auto_crop_enabled and auto_record.get("validation_status") == "auto_ready" and reusable(self, state, unit_id):
             crop_path = Path(str(auto_record.get("path") or ""))
             if crop_path.is_file():
                 state.crop_drafts[unit_id] = {

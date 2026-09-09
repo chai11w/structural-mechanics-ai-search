@@ -110,8 +110,12 @@ class QwenClassifier:
     ) -> dict[str, Any]:
         path = Path(image_path)
         cache_key = self._cache_key(path, context_text=context_text)
-        cache = self._load_cache() if self.use_cache else {}
-        if self.use_cache and cache_key in cache:
+        from tiku_shared.execution_hooks import execution_observer
+        # Legacy caches have no durable operation/attempt provenance. A new
+        # explicit execution must not silently turn into an untracked hit.
+        use_cache = self.use_cache and execution_observer() is None
+        cache = self._load_cache() if use_cache else {}
+        if use_cache and cache_key in cache:
             cached = dict(cache[cache_key])
             # Results written before the visible-problem-text gate cannot
             # prove that a chapter came from text rather than diagram shape.
@@ -148,7 +152,7 @@ class QwenClassifier:
             "from_cache": False,
         }
 
-        if self.use_cache:
+        if use_cache:
             cache[cache_key] = result
             self._save_cache(cache)
         return result
@@ -199,8 +203,10 @@ class QwenClassifier:
             f"{DIMENSION_PROMPT_VERSION}:{self.model}:"
             f"{known_structure_type}:{digest}"
         )
-        cache = self._load_cache(self.dimension_cache_path) if self.use_cache else {}
-        if self.use_cache and cache_key in cache:
+        from tiku_shared.execution_hooks import execution_observer
+        use_cache = self.use_cache and execution_observer() is None
+        cache = self._load_cache(self.dimension_cache_path) if use_cache else {}
+        if use_cache and cache_key in cache:
             return {
                 "normalized": dict(cache[cache_key]),
                 "usage": {},
@@ -218,7 +224,7 @@ class QwenClassifier:
             timeout=self.dimension_timeout,
             known_structure_type=known_structure_type,
         )
-        if self.use_cache:
+        if use_cache:
             cache[cache_key] = normalized
             self._save_cache(cache, self.dimension_cache_path)
         return {"normalized": normalized, "usage": usage, "from_cache": False}

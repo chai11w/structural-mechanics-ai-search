@@ -59,7 +59,9 @@ class OperationStore:
         # cross a changed implementation or prompt set silently.
         root = Path(__file__).resolve().parents[1]
         hasher = hashlib.sha256()
-        files = sorted([*root.glob("*.py"), *root.joinpath("tiku_agent").rglob("*.py"), *root.joinpath("tiku_agent/prompts").glob("*.txt"), *root.joinpath("tiku_shared").glob("*.py")])
+        files = sorted([*root.glob("*.py"), *root.joinpath("tiku_agent").rglob("*.py"),
+                        *root.joinpath("tiku_agent/prompts").glob("*.txt"),
+                        *root.joinpath("tiku_shared").glob("*.py"), *root.joinpath("scripts").rglob("*.py")])
         for file in files:
             hasher.update(file.relative_to(root).as_posix().encode())
             hasher.update(file.read_bytes())
@@ -99,6 +101,8 @@ class OperationStore:
             create_effect_schema(conn)
             from tiku_agent.execution_handoffs import create_handoff_schema
             create_handoff_schema(conn)
+            from tiku_agent.execution_units import create_unit_schema
+            create_unit_schema(conn)
 
     def lookup(self, sid, identity, request):
         req = OperationRequest.parse(request)
@@ -260,6 +264,12 @@ class OperationStore:
         with self.authority.transaction() as conn:
             now = self.authority.clock(conn)
             writer.validate(conn,self.authority,writer.session,writer.epoch,now)
+            if conn.execute("SELECT 1 FROM execution_unit_checks WHERE operation_id=? AND status<>'CONFIRMED' LIMIT 1",
+                            (writer.operation_id,)).fetchone():
+                raise ExecutionError("EXECUTION_UNKNOWN")
+            if conn.execute("SELECT 1 FROM execution_unit_batches WHERE operation_id=? AND status<>'CONFIRMED' LIMIT 1",
+                            (writer.operation_id,)).fetchone():
+                raise ExecutionError("EXECUTION_UNKNOWN")
             if conn.execute("SELECT 1 FROM execution_effects WHERE operation_id=? AND status<>'CONFIRMED' LIMIT 1",
                             (writer.operation_id,)).fetchone():
                 raise ExecutionError("EXECUTION_UNKNOWN")
@@ -315,6 +325,8 @@ class OperationStore:
                                      "AND NOT EXISTS (SELECT 1 FROM execution_cost_outbox c JOIN execution_cost_runs r ON r.run_id=c.run_id WHERE r.operation_id=o.id AND c.status<>'CONFIRMED') "
                                      "AND NOT EXISTS (SELECT 1 FROM execution_files f WHERE f.operation_id=o.id) LIMIT 100",(now-store.policy.history_ttl,now)).fetchall()
             for row in removable:
+                conn.execute("DELETE FROM execution_unit_checks WHERE operation_id=?",(row[0],))
+                conn.execute("DELETE FROM execution_unit_batches WHERE operation_id=?",(row[0],))
                 conn.execute("DELETE FROM execution_handoffs WHERE operation_id=?",(row[0],))
                 conn.execute("DELETE FROM execution_effects WHERE operation_id=?",(row[0],))
                 conn.execute("DELETE FROM execution_collectors WHERE run_id IN (SELECT run_id FROM execution_cost_runs WHERE operation_id=?)",(row[0],))
@@ -323,5 +335,5 @@ class OperationStore:
                 conn.execute("DELETE FROM execution_attempts WHERE operation_id=?",(row[0],))
                 conn.execute("DELETE FROM execution_operations WHERE id=?",(row[0],))
             # Children before parents; current epoch and unresolved-session history stay.
-            conn.execute("DELETE FROM execution_tasks WHERE id IN (SELECT t.id FROM execution_tasks t JOIN execution_sessions s ON s.session=t.session WHERE t.updated<? AND (t.epoch<>s.epoch OR s.expires<=?) AND NOT EXISTS (SELECT 1 FROM execution_operations o WHERE o.session=t.session AND o.status IN ('REGISTERED','RUNNING','UNKNOWN')) AND NOT EXISTS (SELECT 1 FROM execution_tasks c WHERE c.parent_id=t.id) AND NOT EXISTS (SELECT 1 FROM execution_handoffs h WHERE h.parent_record_id=t.id OR h.child_record_id=t.id) LIMIT 100)",(now-store.policy.history_ttl,now))
+            conn.execute("DELETE FROM execution_tasks WHERE id IN (SELECT t.id FROM execution_tasks t JOIN execution_sessions s ON s.session=t.session WHERE t.updated<? AND (t.epoch<>s.epoch OR s.expires<=?) AND NOT EXISTS (SELECT 1 FROM execution_operations o WHERE o.session=t.session AND o.status IN ('REGISTERED','RUNNING','UNKNOWN')) AND NOT EXISTS (SELECT 1 FROM execution_tasks c WHERE c.parent_id=t.id) AND NOT EXISTS (SELECT 1 FROM execution_handoffs h WHERE h.parent_record_id=t.id OR h.child_record_id=t.id) AND NOT EXISTS (SELECT 1 FROM execution_unit_checks u WHERE u.parent_record_id=t.id) AND NOT EXISTS (SELECT 1 FROM execution_unit_batches b WHERE b.parent_record_id=t.id) LIMIT 100)",(now-store.policy.history_ttl,now))
             return {"operations_removed":len(removable)}

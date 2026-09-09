@@ -3,6 +3,8 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 import json
+import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -23,7 +25,7 @@ from tiku_agent.tools import ToolResult
 from tiku_shared.atomic_files import atomic_output
 from tiku_shared.execution_hooks import execution_effect_scope
 from tiku_agent.execution_effects import ExecutionEffects
-from tests.test_a3_runtime import FakeObserver, FakeVerifier
+from tests.test_a3_runtime import FakeObserver, FakeVerifier, FakeAutoCropper
 from tests.test_tiku_agent_session_runtime import FakeTools
 
 
@@ -197,6 +199,137 @@ class ExecutionHandoffTests(unittest.TestCase):
             self.a3.control_execution("s", "workflow", target, operation_request=self.request())
         self.assertEqual(caught.exception.code, "EXECUTION_CONTROL_INVALID")
         self.assertEqual(len(self.rows("execution_operations")), before)
+
+    def auto_page(self):
+        Image.new("RGB", (1000, 800), "white").save(self.image)
+        self.a3.auto_cropper = FakeAutoCropper(second_status="auto_ready")
+        self.a3.handle_image("s", self.image, operation_request=self.request())
+
+    def test_partial_batch_retry_keeps_confirmed_success_and_retries_failed_unit(self):
+        self.auto_page()
+        counts = {"g1-u1":0, "g1-u2":0}
+        original = self.a3._validate_auto_crop
+        def validate(state, unit_id, **kwargs):
+            counts[unit_id] += 1
+            if unit_id == "g1-u2" and counts[unit_id] == 1:
+                return {"validation_status":"manual_required", "external_load_status":"not_run",
+                        "verification_checks":{}, "error_type":"local_validation_failed"}
+            return original(state, unit_id, **kwargs)
+        with patch.object(self.a3, "_validate_auto_crop", side_effect=validate):
+            self.a3.prepare_units("s", ["g1-u1", "g1-u2"], operation_request=self.request())
+            self.assertEqual(self.a3.store.load("s").auto_crops["g1-u1"]["validation_status"], "auto_ready")
+            self.a3.prepare_units("s", ["g1-u1", "g1-u2"], operation_request=self.request())
+        self.assertEqual(counts, {"g1-u1":1, "g1-u2":2})
+        self.assertEqual(len(self.rows("execution_unit_checks")), 3)
+        self.assertTrue(all(row["status"] == "CONFIRMED" for row in self.rows("execution_unit_checks")))
+
+    def test_batch_recovery_uses_worker_receipts_when_parent_final_save_never_happened(self):
+        from tiku_shared.model_costs import SQLiteModelCostLedger, timed_model_call
+        ledger = SQLiteModelCostLedger(self.root / "costs.db")
+        self.a3.cost_ledger = self.a2.cost_ledger = ledger
+        verify = self.a3.crop_verifier.verify
+        self.a3.crop_verifier.verify = lambda *args: timed_model_call(
+            lambda:verify(*args), provider="dashscope", model="qwen3-vl-plus", call_type="unit_test",
+            usage_getter=lambda value:{"input_tokens":100, "output_tokens":20})
+        self.auto_page()
+        original_request = self.request()
+        def progress(stage, message):
+            if message.startswith("已完成"):
+                raise RuntimeError("parent interrupted")
+        with self.assertRaisesRegex(RuntimeError, "parent interrupted"):
+            self.a3.prepare_units("s", ["g1-u1", "g1-u2"], operation_request=original_request, progress=progress)
+        self.assertEqual(self.a3.store.load("s").phase, "AUTO_VALIDATING_CROPS")
+        rows = self.rows("execution_unit_checks")
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["status"] == "CONFIRMED" for row in rows))
+        self.a3.recover_operation("s", rows[0]["operation_id"], operation_request=self.request())
+        self.assertEqual(self.a3.store.load("s").phase, "WAIT_UNIT_SELECTION")
+        replay = self.a3.prepare_units("s", ["g1-u1", "g1-u2"], operation_request=original_request)
+        self.assertTrue(replay.execution_receipt["replayed"])
+        self.assertCountEqual(self.a3.crop_verifier.calls, ["g1-u1", "g1-u2"])
+        with closing(sqlite3.connect(ledger.path)) as conn:
+            self.assertEqual(conn.execute("SELECT count(*),sum(total_tokens) FROM model_cost_calls").fetchone(), (2, 240))
+        self.assertTrue(all(row["status"] == "CONFIRMED" for row in self.rows("execution_cost_outbox")))
+
+    def test_batch_recovery_preserves_success_when_next_unit_was_never_submitted(self):
+        self.auto_page()
+        import tiku_agent.a3_runtime as module
+        submit = module.submit_with_trace_context
+        submitted = []
+        def interrupt(executor, function, unit_id):
+            submitted.append(unit_id)
+            if len(submitted) == 2:
+                raise RuntimeError("before second submission")
+            return submit(executor, function, unit_id)
+        with patch.object(module, "submit_with_trace_context", side_effect=interrupt):
+            with self.assertRaisesRegex(RuntimeError, "before second submission"):
+                self.a3.prepare_units("s", ["g1-u1", "g1-u2"], operation_request=self.request())
+        rows = self.rows("execution_unit_checks")
+        self.assertEqual(len(rows), 1)
+        self.a3.recover_operation("s", rows[0]["operation_id"], operation_request=self.request())
+        self.a3.prepare_units("s", ["g1-u1", "g1-u2"], operation_request=self.request())
+        self.assertCountEqual(self.a3.crop_verifier.calls, ["g1-u1", "g1-u2"])
+
+    def test_batch_with_missing_result_receipt_stays_unknown(self):
+        self.auto_page()
+        from tiku_agent.execution_store import canonical
+        def fail_result(value):
+            if isinstance(value, dict):
+                raise RuntimeError("receipt failed")
+            return canonical(value)
+        with patch("tiku_agent.execution_units.canonical", side_effect=fail_result):
+            with self.assertRaises(AgentProtocolError) as caught:
+                self.a3.prepare_units("s", ["g1-u1", "g1-u2"], operation_request=self.request())
+        self.assertEqual(caught.exception.code, "EXECUTION_UNKNOWN")
+        source = self.rows("execution_unit_checks")[0]["operation_id"]
+        before = len(self.a3.crop_verifier.calls)
+        with self.assertRaises(AgentProtocolError) as recovery:
+            self.a3.recover_operation("s", source, operation_request=self.request())
+        self.assertEqual(recovery.exception.code, "EXECUTION_UNKNOWN")
+        self.assertEqual(len(self.a3.crop_verifier.calls), before)
+
+    def test_changed_verifier_version_cannot_reuse_an_old_validation(self):
+        self.auto_page()
+        self.a3.crop_verifier.model = "model-a"
+        self.a3.prepare_units("s", ["g1-u1", "g1-u2"], operation_request=self.request())
+        self.a3.crop_verifier.model = "model-b"
+        self.a3.select_unit("s", "g1-u1", operation_request=self.request())
+        self.assertEqual(self.analysis_count, 0)
+        self.assertEqual(self.a3.store.load("s").phase, "CROP_REQUIRED")
+
+    def test_batch_recovery_rejects_changed_crop_bytes_without_new_calls(self):
+        self.auto_page()
+        def progress(stage, message):
+            if message.startswith("已完成"):
+                raise RuntimeError("parent interrupted")
+        with self.assertRaises(RuntimeError):
+            self.a3.prepare_units("s", ["g1-u1", "g1-u2"], operation_request=self.request(), progress=progress)
+        source = self.rows("execution_unit_checks")[0]["operation_id"]
+        state = self.a3.store.load("s")
+        Path(state.auto_crops["g1-u1"]["path"]).write_bytes(b"changed crop")
+        with self.assertRaises(AgentProtocolError) as caught:
+            self.a3.recover_operation("s", source, operation_request=self.request())
+        self.assertEqual(caught.exception.code, "EXECUTION_STALE")
+        self.assertCountEqual(self.a3.crop_verifier.calls, ["g1-u1", "g1-u2"])
+
+    def test_upload_auto_preparation_recovers_without_observing_or_grounding_again(self):
+        Image.new("RGB", (1000, 800), "white").save(self.image)
+        self.a3.auto_cropper = FakeAutoCropper(second_status="auto_ready")
+        self.a3.auto_prepare_all_units = True
+        original_request = self.request()
+        def progress(stage, message):
+            if message.startswith("已完成"):
+                raise RuntimeError("upload interrupted in preparation")
+        with self.assertRaises(RuntimeError):
+            self.a3.handle_image("s", self.image, operation_request=original_request, progress=progress)
+        source = self.rows("execution_unit_batches")[0]["operation_id"]
+        self.a3.recover_operation("s", source, operation_request=self.request())
+        replay = self.a3.handle_image("s", self.image, operation_request=original_request)
+        self.assertTrue(replay.execution_receipt["replayed"])
+        self.assertEqual(self.a3.page_observer.calls, 1)
+        self.assertEqual(len(self.a3.auto_cropper.calls), 1)
+        self.assertCountEqual(self.a3.crop_verifier.calls, ["g1-u1", "g1-u2"])
+        self.assertEqual(self.a3.store.load("s").phase, "WAIT_UNIT_SELECTION")
 
     def test_child_stop_fences_a_real_inflight_runtime_without_waiting_for_it(self):
         self.prepare()
