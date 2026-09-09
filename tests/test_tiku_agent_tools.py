@@ -635,6 +635,30 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertEqual(scorer.call_count, 3)
         self.assertEqual(attempts, {"question": 2, "other": 1})
 
+    def test_durable_global_search_does_not_retry_opaque_partial_batch(self):
+        from tiku_shared.execution_hooks import execution_effect_scope
+        candidates = [
+            {"content_hash": "done", "path": "done.jpg", "score": 1.0},
+            {"content_hash": "unknown", "path": "unknown.jpg", "score": 1.0},
+        ]
+        def score(_query, candidate, **_kwargs):
+            if candidate["content_hash"] == "unknown":
+                raise TimeoutError("response not received")
+            return {**candidate, "rerank_status": "completed", "rerank_score": 0.98, "final_score": 0.99}
+        with (
+            execution_effect_scope(object()),
+            patch("tiku_agent.tools.Path.is_file", return_value=True),
+            patch("tiku_agent.tools._collect_global_perfect_candidates", return_value=candidates),
+            patch("tiku_agent.tools.search.score_rerank_candidate", side_effect=score) as scorer,
+        ):
+            result = global_search_tool([{"type": "集中", "raw": "P"}], "query.jpg", route="main")
+        self.assertEqual(result.code, "GLOBAL_RERANK_INCOMPLETE")
+        self.assertEqual(result.outcome, ToolOutcome.PARTIAL)
+        self.assertEqual(result.data["unfinished_candidates"], 1)
+        self.assertEqual(result.data["retry_model_calls"], 0)
+        self.assertEqual(result.data["model_calls"], 2)
+        self.assertCountEqual([call.args[1]["content_hash"] for call in scorer.call_args_list], ["done", "unknown"])
+
     def test_agent_runtime_is_isolated_from_old_feishu_state(self):
         config = AgentToolConfig()
         self.assertEqual(config.runtime_dir, Path(__file__).resolve().parents[1] / ".tmp_tiku_agent_v2")

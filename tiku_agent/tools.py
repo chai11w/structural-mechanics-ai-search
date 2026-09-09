@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 import search
+from tiku_shared.execution_hooks import bounded_transport_retries
 from multi_agent_pipeline import (
     AUTO_CHAPTER_MIN_CONFIDENCE,
     CHAPTER_UNKNOWN,
@@ -719,7 +720,7 @@ def global_search_tool(
         unfinished = [
             item for item in scored if item.get("rerank_status") != "completed"
         ]
-        if unfinished and config.global_retry_incomplete_once:
+        if unfinished and bounded_transport_retries(int(config.global_retry_incomplete_once)):
             originals_by_hash = {item["content_hash"]: item for item in candidates}
             retry_candidates = [
                 originals_by_hash[item["content_hash"]]
