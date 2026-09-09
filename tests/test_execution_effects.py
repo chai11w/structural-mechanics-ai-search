@@ -212,6 +212,92 @@ class ExecutionEffectsTests(unittest.TestCase):
                 request_json_with_retry(request, timeout=1, retry_delays=(0,))
             self.assertEqual(send.call_count, 2)
 
+    def test_invalid_screen_verdict_keeps_confirmed_usage_and_charges_once(self):
+        from PIL import Image
+        from tests.test_external_load_screen import FakeResponse
+        from tiku_agent.external_load_screen import QwenExternalLoadScreen, ZhipuExternalLoadScreen
+        image = self.root / "screen.jpg"
+        Image.new("RGB", (10, 10), "white").save(image)
+        for screen in (QwenExternalLoadScreen(api_key="test-key"), ZhipuExternalLoadScreen()):
+            with self.subTest(provider=type(screen).__name__):
+                class Agent:
+                    config = None
+                    def __init__(self, state):
+                        self.state = state
+                    def handle_text(self, _text):
+                        try:
+                            screen(image)
+                        except RuntimeError:
+                            return AgentResponse(text="manual review required", state=self.state.to_dict(), intent="greeting")
+                        raise AssertionError("invalid model verdict was accepted")
+
+                self.runtime.agent_factory = Agent
+                sid = type(screen).__name__
+                request = self.request(sid)
+                response = FakeResponse({"id":"confirmed-screen-response", "usage":{"prompt_tokens":12,"completion_tokens":1},
+                    "choices":[{"message":{"content":"unsure"}}]})
+                with patch.dict("os.environ", {"ZHIPUAI_API_KEY":"test-key"}), patch("urllib.request.urlopen", return_value=response) as send:
+                    result = self.runtime.handle_text(sid, "screen", operation_request=request)
+                    repeat = self.runtime.handle_text(sid, "screen", operation_request=request)
+                self.assertEqual(send.call_count, 1)
+                self.assertEqual(result.text, repeat.text)
+                self.assertTrue(repeat.execution_receipt["replayed"])
+        self.assertTrue(all(row["status"] == "CONFIRMED" and row["usage_known"] for row in self.rows("execution_effects")))
+        self.assertTrue(all(row["status"] == "CONFIRMED" for row in self.rows("execution_cost_outbox")))
+        with closing(sqlite3.connect(self.ledger.path)) as conn:
+            self.assertEqual(conn.execute("SELECT count(*),sum(total_tokens) FROM model_cost_calls").fetchone(), (2,26))
+
+    def test_load_extraction_retries_only_after_confirmed_provider_response(self):
+        import search
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        def response(text):
+            return SimpleNamespace(id="load-response", usage={"prompt_tokens":12,"completion_tokens":1},
+                choices=[SimpleNamespace(message=SimpleNamespace(content=text))])
+
+        send = Mock(side_effect=[response("invalid json"), response('{"loads":[]}')])
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=send)))
+        class Agent:
+            config = None
+            def __init__(self, state):
+                self.state = state
+            def handle_text(self, _text):
+                search.extract_loads(client, "unused.jpg")
+                return AgentResponse(text="done", state=self.state.to_dict(), intent="greeting")
+        self.runtime.agent_factory = Agent
+        request = self.request()
+        with patch("search.encode_image_base64", return_value="fake-image"), patch("time.sleep"):
+            self.runtime.handle_text("s", "extract", operation_request=request)
+            self.runtime.handle_text("s", "extract", operation_request=request)
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual([row["status"] for row in self.rows("execution_effects")], ["CONFIRMED", "CONFIRMED"])
+        with closing(sqlite3.connect(self.ledger.path)) as conn:
+            self.assertEqual(conn.execute("SELECT count(*),sum(total_tokens) FROM model_cost_calls").fetchone(), (2,26))
+
+    def test_load_extraction_transport_json_error_is_not_schema_retry(self):
+        import search
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        send = Mock(side_effect=ValueError("invalid transport envelope"))
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=send)))
+        class Agent:
+            config = None
+            def __init__(self, state):
+                self.state = state
+            def handle_text(self, _text):
+                search.extract_loads(client, "unused.jpg")
+                raise AssertionError("unknown transport failure was swallowed")
+        self.runtime.agent_factory = Agent
+        request = self.request()
+        with patch("search.encode_image_base64", return_value="fake-image"), patch("time.sleep") as sleep:
+            with self.assertRaisesRegex(ValueError, "invalid transport envelope"):
+                self.runtime.handle_text("s", "extract", operation_request=request)
+            self.assert_code("EXECUTION_UNKNOWN", lambda: self.runtime.handle_text("s", "extract", operation_request=request))
+        self.assertEqual(send.call_count, 1)
+        sleep.assert_not_called()
+        self.assertEqual([row["status"] for row in self.rows("execution_effects")], ["UNKNOWN"])
+
 
 if __name__ == "__main__":
     unittest.main()

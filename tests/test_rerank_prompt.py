@@ -264,6 +264,26 @@ class RerankPromptTest(unittest.TestCase):
         self.assertEqual(results[0]["rerank_attempts"], 2)
         self.assertAlmostEqual(results[0]["final_score"], 0.85)
 
+    def test_durable_rerank_does_not_resend_opaque_failures(self):
+        from tiku_shared.execution_hooks import execution_effect_scope
+        candidates = [{"rank": 1, "path": "slow.jpg", "name": "slow.jpg", "score": 0.8}]
+        for failure in (TimeoutError("timeout"), RuntimeError("429")):
+            with (
+                self.subTest(failure=type(failure).__name__),
+                execution_effect_scope(object()),
+                patch("search.prepare_rerank_candidates", return_value=candidates),
+                patch("search.ZhipuAI", return_value=object()) as sdk,
+                patch("search.score_candidate_pair", side_effect=failure) as score,
+            ):
+                results = search.rerank_candidates_concurrent(
+                    "query.jpg", candidates, max_workers=1,
+                    retry_max_candidates=1, retry_failed_candidates=True,
+                )
+            self.assertEqual(score.call_count, 1)
+            self.assertTrue(all(call.kwargs["max_retries"] == 0 for call in sdk.call_args_list))
+            self.assertEqual(results[0]["rerank_status"], "incomplete")
+            self.assertNotIn("两次", results[0].get("rerank_reason", ""))
+
     def test_unfinished_retry_returns_marked_coarse_fallback(self):
         candidates = [{"rank": 1, "path": "slow.jpg", "name": "slow.jpg", "score": 0.8}]
 

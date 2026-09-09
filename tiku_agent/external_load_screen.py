@@ -32,6 +32,18 @@ class ImageSearchCancelled(RuntimeError):
     """The external-load branch won before the search branch committed."""
 
 
+def _verdict_from_response(data: dict[str, Any]) -> str:
+    # Parse after timed_model_call confirms the provider response and its usage.
+    # A paid response with an invalid verdict must not lose its fee evidence.
+    content = str(data["choices"][0]["message"].get("content") or "").strip()
+    normalized = content.lower().strip("`*_.,:;!?。！？\n\r \t")
+    if normalized.startswith("yes"):
+        return "yes"
+    if normalized.startswith("no"):
+        return "no"
+    raise RuntimeError("external-load screen returned an unexpected response")
+
+
 class ZhipuExternalLoadScreen:
     def __init__(
         self,
@@ -84,20 +96,7 @@ class ZhipuExternalLoadScreen:
                 method="POST",
             )
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                data = json.loads(response.read().decode("utf-8"))
-            content = str(data["choices"][0]["message"].get("content") or "").strip()
-            normalized = content.lower().strip("`*_.,:;!?。！？\n\r \t")
-            if normalized.startswith("yes"):
-                verdict = "yes"
-            elif normalized.startswith("no"):
-                verdict = "no"
-            else:
-                raise RuntimeError("external-load screen returned an unexpected response")
-            return {
-                "verdict": verdict,
-                "usage": data.get("usage") or {},
-                "request_id": str(data.get("request_id") or data.get("id") or ""),
-            }
+                return json.loads(response.read().decode("utf-8"))
 
         result = timed_model_call(
             request_model,
@@ -105,9 +104,9 @@ class ZhipuExternalLoadScreen:
             model=self.model,
             call_type="external_load_screen",
             usage_getter=lambda value: value.get("usage") or {},
-            provider_request_id_getter=lambda value: str(value.get("request_id") or ""),
+            provider_request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
         )
-        return str(result["verdict"])
+        return _verdict_from_response(result)
 
 
 class QwenExternalLoadScreen:
@@ -163,20 +162,7 @@ class QwenExternalLoadScreen:
                 method="POST",
             )
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                data = json.loads(response.read().decode("utf-8"))
-            content = str(data["choices"][0]["message"].get("content") or "").strip()
-            normalized = content.lower().strip("`*_.,:;!?。！？\n\r \t")
-            if normalized.startswith("yes"):
-                verdict = "yes"
-            elif normalized.startswith("no"):
-                verdict = "no"
-            else:
-                raise RuntimeError("external-load screen returned an unexpected response")
-            return {
-                "verdict": verdict,
-                "usage": data.get("usage") or {},
-                "request_id": str(data.get("request_id") or data.get("id") or ""),
-            }
+                return json.loads(response.read().decode("utf-8"))
 
         result = timed_model_call(
             request_model,
@@ -184,6 +170,6 @@ class QwenExternalLoadScreen:
             model=self.model,
             call_type="external_load_screen",
             usage_getter=lambda value: value.get("usage") or {},
-            provider_request_id_getter=lambda value: str(value.get("request_id") or ""),
+            provider_request_id_getter=lambda value: str(value.get("request_id") or value.get("id") or ""),
         )
-        return str(result["verdict"])
+        return _verdict_from_response(result)

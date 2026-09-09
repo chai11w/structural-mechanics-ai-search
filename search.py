@@ -38,7 +38,7 @@ import pandas as pd
 from zhipuai import ZhipuAI
 
 from tiku_shared.model_costs import submit_with_model_cost_context, timed_model_call
-from tiku_shared.execution_hooks import bounded_transport_retries
+from tiku_shared.execution_hooks import bounded_transport_retries, execution_observer
 from tiku_shared.image_payload import image_to_model_data_url
 
 # ============================================================
@@ -985,7 +985,9 @@ def rerank_candidates_concurrent(
     if retry_failed_candidates:
         retryable_statuses.add("failed")
     retryable = [item for item in scored if item.get("rerank_status") in retryable_statuses]
-    retry_limit = max(0, int(retry_max_candidates or 0))
+    # Candidate failure summaries cannot prove that a provider did not execute.
+    # Durable execution therefore does not resend this opaque failure batch.
+    retry_limit = bounded_transport_retries(max(0, int(retry_max_candidates or 0)))
     retry_batch = sorted(
         retryable,
         key=lambda item: float(item.get("score") or 0),
@@ -1032,7 +1034,7 @@ def rerank_candidates_concurrent(
             pass
 
     if not rerank_results_complete(scored):
-        note = "部分候选两次复筛仍未完成，已回退粗筛排序。"
+        note = "部分候选复筛未完成，已回退粗筛排序。"
         fallback = mark_rerank_incomplete(usable, note)
         if on_candidate_scored is not None:
             for item in fallback:
@@ -1258,6 +1260,7 @@ def extract_loads(client, image_path):
     data_url = encode_image_base64(image_path)
 
     for attempt in range(3):
+        response_confirmed = False
         try:
             resp = timed_model_call(
                 lambda: client.chat.completions.create(
@@ -1279,6 +1282,7 @@ def extract_loads(client, image_path):
                 usage_getter=lambda value: getattr(value, "usage", None),
                 request_id_getter=lambda value: str(getattr(value, "request_id", "") or getattr(value, "id", "")),
             )
+            response_confirmed = True
             raw_text = resp.choices[0].message.content
 
             if not raw_text or not raw_text.strip():
@@ -1305,12 +1309,16 @@ def extract_loads(client, image_path):
             return result
 
         except (json.JSONDecodeError, ValueError, KeyError):
+            if execution_observer() is not None and not response_confirmed:
+                raise
             if attempt < 2:
                 import time
                 time.sleep(1)
             else:
                 return {"loads": []}
         except Exception as e:
+            if execution_observer() is not None and not response_confirmed:
+                raise
             err = str(e)
             if '429' in err or '1113' in err:
                 import time
