@@ -320,20 +320,23 @@ class OperationStore:
             now = store.clock(conn)
             for row in conn.execute("SELECT id FROM execution_operations WHERE status='RUNNING' AND lease_until<=? LIMIT 100",(now,)).fetchall():
                 self._unknown(conn,row[0],now)
-            removable = conn.execute("SELECT o.id FROM execution_operations o LEFT JOIN execution_sessions s ON s.session=o.session WHERE o.status IN ('SUCCEEDED','FAILED') AND o.updated<? AND (s.epoch<>o.epoch OR s.expires<=?) "
+            removable = conn.execute("SELECT o.id FROM execution_operations o LEFT JOIN execution_sessions s ON s.session=o.session WHERE o.status IN ('SUCCEEDED','FAILED','CANCELLED') AND o.updated<? AND (s.epoch<>o.epoch OR s.expires<=?) "
                                      "AND NOT EXISTS (SELECT 1 FROM execution_effects e LEFT JOIN execution_cost_outbox c ON c.run_id=e.run_id WHERE e.operation_id=o.id AND (e.status<>'CONFIRMED' OR e.usage_known=0 OR c.status IS NULL OR c.status<>'CONFIRMED')) "
                                      "AND NOT EXISTS (SELECT 1 FROM execution_cost_outbox c JOIN execution_cost_runs r ON r.run_id=c.run_id WHERE r.operation_id=o.id AND c.status<>'CONFIRMED') "
                                      "AND NOT EXISTS (SELECT 1 FROM execution_files f WHERE f.operation_id=o.id) LIMIT 100",(now-store.policy.history_ttl,now)).fetchall()
             for row in removable:
-                conn.execute("DELETE FROM execution_unit_checks WHERE operation_id=?",(row[0],))
-                conn.execute("DELETE FROM execution_unit_batches WHERE operation_id=?",(row[0],))
-                conn.execute("DELETE FROM execution_handoffs WHERE operation_id=?",(row[0],))
-                conn.execute("DELETE FROM execution_effects WHERE operation_id=?",(row[0],))
-                conn.execute("DELETE FROM execution_collectors WHERE run_id IN (SELECT run_id FROM execution_cost_runs WHERE operation_id=?)",(row[0],))
-                conn.execute("DELETE FROM execution_cost_outbox WHERE run_id IN (SELECT run_id FROM execution_cost_runs WHERE operation_id=?)",(row[0],))
-                conn.execute("DELETE FROM execution_cost_runs WHERE operation_id=?",(row[0],))
-                conn.execute("DELETE FROM execution_attempts WHERE operation_id=?",(row[0],))
-                conn.execute("DELETE FROM execution_operations WHERE id=?",(row[0],))
+                self._delete_operation_rows(conn, row[0])
             # Children before parents; current epoch and unresolved-session history stay.
             conn.execute("DELETE FROM execution_tasks WHERE id IN (SELECT t.id FROM execution_tasks t JOIN execution_sessions s ON s.session=t.session WHERE t.updated<? AND (t.epoch<>s.epoch OR s.expires<=?) AND NOT EXISTS (SELECT 1 FROM execution_operations o WHERE o.session=t.session AND o.status IN ('REGISTERED','RUNNING','UNKNOWN')) AND NOT EXISTS (SELECT 1 FROM execution_tasks c WHERE c.parent_id=t.id) AND NOT EXISTS (SELECT 1 FROM execution_handoffs h WHERE h.parent_record_id=t.id OR h.child_record_id=t.id) AND NOT EXISTS (SELECT 1 FROM execution_unit_checks u WHERE u.parent_record_id=t.id) AND NOT EXISTS (SELECT 1 FROM execution_unit_batches b WHERE b.parent_record_id=t.id) LIMIT 100)",(now-store.policy.history_ttl,now))
             return {"operations_removed":len(removable)}
+
+    @staticmethod
+    def _delete_operation_rows(conn, operation_id):
+        """Caller proves expiry and reference safety inside the same transaction."""
+        for table in ("execution_unit_checks", "execution_unit_batches", "execution_handoffs", "execution_effects"):
+            conn.execute(f"DELETE FROM {table} WHERE operation_id=?", (operation_id,))
+        for table in ("execution_collectors", "execution_cost_outbox"):
+            conn.execute(f"DELETE FROM {table} WHERE run_id IN (SELECT run_id FROM execution_cost_runs WHERE operation_id=?)", (operation_id,))
+        for table in ("execution_cost_runs", "execution_attempts"):
+            conn.execute(f"DELETE FROM {table} WHERE operation_id=?", (operation_id,))
+        conn.execute("DELETE FROM execution_operations WHERE id=?", (operation_id,))

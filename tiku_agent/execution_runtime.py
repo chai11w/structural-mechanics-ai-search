@@ -334,4 +334,10 @@ def attach_execution(runtime, authority):
     authority.require_writer = True
     with authority.transaction() as conn:
         conn.execute("INSERT OR REPLACE INTO execution_meta VALUES ('execution_enabled','1')")
+        roots = {str(target.artifacts.root.resolve()) for target, _ in runtimes}
+        previous = conn.execute("SELECT value FROM execution_meta WHERE key='artifact_roots'").fetchone()
+        if previous:
+            roots.update(json.loads(previous[0]))
+        conn.execute("INSERT OR REPLACE INTO execution_meta VALUES ('artifact_roots',?)", (canonical(sorted(roots)),))
+        conn.execute("INSERT OR REPLACE INTO execution_meta VALUES ('execution_policy',?)", (canonical(vars(authority.policy)),))
     return runtime
