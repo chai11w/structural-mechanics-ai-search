@@ -1,4 +1,4 @@
-"""Publish complete local artifacts using a same-directory atomic rename."""
+"""Publish complete local artifacts atomically without replacing existing files."""
 from contextlib import contextmanager
 import os
 from pathlib import Path
@@ -25,7 +25,10 @@ def atomic_output(target):
             os.fsync(handle.fileno())
         if observer is not None:
             observer.file_ready(file_id, temporary)
-        os.replace(temporary, target)
+        # link creates the final name exclusively. A pre-check plus replace
+        # would overwrite another writer that publishes while we are writing.
+        # Both names are in the same directory/filesystem; failure is closed.
+        os.link(temporary, target)
         if observer is not None:
             observer.file_published(file_id)
     finally:

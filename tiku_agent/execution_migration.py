@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 
 from tiku_agent.execution_store import ExecutionError, ExecutionStore, canonical, digest
+from tiku_shared.atomic_files import atomic_output
 
 
 def _rows(path: Path | None, table: str):
@@ -66,7 +67,17 @@ def migrate_offline(child_db: str | Path, workflow_db: str | Path | None, *,
             or plan_migration(backup / "child.sqlite3", backup / "workflow.sqlite3" if workflow_path else None) != expected_plan):
         raise ExecutionError("EXECUTION_MIGRATION_PLAN_CHANGED")
     (backup / "plan.json").write_text(canonical(actual), encoding="utf-8")
+    # The configured destination must not appear until the entire database is
+    # usable. A failed validation used to leave an apparently fresh empty DB.
+    with atomic_output(target) as staging:
+        imported = _import_snapshots(staging, sources)
+    return {**actual, "imported": imported}
+
+
+def _import_snapshots(target, sources):
     authority = ExecutionStore(target)
+    with authority.transaction() as conn:
+        conn.execute("INSERT INTO execution_meta VALUES ('migration','incomplete')")
     from tiku_agent.state import AgentState
     from tiku_agent.a3_runtime import A3SessionState
     imported = {"child": 0, "workflow": 0}
@@ -81,8 +92,6 @@ def migrate_offline(child_db: str | Path, workflow_db: str | Path | None, *,
                 continue
             payload = cls.from_dict(json.loads(row["state_json"])).to_dict()
             validated.append((kind, row["session_id"], payload, expires))
-    with authority.transaction() as conn:
-        conn.execute("INSERT INTO execution_meta VALUES ('migration','incomplete')")
     for kind, sid, payload, expires in validated:
         authority.save(sid, kind, payload, None, origin="legacy_snapshot")
         imported[kind] += 1
@@ -90,5 +99,7 @@ def migrate_offline(child_db: str | Path, workflow_db: str | Path | None, *,
         from tiku_agent.execution_store import session_key
         for _kind, sid, _payload, expires in validated:
             conn.execute("UPDATE execution_sessions SET expires=min(expires,?) WHERE session=?", (expires, session_key(sid)))
+        if conn.execute("PRAGMA quick_check").fetchone()[0] != "ok" or conn.execute("PRAGMA foreign_key_check").fetchone():
+            raise ExecutionError("EXECUTION_MIGRATION_INCOMPLETE")
         conn.execute("UPDATE execution_meta SET value='complete' WHERE key='migration'")
-    return {**actual, "imported": imported}
+    return imported

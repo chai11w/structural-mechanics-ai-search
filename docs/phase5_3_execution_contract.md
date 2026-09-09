@@ -86,6 +86,6 @@ CLI/飞书/旧 launcher 没有启用 attach_execution；共享 model_costs 的�
 
 验证：`python -B -m unittest -q tests.test_execution_state tests.test_execution_operations tests.test_execution_frontend`，38 项通过。覆盖双独立进程抢占、重启登记、租约和执行截止、旧 writer、预先打开的 store、身份撤销、HTTP JSON/stream 重发、v6 fence/reset、换图/框/unit/候选及多题顺序冲突、A3 媒体失败收据、父子 attempt 外键、费用 run 归属、清理/容量、离线迁移与实际前端信封 helper。
 
-上述证据完成 5.2/5.3 范围；不声称 A08/A10/A11/A12/A14/A15 的完整故障恢复、供应商费用恰好一次或整套 A01～A18 发布验收已通过。5.4 的副作用和费用对账、5.5 的真实浏览器/运行压力/迁移发布演练仍待完成。
+上述历史批次证据完成 5.2/5.3 范围。后续 5.4 副作用/费用恢复和 5.5 真实浏览器、并发、中断、迁移回退演练已完成，最终全仓 1613 项通过，见 [A01～A18 验收矩阵](phase5_acceptance_matrix.md)。不承诺供应商恰好一次，未执行生产发布。
 
 最终全仓回归 `python -B -m unittest discover -s tests -p 'test_*.py'`：1504 项通过（90.160 秒）。两个新 CLI 的 `--help`、`node --check tiku_agent/demo_web/demo.js` 与 `git diff --check` 通过；未调用真实模型、未迁移 live 数据、未启动或重启任何服务。

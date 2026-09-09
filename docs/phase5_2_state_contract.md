@@ -38,9 +38,11 @@ python scripts/tiku_execution_migrate.py plan --child-db <clone>/a2/session.db -
 python scripts/tiku_execution_migrate.py apply --child-db <clone>/a2/session.db --workflow-db <clone>/a3_sessions.sqlite3 --destination <clone>/execution.sqlite3 --offline-clone-root <clone> --expected-plan <reviewed-plan.json> --backup-dir <repository-external-new-backup-directory>
 ```
 
-plan 只输出源数据摘要和行数，不输出会话内容。apply 要求新目标、新备份目录，分别以 SQLite backup 保存源库，核对源和备份均与审阅摘要一致。过期状态不导入；有效旧状态标 `legacy_snapshot`，不制造历史 operation/call 收据。父子/输入不一致的旧数据拒绝迁移，不猜测绑定。导入未完成的库保留 `migration=incomplete`，运行时打开即拒绝。
+plan 只输出源数据摘要和行数，不输出会话内容。apply 要求新目标、新备份目录，分别以 SQLite backup 保存源库，核对源和备份均与审阅摘要一致。过期状态不导入；有效旧状态标 `legacy_snapshot`，不制造历史 operation/call 收据。父子/输入不一致的旧数据拒绝迁移，不猜测绑定。导入在同目录临时库完成，先标记 `migration=incomplete`，全部导入及 SQLite 完整性/外键校验通过后才标记 complete、同步并独占发布目标名称。普通失败清除临时库；进程直接退出可能留下临时库，未完成库运行时打开即拒绝，正式目标不出现。发布时目标已被其他写入者创建则拒绝覆盖。
 
 原库始终不变。尚未启用/没有新执行时，回退为放弃新库并使用核验过的源备份。启用后发生的新操作不能靠直接切旧库“回退”；必须先停止新写、保留新库并对账，其费用/副作用收尾属于 5.4 与发布流程。关闭开关不是已发生操作的撤销。
+
+真实 CLI 的隔离迁移、补账、清理和备份恢复证据见 [发布演练](phase5_release_rehearsal.md)。该演练不修改生产运行库、不切换服务。
 
 ## 验证
 
