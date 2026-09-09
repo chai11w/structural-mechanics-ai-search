@@ -8,6 +8,7 @@ import shutil
 from uuid import uuid4
 
 from tiku_agent.tools import DEFAULT_RUNTIME_DIR
+from tiku_shared.atomic_files import atomic_copy
 
 
 class SessionArtifacts:
@@ -28,7 +29,7 @@ class SessionArtifacts:
         target_dir.mkdir(parents=True, exist_ok=True)
         suffix = source_path.suffix.lower() or ".bin"
         target = target_dir / f"{uuid4().hex}{suffix}"
-        shutil.copy2(source_path, target)
+        atomic_copy(source_path, target)
         return target
 
     def persist_media(self, session_id: str, source: str | Path) -> Path:
@@ -40,7 +41,7 @@ class SessionArtifacts:
         target_dir.mkdir(parents=True, exist_ok=True)
         suffix = source_path.suffix.lower() or ".bin"
         target = target_dir / f"{uuid4().hex}{suffix}"
-        shutil.copy2(source_path, target)
+        atomic_copy(source_path, target)
         return target
 
     def resolve_upload(self, session_id: str, filename: str) -> Path | None:

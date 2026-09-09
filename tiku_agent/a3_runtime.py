@@ -38,6 +38,8 @@ from tiku_agent.a3_models import (
     CropCompareResult,
 )
 from tiku_agent.execution_runtime import execution_entry, execution_snapshot_scope, bind_snapshot_context, delivery_execution_entry
+from tiku_shared.atomic_files import atomic_output
+from tiku_agent.execution_handoffs import parent_finalize
 from tiku_agent.agent import AgentResponse
 from tiku_agent.a3_checkpoint_context import (
     A3CheckpointBindingV1, a3_checkpoint_request_scope, current_a3_checkpoint_binding,
@@ -3178,6 +3180,7 @@ class A3MvpRuntime:
             intent="a3_reselect" if remaining else "a3_complete",
         )
 
+    @parent_finalize
     def _after_a2_response(
         self,
         state: A3SessionState,
@@ -3305,19 +3308,17 @@ class A3MvpRuntime:
                 top + 1,
                 min(height, round((float(bounds["y"]) + float(bounds["height"])) * height)),
             )
-            image.crop((left, top, right, bottom)).save(
-                target,
-                format="JPEG",
-                quality=94,
-                optimize=True,
-            )
+            with atomic_output(target) as temporary:
+                image.crop((left, top, right, bottom)).save(
+                    temporary, format="JPEG", quality=94, optimize=True,
+                )
         return target.resolve()
 
     def _write_auto_crop_overlay(self, state: A3SessionState) -> Path:
         source = Path(state.source_page_path)
         target_dir = self.artifacts.session_dir(state.session_id) / "crops"
         target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / "a3_auto_crop_overlay.jpg"
+        target = target_dir / f"a3_auto_crop_overlay_{uuid4().hex}.jpg"
         with Image.open(source) as opened:
             image = ImageOps.exif_transpose(opened).convert("RGB")
         draw = ImageDraw.Draw(image)
@@ -3342,7 +3343,8 @@ class A3MvpRuntime:
                 fill=color,
             )
             draw.text((x1 + 4, label_y + 2), label, fill="white")
-        image.save(target, format="JPEG", quality=92, optimize=True)
+        with atomic_output(target) as temporary:
+            image.save(temporary, format="JPEG", quality=92, optimize=True)
         return target.resolve()
 
     def _a3_snapshot(self, state: A3SessionState) -> dict[str, Any]:

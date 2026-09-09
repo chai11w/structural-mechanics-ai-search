@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
+from uuid import uuid4
 
 from tiku_agent.execution_store import ExecutionError, canonical, digest
 
@@ -24,6 +26,11 @@ def create_effect_schema(conn):
         CREATE TABLE IF NOT EXISTS execution_collectors (
             run_id TEXT PRIMARY KEY REFERENCES execution_cost_runs(run_id),
             metadata TEXT NOT NULL, closed INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS execution_files (
+            id TEXT PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES execution_operations(id),
+            attempt_id TEXT NOT NULL REFERENCES execution_attempts(id),
+            path TEXT NOT NULL UNIQUE, temporary_path TEXT NOT NULL, digest TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL, updated REAL NOT NULL);
     """.split(";"):
         if statement.strip():
             conn.execute(statement)
@@ -35,11 +42,42 @@ def collector_metadata(collector):
 
 
 class ExecutionEffects:
-    def __init__(self, operations, writer, *, ledger_paths=()):
+    def __init__(self, operations, writer, *, ledger_paths=(), artifact_roots=()):
         self.operations = operations
         self.store = operations.authority
         self.writer = writer
         self.ledger_keys = {digest(str(Path(path).resolve()).casefold()) for path in ledger_paths}
+        self.artifact_roots = tuple(Path(path).resolve() for path in artifact_roots)
+
+    def prepare_file(self, path, temporary):
+        if not any(path.is_relative_to(root) and temporary.is_relative_to(root) for root in self.artifact_roots):
+            raise ExecutionError("EXECUTION_ARTIFACT_INVALID")
+        with self.store.transaction() as conn:
+            now = self._validate(conn)
+            self.store.storage_capacity(extra=4096)
+            file_id = uuid4().hex
+            conn.execute("INSERT INTO execution_files (id,operation_id,attempt_id,path,temporary_path,status,updated) VALUES (?,?,?,?,?,'PREPARED',?)",
+                         (file_id, self.writer.operation_id, self.writer.attempt_id, str(path), str(temporary), now))
+        return file_id
+
+    def file_ready(self, file_id, temporary):
+        hasher = hashlib.sha256()
+        with temporary.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024*1024), b""):
+                hasher.update(chunk)
+        with self.store.transaction() as conn:
+            now = self._validate(conn)
+            count = conn.execute("UPDATE execution_files SET digest=?,status='READY',updated=? WHERE id=? AND attempt_id=? AND status='PREPARED'",
+                                 (hasher.hexdigest(), now, file_id, self.writer.attempt_id)).rowcount
+            if count != 1:
+                raise ExecutionError("EXECUTION_ARTIFACT_INVALID")
+
+    def file_published(self, file_id):
+        with self.store.transaction() as conn:
+            count = conn.execute("UPDATE execution_files SET status='PUBLISHED',updated=? WHERE id=? AND attempt_id=? AND status='READY'",
+                                 (self.store.clock(conn), file_id, self.writer.attempt_id)).rowcount
+            if count != 1:
+                raise ExecutionError("EXECUTION_ARTIFACT_INVALID")
 
     def _validate(self, conn):
         now = self.store.clock(conn)

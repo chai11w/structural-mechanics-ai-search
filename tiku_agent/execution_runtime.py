@@ -222,7 +222,8 @@ def execution_entry(method):
                 from tiku_agent.execution_effects import ExecutionEffects
                 ledgers = [getattr(target, "cost_ledger", None) for target in (runtime, getattr(runtime, "a2_runtime", None))]
                 ledger_paths = [ledger.path for ledger in ledgers if ledger is not None and getattr(ledger, "path", None) is not None]
-                with model_run_binding(lambda run_id:operations.bind_cost_run(writer,run_id)), execution_effect_scope(ExecutionEffects(operations, writer, ledger_paths=ledger_paths)):
+                artifact_roots = [target.artifacts.root for target in (runtime, getattr(runtime, "a2_runtime", None)) if target is not None and getattr(target, "artifacts", None) is not None]
+                with model_run_binding(lambda run_id:operations.bind_cost_run(writer,run_id)), execution_effect_scope(ExecutionEffects(operations, writer, ledger_paths=ledger_paths, artifact_roots=artifact_roots)):
                     response = method(runtime,session_id,*args,**kwargs)
                     child_runtime=getattr(runtime,"a2_runtime",runtime)
                     await_background=getattr(child_runtime,"_await_background_image_work",None)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import time
+from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from functools import wraps
@@ -42,6 +43,8 @@ from tiku_agent.intent_contract import CHAPTERS
 from tiku_agent.tool_result import ToolOutcome, ToolResult
 from tiku_shared.request_protocol import RequestAction
 from tiku_shared.model_costs import submit_with_model_cost_context
+from tiku_shared.atomic_files import atomic_copy
+from tiku_shared.execution_hooks import execution_observer
 from tiku_shared.trace_events import record_trace_event
 from scripts.classify_question_bank import SYSTEM_PROMPT as ANALYSIS_PROMPT
 
@@ -1236,12 +1239,14 @@ def answer_candidate_tool(
         copied = []
         if copy_to_output:
             output_dir = config.answer_output_dir
-            if output_dir.exists():
+            if execution_observer() is not None:
+                output_dir = output_dir / uuid4().hex
+            elif output_dir.exists():
                 shutil.rmtree(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
             for src in answers:
                 dst = output_dir / src.name
-                shutil.copy2(src, dst)
+                atomic_copy(src, dst)
                 copied.append(str(dst))
     except Exception as exc:  # noqa: BLE001 - isolate file-system failures.
         del exc

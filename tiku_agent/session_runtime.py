@@ -15,7 +15,8 @@ from typing import Any, Callable, Protocol
 from zoneinfo import ZoneInfo
 
 from tiku_agent.agent import AgentResponse, TikuSearchAgent
-from tiku_agent.execution_runtime import execution_entry, execution_snapshot_locked
+from tiku_agent.execution_runtime import execution_entry, execution_snapshot_locked, execution_snapshot_scope
+from tiku_agent.execution_handoffs import save_child_result
 from tiku_agent.a2_checkpoint_recorder import A2CheckpointRecorderV1
 from tiku_agent.checkpoint_capture import A2CheckpointContextV1
 from tiku_agent.checkpoint_capture_gate import A2CaptureAdmissionV1
@@ -1537,7 +1538,9 @@ class AgentSessionRuntime:
                 if not self.preserve_artifacts_on_cancel:
                     self.artifacts.clear_session(clean_session_id)
             else:
-                self.store.save(agent.state)
+                with execution_snapshot_scope(self):
+                    self.store.save(agent.state)
+                    save_child_result(self, clean_session_id, response)
             return response
         except Exception as exc:
             error_kind = type(exc).__name__
