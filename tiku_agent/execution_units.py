@@ -47,17 +47,11 @@ def finish_batch(runtime):
 
 def input_version(runtime, state, unit_id):
     from tiku_agent.execution_runtime import file_digest
+    from tiku_agent.execution_versions import component_version
     record = state.auto_crops.get(unit_id) or {}
-    def client_version(client):
-        if client is None:
-            return None
-        return {"type":type(client).__module__ + "." + type(client).__qualname__,
-                **{key:getattr(client, key) for key in
-                   ("model", "endpoint", "timeout_seconds", "execution_version")
-                   if isinstance(getattr(client, key, None), (str, int, float, bool))}}
     return digest({"producer":runtime.execution_operations.producer,
-        "verifier":client_version(runtime.crop_verifier),
-        "load_screen":client_version(runtime.external_load_screen),
+        "verifier":component_version(runtime.crop_verifier),
+        "load_screen":component_version(runtime.external_load_screen),
         "page":file_digest(state.source_page_path), "crop":file_digest(record["path"]),
         "bounds":record.get("bounds"), "unit":state.unit(unit_id),
         "understanding":state.page_understanding})
@@ -69,7 +63,7 @@ def reusable(runtime, state, unit_id):
     record = state.auto_crops.get(unit_id) or {}
     try:
         return record.get("execution_validation_version") == input_version(runtime, state, unit_id)
-    except (OSError, KeyError, TypeError):
+    except (OSError, KeyError, TypeError, ExecutionError):
         return False
 
 

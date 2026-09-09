@@ -47,6 +47,7 @@ class ExecutionHandoffTests(unittest.TestCase):
             agent_factory=lambda state:TikuSearchAgent(state=state, tools=tools, use_llm_intent=False))
         self.a3 = A3MvpRuntime(store=ExecutionSessionStore(self.store, "workflow"), artifacts=SessionArtifacts(self.root / "a3"),
             a2_runtime=self.a2, page_observer=FakeObserver(), crop_verifier=FakeVerifier())
+        self.a3.crop_verifier.execution_version = "fake-verifier-v1"
         attach_execution(self.a3, self.store)
 
     def request(self):
@@ -377,6 +378,58 @@ class ExecutionHandoffTests(unittest.TestCase):
             self.a3.recover_operation("s", source, operation_request=self.request())
         self.assertEqual(caught.exception.code, "EXECUTION_STALE")
         self.assertCountEqual(self.a3.crop_verifier.calls, ["g1-u1", "g1-u2"])
+
+    def test_changed_custom_prompt_cannot_reuse_confirmed_validation(self):
+        self.auto_page()
+        prompt = self.root / "custom-verifier.txt"
+        prompt.write_text("first", encoding="utf-8")
+        self.a3.crop_verifier.prompt_path = prompt
+        self.a3.prepare_units("s", ["g1-u1", "g1-u2"], operation_request=self.request())
+        calls = list(self.a3.crop_verifier.calls)
+        prompt.write_text("second", encoding="utf-8")
+        self.a3.select_unit("s", "g1-u1", operation_request=self.request())
+        self.assertEqual(self.a3.store.load("s").phase, "CROP_REQUIRED")
+        self.assertEqual(self.analysis_count, 0)
+        self.assertEqual(self.a3.crop_verifier.calls, calls)
+
+    def test_missing_custom_version_cannot_authorize_old_validation(self):
+        self.auto_page()
+        self.a3.prepare_units("s", ["g1-u1", "g1-u2"], operation_request=self.request())
+        del self.a3.crop_verifier.execution_version
+        self.a3.select_unit("s", "g1-u1", operation_request=self.request())
+        self.assertEqual(self.a3.store.load("s").phase, "CROP_REQUIRED")
+        self.assertEqual(self.analysis_count, 0)
+
+    def test_custom_version_change_during_check_cannot_confirm_result(self):
+        self.auto_page()
+        verify = self.a3.crop_verifier.verify
+        def change_version(*args):
+            result = verify(*args)
+            self.a3.crop_verifier.execution_version = "fake-verifier-v2"
+            return result
+        self.a3.crop_verifier.verify = change_version
+        with self.assertRaises(AgentProtocolError):
+            self.a3.prepare_units("s", ["g1-u1"], operation_request=self.request())
+        rows = self.rows("execution_unit_checks")
+        self.assertEqual(len(rows), 1)
+        self.assertNotEqual(rows[0]["status"], "CONFIRMED")
+        self.assertIsNone(rows[0]["result"])
+
+    def test_recovery_rejects_changed_custom_options_without_rechecking(self):
+        self.auto_page()
+        options = {"implementation": "v1", "threshold": 0.9}
+        self.a3.crop_verifier.execution_version = lambda: options
+        def progress(stage, message):
+            if message.startswith("已完成"):
+                raise RuntimeError("parent interrupted")
+        with self.assertRaises(RuntimeError):
+            self.a3.prepare_units("s", ["g1-u1"], operation_request=self.request(), progress=progress)
+        source = self.rows("execution_unit_checks")[0]["operation_id"]
+        options["threshold"] = 0.95
+        with self.assertRaises(AgentProtocolError) as error:
+            self.a3.recover_operation("s", source, operation_request=self.request())
+        self.assertEqual(error.exception.code, "EXECUTION_STALE")
+        self.assertEqual(self.a3.crop_verifier.calls, ["g1-u1"])
 
     def test_upload_auto_preparation_recovers_without_observing_or_grounding_again(self):
         Image.new("RGB", (1000, 800), "white").save(self.image)
