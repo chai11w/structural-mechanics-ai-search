@@ -1,18 +1,24 @@
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import threading
+import time
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
 from PIL import Image
+from fastapi.testclient import TestClient
 
 from tiku_agent.a3_runtime import A3MvpRuntime
 from tiku_agent.agent import TikuSearchAgent
 from tiku_agent.execution_operations import OperationRequest
-from tiku_agent.execution_runtime import attach_execution
+from tiku_agent.execution_runtime import attach_execution, OPERATION_HEADER
+from tiku_agent.fastapi_demo import create_app, SESSION_COOKIE
 from tiku_agent.execution_store import ExecutionStore, ExecutionSessionStore, _WRITER
 from tiku_agent.session_artifacts import SessionArtifacts
-from tiku_agent.session_runtime import AgentSessionRuntime
+from tiku_agent.session_runtime import AgentSessionRuntime, AgentProtocolError
 from tiku_agent.tools import ToolResult
 from tiku_shared.atomic_files import atomic_output
 from tiku_shared.execution_hooks import execution_effect_scope
@@ -80,6 +86,167 @@ class ExecutionHandoffTests(unittest.TestCase):
         operation = next(row for row in self.rows("execution_operations") if row["id"] == handoff["operation_id"])
         self.assertEqual(operation["status"], "UNKNOWN")
         self.assertEqual(self.analysis_count, 1)
+
+    def test_explicit_recovery_finishes_parent_without_rerunning_child(self):
+        self.prepare()
+        original_request = self.request()
+        bounds = {"x":0, "y":0, "width":1, "height":1}
+        with patch.object(self.a3, "_after_a2_response", side_effect=RuntimeError("before parent finish")):
+            with self.assertRaises(RuntimeError):
+                self.a3.handle_crop("s", bounds, unit_id="g1-u1", operation_request=original_request)
+        source = self.rows("execution_handoffs")[0]["operation_id"]
+        request = self.request()
+        result = self.a3.recover_operation("s", source, operation_request=request)
+        again = self.a3.recover_operation("s", source, operation_request=request)
+        self.assertTrue(again.execution_receipt["replayed"])
+        self.assertEqual(result.text, again.text)
+        replay = self.a3.handle_crop("s", bounds, unit_id="g1-u1", operation_request=original_request)
+        self.assertTrue(replay.execution_receipt["replayed"])
+        self.assertEqual(self.analysis_count, 1)
+        self.assertTrue(all(row["status"] == "COMMITTED" for row in self.rows("execution_handoffs")))
+        self.assertEqual(next(row["status"] for row in self.rows("execution_operations") if row["id"] == source), "SUCCEEDED")
+
+    def test_invalid_recovery_is_atomic_and_does_not_strand_a_new_operation(self):
+        self.prepare()
+        before = len(self.rows("execution_operations"))
+        with self.assertRaises(AgentProtocolError) as caught:
+            self.a3.recover_operation("s", "missing-operation", operation_request=self.request())
+        self.assertEqual(caught.exception.code, "EXECUTION_RECOVERY_INVALID")
+        self.assertEqual(len(self.rows("execution_operations")), before)
+
+    def http_headers(self):
+        request = self.request()
+        return {OPERATION_HEADER: json.dumps({"key":request.key, "epoch":request.epoch, "state_version":request.state_version}),
+                "Sec-Fetch-Site":"same-origin", "X-Session-Coordination-Version":"6",
+                "X-Session-Request-Fence":f"{int(time.time()*1000)}:{uuid4().hex}"}
+
+    def test_http_recovery_consumes_saved_child_once_and_rejects_changed_command(self):
+        self.prepare()
+        with patch.object(self.a3, "_after_a2_response", side_effect=RuntimeError("before parent finish")):
+            with self.assertRaises(RuntimeError):
+                self.crop()
+        source = self.rows("execution_handoffs")[0]["operation_id"]
+        with TestClient(create_app(runtime=self.a3, incoming_dir=self.root/"incoming")) as client:
+            client.cookies.set(SESSION_COOKIE, "s")
+            headers = self.http_headers()
+            payload = {"source_operation_id":source}
+            first = client.post("/api/execution/recover", json=payload, headers=headers)
+            self.assertEqual(first.status_code, 200, first.text)
+            replay = client.post("/api/execution/recover", json=payload, headers=headers)
+            self.assertTrue(replay.json()["operation"]["replayed"], replay.text)
+            changed = client.post("/api/execution/recover", json={"source_operation_id":"different"}, headers=headers)
+            self.assertEqual(changed.status_code, 409, changed.text)
+            self.assertEqual(changed.json()["code"], "EXECUTION_INPUT_CONFLICT")
+            self.assertEqual(client.post("/api/execution/recover", json=payload).status_code, 409)
+        self.assertEqual(self.analysis_count, 1)
+
+    def test_http_reset_and_control_do_not_wait_for_inflight_v6_request(self):
+        for command in ("child", "reset"):
+            with self.subTest(command=command):
+                self.prepare()
+                entered, release = threading.Event(), threading.Event()
+                original_factory = self.a2.agent_factory
+                def factory(state):
+                    agent = original_factory(state)
+                    original = agent.tools.analyze_image
+                    def blocked(*args, **kwargs):
+                        entered.set()
+                        if not release.wait(10):
+                            raise RuntimeError("test release missing")
+                        return original(*args, **kwargs)
+                    agent.tools.analyze_image = blocked
+                    return agent
+                parent = self.a3.store.load("s")
+                target = {"workflow_id":parent.workflow_search_id or parent.current_search_id,
+                          "task_revision":parent.task_revision, "unit_id":"g1-u1"}
+                self.a2.agent_factory = factory
+                app = create_app(runtime=self.a3, incoming_dir=self.root/"incoming")
+                with TestClient(app) as client, ThreadPoolExecutor(max_workers=2) as pool:
+                    client.cookies.set(SESSION_COOKIE, "s")
+                    pending = pool.submit(client.post, "/api/a3/crop/stream", json={**target,
+                        "bounds":{"x":0,"y":0,"width":1,"height":1}}, headers=self.http_headers())
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        status = pool.submit(client.get, "/api/execution").result(timeout=2)
+                        self.assertEqual(status.status_code, 200, status.text)
+                        self.assertEqual(status.json()["task_state"]["workflow"]["phase"], "A2_ACTIVE")
+                        headers = self.http_headers()
+                        path = "/api/reset" if command == "reset" else "/api/execution/control"
+                        result = pool.submit(client.post, path, headers=headers,
+                            json={} if command == "reset" else {"scope":"child", "target":target}).result(timeout=2)
+                        self.assertEqual(result.status_code, 200, result.text)
+                        repeat = pool.submit(client.post, path, headers=headers,
+                            json={} if command == "reset" else {"scope":"child", "target":target}).result(timeout=2)
+                        self.assertEqual(repeat.status_code, 200, repeat.text)
+                        self.assertIsNone(self.a2.store.load("s"))
+                        self.assertFalse(pending.done())
+                    finally:
+                        release.set()
+                        self.a2.agent_factory = original_factory
+                    stopped = pending.result(timeout=5)
+                    events = [json.loads(line) for line in stopped.text.splitlines()]
+                    self.assertTrue(any(event["type"] == "error" for event in events), stopped.text)
+                self.assertIsNone(self.a2.store.load("s"))
+
+    def test_boolean_revision_cannot_authorize_a_control(self):
+        self.prepare()
+        parent = self.a3.store.load("s")
+        target = {"workflow_id":parent.workflow_search_id or parent.current_search_id, "task_revision":True}
+        before = len(self.rows("execution_operations"))
+        with self.assertRaises(AgentProtocolError) as caught:
+            self.a3.control_execution("s", "workflow", target, operation_request=self.request())
+        self.assertEqual(caught.exception.code, "EXECUTION_CONTROL_INVALID")
+        self.assertEqual(len(self.rows("execution_operations")), before)
+
+    def test_child_stop_fences_a_real_inflight_runtime_without_waiting_for_it(self):
+        self.prepare()
+        entered = threading.Event()
+        release = threading.Event()
+        original_factory = self.a2.agent_factory
+        def factory(state):
+            agent = original_factory(state)
+            original = agent.tools.analyze_image
+            def blocked(*args, **kwargs):
+                entered.set()
+                if not release.wait(10):
+                    raise RuntimeError("test release missing")
+                return original(*args, **kwargs)
+            agent.tools.analyze_image = blocked
+            return agent
+        self.a2.agent_factory = factory
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(self.crop)
+            try:
+                self.assertTrue(entered.wait(5))
+                parent = self.a3.store.load("s")
+                target = {"workflow_id":parent.workflow_search_id or parent.current_search_id,
+                          "task_revision":parent.task_revision, "unit_id":parent.selected_unit_id}
+                started = time.monotonic()
+                response = self.a3.control_execution("s", "child", target, operation_request=self.request())
+                self.assertLess(time.monotonic() - started, 2)
+                self.assertIn("停止", response.text)
+                self.assertIsNone(self.a2.store.load("s"))
+                self.assertEqual(self.a3.store.load("s").selected_unit_id, "")
+            finally:
+                release.set()
+            with self.assertRaises(AgentProtocolError):
+                pending.result(timeout=5)
+        self.assertIsNone(self.a2.store.load("s"))
+        self.assertEqual(self.a3.store.load("s").selected_unit_id, "")
+        self.assertTrue(any(row["status"] == "CANCELLED" for row in self.rows("execution_operations")))
+
+    def test_workflow_stop_is_distinct_from_reset_and_replay_does_not_touch_new_page(self):
+        self.prepare()
+        parent = self.a3.store.load("s")
+        target = {"workflow_id":parent.workflow_search_id or parent.current_search_id, "task_revision":parent.task_revision}
+        request = self.request()
+        self.a3.control_execution("s", "workflow", target, operation_request=request)
+        self.assertTrue(self.a3.store.load("s").page_finished)
+        self.a3.handle_image("s", self.image, operation_request=self.request())
+        current = self.a3.store.load("s").workflow_search_id
+        self.a3.control_execution("s", "workflow", target, operation_request=request)
+        self.assertEqual(self.a3.store.load("s").workflow_search_id, current)
+        self.assertFalse(self.a3.store.load("s").page_finished)
 
     def test_child_receipt_failure_rolls_back_child_state_in_same_transaction(self):
         self.prepare()

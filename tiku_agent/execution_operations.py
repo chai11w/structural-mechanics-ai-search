@@ -162,11 +162,12 @@ class OperationStore:
                     raise ExecutionError("EXECUTION_STALE")
                 return dict(row)
             current = store._session(conn, key, now)
-            if not store._valid_session(current, now) or current["epoch"] != req.epoch or current["version"] != req.state_version:
+            if current is None or (kind != "clear" and not store._valid_session(current, now)) or current["epoch"] != req.epoch or current["version"] != req.state_version:
                 raise ExecutionError("EXECUTION_STALE")
-            if conn.execute("SELECT 1 FROM execution_cost_outbox WHERE status<>'CONFIRMED' LIMIT 1").fetchone():
+            command = kind in {"clear", "control_execution", "recover_operation"}
+            if not command and conn.execute("SELECT 1 FROM execution_cost_outbox WHERE status<>'CONFIRMED' LIMIT 1").fetchone():
                 raise ExecutionError("EXECUTION_COST_PENDING")
-            if conn.execute("SELECT 1 FROM execution_effects e JOIN execution_operations o ON o.id=e.operation_id "
+            if not command and conn.execute("SELECT 1 FROM execution_effects e JOIN execution_operations o ON o.id=e.operation_id "
                             "LEFT JOIN execution_cost_outbox c ON c.run_id=e.run_id "
                             "WHERE o.status IN ('SUCCEEDED','UNKNOWN','CANCELLED','FAILED') "
                             "AND (e.status IN ('SENT','UNKNOWN') OR (e.status='CONFIRMED' AND (c.run_id IS NULL OR e.usage_known=0))) LIMIT 1").fetchone():
@@ -182,7 +183,7 @@ class OperationStore:
             for state in conn.execute("SELECT kind,payload FROM execution_states WHERE session=? AND epoch=? AND payload IS NOT NULL", (key, req.epoch)):
                 data = json.loads(state["payload"])
                 target[state["kind"]] = {name: data[name] for name in ("workflow_search_id", "current_search_id", "task_revision", "candidate_generation", "selected_unit_id") if name in data}
-            target["action"] = {name: inputs[name] for name in ("unit_id", "unit_ids", "task_revision", "workflow_search_id", "bounds") if name in inputs}
+            target["action"] = {name: inputs[name] for name in ("unit_id", "unit_ids", "task_revision", "workflow_search_id", "bounds", "scope", "target", "source_operation_id") if name in inputs}
             action = inputs.get("action_context")
             if isinstance(action, dict):
                 target["action_context"] = {name: action[name] for name in ("type", "task_id", "task_revision", "candidate_generation", "rank") if name in action}
@@ -208,7 +209,7 @@ class OperationStore:
                     failure = "EXECUTION_BUSY" if row["status"] == "RUNNING" else "EXECUTION_UNKNOWN"
             else:
                 session = store._session(conn,row["session"],now)
-                if not store._valid_session(session,now) or session["epoch"] != row["epoch"] or session["version"] != row["expected_version"]:
+                if session is None or (row["kind"] != "clear" and not store._valid_session(session,now)) or session["epoch"] != row["epoch"] or session["version"] != row["expected_version"]:
                     failure = "EXECUTION_STALE"
                     conn.execute("UPDATE execution_operations SET status='FAILED',updated=? WHERE id=?",(now,operation_id))
                 else:
@@ -216,6 +217,16 @@ class OperationStore:
                     for other in competing:
                         if other["status"] == "RUNNING" and other["lease_until"] <= now:
                             self._unknown(conn,other["id"],now)
+                    if row["kind"] in {"clear", "control_execution"}:
+                        cancelled = conn.execute("SELECT id FROM execution_operations WHERE session=? AND epoch=? AND id<>? AND status IN ('REGISTERED','RUNNING','UNKNOWN')", (row["session"], row["epoch"], row["id"])).fetchall()
+                        for other in cancelled:
+                            self._unknown(conn, other["id"], now)
+                            conn.execute("UPDATE execution_operations SET status='CANCELLED' WHERE id=?", (other["id"],))
+                            conn.execute("UPDATE execution_attempts SET status='CANCELLED' WHERE operation_id=? AND status='UNKNOWN'", (other["id"],))
+                        competing = []
+                    elif row["kind"] == "recover_operation":
+                        source_id = json.loads(row["target"])["action"].get("source_operation_id")
+                        competing = [other for other in competing if other["id"] != source_id or (other["status"] == "RUNNING" and other["lease_until"] > now)]
                     if competing:
                         failure = "EXECUTION_BUSY" if all(o["status"] == "RUNNING" and o["lease_until"]>now for o in competing) else "EXECUTION_UNKNOWN"
                     else:

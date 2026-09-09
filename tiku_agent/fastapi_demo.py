@@ -341,6 +341,21 @@ class _SessionCoordinationGate:
                 and now - self._last_used >= _SESSION_COORDINATION_RETENTION_SECONDS
             )
 
+    @contextmanager
+    def control(self, fence_ids, request_fence, *, replay=False):
+        # Durable phase-five commands revoke writers in SQLite. Keep the
+        # in-flight task's busy flag; only serialize the short command fence.
+        with self._condition:
+            now = time.monotonic()
+            self._prune_completed_locked(now)
+            admitted = replay or not request_fence or request_fence not in self._completed_fences
+            yield admitted
+            if admitted:
+                for fence_id in (*fence_ids, request_fence):
+                    if fence_id:
+                        self._completed_fences[fence_id] = time.monotonic() + _SESSION_COORDINATION_RETENTION_SECONDS
+                self._last_used = time.monotonic()
+
 
 class _SessionCoordinationRegistry:
     def __init__(self) -> None:
@@ -385,6 +400,15 @@ class _SessionCoordinationRegistry:
                 self._pins.pop(session_id, None)
             else:
                 self._pins[session_id] = pins - 1
+
+    @contextmanager
+    def control(self, session_id, fence_ids, request_fence, *, replay=False):
+        clean_session_id, gate = self._pin(session_id)
+        try:
+            with gate.control(fence_ids, request_fence, replay=replay) as admitted:
+                yield admitted
+        finally:
+            self._unpin(clean_session_id, gate)
 
     @contextmanager
     def task(self, session_id: str, fence_id: str):
@@ -1836,6 +1860,22 @@ def create_app(
         )
         return result
 
+    def phase5_command_response(request, session_id, execute):
+        coordination, rejection = _parse_session_coordination_headers(request, task_request=False)
+        if rejection:
+            return request_protocol_response(request, rejection,
+                RequestProtocol.from_code("STALE_ACTION", request_id=_request_id(request)), status_code=409)
+        assert coordination is not None
+        with session_coordination.control(session_id, coordination.reconcile_fences,
+                coordination.request_fence, replay=phase5_registered(request, session_id)) as admitted:
+            if not admitted:
+                return request_protocol_response(request, "session request fence was already completed",
+                    RequestProtocol.from_code("STALE_ACTION", request_id=_request_id(request)), status_code=409)
+            result = execute()
+            if coordination.versioned:
+                _mark_session_coordination_ack(request, _coordination_completed_fences(coordination))
+            return _attach_session_coordination_ack(result, request)
+
     def coordinated_reconciliation_endpoint(*, mint_session: bool):
         def decorate(endpoint):
             @wraps(endpoint)
@@ -1846,6 +1886,8 @@ def create_app(
                     session_id = str(request.cookies.get(session_cookie) or "").strip()
                     if session_id:
                         session_id = _session_id(request, cookie_name=session_cookie)
+                if session_id and request.method == "POST" and getattr(runtime, "execution_operations", None) is not None:
+                    return phase5_command_response(request, session_id, lambda: endpoint(request))
                 coordination, rejection = _parse_session_coordination_headers(
                     request,
                     task_request=False,
@@ -1968,6 +2010,48 @@ def create_app(
         if result is None:
             raise HTTPException(status_code=404, detail="operation not found")
         return JSONResponse({"operation": result})
+
+    @app.get("/api/execution")
+    def execution_status(request: Request) -> JSONResponse:
+        from tiku_agent.execution_commands import command_snapshot
+        operations = getattr(runtime, "execution_operations", None)
+        session_id = str(request.cookies.get(session_cookie) or "").strip()
+        if operations is None or not session_id:
+            raise HTTPException(status_code=404, detail="execution session not found")
+        operations.verify_owner(session_id, _identity_key(request) or "local")
+        captured = command_snapshot(runtime, session_id, capabilities=_SESSION_TASK_STATE_CAPABILITIES)
+        return JSONResponse(with_public_task_state({
+            "execution": dict(captured.execution_context),
+            "session": _public_session_snapshot(captured.legacy_session),
+        }, captured.task_state))
+
+    @app.post("/api/execution/control")
+    @app.post("/api/execution/recover")
+    async def execution_command(request: Request) -> Response:
+        operations = getattr(runtime, "execution_operations", None)
+        session_id = str(request.cookies.get(session_cookie) or "").strip()
+        if operations is None or not session_id:
+            raise HTTPException(status_code=404, detail="execution session not found")
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid json") from None
+        recover = request.url.path.endswith("/recover")
+        required = {"source_operation_id"} if recover else {"scope", "target"}
+        if type(payload) is not dict or set(payload) != required:
+            raise HTTPException(status_code=400, detail="invalid command fields")
+        if recover and (type(payload["source_operation_id"]) is not str or not 1 <= len(payload["source_operation_id"]) <= 128):
+            raise HTTPException(status_code=400, detail="invalid source operation")
+
+        def execute():
+            kwargs = {"task_state_capabilities": _JSON_TASK_STATE_CAPABILITIES}
+            response = (runtime.recover_operation(session_id, payload["source_operation_id"], **kwargs)
+                if recover else runtime.control_execution(session_id, payload["scope"], payload["target"], **kwargs))
+            return _agent_json(response, runtime, session_id, response_store=response_store,
+                identity_key=_identity_key(request) or "local", secure_cookie=_is_secure_request(request),
+                cookie_name=session_cookie, task_state_capabilities=_JSON_TASK_STATE_CAPABILITIES)
+
+        return await asyncio.to_thread(phase5_command_response, request, session_id, execute)
 
     @app.post("/api/message")
     async def message(request: Request) -> Response:
@@ -2119,7 +2203,12 @@ def create_app(
         search_id = ""
         if session_id:
             try:
-                captured = runtime.session_response_snapshot_v1(
+                capture = runtime.session_response_snapshot_v1
+                if getattr(runtime, "execution_operations", None) is not None:
+                    from functools import partial
+                    from tiku_agent.execution_commands import command_snapshot
+                    capture = partial(command_snapshot, runtime)
+                captured = capture(
                     session_id,
                     capabilities=_JSON_TASK_STATE_CAPABILITIES,
                     response_frozen=True,
@@ -2716,6 +2805,8 @@ def _is_authoritative_reply_path(path: object) -> bool:
         "/api/a3/select/stream",
         "/api/a3/prepare/stream",
         "/api/a3/crop/stream",
+        "/api/execution/control",
+        "/api/execution/recover",
     }
 
 
@@ -2728,6 +2819,9 @@ def _is_http_error_task_state_path(path: object) -> bool:
         "/api/image",
         "/api/a3/select",
         "/api/reset",
+        "/api/execution",
+        "/api/execution/control",
+        "/api/execution/recover",
     }
 
 
@@ -4314,6 +4408,10 @@ def _safe_error_snapshot(
 
     fallback_task_state = _unreadable_http_error_task_state(runtime)
     capture = getattr(runtime, "session_response_snapshot_v1", None)
+    if getattr(runtime, "execution_operations", None) is not None:
+        from functools import partial
+        from tiku_agent.execution_commands import command_snapshot
+        capture = partial(command_snapshot, runtime)
     if not callable(capture) or not session_id:
         return (
             ({"session_valid": False}, fallback_task_state)

@@ -17,7 +17,8 @@ from tiku_agent.execution_store import ExecutionError, ExecutionSessionStore, _W
 
 OPERATION_HEADER = "X-Tiku-Operation"
 MUTATION_PATHS = frozenset({"/api/image", "/api/image/stream", "/api/message", "/api/message/stream",
-    "/api/a3/select", "/api/a3/select/stream", "/api/a3/prepare/stream", "/api/a3/crop/stream", "/api/reset"})
+    "/api/a3/select", "/api/a3/select/stream", "/api/a3/prepare/stream", "/api/a3/crop/stream", "/api/reset",
+    "/api/execution/control", "/api/execution/recover"})
 _REQUEST: ContextVar[tuple[object, str] | None] = ContextVar("execution_request", default=None)
 _DELIVERY_CONTEXT: ContextVar[object] = ContextVar("execution_delivery_context", default=None)
 
@@ -192,6 +193,12 @@ def execution_entry(method):
         request_context = _REQUEST.get()
         raw_request = explicit if explicit is not None else (request_context[0] if request_context else None)
         identity = request_context[1] if request_context else (kwargs.get("identity_key") or "local")
+        if method.__name__ == "clear":
+            from tiku_agent.execution_commands import run_command
+            # Internal A3→A2 clear returned through the inherited-writer branch
+            # above; only explicit outer resets rotate the conversation epoch.
+            return run_command(runtime, session_id, "clear", {}, operation_request=raw_request,
+                               identity_key=identity, capabilities=kwargs.get("task_state_capabilities"))
         try:
             request = OperationRequest.parse(raw_request)
             bound = signature.bind(runtime,session_id,*args,**kwargs)
@@ -262,6 +269,8 @@ def execution_message(code):
         "EXECUTION_CAPACITY":"执行记录暂时无法接收新操作，请稍后重新连接。",
         "EXECUTION_COST_PENDING":"已有调用的费用尚待核对，当前结果保留，暂不启动新的操作。",
         "EXECUTION_COST_CONFLICT":"费用记录存在不一致，需要核对后再继续。",
+        "EXECUTION_CONTROL_INVALID":"停止范围无效，请从当前任务重新选择。",
+        "EXECUTION_RECOVERY_INVALID":"现有记录不足以安全恢复，请先核对当前任务。",
     }.get(code,"执行状态暂时无法确认，请重新连接后核对进度。")
 
 

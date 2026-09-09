@@ -2530,6 +2530,16 @@ class A3MvpRuntime:
     def record_protocol_event(self, *args: Any, **kwargs: Any) -> None:
         self.a2_runtime.record_protocol_event(*args, **kwargs)
 
+    def recover_operation(self, session_id, source_operation_id, *, operation_request=None, identity_key="", task_state_capabilities=None):
+        from tiku_agent.execution_commands import run_command
+        return run_command(self, session_id, "recover_operation", {"source_operation_id":source_operation_id},
+                           operation_request=operation_request, identity_key=identity_key, capabilities=task_state_capabilities)
+
+    def control_execution(self, session_id, scope, target, *, operation_request=None, identity_key="", task_state_capabilities=None):
+        from tiku_agent.execution_commands import run_command
+        return run_command(self, session_id, "control_execution", {"scope":scope,"target":target},
+                           operation_request=operation_request, identity_key=identity_key, capabilities=task_state_capabilities)
+
     @execution_entry
     def clear(
         self,
