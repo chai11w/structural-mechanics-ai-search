@@ -1,4 +1,12 @@
 async (page) => {
+  // Diagnostic fixture only: the product keeps this panel hidden by default.
+  await page.context().addInitScript(() => {
+    window.addEventListener('DOMContentLoaded', () => {
+      const style = document.createElement('style');
+      style.textContent = '#execution-panel:not([hidden]) { display: block; }';
+      document.head.appendChild(style);
+    });
+  });
   await page.goto('http://127.0.0.1:8910/fixture/start?mode=ready');
   await page.evaluate(()=>fetch('/fixture/release',{method:'POST'}));
   await page.evaluate(()=>window.__phase5Blocked);
