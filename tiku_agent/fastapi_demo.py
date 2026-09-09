@@ -2013,15 +2013,16 @@ def create_app(
 
     @app.get("/api/execution")
     def execution_status(request: Request) -> JSONResponse:
-        from tiku_agent.execution_commands import command_snapshot
+        from tiku_agent.execution_commands import execution_session_view
         operations = getattr(runtime, "execution_operations", None)
         session_id = str(request.cookies.get(session_cookie) or "").strip()
         if operations is None or not session_id:
             raise HTTPException(status_code=404, detail="execution session not found")
-        operations.verify_owner(session_id, _identity_key(request) or "local")
-        captured = command_snapshot(runtime, session_id, capabilities=_SESSION_TASK_STATE_CAPABILITIES)
+        captured, controls = execution_session_view(runtime, session_id, _identity_key(request) or "local",
+            capabilities=_SESSION_TASK_STATE_CAPABILITIES)
         return JSONResponse(with_public_task_state({
             "execution": dict(captured.execution_context),
+            "execution_control": controls,
             "session": _public_session_snapshot(captured.legacy_session),
         }, captured.task_state))
 

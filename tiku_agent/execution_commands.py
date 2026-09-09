@@ -7,10 +7,79 @@ before the command commits. No mutable in-memory agent state is reused.
 import json
 
 from tiku_agent.execution_operations import OperationRequest
-from tiku_agent.execution_store import ExecutionError, _WRITER, canonical
+from tiku_agent.execution_store import ExecutionError, _WRITER, canonical, digest, session_key
 
 
 COMMANDS = frozenset({"clear", "control_execution", "recover_operation"})
+
+
+def execution_session_view(runtime, sid, identity, *, capabilities=None):
+    """One owned read-set for the control panel; never acquires model locks.
+
+    Control offers are distinct from V1 business actions. They authorize only
+    explicit, version-bound commands, never a search or an automatic replay.
+    CHECK_RECEIPT means evidence exists to inspect, not that recovery is proven.
+    """
+    operations = runtime.execution_operations
+    store = operations.authority
+    with store.transaction() as conn:
+        operations.verify_owner(sid, identity)
+        captured = _snapshot(runtime, sid, capabilities, False)
+        context = dict(captured.execution_context)
+        now = store.clock(conn)
+        key = session_key(sid)
+        current = store._session(conn, key, now)
+        valid = store._valid_session(current, now)
+        parent = runtime.store.load(sid) if hasattr(runtime, "a2_runtime") else None
+        child = getattr(runtime, "a2_runtime", runtime).store.load(sid)
+        controls = [{"action": "reset_session", "target": {}}]
+        if valid:
+            for scope, action in (("child", "stop_child"), ("workflow", "finish_page")):
+                try:
+                    target = _control_target(parent, child, scope)
+                except ExecutionError:
+                    continue
+                controls.append({"action": action, "target": target})
+        rows = conn.execute(
+            "SELECT id,status,lease_until,producer FROM execution_operations "
+            "WHERE session=? AND epoch=? AND identity=? AND status IN ('REGISTERED','RUNNING','UNKNOWN') "
+            "ORDER BY rowid DESC LIMIT 21", (key, context["epoch"], digest(identity))).fetchall()
+        pending = []
+        for row in rows[:20]:
+            status = row["status"]
+            if status == "RUNNING" and row["lease_until"] <= now:
+                status = "UNKNOWN"  # Observation does not take over the writer.
+            reason = "WAIT" if status != "UNKNOWN" else "NO_RECEIPT"
+            if status == "UNKNOWN" and valid and row["producer"] == operations.producer:
+                unconfirmed = conn.execute(
+                    "SELECT 1 FROM execution_effects WHERE operation_id=? AND status<>'CONFIRMED' LIMIT 1",
+                    (row["id"],)).fetchone()
+                receipt = conn.execute(
+                    "SELECT 1 FROM execution_handoffs WHERE operation_id=? UNION ALL "
+                    "SELECT 1 FROM execution_unit_batches WHERE operation_id=? LIMIT 1",
+                    (row["id"], row["id"])).fetchone()
+                reason = "UNCONFIRMED_EFFECT" if unconfirmed else "CHECK_RECEIPT" if receipt else "NO_RECEIPT"
+                if reason == "CHECK_RECEIPT":
+                    controls.append({"action": "recover_operation", "target": {"source_operation_id": row["id"]}})
+            pending.append({"operation_id": row["id"], "status": status, "recovery": reason})
+        return captured, {"schema": 1, "epoch": context["epoch"], "state_version": context["state_version"],
+                          "controls": controls, "pending": pending, "has_more": len(rows) > 20}
+
+
+def _control_target(parent, child, scope):
+    if parent is not None and parent.entry_route == "A3":
+        if parent.page_finished or not (parent.workflow_search_id or parent.current_search_id):
+            raise ExecutionError("EXECUTION_STALE")
+        target = {"workflow_id": parent.workflow_search_id or parent.current_search_id,
+                  "task_revision": parent.task_revision}
+        if scope == "child":
+            if not parent.selected_unit_id:
+                raise ExecutionError("EXECUTION_STALE")
+            target["unit_id"] = parent.selected_unit_id
+        return target
+    if scope == "child" and child is not None and child.current_search_id:
+        return {"task_id": child.current_search_id, "task_revision": child.task_revision}
+    raise ExecutionError("EXECUTION_STALE")
 
 
 def command_snapshot(runtime, sid, *, capabilities=None, response_frozen=False):
@@ -60,17 +129,7 @@ def _control(runtime, sid, scope, target):
     if type(target.get("task_revision")) is not int or any(
             type(value) is not str for key, value in target.items() if key != "task_revision"):
         raise ExecutionError("EXECUTION_CONTROL_INVALID")
-    if parent is not None and parent.entry_route == "A3":
-        expected = {"workflow_id": parent.workflow_search_id or parent.current_search_id,
-                    "task_revision": parent.task_revision}
-        if scope == "child":
-            expected["unit_id"] = parent.selected_unit_id
-            if not parent.selected_unit_id or parent.page_finished:
-                raise ExecutionError("EXECUTION_STALE")
-    elif scope == "child" and child is not None:
-        expected = {"task_id": child.current_search_id, "task_revision": child.task_revision}
-    else:
-        raise ExecutionError("EXECUTION_STALE")
+    expected = _control_target(parent, child, scope)
     if target != expected:
         raise ExecutionError("EXECUTION_STALE")
     child_runtime.store.clear(sid)

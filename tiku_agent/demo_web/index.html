@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
   <title>力答 · 结构力学搜题</title>
-  <link rel="stylesheet" href="/assets/demo.css?v=20260822-feedback-v1">
+  <link rel="stylesheet" href="/assets/demo.css?v=20260909-phase5-controls-v1">
 </head>
 <body>
   <div class="app-shell">
@@ -40,6 +40,13 @@
       </section>
 
       <div class="composer-dock">
+        <details id="execution-panel" class="execution-panel" hidden>
+          <summary>任务状态与控制</summary>
+          <p id="execution-note" role="status" aria-live="polite">查看当前任务的执行状态。</p>
+          <div id="execution-controls" class="execution-controls"></div>
+          <button id="execution-refresh" type="button">刷新任务状态</button>
+          <button id="execution-retry" type="button" hidden>核对上次操作</button>
+        </details>
         <div class="drop-target" id="drop-target">
           <form class="composer" id="composer">
             <textarea id="text" rows="1" maxlength="1000" aria-label="消息" placeholder="发题图，或继续选择候选题…"></textarea>
@@ -148,6 +155,7 @@
     </section>
   </div>
   <script src="/assets/task_state.js?v=20260830-task-state-3-4-5" defer></script>
-  <script src="/assets/demo.js?v=20260903-answer-session-v9" defer></script>
+  <script src="/assets/execution_control.js?v=20260909-phase5-controls-v1" defer></script>
+  <script src="/assets/demo.js?v=20260909-phase5-controls-v1" defer></script>
 </body>
 </html>

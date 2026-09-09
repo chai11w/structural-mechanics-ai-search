@@ -341,3 +341,11 @@ button:focus-visible, [role="button"]:focus-visible, textarea:focus-visible { ou
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+/* The execution panel remains available while the ordinary composer is busy. */
+.execution-panel { max-width: 800px; max-height: 38vh; overflow: auto; pointer-events: auto; margin: 0 auto 10px; padding: 10px 14px; border: 1px solid #dedee4; border-radius: 12px; background: #fff; font-size: 13px; }
+.execution-panel[hidden] { display: none; }
+.execution-panel summary { cursor: pointer; font-weight: 600; }
+.execution-panel p { line-height: 1.5; white-space: pre-line; }
+.execution-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+.execution-panel button { font: inherit; padding: 7px 10px; margin: 4px 4px 4px 0; border: 1px solid #dedee4; border-radius: 8px; background: #f8f8fa; cursor: pointer; }
+.execution-panel button:disabled { opacity: .5; cursor: default; }

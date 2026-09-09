@@ -142,6 +142,69 @@ class ExecutionHandoffTests(unittest.TestCase):
             self.assertEqual(client.post("/api/execution/recover", json=payload).status_code, 409)
         self.assertEqual(self.analysis_count, 1)
 
+    def test_control_view_is_owned_bounded_and_does_not_recover_on_read(self):
+        from tiku_agent.execution_commands import execution_session_view
+        from tiku_agent.execution_store import ExecutionError
+        self.prepare()
+        with patch.object(self.a3, "_after_a2_response", side_effect=RuntimeError("before parent finish")):
+            with self.assertRaises(RuntimeError):
+                self.crop()
+        before = self.rows("execution_operations")
+        with TestClient(create_app(runtime=self.a3, incoming_dir=self.root/"incoming")) as client:
+            client.cookies.set(SESSION_COOKIE, "s")
+            result = client.get("/api/execution")
+            self.assertEqual(result.status_code, 200, result.text)
+            envelope = result.json()
+            view = envelope["execution_control"]
+            self.assertEqual(view["epoch"], envelope["execution"]["epoch"])
+            self.assertEqual(view["state_version"], envelope["execution"]["state_version"])
+            self.assertEqual({item["action"] for item in view["controls"]},
+                {"reset_session", "stop_child", "finish_page", "recover_operation"})
+            self.assertEqual(view["pending"][0]["recovery"], "CHECK_RECEIPT")
+            self.assertNotIn("fingerprint", result.text)
+            self.assertNotIn("op_key", result.text)
+            self.assertNotIn(str(self.root), result.text)
+        self.assertEqual(self.rows("execution_operations"), before)
+        self.assertEqual(self.analysis_count, 1)
+        with self.assertRaises(ExecutionError):
+            execution_session_view(self.a3, "s", "another-owner")
+        _, other = execution_session_view(self.a3, "another-session", "local")
+        self.assertEqual(other["pending"], [])
+        self.assertEqual(other["controls"], [{"action":"reset_session", "target":{}}])
+        source = view["pending"][0]["operation_id"]
+        self.a3.recover_operation("s", source, operation_request=self.request())
+        _, after = execution_session_view(self.a3, "s", "local")
+        self.assertEqual(after["pending"], [])
+
+    def test_control_view_expired_lease_only_classifies_and_finished_page_has_no_stop(self):
+        from tiku_agent.execution_commands import execution_session_view
+        self.prepare()
+        op = self.a3.execution_operations.register("s", "local", self.request(), "handle_text", {"text":"x"})
+        self.a3.execution_operations.claim(op["id"])
+        with self.store.transaction() as conn:
+            conn.execute("UPDATE execution_operations SET lease_until=1 WHERE id=?", (op["id"],))
+        _, view = execution_session_view(self.a3, "s", "local")
+        self.assertEqual(view["pending"], [{"operation_id":op["id"], "status":"UNKNOWN", "recovery":"NO_RECEIPT"}])
+        self.assertEqual(next(row["status"] for row in self.rows("execution_operations") if row["id"] == op["id"]), "RUNNING")
+        target = next(item["target"] for item in view["controls"] if item["action"] == "finish_page")
+        self.a3.control_execution("s", "workflow", target, operation_request=self.request())
+        _, view = execution_session_view(self.a3, "s", "local")
+        self.assertEqual(view["controls"], [{"action":"reset_session", "target":{}}])
+        self.assertEqual(view["pending"], [])
+
+    def test_idle_a2_state_does_not_publish_an_empty_stop_target(self):
+        from tiku_agent.execution_commands import execution_session_view
+        from tiku_agent.state import AgentState
+        operation = self.a2.execution_operations.register("s", "local", self.request(), "handle_text", {"text":"hello"})
+        writer = self.a2.execution_operations.claim(operation["id"])
+        token = _WRITER.set(writer)
+        try:
+            self.a2.store.save(AgentState(session_id="s"))
+        finally:
+            _WRITER.reset(token)
+        _, view = execution_session_view(self.a2, "s", "local")
+        self.assertEqual(view["controls"], [{"action":"reset_session", "target":{}}])
+
     def test_http_reset_and_control_do_not_wait_for_inflight_v6_request(self):
         for command in ("child", "reset"):
             with self.subTest(command=command):
@@ -172,6 +235,9 @@ class ExecutionHandoffTests(unittest.TestCase):
                         status = pool.submit(client.get, "/api/execution").result(timeout=2)
                         self.assertEqual(status.status_code, 200, status.text)
                         self.assertEqual(status.json()["task_state"]["workflow"]["phase"], "A2_ACTIVE")
+                        offered = status.json()["execution_control"]
+                        self.assertIn({"action":"stop_child", "target":target}, offered["controls"])
+                        self.assertEqual(offered["pending"][0]["status"], "RUNNING")
                         headers = self.http_headers()
                         path = "/api/reset" if command == "reset" else "/api/execution/control"
                         result = pool.submit(client.post, path, headers=headers,

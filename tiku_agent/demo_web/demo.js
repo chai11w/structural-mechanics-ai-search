@@ -151,6 +151,7 @@ const A3_CROP_REVIEW_MESSAGES = Object.freeze({
 });
 const TASK_STATE_JSON_PATHS = new Set([
   '/api/session', '/api/message', '/api/image', '/api/a3/select', '/api/reset',
+  '/api/execution', '/api/execution/control', '/api/execution/recover',
 ]);
 const TASK_STATE_STREAM_PATHS = new Set([
   '/api/message/stream', '/api/image/stream', '/api/a3/select/stream',
@@ -642,7 +643,8 @@ function isTaskStateRequestPath(url) {
 
 function isTaskStartingPath(url) {
   const path = taskStateApiPath(url);
-  return isTaskStateRequestPath(path) && !['/api/session', '/api/reset'].includes(path);
+  return isTaskStateRequestPath(path) && !['/api/session', '/api/reset',
+    '/api/execution', '/api/execution/control', '/api/execution/recover'].includes(path);
 }
 
 function isExplicitSessionResetText(value) {
@@ -1176,18 +1178,20 @@ function isAuthenticationTerminalNoUpdate(envelope) {
 // Phase 5 metadata is accepted only with the same authoritative task envelope.
 let executionContext = null;
 let executionRequired = false;
+let executionPanel = null;
 function acceptExecutionContext(envelope) {
   const value = envelope?.execution;
   if (value?.schema === 1 && /^[0-9a-f]{32}$/.test(value.epoch)
       && Number.isSafeInteger(value.state_version) && value.state_version >= 0) {
     executionContext = Object.freeze({ epoch: value.epoch, state_version: value.state_version });
     executionRequired = true;
+    executionPanel?.enable();
   } else if (executionRequired) {
     executionContext = null;
   }
 }
 function applyExecutionHeaders(headers, fence, url) {
-  if (!executionRequired || url === '/api/session' || !isTaskStateRequestPath(url)) return;
+  if (!executionRequired || url === '/api/session' || url === '/api/execution' || !isTaskStateRequestPath(url)) return;
   if (!executionContext || !fence?.id) throw staleSessionActionError();
   if (!fence.operation) fence.operation = Object.freeze({ key: fence.id, ...executionContext });
   headers.set('X-Tiku-Operation', JSON.stringify(fence.operation));
@@ -1463,11 +1467,11 @@ function a3SnapshotMatchesTaskState(a3, target) {
       || legacyUnit.page_index !== unit.page_index
       || legacyUnit.display_label !== unit.display_label
       || legacyUnit.completed !== (unit.status === 'COMPLETED')
-      || legacyUnit.searched !== (unit.status === 'CLOSED')
+      || ((legacyUnit.searched || a3.page_finished) && !legacyUnit.completed) !== (unit.status === 'CLOSED')
       || legacyUnit.selected !== (unit.unit_id === projectedSelectedUnitId)
       || !['pending', 'located', 'manual', 'ready'].includes(preparationStatus)
     ) return false;
-    if (!legacyUnit.completed && !legacyUnit.searched && !legacyUnit.selected) {
+    if (!['COMPLETED', 'CLOSED'].includes(unit.status) && !legacyUnit.selected) {
       if (preparationStatus === 'ready' && !legacyUnit.crop_available) return false;
       if ((preparationStatus === 'ready') !== (unit.status === 'PREPARED')) return false;
     }
@@ -4506,6 +4510,11 @@ function hasDraggedFiles(event) {
 }
 
 async function resetConversation() {
+  if (executionRequired && executionPanel) return executionPanel.reset();
+  if (executionRequired) {
+    showFailureNotice('connection', '任务控制资源缺失，请刷新页面后重试。', ['retry_connection']);
+    return;
+  }
   if (activeController) activeController.abort('new-chat');
   const operation = ++operationVersion;
   setBusy(true);
@@ -4709,6 +4718,138 @@ window.visualViewport?.addEventListener('resize', syncVisualViewport, { passive:
 window.visualViewport?.addEventListener('scroll', syncVisualViewport, { passive: true });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) expireHistoryIfNeeded(); });
 
+function createExecutionPanel() {
+  const panel = $('#execution-panel');
+  const api = globalThis.TikuExecutionControl;
+  if (!panel || !api) return null;
+  const note = $('#execution-note');
+  const controls = $('#execution-controls');
+  const refresh = $('#execution-refresh');
+  const retry = $('#execution-retry');
+  const eventKey = 'tiku-agent-execution-control-event-v1';
+  let working = false;
+  const validFence = (fence) => {
+    if (!fence || !Array.isArray(fence.records) || fence.records.length < 1 || fence.records.length > 65
+        || typeof fence.id !== 'string' || !fence.ownRecord || fence.ownRecord.id !== fence.id) return false;
+    const keys = new Set();
+    for (const record of fence.records) {
+      if (!record || typeof record.id !== 'string' || !/^[A-Za-z0-9:_.-]{8,128}$/.test(record.id)
+          || keys.has(record.key) || (record.legacy ? record.key !== SESSION_REQUEST_FENCE_KEY
+            : record.key !== sessionRequestFenceKey(record.id))) return false;
+      keys.add(record.key);
+    }
+    return fence.records.some((record) => record.key === fence.ownRecord.key && record.id === fence.id && !record.legacy);
+  };
+  const retire = () => {
+    operationVersion += 1;
+    if (activeController) activeController.abort('execution-control');
+    activeController = null;
+    invalidateTaskStateContext();
+    invalidateCandidateActions();
+    setBusy(false);
+    closeA3Sheet();
+  };
+  const client = api.createClient({
+    taskStateV1, fetch: (...args) => fetch(...args), storage: window.localStorage,
+    locks: globalThis.navigator?.locks,
+    createFence: () => createSessionRequestFence({ allowExisting: true }),
+    validFence,
+    clearFence(fence, ownOnly) {
+      const selected = ownOnly ? { ...fence, records: [fence.ownRecord] } : fence;
+      if (!clearSessionRequestFence(selected)) throw sessionCoordinationError();
+    },
+    headers(fence) {
+      const headers = new Headers();
+      applySessionCoordinationHeaders(headers, fence);
+      headers.set('x-request-id', createRequestId());
+      return headers;
+    },
+    acknowledged: sessionRequestFenceAcknowledgedByEnvelope,
+    retire,
+    publish() {
+      if (!safeLocalStorageSet(eventKey, createRequestId())) throw sessionCoordinationError();
+    },
+    committed(result, current, action) {
+      retire();
+      const same = result.execution?.epoch === current.execution?.epoch
+        && result.execution?.state_version === current.execution?.state_version;
+      const envelope = same ? result : current;
+      const request = beginTaskStateRequest('/api/execution', 'json');
+      consumeTaskStateResponse(request, envelope);
+      if (!authoritativeTaskStateEnvelopeAccepted(envelope)) throw sessionCoordinationError();
+      if (action === 'reset_session' && authoritativeTaskStateIsEmpty()) {
+        if (!applyResetSessionContext(envelope) || !publishSessionReset()) throw sessionCoordinationError();
+        clearHistory(); renderHistory();
+      } else if (same && result.text) {
+        addMessage(responseItem(result));
+      } else {
+        updateSessionContext(current);
+        addMessage({ message: '操作结果已核对，当前任务状态已刷新。' });
+      }
+      setStatus('ready', '任务状态已更新');
+    },
+  });
+  function render(view) {
+    controls.replaceChildren();
+    const pending = client.hasPending();
+    retry.hidden = !pending;
+    const labels = { reset_session: '开始新对话', stop_child: '停止当前题', finish_page: '结束本页', recover_operation: '核对并恢复已保存结果' };
+    const statuses = { RUNNING: '任务正在处理。', REGISTERED: '任务已登记，等待处理。', UNKNOWN: '任务中断，执行结果需要核对。' };
+    note.textContent = pending ? '上次控制请求尚未确认。核对会沿用原操作编号，不会重新识别。'
+      : view.pending.map((item) => statuses[item.status] + (item.recovery === 'UNCONFIRMED_EFFECT'
+        ? '模型请求结果尚未确认，暂时不能恢复。' : item.recovery === 'NO_RECEIPT'
+          ? '缺少可恢复的结果记录，不会自动重试。' : '')).join('\n') || '当前没有等待核对的操作。';
+    if (view.has_more) note.textContent += '\n另有更早的待核对记录，请联系维护人员查看。';
+    view.controls.forEach((offer, index) => {
+      const button = document.createElement('button');
+      button.type = 'button'; button.textContent = labels[offer.action];
+      button.disabled = pending || working;
+      button.addEventListener('click', () => run(() => client.execute(view, index)));
+      controls.appendChild(button);
+    });
+  }
+  async function run(callback) {
+    if (working) return;
+    working = true; panel.hidden = false; panel.open = true;
+    refresh.disabled = true; retry.disabled = true;
+    controls.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+    try {
+      const result = await callback();
+      acceptExecutionContext(result.envelope);
+      working = false;
+      render(result.view);
+    } catch (error) {
+      controls.replaceChildren();
+      note.textContent = error.message || '状态查询失败，请稍后刷新任务状态。';
+      try { retry.hidden = !client.hasPending(); } catch (_error) { retry.hidden = true; }
+    } finally { working = false; refresh.disabled = false; retry.disabled = false; }
+  }
+  const inspect = () => run(() => client.inspect());
+  refresh.addEventListener('click', inspect);
+  retry.addEventListener('click', () => run(() => client.retry()));
+  panel.addEventListener('toggle', () => { if (panel.open && !working) inspect(); });
+  window.addEventListener('storage', (event) => {
+    if (event.key === eventKey && event.newValue) {
+      retire();
+      controls.replaceChildren();
+      note.textContent = '任务已在另一页面更新，请刷新任务状态。';
+    }
+  });
+  return {
+    enable() { panel.hidden = false; },
+    reset() { return run(async () => {
+      if (client.hasPending()) throw new Error('请先在任务状态面板核对上次操作。');
+      const current = await client.inspect();
+      return client.execute(current.view, current.view.controls.findIndex((item) => item.action === 'reset_session'));
+    }); },
+    async probe() {
+      try { const result = await client.inspect(); acceptExecutionContext(result.envelope); render(result.view); }
+      catch (_error) { /* Legacy/unauthenticated sessions have no execution endpoint. */ }
+    },
+  };
+}
+executionPanel = createExecutionPanel();
+executionPanel?.probe();
 syncVisualViewport();
 restoreHistory();
 resizeComposer();
