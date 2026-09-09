@@ -58,7 +58,7 @@ class ExecutionEffectsTests(unittest.TestCase):
 
         self.runtime = AgentSessionRuntime(ExecutionSessionStore(self.store),
             artifacts=SessionArtifacts(self.root / "media"), agent_factory=Agent, cost_ledger=self.ledger)
-        attach_execution(self.runtime, self.store)
+        attach_execution(self.runtime, self.store, configuration_version="effects-fixture-v1")
         self.ops = self.runtime.execution_operations
 
     def request(self, sid="s"):
@@ -297,6 +297,89 @@ class ExecutionEffectsTests(unittest.TestCase):
         self.assertEqual(send.call_count, 1)
         sleep.assert_not_called()
         self.assertEqual([row["status"] for row in self.rows("execution_effects")], ["UNKNOWN"])
+
+    def configured_pipeline(self):
+        options = {"pipeline": "v1"}
+        attach_execution(self.runtime, self.store, configuration_version=lambda: options)
+        self.ops = self.runtime.execution_operations
+        return options
+
+    def test_changed_runtime_configuration_cannot_replay_completed_receipt(self):
+        options = self.configured_pipeline()
+        request = self.request()
+        self.runtime.handle_text("s", "success", operation_request=request)
+        options["pipeline"] = "v2"
+        self.assert_code("EXECUTION_RESULT_UNAVAILABLE", lambda: self.runtime.handle_text("s", "success", operation_request=request))
+        options["pipeline"] = "v1"
+        result = self.runtime.handle_text("s", "success", operation_request=request)
+        self.assertTrue(result.execution_receipt["replayed"])
+        self.assertEqual(self.calls, ["success"])
+
+    def test_configuration_change_between_register_and_claim_does_not_start(self):
+        options = self.configured_pipeline()
+        row = self.ops.register("s", "local", self.request(), "handle_text", {"text": "hello"})
+        options["pipeline"] = "v2"
+        self.assert_code("EXECUTION_STALE", lambda: self.ops.claim(row["id"]))
+        self.assertEqual(self.rows("execution_attempts"), [])
+        self.assertEqual(self.rows("execution_effects"), [])
+
+    def test_configuration_change_during_provider_keeps_fee_but_fences_result(self):
+        options = self.configured_pipeline()
+        class Calls(list):
+            def append(self, item):
+                super().append(item)
+                options["pipeline"] = "v2"
+        self.calls = Calls()
+        self.assert_code("EXECUTION_STALE", lambda: self.runtime.handle_text("s", "success", operation_request=self.request()))
+        self.assertEqual(self.calls, ["success"])
+        self.assertEqual([row["status"] for row in self.rows("execution_effects")], ["CONFIRMED"])
+        self.assertEqual([row["status"] for row in self.rows("execution_cost_outbox")], ["CONFIRMED"])
+        self.assertEqual(self.rows("execution_operations")[0]["status"], "UNKNOWN")
+        self.assertIsNone(self.rows("execution_operations")[0]["result"])
+        with closing(sqlite3.connect(self.ledger.path)) as conn:
+            self.assertEqual(conn.execute("SELECT count(*),sum(total_tokens) FROM model_cost_calls").fetchone(), (1,120))
+
+    def test_broken_configuration_still_allows_read_and_idempotent_reset(self):
+        from tiku_agent.execution_commands import execution_session_view
+        options = self.configured_pipeline()
+        self.runtime.handle_text("s", "success", operation_request=self.request())
+        options.clear()
+        _, control = execution_session_view(self.runtime, "s", "local")
+        self.assertIn("reset_session", [offer["action"] for offer in control["controls"]])
+        request = self.request()
+        self.runtime.clear("s", operation_request=request)
+        epoch = self.store.context("s")["epoch"]
+        self.runtime.clear("s", operation_request=request)
+        self.assertEqual(self.store.context("s")["epoch"], epoch)
+        self.assertNotEqual(epoch, request.epoch)
+        self.assertEqual(self.calls, ["success"])
+
+    def test_configuration_change_blocks_second_model_send_in_same_attempt(self):
+        options = self.configured_pipeline()
+        class Calls(list):
+            def append(self, item):
+                super().append(item)
+                options["pipeline"] = "v2"
+        self.calls = Calls()
+        self.assert_code("EXECUTION_STALE", lambda: self.runtime.handle_text("s", "schema_retry", operation_request=self.request()))
+        self.assertEqual(self.calls, ["schema_retry"])
+        effects = self.rows("execution_effects")
+        self.assertEqual(len(effects), 1)
+        self.assertEqual(effects[0]["status"], "CONFIRMED")
+
+    def test_same_configuration_receipt_replays_in_independent_runtime(self):
+        options = self.configured_pipeline()
+        request = self.request()
+        self.runtime.handle_text("s", "success", operation_request=request)
+        authority = ExecutionStore(self.store.path)
+        restarted = AgentSessionRuntime(ExecutionSessionStore(authority),
+            artifacts=self.runtime.artifacts, agent_factory=self.runtime.agent_factory, cost_ledger=self.ledger)
+        attach_execution(restarted, authority, configuration_version=lambda: dict(options))
+        replay = restarted.handle_text("s", "success", operation_request=request)
+        self.assertTrue(replay.execution_receipt["replayed"])
+        self.assertEqual(self.calls, ["success"])
+        options["pipeline"] = "v2"
+        self.assert_code("EXECUTION_RESULT_UNAVAILABLE", lambda: restarted.handle_text("s", "success", operation_request=request))
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@
 
 操作作用域是服务端验证的身份摘要、会话摘要、epoch 和客户端 key。每次请求仍经过鉴权；同 epoch 会话绑定同一身份，另一身份不能命中原收据。直接 Python runtime 调用属于可信进程内接口，调用方负责身份认证。
 
-`execution_operations` 保存操作类型、影响执行的输入摘要、预期总状态版本、当前父子任务/动作目标、源码生产版本及前一操作 ID。前一操作是会话顺序关联，不表示已经证明是某个失败操作的安全重试；旧收据清理后该历史 ID 可以不再可读。
+`execution_operations` 保存操作类型、影响执行的输入摘要、预期总状态版本、当前父子任务/动作目标、源码和运行配置生产版本及前一操作 ID。前一操作是会话顺序关联，不表示已经证明是某个失败操作的安全重试；旧收据清理后该历史 ID 可以不再可读。
 
 图片摘要按字节计算，临时上传文件名不影响重发；裁剪框、章节/上下文、unit 顺序、候选 revision/generation/rank 参与摘要。trace/request ID、进度回调及界面能力不参与。相同 key 改内容会冲突；相同图片新 key 是新的明确操作，不会按内容合并。
 
@@ -70,7 +70,7 @@ response = runtime.handle_text(session_id, "力法", operation_request=request)
 
 收据保存公共回复和冻结的 V1/legacy 视图、必要文件引用与哈希，不复制完整 AgentState、模型原文或原始 intent 分析。重发时文件缺失、内容变化或源码生产摘要变化会返回 EXECUTION_RESULT_UNAVAILABLE，不重新检索或生成替代答案。
 
-生产摘要覆盖仓库根 Python、tiku_agent Python/Prompt、tiku_shared Python。它用于拒绝跨代码版本静默重放；不是模型供应商版本、动态配置或实时题库版本的完整指纹，不能用于跨操作阶段产物缓存。后者本批未实现。
+生产摘要的源码部分覆盖仓库根 Python、tiku_agent Python/Prompt、tiku_shared Python 和 scripts Python。5.4 增加标准 runtime 模型/工具组件图、配置字段和实际 Prompt 字节摘要；登记、原键重放、抢占、执行者条件写和恢复均核对该版本。自定义适配须显式声明版本，见 [5.4 配置约定](phase5_4_recovery_contract.md)。该摘要不证明供应商同名模型的内部权重或实时题库内容不变；题库答案仍按不可变交付文件及摘要核对，跨操作校验复用只覆盖已有明确输入/版本契约的 unit 检查。
 
 A3 媒体交付失败后的重新开放动作使用原 key 派生的独立操作，绑定原 unit/revision/generation。重复交付失败复用这条修正收据，避免反复改状态。业务完成、文件保存、浏览器收到图片和费用落账仍是不同事实。
 

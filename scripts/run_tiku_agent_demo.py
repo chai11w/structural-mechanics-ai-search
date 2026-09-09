@@ -80,6 +80,8 @@ def build_runtime(
             options.update(policy)
             return rerank_candidates_tool(query_image_path, candidates, **options)
 
+        rerank_with_policy.execution_version = lambda: {"adapter": "standard-rerank-v1", "policy": policy}
+
         scoped_tools = AgentToolbox(rerank_candidates=rerank_with_policy)
 
     if (
@@ -105,6 +107,15 @@ def build_runtime(
             )
 
         agent_factory = build_agent
+        def execution_version():
+            from tiku_agent.execution_versions import component_version
+            return {"factory": "standard-a2-v1", "safe_answer": enable_safe_answer_v0,
+                    "dimension_filter": enable_dimension_filter,
+                    "chapter_fallback": enable_chapter_scope_fallback,
+                    "author_contact": enable_author_contact_fallback,
+                    "tools": component_version(scoped_tools or AgentToolbox()),
+                    "generator": component_version(generator)}
+        build_agent.execution_version = execution_version
     return AgentSessionRuntime(
         SQLiteSessionStore(root / "session.db"),
         artifacts=artifacts,

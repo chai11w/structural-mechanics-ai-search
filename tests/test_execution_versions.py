@@ -84,6 +84,54 @@ class ExecutionVersionTests(unittest.TestCase):
             component_version(client)
         self.assertNotIn(str(self.prompt), str(error.exception))
 
+    def test_default_runtime_graph_tracks_nested_prompts_options_and_tools(self):
+        from scripts.run_tiku_agent_8896 import build_runtime
+        from tiku_agent.execution_versions import runtime_version
+        from unittest.mock import patch
+        with patch("urllib.request.urlopen") as send:
+            runtime = build_runtime(self.prompt.parent / "runtime")
+            first = runtime_version(runtime)
+            self.assertEqual(runtime_version(runtime), first)
+            runtime.image_triage_authority.observer.prompt_path = self.prompt
+            before = runtime_version(runtime)
+            self.prompt.write_text("changed triage prompt", encoding="utf-8")
+            self.assertNotEqual(runtime_version(runtime), before)
+            for target, field, value in (
+                (runtime.page_observer, "model", "new-model"),
+                (runtime.auto_cropper, "timeout_seconds", 17.0),
+                (runtime, "auto_prepare_all_units", not runtime.auto_prepare_all_units),
+                (runtime.image_triage_authority.reply_client, "SYSTEM_PROMPT", "new reply prompt"),
+            ):
+                with self.subTest(field=field):
+                    before = runtime_version(runtime)
+                    setattr(target, field, value)
+                    self.assertNotEqual(runtime_version(runtime), before)
+            # Replacing a factory with an undeclared adapter cannot retain the
+            # version of the old standard tool/model pipeline.
+            runtime.a2_runtime.agent_factory = lambda state: None
+            with self.assertRaises(ExecutionError):
+                runtime_version(runtime)
+            send.assert_not_called()
+
+    def test_attach_rejects_unversioned_factory_before_replacing_store(self):
+        from tiku_agent.execution_runtime import attach_execution
+        from tiku_agent.execution_store import ExecutionStore, ExecutionSessionStore
+        from tiku_agent.session_runtime import AgentSessionRuntime
+        from tiku_agent.session_artifacts import SessionArtifacts
+        authority = ExecutionStore(self.prompt.parent / "execution.db")
+        original = ExecutionSessionStore(authority)
+        runtime = AgentSessionRuntime(original, artifacts=SessionArtifacts(self.prompt.parent / "media"),
+                                      agent_factory=lambda state: None)
+        with self.assertRaises(ExecutionError):
+            attach_execution(runtime, authority)
+        self.assertIs(runtime.store, original)
+        self.assertFalse(authority.require_writer)
+        options = {"custom_pipeline": "v1"}
+        attach_execution(runtime, authority, configuration_version=lambda: options)
+        before = runtime.execution_operations.current_producer
+        options["custom_pipeline"] = "v2"
+        self.assertNotEqual(runtime.execution_operations.current_producer, before)
+
 
 if __name__ == "__main__":
     unittest.main()

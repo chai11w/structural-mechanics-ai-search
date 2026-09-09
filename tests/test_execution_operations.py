@@ -51,7 +51,7 @@ class ExecutionOperationsTests(unittest.TestCase):
                 return AgentResponse(text="reply:"+text,state=self.state.to_dict(),intent="greeting")
         self.runtime = AgentSessionRuntime(ExecutionSessionStore(self.authority),
             artifacts=SessionArtifacts(self.root/"media"),agent_factory=FakeAgent)
-        attach_execution(self.runtime,self.authority)
+        attach_execution(self.runtime,self.authority,configuration_version="operations-fixture-v1")
 
     def req(self,sid="s",key=None):
         context=self.authority.context(sid)
@@ -330,7 +330,7 @@ class ExecutionOperationsTests(unittest.TestCase):
         verifier=FakeVerifier(); observer=FakeObserver()
         a3=A3MvpRuntime(store=ExecutionSessionStore(self.authority,"workflow"),artifacts=SessionArtifacts(self.root/"a3"),
             a2_runtime=a2,page_observer=observer,crop_verifier=verifier)
-        attach_execution(a3,self.authority)
+        attach_execution(a3,self.authority,configuration_version="operations-a3-fixture-v1")
         app=create_app(runtime=a3,incoming_dir=self.root/"incoming")
         with TestClient(app) as client:
             def headers():

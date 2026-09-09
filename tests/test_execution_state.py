@@ -196,11 +196,11 @@ class ExecutionStateTests(unittest.TestCase):
         def request(sid):
             ctx=self.authority.context(sid)
             return OperationRequest(uuid4().hex,ctx["epoch"],ctx["state_version"])
-        attach_execution(a2,self.authority)
+        attach_execution(a2,self.authority,configuration_version="state-fixture-v1")
         self.assertEqual(a2.handle_image("single",self.image,operation_request=request("single")).state["phase"],"WAIT_CANDIDATE_CHOICE")
         a3 = A3MvpRuntime(store=self.parent,artifacts=SessionArtifacts(self.root/"a3"),
             a2_runtime=a2,page_observer=FakeObserver(),crop_verifier=FakeVerifier())
-        attach_execution(a3,self.authority)
+        attach_execution(a3,self.authority,configuration_version="state-fixture-v1")
         a3.handle_image("multi",self.image,operation_request=request("multi"))
         a3.select_unit("multi","g1-u1",operation_request=request("multi"))
         a3.handle_crop("multi",{"x":0,"y":0,"width":1,"height":1},unit_id="g1-u1",operation_request=request("multi"))

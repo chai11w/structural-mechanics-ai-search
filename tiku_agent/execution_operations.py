@@ -1,7 +1,7 @@
 """Durable operation admission and fenced attempts; no automatic effect replay."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import re
 import hashlib
@@ -39,6 +39,8 @@ class ExecutionWriter:
     operation_id: str
     attempt_id: str
     token: str
+    producer: str = ""
+    producer_reader: object = field(default=None, compare=False, repr=False)
 
     def validate(self, conn, store, key, epoch, now):
         if (self.authority, self.session, self.epoch) != (store.authority, key, epoch):
@@ -50,6 +52,8 @@ class ExecutionWriter:
                                (self.attempt_id, self.operation_id, self.token)).fetchone()
         if attempt is None or attempt[0] + store.policy.max_execution_seconds <= now:
             raise ExecutionError("EXECUTION_LEASE_LOST")
+        if self.producer_reader is not None and self.producer_reader() != self.producer:
+            raise ExecutionError("EXECUTION_STALE")
 
 
 class OperationStore:
@@ -66,6 +70,7 @@ class OperationStore:
             hasher.update(file.relative_to(root).as_posix().encode())
             hasher.update(file.read_bytes())
         self.producer = hasher.hexdigest()
+        self.configuration_version = None
         with authority.transaction() as conn:
             schema = """
                 CREATE TABLE IF NOT EXISTS execution_operations (
@@ -103,6 +108,19 @@ class OperationStore:
             create_handoff_schema(conn)
             from tiku_agent.execution_units import create_unit_schema
             create_unit_schema(conn)
+
+    @property
+    def current_producer(self):
+        if self.configuration_version is None:
+            return self.producer
+        try:
+            return digest({"source": self.producer, "configuration": self.configuration_version()})
+        except Exception:
+            raise ExecutionError("EXECUTION_RESULT_UNAVAILABLE") from None
+
+    def producer_for(self, kind):
+        # Stop/reset must remain available when a model configuration is broken.
+        return self.producer if kind in {"clear", "control_execution"} else self.current_producer
 
     def lookup(self, sid, identity, request):
         req = OperationRequest.parse(request)
@@ -148,6 +166,7 @@ class OperationStore:
 
     def register(self, sid, identity, request, kind, inputs):
         req = OperationRequest.parse(request)
+        producer = self.producer_for(kind)
         key = session_key(sid)
         fingerprint = digest({"kind": kind, "input": inputs, "state_version": req.state_version})
         store = self.authority
@@ -159,7 +178,7 @@ class OperationStore:
             if row:
                 if row["fingerprint"] != fingerprint or row["kind"] != kind:
                     raise ExecutionError("EXECUTION_INPUT_CONFLICT")
-                if row["producer"] != self.producer:
+                if row["producer"] != producer:
                     raise ExecutionError("EXECUTION_RESULT_UNAVAILABLE")
                 current = store._session(conn,key,now)
                 if row["kind"] != "clear" and (not store._valid_session(current,now) or current["epoch"]!=req.epoch):
@@ -193,7 +212,7 @@ class OperationStore:
                 target["action_context"] = {name: action[name] for name in ("type", "task_id", "task_revision", "candidate_generation", "rank") if name in action}
             previous = conn.execute("SELECT id FROM execution_operations WHERE session=? AND epoch=? ORDER BY rowid DESC LIMIT 1", (key, req.epoch)).fetchone()
             conn.execute("INSERT INTO execution_operations (id,session,epoch,identity,op_key,kind,fingerprint,expected_version,producer,target,previous_operation_id,status,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                         (operation_id,key,req.epoch,digest(identity),req.key,kind,fingerprint,req.state_version,self.producer,canonical(target),previous[0] if previous else None,"REGISTERED",now,now))
+                         (operation_id,key,req.epoch,digest(identity),req.key,kind,fingerprint,req.state_version,producer,canonical(target),previous[0] if previous else None,"REGISTERED",now,now))
             return dict(conn.execute("SELECT * FROM execution_operations WHERE id=?",(operation_id,)).fetchone())
 
     def claim(self, operation_id):
@@ -204,6 +223,8 @@ class OperationStore:
             now = store.clock(conn)
             row = conn.execute("SELECT * FROM execution_operations WHERE id=?",(operation_id,)).fetchone()
             if row is None:
+                raise ExecutionError("EXECUTION_STALE")
+            if row["producer"] != self.producer_for(row["kind"]):
                 raise ExecutionError("EXECUTION_STALE")
             if row["status"] != "REGISTERED":
                 if row["status"] == "RUNNING" and row["lease_until"] <= now:
@@ -237,7 +258,8 @@ class OperationStore:
                         token, attempt = uuid4().hex, uuid4().hex
                         conn.execute("UPDATE execution_operations SET status='RUNNING',token=?,lease_until=?,updated=? WHERE id=? AND status='REGISTERED'",(token,now+min(store.policy.lease_seconds,store.policy.max_execution_seconds),now,operation_id))
                         conn.execute("INSERT INTO execution_attempts VALUES (?,?,?,'RUNNING',?,?)",(attempt,operation_id,token,now,now))
-                        writer = ExecutionWriter(store.authority,row["session"],row["epoch"],operation_id,attempt,token)
+                        writer = ExecutionWriter(store.authority,row["session"],row["epoch"],operation_id,attempt,token,
+                                                 row["producer"], lambda kind=row["kind"]: self.producer_for(kind))
         if failure:
             raise ExecutionError(failure)
         return writer

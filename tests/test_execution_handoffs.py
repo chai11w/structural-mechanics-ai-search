@@ -48,7 +48,7 @@ class ExecutionHandoffTests(unittest.TestCase):
         self.a3 = A3MvpRuntime(store=ExecutionSessionStore(self.store, "workflow"), artifacts=SessionArtifacts(self.root / "a3"),
             a2_runtime=self.a2, page_observer=FakeObserver(), crop_verifier=FakeVerifier())
         self.a3.crop_verifier.execution_version = "fake-verifier-v1"
-        attach_execution(self.a3, self.store)
+        attach_execution(self.a3, self.store, configuration_version="handoff-fixture-v1")
 
     def request(self):
         context = self.store.context("s")

@@ -305,10 +305,20 @@ def delivery_context():
     return _DELIVERY_CONTEXT.get()
 
 
-def attach_execution(runtime, authority):
-    """Attach only to a new/migrated isolated runtime, never silently import."""
+def attach_execution(runtime, authority, *, configuration_version=None):
+    """Attach an isolated runtime with a versioned graph, never silently import.
+
+    configuration_version is an optional explicit whole-pipeline attestation
+    for custom adapters. A callback must be bounded, side-effect-free and cover
+    all behavior-affecting configuration; it is read inside writer transactions.
+    """
     from tiku_agent.a3_runtime import A3MvpRuntime
     operations = OperationStore(authority)
+    from tiku_agent.execution_versions import runtime_version, configuration_digest
+    operations.configuration_version = (
+        (lambda: runtime_version(runtime)) if configuration_version is None
+        else (lambda: configuration_digest(configuration_version)))
+    operations.current_producer  # Validate the graph before replacing any stores.
     runtimes = [(runtime,"workflow" if isinstance(runtime,A3MvpRuntime) else "child")]
     if isinstance(runtime,A3MvpRuntime):
         runtimes.append((runtime.a2_runtime,"child"))

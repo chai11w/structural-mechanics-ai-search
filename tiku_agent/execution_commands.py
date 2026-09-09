@@ -45,12 +45,16 @@ def execution_session_view(runtime, sid, identity, *, capabilities=None):
             "WHERE session=? AND epoch=? AND identity=? AND status IN ('REGISTERED','RUNNING','UNKNOWN') "
             "ORDER BY rowid DESC LIMIT 21", (key, context["epoch"], digest(identity))).fetchall()
         pending = []
+        try:
+            producer = operations.current_producer
+        except ExecutionError:
+            producer = ""  # Still expose stop/reset; never offer recovery.
         for row in rows[:20]:
             status = row["status"]
             if status == "RUNNING" and row["lease_until"] <= now:
                 status = "UNKNOWN"  # Observation does not take over the writer.
             reason = "WAIT" if status != "UNKNOWN" else "NO_RECEIPT"
-            if status == "UNKNOWN" and valid and row["producer"] == operations.producer:
+            if status == "UNKNOWN" and valid and row["producer"] == producer:
                 unconfirmed = conn.execute(
                     "SELECT 1 FROM execution_effects WHERE operation_id=? AND status<>'CONFIRMED' LIMIT 1",
                     (row["id"],)).fetchone()
@@ -158,7 +162,7 @@ def _recover(runtime, sid, source_id, conn, operations, writer):
     source = conn.execute("SELECT * FROM execution_operations WHERE id=? AND session=? AND epoch=?",
                           (source_id, writer.session, writer.epoch)).fetchone()
     current = conn.execute("SELECT identity FROM execution_operations WHERE id=?", (writer.operation_id,)).fetchone()
-    if (source is None or source["status"] != "UNKNOWN" or source["producer"] != operations.producer
+    if (source is None or source["status"] != "UNKNOWN" or source["producer"] != operations.current_producer
             or current is None or source["identity"] != current["identity"]):
         raise ExecutionError("EXECUTION_RECOVERY_INVALID")
     if conn.execute("SELECT 1 FROM execution_effects WHERE operation_id=? AND status<>'CONFIRMED' LIMIT 1", (source_id,)).fetchone():

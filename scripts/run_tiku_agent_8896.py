@@ -143,6 +143,8 @@ def build_runtime(
             prompt,
             timeout=max(1, int(reply_timeout_seconds)),
         )
+        intent_client.execution_version = lambda: {
+            "adapter": "standard-a3-intent-v1", "timeout": max(1, int(reply_timeout_seconds))}
     runtime_kwargs = dict(
         store=SQLiteA3SessionStore(root / "a3_sessions.sqlite3"),
         artifacts=SessionArtifacts(root / "a3_sessions"),

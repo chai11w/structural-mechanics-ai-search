@@ -13,13 +13,13 @@ from tiku_agent.execution_store import ExecutionStore
 from tiku_agent.fastapi_demo import create_app
 
 
-def build_app(runtime_dir: str | Path, *, runtime=None):
+def build_app(runtime_dir: str | Path, *, runtime=None, configuration_version=None):
     root=Path(runtime_dir).resolve()
     if any(part in {".tmp_tiku_agent_v2_prod_8790", ".tmp_feishu_tiku"} for part in root.parts):
         raise ValueError("phase 5 requires a separate runtime directory")
     authority=ExecutionStore(root/"execution.sqlite3")
     target=runtime or build_runtime(root,max_concurrent_tasks=1,max_queued_tasks=2,queue_wait_seconds=55)
-    attach_execution(target,authority)
+    attach_execution(target,authority,configuration_version=configuration_version)
     return create_app(runtime=target,incoming_dir=root/"incoming",session_cookie="tiku_phase5_session")
 
 

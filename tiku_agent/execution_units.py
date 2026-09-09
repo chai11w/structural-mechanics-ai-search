@@ -49,7 +49,7 @@ def input_version(runtime, state, unit_id):
     from tiku_agent.execution_runtime import file_digest
     from tiku_agent.execution_versions import component_version
     record = state.auto_crops.get(unit_id) or {}
-    return digest({"producer":runtime.execution_operations.producer,
+    return digest({"producer":runtime.execution_operations.current_producer,
         "verifier":component_version(runtime.crop_verifier),
         "load_screen":component_version(runtime.external_load_screen),
         "page":file_digest(state.source_page_path), "crop":file_digest(record["path"]),
