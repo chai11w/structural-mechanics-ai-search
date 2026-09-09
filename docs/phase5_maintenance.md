@@ -20,9 +20,11 @@ python scripts/tiku_execution_maintain.py cleanup-plan --database <runtime>/exec
 python scripts/tiku_execution_maintain.py cost-apply --database <runtime>/execution.sqlite3 --ledger <runtime>/model_costs.sqlite3 --plan <reviewed-plan.json> --confirm-plan-hash <plan_hash> --backup-dir F:/cc/_backups/7-题库检索/<date>/<new-run>
 ```
 
-可以用重复的 `--run-id` 限定计划，最多为本批 limit 个。每项列出 call 数量、来源摘要和原因：READY、RUNNING、UNKNOWN_USAGE、ALREADY_CONFIRMED、CONFLICT、WRONG_LEDGER 或 MISSING_EVIDENCE。只有 READY 会执行；账本必须匹配调用时记录的目标摘要。缺失 usage、未确认调用和冲突不能当作零费用或由操作员盲目标成功。
+可以用重复的 `--run-id` 限定计划，最多为本批 limit 个。每项列出调用记录数 `calls`、已确认数 `confirmed_calls`、未发送数 `not_sent_calls`、来源摘要和原因：READY、RUNNING、UNKNOWN_USAGE、ALREADY_CONFIRMED、CONFLICT、WRONG_LEDGER 或 MISSING_EVIDENCE。只有 READY 会执行；账本必须匹配调用时记录的目标摘要。已发送调用缺失 usage、结果未确认和冲突不能当作零费用或由操作员盲目标成功。
 
-apply 重查所有选择项。执行库存在有效 RUNNING 租约时返回 EXECUTION_BUSY，避免备份占用模型正在确认结果所需的写事务。符合条件后先用 SQLite backup 保存执行库与既有费用库，并执行 quick_check，再重放原有精确费用写入。outbox 尚未建立时，只能从完整确认记录生成确定的 interrupted 载荷。
+apply 重查所有选择项。执行库存在有效 RUNNING 租约时返回 EXECUTION_BUSY，避免备份占用模型正在确认结果所需的写事务。符合条件后先用 SQLite backup 保存执行库与既有费用库，并执行 quick_check，再重放原有精确费用写入。outbox 尚未建立时，从确认记录生成确定的 interrupted 载荷。
+
+进程在发送前退出时，调用记录可能仍为 PREPARED。只有原执行者已失权（终态或租约已过期）、记录仍为 PREPARED 且没有响应/usage 时，受审核的 apply 才能将其标记为 NOT_SENT；原 call_id 保留，不虚构模型响应或 token 数。费用载荷只包含 CONFIRMED 调用；全部未发送时账本保留原 run 的零调用记录。混合已确认和未发送调用只记实际确认部分。审核后记录变为 SENT 或其他内容漂移，原计划失效；SENT/UNKNOWN 仍须对账，不能按未发送处理。这一处理不恢复业务执行，也不令 UNKNOWN 操作自动成功。
 
 业务不会重跑。相同 run/call 内容已经落账但 ACK 丢失时，核对原记录后确认即可；相同 ID 内容不一致时不覆盖账本，冲突持久保留。如果账本已提交而执行库事务随后失败，备份 result.json 标明可能已有账本写入，应重新 plan。再次对账仍使用同一调用身份，不能创建替代调用或重新估价。
 

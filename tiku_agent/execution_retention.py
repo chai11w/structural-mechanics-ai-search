@@ -115,7 +115,7 @@ def _cleanup_plan(conn, database, roots, limit, created, compact):
     cutoff = created - policy.history_ttl
     sessions = {row["session"]:dict(row) for row in conn.execute("SELECT * FROM execution_sessions")}
     operations = {row["id"]:dict(row) for row in conn.execute("SELECT * FROM execution_operations ORDER BY updated,id")}
-    pending_costs = {row[0] for row in conn.execute("SELECT DISTINCT e.operation_id FROM execution_effects e LEFT JOIN execution_cost_outbox c ON c.run_id=e.run_id WHERE e.status<>'CONFIRMED' OR e.usage_known=0 OR c.status IS NULL OR c.status<>'CONFIRMED'")}
+    pending_costs = {row[0] for row in conn.execute("SELECT DISTINCT e.operation_id FROM execution_effects e LEFT JOIN execution_cost_outbox c ON c.run_id=e.run_id WHERE e.status NOT IN ('CONFIRMED','NOT_SENT') OR (e.status='CONFIRMED' AND e.usage_known=0) OR c.status IS NULL OR c.status<>'CONFIRMED'")}
     pending_costs.update(row[0] for row in conn.execute("SELECT r.operation_id FROM execution_cost_runs r JOIN execution_cost_outbox c ON c.run_id=r.run_id WHERE c.status<>'CONFIRMED'"))
     eligible = {key for key,op in operations.items() if op["status"] in {"SUCCEEDED", "FAILED", "CANCELLED"}
         and op["updated"] < cutoff and key not in pending_costs and

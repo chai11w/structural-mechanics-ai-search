@@ -72,6 +72,7 @@ def inspect_execution(database, *, limit=20):
 
 
 def _cost_item(conn, ledger, run_id, now):
+    from tiku_agent.execution_effects import reconcilable_effect
     operation = conn.execute("SELECT o.* FROM execution_operations o JOIN execution_cost_runs r ON r.operation_id=o.id WHERE r.run_id=?", (run_id,)).fetchone()
     collector = conn.execute("SELECT * FROM execution_collectors WHERE run_id=?", (run_id,)).fetchone()
     outbox = conn.execute("SELECT * FROM execution_cost_outbox WHERE run_id=?", (run_id,)).fetchone()
@@ -84,7 +85,7 @@ def _cost_item(conn, ledger, run_id, now):
         reason = "MISSING_EVIDENCE"
     elif operation["status"] == "RUNNING" and operation["lease_until"] > now:
         reason = "RUNNING"
-    elif any(row["status"] != "CONFIRMED" or not row["usage_known"] or not row["record"] for row in effects):
+    elif any(not reconcilable_effect(row) for row in effects):
         reason = "UNKNOWN_USAGE"
     elif outbox and outbox["status"] == "CONFIRMED":
         reason = "ALREADY_CONFIRMED"
@@ -96,7 +97,10 @@ def _cost_item(conn, ledger, run_id, now):
             reason = "WRONG_LEDGER"
         elif outbox and (outbox["ledger_key"] != path_key(ledger) or digest(json.loads(outbox["payload"])) != outbox["fingerprint"]):
             reason = "CONFLICT"
-    return {"run_id":run_id, "reason":reason, "calls":len(effects), "source_digest":digest(source)}
+    return {"run_id":run_id, "reason":reason, "calls":len(effects),
+            "confirmed_calls":sum(row["status"] == "CONFIRMED" for row in effects),
+            "not_sent_calls":sum(row["status"] in {"PREPARED", "NOT_SENT"} for row in effects),
+            "source_digest":digest(source)}
 
 
 def seal_plan(plan):

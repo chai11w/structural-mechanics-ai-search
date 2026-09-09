@@ -77,6 +77,47 @@ class ExecutionMaintenanceTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "EXECUTION_MAINTENANCE_PLAN_CHANGED")
         self.assertFalse(self.backup.exists())
 
+    def test_confirmed_and_unsent_calls_are_reconciled_without_inventing_a_response(self):
+        from tiku_agent.execution_effects import ExecutionEffects
+        f = self.fixture
+        sent = ExecutionEffects.model_sent
+        count = 0
+        def fail_second(observer, call_id):
+            nonlocal count
+            count += 1
+            if count == 2:
+                raise OSError("before second send")
+            return sent(observer, call_id)
+        with patch.object(ExecutionEffects, "model_sent", new=fail_second):
+            with self.assertRaisesRegex(OSError, "before second send"):
+                f.runtime.handle_text("s", "schema_retry", operation_request=f.request())
+        plan = self.plan()
+        self.assertEqual(plan["items"][0]["confirmed_calls"], 1)
+        self.assertEqual(plan["items"][0]["not_sent_calls"], 1)
+        self.assertEqual(self.apply(plan)["confirmed_runs"], 1)
+        self.assertEqual(f.calls, ["schema_retry"])
+        effects = f.rows("execution_effects")
+        self.assertCountEqual([row["status"] for row in effects], ["CONFIRMED", "NOT_SENT"])
+        self.assertIsNone(next(row["record"] for row in effects if row["status"] == "NOT_SENT"))
+        with closing(sqlite3.connect(f.ledger.path)) as conn:
+            self.assertEqual(conn.execute("SELECT count(*),sum(total_tokens) FROM model_cost_calls").fetchone(), (1, 120))
+
+    def test_prepared_call_changed_to_sent_after_review_is_not_closed(self):
+        from tiku_agent.execution_effects import ExecutionEffects
+        f = self.fixture
+        with patch.object(ExecutionEffects, "model_sent", side_effect=OSError("before send")):
+            with self.assertRaises(OSError):
+                f.runtime.handle_text("s", "success", operation_request=f.request())
+        plan = self.plan()
+        with f.store.transaction() as conn:
+            conn.execute("UPDATE execution_effects SET status='SENT'")
+        with self.assertRaises(ExecutionError) as error:
+            self.apply(plan)
+        self.assertEqual(error.exception.code, "EXECUTION_MAINTENANCE_PLAN_CHANGED")
+        self.assertFalse(self.backup.exists())
+        self.assertEqual(f.rows("execution_effects")[0]["status"], "SENT")
+        self.assertEqual(self.plan()["items"][0]["reason"], "UNKNOWN_USAGE")
+
     def test_committed_ledger_with_lost_ack_is_confirmed_without_duplicate_charge(self):
         from tiku_agent.execution_effects import ExecutionEffects
         f = self.fixture

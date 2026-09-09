@@ -130,6 +130,8 @@ class ExecutionEffects:
                                (call_id, self.writer.attempt_id)).fetchone()
             if row is None:
                 raise ExecutionError("EXECUTION_UNKNOWN")
+            if row["status"] == "NOT_SENT":
+                raise ExecutionError("EXECUTION_COST_CONFLICT")
             status = "CONFIRMED" if confirmed else "UNKNOWN"
             if row["status"] == "CONFIRMED":
                 if row["record"] != encoded:
@@ -200,11 +202,18 @@ def reconcile_cost(operations, ledger, run_id):
                      (store.clock(conn), run_id, row["fingerprint"]))
 
 
+def reconcilable_effect(effect):
+    """PREPARED is proof of no send only after the owning writer is fenced."""
+    if effect["status"] in {"PREPARED", "NOT_SENT"}:
+        return effect["record"] is None and not effect["usage_known"]
+    return effect["status"] == "CONFIRMED" and effect["usage_known"] and bool(effect["record"])
+
+
 def stage_unwritten_cost(operations, ledger, run_id):
     """Recover a stopped collector from confirmed call evidence, never guesses usage.
 
     Used by explicit reconciliation after a crash before the outbox write. A
-    live collector, an unconfirmed call, or missing usage remains unresolved.
+    live writer, unknown sent call, or missing response usage stays unresolved.
     """
     store = operations.authority
     with store.transaction() as conn:
@@ -219,11 +228,16 @@ def stage_unwritten_cost(operations, ledger, run_id):
         if operation["status"] == "RUNNING" and operation["lease_until"] > now:
             raise ExecutionError("EXECUTION_BUSY")
         effects = conn.execute("SELECT * FROM execution_effects WHERE run_id=? ORDER BY created,call_id", (run_id,)).fetchall()
-        if any(row["status"] != "CONFIRMED" or not row["usage_known"] or not row["record"] for row in effects):
+        if any(not reconcilable_effect(row) for row in effects):
             raise ExecutionError("EXECUTION_COST_PENDING")
         if operation["status"] == "RUNNING":
             operations._unknown(conn, operation["id"], now)
-        records = sorted([json.loads(row["record"]) for row in effects], key=lambda record: record["sequence"])
+        # The operation is no longer a valid writer. model_sent requires that
+        # writer and a PREPARED row, so these calls can never start afterwards.
+        # Keep the original call identity without inventing a zero-usage reply.
+        conn.execute("UPDATE execution_effects SET status='NOT_SENT',updated=? WHERE run_id=? AND status='PREPARED'",
+                     (now, run_id))
+        records = sorted([json.loads(row["record"]) for row in effects if row["status"] == "CONFIRMED"], key=lambda record: record["sequence"])
         saved_metadata = json.loads(metadata[0])
         ledger_key = digest(str(Path(ledger.path).resolve()).casefold())
         if ledger_key not in saved_metadata["ledger_keys"]:
