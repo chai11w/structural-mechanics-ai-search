@@ -15,7 +15,7 @@ from typing import Any, Callable, Protocol
 from zoneinfo import ZoneInfo
 
 from tiku_agent.agent import AgentResponse, TikuSearchAgent
-from tiku_agent.execution_runtime import execution_entry, execution_snapshot_locked, execution_snapshot_scope
+from tiku_agent.execution_runtime import execution_entry, execution_snapshot_locked, execution_snapshot_scope, ensure_execution_cost_available
 from tiku_agent.execution_handoffs import save_child_result
 from tiku_agent.a2_checkpoint_recorder import A2CheckpointRecorderV1
 from tiku_agent.checkpoint_capture import A2CheckpointContextV1
@@ -1783,6 +1783,7 @@ class AgentSessionRuntime:
                 with lock:
                     try:
                         self._await_background_image_work(session_id)
+                        ensure_execution_cost_available(self)
                         self._check_daily_budget(identity_key)
                         response = execute()
                     except Exception as exc:

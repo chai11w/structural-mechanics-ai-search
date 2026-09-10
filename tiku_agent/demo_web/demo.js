@@ -175,6 +175,7 @@ const FEEDBACK_OPTIONS = {
 const RECOVERY_ACTION_LABELS = {
   relogin: '重新登录', reupload: '重新上传题图', new_chat: '开始新对话',
   retry_connection: '重新连接', retry_request: '重试上一条', retry_search: '重试搜索',
+  verify_operation: '核对上次操作',
 };
 
 class UserVisibleError extends Error {
@@ -1997,6 +1998,7 @@ function createRecoveryActions(actions, item = {}) {
       if (action === 'relogin') window.location.assign('/invite');
       else if (action === 'reupload') fileInput.click();
       else if (action === 'new_chat') resetConversation();
+      else if (action === 'verify_operation') executionPanel?.retry();
       else if (action === 'retry_connection') retryConnection();
       else if (action === 'retry_request') retryTextAction(retryAction, childActionTarget);
       else if (action === 'retry_search' && taskStateAllowsChildAction(action, childActionTarget)) {
@@ -4818,10 +4820,14 @@ function createExecutionPanel() {
       acceptExecutionContext(result.envelope);
       working = false;
       render(result.view);
+      resolveFailureNotice('execution-control');
     } catch (error) {
       controls.replaceChildren();
       note.textContent = error.message || '状态查询失败，请稍后刷新任务状态。';
       try { retry.hidden = !client.hasPending(); } catch (_error) { retry.hidden = true; }
+      resolveFailureNotice('execution-control');
+      showFailureNotice('execution-control', note.textContent,
+        retry.hidden ? ['retry_connection'] : ['verify_operation']);
     } finally { working = false; refresh.disabled = false; retry.disabled = false; }
   }
   const inspect = () => run(() => client.inspect());
@@ -4837,13 +4843,18 @@ function createExecutionPanel() {
   });
   return {
     enable() { panel.hidden = false; },
+    retry() { return run(() => client.retry()); },
     reset() { return run(async () => {
-      if (client.hasPending()) throw new Error('请先在任务状态面板核对上次操作。');
+      if (client.hasPending()) return client.retry();
       const current = await client.inspect();
       return client.execute(current.view, current.view.controls.findIndex((item) => item.action === 'reset_session'));
     }); },
     async probe() {
-      try { const result = await client.inspect(); acceptExecutionContext(result.envelope); render(result.view); }
+      try {
+        const result = await client.inspect(); acceptExecutionContext(result.envelope); render(result.view);
+        if (client.hasPending()) showFailureNotice('execution-control',
+          '上次操作尚未确认，请核对后再继续。', ['verify_operation']);
+      }
       catch (_error) { /* Legacy/unauthenticated sessions have no execution endpoint. */ }
     },
   };

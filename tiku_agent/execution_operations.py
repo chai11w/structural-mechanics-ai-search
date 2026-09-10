@@ -164,6 +164,36 @@ class OperationStore:
         return {"operation_id":row["id"],"kind":row["kind"],"status":status,"attempts":attempts,
                 "effects":effect_counts,"accounting":{"pending_runs":pending}}
 
+    def ensure_cost_available(self):
+        """Recheck durable accounting at admission, dequeue and send boundaries.
+
+        A live collector may be between its outbox and ledger commits. Only
+        after the ledger attempt ends (closed=2), or its writer is lost, does
+        an unconfirmed outbox/usage become an admission blocker.
+        """
+        with self.authority.transaction() as conn:
+            now = self.authority.clock(conn)
+            if conn.execute(
+                "SELECT 1 FROM execution_cost_outbox c "
+                "LEFT JOIN execution_cost_runs link ON link.run_id=c.run_id "
+                "LEFT JOIN execution_operations o ON o.id=link.operation_id "
+                "LEFT JOIN execution_collectors r ON r.run_id=c.run_id "
+                "WHERE c.status<>'CONFIRMED' AND (c.status<>'PENDING' OR o.id IS NULL "
+                "OR o.status<>'RUNNING' OR o.lease_until<=? OR r.run_id IS NULL OR r.closed<>1) LIMIT 1",
+                (now,)
+            ).fetchone():
+                raise ExecutionError("EXECUTION_COST_PENDING")
+            if conn.execute(
+                "SELECT 1 FROM execution_effects e JOIN execution_operations o ON o.id=e.operation_id "
+                "LEFT JOIN execution_cost_outbox c ON c.run_id=e.run_id "
+                "LEFT JOIN execution_collectors r ON r.run_id=e.run_id "
+                "WHERE (o.status IN ('SUCCEEDED','UNKNOWN','CANCELLED','FAILED') "
+                "OR (o.status='RUNNING' AND o.lease_until<=?) OR r.closed=2) "
+                "AND (e.status IN ('SENT','UNKNOWN') OR (e.status='CONFIRMED' "
+                "AND (c.run_id IS NULL OR e.usage_known=0))) LIMIT 1", (now,)
+            ).fetchone():
+                raise ExecutionError("EXECUTION_COST_PENDING")
+
     def register(self, sid, identity, request, kind, inputs):
         req = OperationRequest.parse(request)
         producer = self.producer_for(kind)
@@ -188,13 +218,8 @@ class OperationStore:
             if current is None or (kind != "clear" and not store._valid_session(current, now)) or current["epoch"] != req.epoch or current["version"] != req.state_version:
                 raise ExecutionError("EXECUTION_STALE")
             command = kind in {"clear", "control_execution", "recover_operation"}
-            if not command and conn.execute("SELECT 1 FROM execution_cost_outbox WHERE status<>'CONFIRMED' LIMIT 1").fetchone():
-                raise ExecutionError("EXECUTION_COST_PENDING")
-            if not command and conn.execute("SELECT 1 FROM execution_effects e JOIN execution_operations o ON o.id=e.operation_id "
-                            "LEFT JOIN execution_cost_outbox c ON c.run_id=e.run_id "
-                            "WHERE o.status IN ('SUCCEEDED','UNKNOWN','CANCELLED','FAILED') "
-                            "AND (e.status IN ('SENT','UNKNOWN') OR (e.status='CONFIRMED' AND (c.run_id IS NULL OR e.usage_known=0))) LIMIT 1").fetchone():
-                raise ExecutionError("EXECUTION_COST_PENDING")
+            if not command:
+                self.ensure_cost_available()
             store.capacity(conn,"execution_operations",store.policy.max_operations)
             used = conn.execute("SELECT coalesce(sum(result_bytes),0) FROM execution_operations").fetchone()[0]
             reserved = conn.execute("SELECT count(*) FROM execution_operations WHERE status IN ('REGISTERED','RUNNING','UNKNOWN')").fetchone()[0] * store.policy.max_result_bytes
@@ -255,6 +280,8 @@ class OperationStore:
                     if competing:
                         failure = "EXECUTION_BUSY" if all(o["status"] == "RUNNING" and o["lease_until"]>now for o in competing) else "EXECUTION_UNKNOWN"
                     else:
+                        if row["kind"] not in {"clear", "control_execution", "recover_operation"}:
+                            self.ensure_cost_available()
                         token, attempt = uuid4().hex, uuid4().hex
                         conn.execute("UPDATE execution_operations SET status='RUNNING',token=?,lease_until=?,updated=? WHERE id=? AND status='REGISTERED'",(token,now+min(store.policy.lease_seconds,store.policy.max_execution_seconds),now,operation_id))
                         conn.execute("INSERT INTO execution_attempts VALUES (?,?,?,'RUNNING',?,?)",(attempt,operation_id,token,now,now))

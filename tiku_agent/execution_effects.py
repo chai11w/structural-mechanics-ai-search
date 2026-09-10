@@ -94,7 +94,14 @@ class ExecutionEffects:
     def collector_closed(self, collector):
         # This is evidence only; a late collector cannot authorize a state write.
         with self.store.transaction() as conn:
-            conn.execute("UPDATE execution_collectors SET closed=1 WHERE run_id=?", (collector.run_id,))
+            conn.execute("UPDATE execution_collectors SET closed=max(closed,1) WHERE run_id=?", (collector.run_id,))
+
+    def cost_write_finished(self, run_id):
+        # 0 = collecting, 1 = model scope closed, 2 = ledger attempt ended.
+        # Outbox PENDING is normal during the ledger transaction. Only after
+        # this marker (or writer loss) does it prove unresolved accounting.
+        with self.store.transaction() as conn:
+            conn.execute("UPDATE execution_collectors SET closed=2 WHERE run_id=?", (run_id,))
 
     def prepare_model(self, *, call_id, run_id, provider, model, call_type):
         with self.store.transaction() as conn:
@@ -102,6 +109,7 @@ class ExecutionEffects:
             if conn.execute("SELECT 1 FROM execution_effects WHERE operation_id=? AND status='UNKNOWN' LIMIT 1",
                             (self.writer.operation_id,)).fetchone():
                 raise ExecutionError("EXECUTION_UNKNOWN")
+            self.operations.ensure_cost_available()
             link = conn.execute("SELECT operation_id,attempt_id FROM execution_cost_runs WHERE run_id=?", (run_id,)).fetchone()
             if link is None or tuple(link) != (self.writer.operation_id, self.writer.attempt_id):
                 raise ExecutionError("EXECUTION_CONTEXT_REQUIRED")
@@ -114,6 +122,7 @@ class ExecutionEffects:
     def model_sent(self, call_id):
         with self.store.transaction() as conn:
             now = self._validate(conn)
+            self.operations.ensure_cost_available()
             changed = conn.execute("UPDATE execution_effects SET status='SENT',updated=? "
                                    "WHERE call_id=? AND attempt_id=? AND status='PREPARED'",
                                    (now, call_id, self.writer.attempt_id)).rowcount

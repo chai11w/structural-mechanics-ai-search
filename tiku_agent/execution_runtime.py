@@ -47,6 +47,12 @@ def execution_snapshot_scope(runtime):
     return operations.authority.transaction() if operations is not None else nullcontext()
 
 
+def ensure_execution_cost_available(runtime):
+    operations = getattr(runtime, "execution_operations", None)
+    if operations is not None:
+        operations.ensure_cost_available()
+
+
 def bind_snapshot_context(runtime, sid, snapshot):
     operations = getattr(runtime,"execution_operations",None)
     if operations is None:
@@ -244,7 +250,9 @@ def execution_entry(method):
                 return response
             except BaseException as exc:
                 try:
-                    operations.fail(writer,known_not_started=type(exc).__name__ in {"_ExecutionCancelled","AgentRuntimeBusyError","AgentBudgetExceededError"})
+                    operations.fail(writer, known_not_started=(
+                        type(exc).__name__ in {"_ExecutionCancelled","AgentRuntimeBusyError","AgentBudgetExceededError"}
+                        or isinstance(exc, ExecutionError) and exc.code == "EXECUTION_COST_PENDING"))
                 except Exception:
                     pass  # a persisted RUNNING record will become UNKNOWN; never replay it
                 raise

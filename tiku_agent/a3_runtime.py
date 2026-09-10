@@ -37,7 +37,7 @@ from tiku_agent.a3_models import (
     A3UnitAnalyzer,
     CropCompareResult,
 )
-from tiku_agent.execution_runtime import execution_entry, execution_snapshot_scope, bind_snapshot_context, delivery_execution_entry
+from tiku_agent.execution_runtime import execution_entry, execution_snapshot_scope, bind_snapshot_context, delivery_execution_entry, ensure_execution_cost_available
 from tiku_shared.atomic_files import atomic_output
 from tiku_agent.execution_handoffs import parent_finalize
 from tiku_agent.agent import AgentResponse
@@ -176,6 +176,7 @@ def _capture_a3_response_snapshot(method: Callable[..., AgentResponse]):
                     captured: SessionResponseSnapshotV1 | None = None
                     capture_in_progress = False
                     try:
+                        ensure_execution_cost_available(runtime)
                         defer_child_capture = getattr(
                             runtime.a2_runtime,
                             "_defer_error_response_snapshot_capture",

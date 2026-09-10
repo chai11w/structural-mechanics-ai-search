@@ -76,7 +76,7 @@ async (page) => {
   await page.reload();
   await page.locator('#execution-panel').waitFor({state:'visible'});
   await page.locator('#execution-panel summary').click();
-  await page.getByRole('button',{name:'核对上次操作',exact:true}).click();
+  await page.locator('#execution-retry').click();
   await page.waitForFunction(()=>!document.querySelector('#execution-refresh').disabled && document.querySelector('#status-text').textContent==='任务状态已更新',null,{polling:100,timeout:10000});
   const commandsAfter = await page.evaluate(async()=>(await (await fetch('/fixture/status')).json()).operations.filter(x=>x.kind==='control_execution').length);
   if(commandsAfter!==commandsBefore+1 || sent.length!==2 || sent[0].operation!==sent[1].operation || sent[0].body!==sent[1].body)

@@ -511,6 +511,21 @@ class SQLiteModelCostLedger:
         outcome: str,
         idempotent: bool = False,
     ) -> None:
+        observer = execution_observer()
+        try:
+            self._write_run(collector, finished_at=finished_at, outcome=outcome, idempotent=idempotent)
+        finally:
+            if observer is not None:
+                observer.cost_write_finished(collector.run_id)
+
+    def _write_run(
+        self,
+        collector: ModelCostCollector,
+        *,
+        finished_at: str,
+        outcome: str,
+        idempotent: bool = False,
+    ) -> None:
         records = collector.records()
         call_count = sum(item.attempt_count for item in records)
         total_tokens = sum(item.total_tokens for item in records)

@@ -4,6 +4,8 @@
 
 测试目录均为 `tests/`。公共入口使用真实 FastAPI/ASGI 处理、独立 runtime 和 SQLite；外部模型是可计数替身。进程中断证据另外使用独立 Python 进程与 `os._exit`，不能用 ASGI 线程测试替代。
 
+2026-09-10 独立复验发现并修复两项遗漏，补充 A14/A18 证据：`test_execution_cost_admission.py` 验证 A2/A3 排队期间新增待对账时零业务/模型执行，补账后原键继续，并核对跨连接抢占和模型 prepare/send；`phase5_hidden_reset.js` 在产品默认隐藏样式下验证可见核对入口与刷新后新对话按钮复用原命令，5 次请求只形成 3 次重置且模型调用为 0。既有诊断面板浏览器脚本不代替本次默认样式验证。
+
 | 门 | 已核对的证据与具体断言 | 状态 |
 | --- | --- | --- |
 | A01 | `test_execution_http_concurrency.py` 四种图片/文本、JSON/stream 双向竞争：两个独立应用共享库，阻塞第一个 provider 后第二请求返回 BUSY，只有一次 attempt；完成后重发同 operation_id，调用不增加。`test_execution_operations.py` 覆盖连续重发。 | 已有证据 |
@@ -27,10 +29,14 @@
 
 ## 本批结果
 
+- 2026-09-10 两项缺陷修复后，费用准入/父子/调用/进程/运维专项 76 项通过（27.734 秒），前端/HTTP/操作专项 42 项通过（7.902 秒）。新增 7 项自动回归；费用写入进行中与落账失败分别有确定性断言。
+- 最新全仓 **1620 项通过，146.819 秒**：`python -B -m unittest discover -s tests -p 'test_*.py'`，退出码 0。默认隐藏页面的两条 reset 核对路径、原诊断面板的跨标签停止/收据恢复/控制重发均通过真实隔离浏览器复验。前一轮并发测试暴露的正常落账误挡已修复，没有放宽失败断言。
+- 本批保持阶段五独立工作区与临时运行库；未调用真实模型、未推送或部署。CLI/旧飞书未启用 execution observer，未增加其准入规则。
+
 - 迁移发布、真实 CLI 演练、状态、父子、保留相关 60 项通过，24.764 秒：`.tmp_phase5_1/release_targeted.txt`。
 - HTTP 图片/文本双向竞争、结果失效/重发、只读请求及启用模式队列取消 5 项通过，2.258 秒：`.tmp_phase5_1/http_concurrency_final.txt`。
 - 前一批全仓 1612 项通过，160.954 秒：`.tmp_phase5_1/release_full.txt`；随后仅补充上述结果失效/读取/队列测试，未改运行时代码。
-- 最终全仓 **1613 项通过，154.404 秒**：`.tmp_phase5_1/phase5_final_full.txt`。命令 `python -B -m unittest discover -s tests -p 'test_*.py'` 返回 0、摘要 OK；包含全部上述补充测试。
+- 2026-09-09 全仓 **1613 项通过，154.404 秒**：`.tmp_phase5_1/phase5_final_full.txt`。命令 `python -B -m unittest discover -s tests -p 'test_*.py'` 返回 0、摘要 OK；本记录保留为上一批历史证据。
 
 ## 其他交付核对
 
