@@ -39,6 +39,9 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
         self.assertTrue(defaults.enable_auto_crop)
         self.assertTrue(defaults.enable_output_watchdog)
         self.assertFalse(defaults.enable_a3_text_orientation)
+        self.assertFalse(defaults.enable_durable_execution)
+        self.assertTrue(build_argument_parser().parse_args(
+            [*EVIDENCE_CLI_ARGUMENTS, "--enable-durable-execution"]).enable_durable_execution)
         self.assertEqual(defaults.max_concurrent_tasks, 1)
         self.assertEqual(defaults.max_queued_tasks, 2)
         self.assertEqual(defaults.queue_wait_seconds, 55.0)
@@ -131,6 +134,50 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
             )
 
             self.assertIsNotNone(app)
+
+    def test_phase5_standard_production_graph_supports_reset_without_model_calls(self):
+        import json
+        from fastapi.testclient import TestClient
+        with tempfile.TemporaryDirectory() as temp, patch("urllib.request.urlopen") as provider:
+            app = build_app(temp, enable_durable_execution=True)
+            with TestClient(app) as client:
+                context = client.get("/api/session").json()["execution"]
+                self.assertEqual(client.post("/api/reset", json={}).status_code, 409)
+                operation = {"key":"production-reset-fixture", "epoch":context["epoch"],
+                             "state_version":context["state_version"]}
+                headers = {"X-Tiku-Operation":json.dumps(operation)}
+                first = client.post("/api/reset", headers=headers, json={})
+                second = client.post("/api/reset", headers=headers, json={})
+                self.assertEqual(first.status_code, 200)
+                self.assertEqual(first.json()["execution"], second.json()["execution"])
+                self.assertNotEqual(context["epoch"], first.json()["execution"]["epoch"])
+            provider.assert_not_called()
+            with self.assertRaisesRegex(ValueError, "enable-durable-execution"):
+                build_app(temp)
+
+    def test_phase5_keeps_production_invite_authentication(self):
+        from fastapi.testclient import TestClient
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            control = root / "control.sqlite3"
+            SQLiteControlStore(control)
+            with TestClient(build_app(root / "runtime", control_db=control,
+                                      enable_durable_execution=True)) as client:
+                self.assertEqual(client.get("/api/session").status_code, 401)
+                self.assertEqual(client.get("/api/execution").status_code, 401)
+
+    def test_phase5_does_not_implicitly_import_legacy_sessions(self):
+        from tiku_agent.session_store import SQLiteSessionStore
+        from tiku_agent.state import AgentState
+        from tiku_agent.execution_store import ExecutionError
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            legacy = SQLiteSessionStore(root / "a2" / "session.db")
+            legacy.save(AgentState(session_id="legacy"))
+            with self.assertRaises(ExecutionError) as error:
+                build_app(root, enable_durable_execution=True)
+            self.assertEqual(error.exception.code, "EXECUTION_MIGRATION_REQUIRED")
+            self.assertIsNotNone(legacy.load("legacy"))
 
     def test_production_auto_validates_all_units_before_selection(self):
         with tempfile.TemporaryDirectory() as temp, patch(

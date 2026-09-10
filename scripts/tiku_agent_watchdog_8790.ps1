@@ -23,6 +23,7 @@ param(
     [switch]$DisableOutputWatchdog,
     [switch]$EnableA2CheckpointCapture,
     [switch]$EnableA3CheckpointCapture,
+    [switch]$EnableDurableExecution,
     [Parameter(Mandatory = $true)][string]$ReleaseManifest,
     [Parameter(Mandatory = $true)][string]$ExpectedCommit,
     [string]$PythonExe = "python"
@@ -156,6 +157,9 @@ if ($EnableA2CheckpointCapture) {
 }
 if ($EnableA3CheckpointCapture) {
     $BotArguments += "--enable-a3-checkpoint-capture"
+}
+if ($EnableDurableExecution) {
+    $BotArguments += "--enable-durable-execution"
 }
 $BotLaunchArguments = @(
     $BotArguments |

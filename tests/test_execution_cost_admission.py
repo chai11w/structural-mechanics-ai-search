@@ -166,6 +166,10 @@ class ExecutionCostAdmissionTests(unittest.TestCase):
 
     def test_live_ledger_transaction_does_not_block_another_model(self):
         f = self.fixture
+        # Session locks are striped by Python's randomized hash. Select distinct
+        # stripes so this test exercises concurrent accounting, not lock waiting.
+        second_sid = next(f"second-{i}" for i in range(1000)
+                          if f.runtime._lock(f"second-{i}") is not f.runtime._lock("first"))
         entered, release = threading.Event(), threading.Event()
         original = ExecutionEffects.prepare_cost
         def prepare(observer, *args, **kwargs):
@@ -182,7 +186,7 @@ class ExecutionCostAdmissionTests(unittest.TestCase):
                 # the ledger; this is not the fault injected in queue_scenario.
                 self.assertEqual(f.rows("execution_cost_outbox")[0]["status"], "PENDING")
                 self.assertEqual(f.rows("execution_collectors")[0]["closed"], 1)
-                f.runtime.handle_text("second", "second", operation_request=f.request("second"))
+                f.runtime.handle_text(second_sid, "second", operation_request=f.request(second_sid))
             finally:
                 release.set()
             first.result(timeout=10)

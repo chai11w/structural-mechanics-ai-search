@@ -270,6 +270,7 @@ def build_app(
     enable_a2_checkpoint_capture: bool = False,
     checkpoint_code_revision: str = "",
     enable_a3_checkpoint_capture: bool = False,
+    enable_durable_execution: bool = False,
 ):
     _validate_queue_settings(
         max_concurrent_tasks,
@@ -277,6 +278,10 @@ def build_app(
         queue_wait_seconds,
     )
     root = Path(runtime_dir).resolve()
+    if type(enable_durable_execution) is not bool:
+        raise TypeError("enable_durable_execution must be boolean")
+    if (root / "execution.sqlite3").exists() and not enable_durable_execution:
+        raise ValueError("An execution database exists; use --enable-durable-execution instead of legacy writers")
     if type(enable_a2_checkpoint_capture) is not bool:
         raise TypeError("enable_a2_checkpoint_capture must be boolean")
     if type(enable_a3_checkpoint_capture) is not bool:
@@ -360,29 +365,34 @@ def build_app(
     capture_kwargs = {"checkpoint_recorder": recorder} if recorder is not None else {}
     if enable_a3_checkpoint_capture:
         capture_kwargs["a3_checkpoint_recorder"] = recorder
+    runtime = build_a3_runtime(
+        root,
+        model_timeout_seconds=model_timeout_seconds,
+        grounding_timeout_seconds=grounding_timeout_seconds,
+        enable_auto_crop=enable_auto_crop,
+        auto_prepare_all_units=True,
+        enable_triage=enable_triage,
+        triage_timeout_seconds=triage_timeout_seconds,
+        reply_timeout_seconds=reply_timeout_seconds,
+        control_store=control_store,
+        enable_a3_intent_v1=True,
+        enable_a3_intent_model_fallback=True,
+        enable_author_contact_fallback=True,
+        enable_three_scope_cancel_clarification=True,
+        preserve_a2_artifacts_on_cancel=True,
+        a3_page_orienter=a3_page_orienter,
+        orient_before_routing=True,
+        max_concurrent_tasks=max_concurrent_tasks,
+        max_queued_tasks=max_queued_tasks,
+        queue_wait_seconds=queue_wait_seconds,
+        **capture_kwargs,
+    )
+    if enable_durable_execution:
+        from tiku_agent.execution_runtime import attach_execution
+        from tiku_agent.execution_store import ExecutionStore
+        attach_execution(runtime, ExecutionStore(root / "execution.sqlite3"))
     app = create_app(
-        runtime=build_a3_runtime(
-            root,
-            model_timeout_seconds=model_timeout_seconds,
-            grounding_timeout_seconds=grounding_timeout_seconds,
-            enable_auto_crop=enable_auto_crop,
-            auto_prepare_all_units=True,
-            enable_triage=enable_triage,
-            triage_timeout_seconds=triage_timeout_seconds,
-            reply_timeout_seconds=reply_timeout_seconds,
-            control_store=control_store,
-            enable_a3_intent_v1=True,
-            enable_a3_intent_model_fallback=True,
-            enable_author_contact_fallback=True,
-            enable_three_scope_cancel_clarification=True,
-            preserve_a2_artifacts_on_cancel=True,
-            a3_page_orienter=a3_page_orienter,
-            orient_before_routing=True,
-            max_concurrent_tasks=max_concurrent_tasks,
-            max_queued_tasks=max_queued_tasks,
-            queue_wait_seconds=queue_wait_seconds,
-            **capture_kwargs,
-        ),
+        runtime=runtime,
         incoming_dir=root / "incoming",
         session_cookie=SESSION_COOKIE,
         output_watchdog=output_watchdog,
@@ -439,6 +449,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--invite-config", type=Path)
     parser.add_argument("--enable-a2-checkpoint-capture", action="store_true", default=False)
     parser.add_argument("--enable-a3-checkpoint-capture", action="store_true", default=False)
+    parser.add_argument("--enable-durable-execution", action="store_true", default=False,
+                        help="Enable phase-five execution; existing sessions require offline migration")
     parser.add_argument("--checkpoint-code-revision", default="")
     parser.add_argument("--max-checkpoint-rows", type=_positive_int, required=True)
     parser.add_argument("--max-artifact-rows", type=_positive_int, required=True)
@@ -555,6 +567,7 @@ def main() -> int:
             evidence_capacity=_capacity_from_args(args),
             enable_a2_checkpoint_capture=args.enable_a2_checkpoint_capture,
             enable_a3_checkpoint_capture=args.enable_a3_checkpoint_capture,
+            enable_durable_execution=args.enable_durable_execution,
             checkpoint_code_revision=args.checkpoint_code_revision,
             checkpoint_retention_backup_root=(
                 args.checkpoint_retention_backup_root
