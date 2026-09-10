@@ -2,11 +2,10 @@
 
 ## Current State
 
-- 截至 2026-09-08，阶段 4 及优化 4.5.1～4.5.5 完成，已合入本地主线 `codex/mainline-bounded-autonomy-v1` 并上线 8790，未推送。生产代码基线 `066c967`，后续文档提交不代表生产代码变更。
-- 8790 固定 release 为 `.worktrees/8790-release-066c967`，计划任务 `Tiku Agent Web 8790` 显式启用 A2/A3 Checkpoint；runtime 沿用 `.tmp_tiku_agent_v2_prod_8790`，控制库沿用 8795，原会话未搬迁。源码采集开关默认仍关闭。
-- A3-V1 生产链为整页理解 → 框选/裁图 → 双门禁 → 单题下行或多题选择 → A2/人工裁剪；8790、8896、8788 均已停四方向 RapidOCR，RapidOrientation 未接入。
-- 8790 保留统一计费、反馈、动态额度及 1 运行/2 排队/55 秒队列；Trace/Response 独立于可替换的 8795。此次发布未改变 8788、8795、8896、8902 的服务进程。
-- 全量 1466 项通过；用户五个请求的 33/33 Checkpoint 成功，Trace/unit 归属一致，12 个原图/裁图 Artifact 可读；核验时无失败、丢弃、积压或 Trace 丢失。范围与发布回退材料见 [Roadmap](roadmap.md#阶段-4-主线发布与生产验收2026-09-08)。
+- 截至 2026-09-10，阶段 1～5 已完成；阶段五已从 `codex/phase5-idempotent-execution` 快进合入本地主线 `codex/mainline-bounded-autonomy-v1`，未推送。阶段 6/7 未启动。
+- 8790 任务 `Tiku Agent Web 8790` 已启用 durable execution 和 A2/A3 Checkpoint。runtime `.tmp_tiku_agent_v2_prod_8790`、8795 控制库沿用；1 父/1 等待选题子会话迁至 `execution.sqlite3`，旧库及媒体保留。固定版本、备份见 [发布记录](../docs/phase5_8790_release.md)，主线更新不改变生产版本。
+- A3-V1 经过整页理解、裁图、双门禁与选题进入 A2；8790/8896/8788 已停四方向 RapidOCR，RapidOrientation 未接入。
+- 上线前全仓 1623 项和两组真实隔离浏览器验收通过；生产只读冒烟、认证、旧库哈希及看门狗稳定检查通过。合入主线后追加 65 项回归通过，业务代码与发布版本一致。未额外调用真实模型，旧阶段样本不作新验收；见 [验收矩阵](../docs/phase5_acceptance_matrix.md)。
 
 ## Implemented
 
@@ -16,23 +15,25 @@
 - 公共五态协议只输出注册 code/白名单字段；候选原子交付，媒体失败可重发，同题重试沿用 `search_id`。
 - 8790 已实现有界队列、请求限长、登录限速和 JSON 工作线程；8795 管理登录同样限长限速，费用库异常时邀请码删除 fail-closed。
 - Trace/Response Store 使用白名单、唯一终态和幂等隐私投影；诊断 CLI 只读，retention 默认 dry-run。
-- 8790/8795 看门狗核对端口、PID、Python 和 argv；8790/8896 另绑定固定 checkout/入口，身份不明时 fail-closed。8790 启动复验 manifest、完整提交、干净 worktree 和 runtime；Limited 任务显式使用 UTF-8 与 `core.quotePath=false`。
-- 阶段 3 已冻结 `TaskStateSnapshotV1`，完成纯构造、锁内单读、异常 fail-closed、跨出口一致快照、前端 branded 动作授权及固定 release；动作绑定 identity/revision/target，拒绝 stale/ABA，未知结果不自动重放，refresh-recovery 仅经 `/api/session` 对账并保留 pending fence/限定历史态补偿。
-- 阶段 4 已贯通 A2/A3 九阶段、父子 revision、输入指纹、原图/裁图 Artifact、识别/章节/荷载/尺寸、筛选计数、候选排名分数和答案引用；图片、unit 与 Trace 精确绑定，不替代 Task State 或授权动作。
-- 独立 Checkpoint/Artifact Store 具备可信 TTL、七项容量门、有限审计、孤儿清理和带备份的周期 retention；结构化记录 30 天，普通/失败图片 3/7 天，反馈/调查最多 365/90 天，无永久 hold。证据写失败不阻断业务，读取与管理仍 fail-closed。
-- 候选/答案使用 `bank_id/chapter/relative_key/lookup_mode=current`；答案采集不复制题库字节，业务答案交付仍按原流程复制。原图/裁图保留 Artifact，裁图文件名不可变，schema 1 Artifact 与 schema 2 引用兼容。
-- 冻结阶段输入后进入有界异步单消费者队列（含在途最多 128 项、8 MiB、120 秒）；只有实际提交才写 Trace 关联。已实现资源租约、等待预算、熔断、健康计数和有限停机；维护占锁时 Trace 在有界队列保留事件并可取消等待，不重试不确定的数据库提交。
-- 主线保留受保护的后台 Trace 诊断和运营概览源码；本次未重启 8795，不能据主线合并推断后台运行版本。
+- 看门狗核对端口、PID、Python 和 argv；8790/8896 绑定固定 checkout/入口。8790 复验 manifest、完整提交、干净 worktree 和 runtime；Limited 任务使用 UTF-8 与 `core.quotePath=false`。
+- 阶段 3 的 `TaskStateSnapshotV1` 支持锁内单读、异常 fail-closed、跨出口一致快照和 branded 动作授权；绑定 identity/revision/target，拒绝 stale/ABA。刷新按会话对账保留 pending fence，未知结果不自动重放。
+- 阶段 4 贯通 A2/A3 九阶段及父子 revision、输入、Artifact、识别与筛选、候选分数和答案引用；图片/unit/Trace 绑定，不替代 Task State 或动作授权。
+- Checkpoint/Artifact 支持 TTL、七项容量、审计、孤儿清理和备份 retention：记录 30 天，普通/失败图片 3/7 天，反馈/调查上限 365/90 天，无永久 hold。写失败不阻断业务，读/管理 fail-closed。
+- 候选/答案使用 `bank_id/chapter/relative_key/lookup_mode=current`，只采引用，业务仍复制答案。原图/裁图保留 Artifact，裁图名不可变；schema 1 Artifact 兼容 schema 2 引用。
+- Checkpoint 异步单消费者含在途最多 128 项、8 MiB、120 秒，提交后才关联 Trace；支持租约、熔断、健康和有限停机。维护占锁时 Trace 有界等待且可取消，不重试不确定提交。
+- 主线含后台 Trace 诊断和运营概览；8795 未重启，运行版本须另核验。
+- 阶段五持久化幂等操作、租约、模型效果、费用 outbox、父子收据及逐题结果；绑定会话代次、任务和配置版本。登记/抢占/出队/发送前核对费用，待对账阻止新调用，未知效果不自动重放。
+- 前端隐藏诊断面板仍保留可见重置核对入口，刷新复用原命令。非空旧库须显式迁移；已有执行库时禁用开关会拒绝旧写入路径。
 
 ## In Progress
 
-- 8790 继续试用；本轮覆盖单题检索/答案、多题上传/选题/答案及登录/动态停用，继续观察错绑、裁图边界和证据健康，浏览器恢复场景仍需按样本核验。
+- 阶段五上线后继续收集真实样本，核对正常单题/多题、重试恢复、费用归属和证据健康；本次不启动收费采样或后续阶段。
 - 方向评估保留既有离线基线，尚无可上线的误旋安全阈值；新样本及工作区文件状态须在恢复该任务时重新核验。
 
 ## Not Implemented
 
 - Cloudflare Access、边缘登录限速和测试者邮箱名单仍需账户侧配置；应用内限速不能替代边缘策略。
-- 阶段 5 幂等执行/父子控制、阶段 6 后台任务与 HTTP 流解耦尚未实现；阶段 7 暂停/继续仍延期。本轮完成阶段 4，不自动进入后续阶段。
+- 阶段 6 后台任务与 HTTP 流解耦未实现；阶段 7 暂停/继续仍延期，须用户另行选择后规划。
 - 尚无可复用的 8790 计划任务 release 发布器；`switch_tiku_agent_8790_control.ps1` 仅迁移控制库，不负责任务切换或代码回退。
 - RapidOrientation 封装、阈值、8896 影子和 8790 发布未实现；需提取 ONNX 置信度并固定版本/模型哈希。
 - Paddle splitter 驱动的裁剪及回退属于 A3 V2，暂不继续。
@@ -51,18 +52,18 @@
 ## Known Risks
 
 - Cloudflare Access 和边缘登录限速尚未从账户侧核验；完成前不应把公网地址和邀请码同时发给测试者。
-- 真实烟测样本仍少；需关注错绑、跨题费用、客户端时间、多题混排、裁剪边界、小荷载、低清和旋转。
+- 阶段五真实模型样本尚未补采；关注错绑、跨题费用、客户端时间、多题混排、裁剪边界、小荷载、低清和旋转。
 - 方向阈值未校准；现有阈值无法同时保证误旋安全和召回，不能直接上线。
 - Qwen 冷调用有长尾；1/2/55 队列下第 4 个同时任务直接繁忙，等待超 55 秒需重试。
 - 旧 `parse_chapter` 会把“第4章”映射为 `4力法`；严格入口对纯数字返回 `uncertain`，未迁移入口仍可能误搜。
 - 邀请码转发会共享额度，完成后落账可能使最后一个在途任务略超阈值。
 - 题库引用读取当前文件，不保存题库历史字节；移动、覆盖或删除原文件会改变可读证据，缺失时不找另一版补位。Checkpoint 过期/删除不会删除题库原文件。
-- 超过队列容量会拒绝证据；样本无丢失不代表任意负载零丢失，请求总耗时也不是采集增量。性能边界见 [优化验收](../docs/checkpoint_optimization_phase4_5.md)。
-- 合并诊断预览最多 100 行，长多题 Trace 可能被截断；需缩小范围核对完整关联，不能把预览截断判断为入库丢失。
-- 当前保存尺寸筛选计数及复筛候选排名/分数，不保存每个候选的尺寸淘汰明细或复筛解释全文。
+- 超过队列容量会拒绝证据；样本无丢失不代表任意负载零丢失，请求总耗时不是采集增量。上线前曾有 3 次 Trace 写入超时，重启计数归零不代表根因已修复。见 [优化验收](../docs/checkpoint_optimization_phase4_5.md)。
+- 诊断预览最多 100 行，长 Trace 需缩小范围，截断不等于丢失；尺寸只存筛选计数，复筛只存排名/分数，不含逐候选淘汰明细或完整解释。
 - 无 Web Lock 时任务入口 fail-closed，只允许会话对账；8896 浏览器完整路径已通过，发放前仍需覆盖测试者浏览器。
 - NATAPP 静态资源和健康可达不证明公网登录恢复闭环。
 - 8790 冷启动须等 PID 链稳定并跨 watchdog 周期复核，回退只停已捕获 PID。
+- 阶段五产生新业务操作后，不能直接回退旧会话库；须保留执行库、费用证据和媒体，以兼容状态的修复版本处理。供应商恰好一次和未知调用自动恢复不在保证范围内。
 
 ## Do Not Do
 
@@ -80,13 +81,12 @@
 ## Next Best Step
 
 1. 继续在 8790 收集真实失败样本，按 Trace → Checkpoint → 原图/裁图/题库引用定位；关注健康中的失败、丢弃、积压与维护等待，发现缺口再做有范围的修复。
-2. 阶段 4 已完成；以真实问题决定下一项工作，经用户明确选择后再规划阶段 5/6，不提前实现暂停/继续。
+2. 阶段五已完成并合入主线；以生产问题决定修复优先级，经用户选择后再规划阶段 6，不提前实现暂停/继续。
 3. 账户侧配置 8790/8795 的 Cloudflare Access 与边缘限速后，再受控发放邀请码。
 
 ## Important Commands
 
 - `python -m unittest discover -s tests -p 'test_*.py'`
-- `python -B -m unittest -q tests.test_checkpoint_optimization tests.test_checkpoint_async tests.test_checkpoint_resilience`
 - `python scripts/run_tiku_agent_8790.py --help`
 - `python scripts/tiku_diagnostics.py --help`
 - `python scripts/tiku_checkpoint_diagnostics.py --help`
