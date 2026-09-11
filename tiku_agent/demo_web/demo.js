@@ -2339,9 +2339,10 @@ function addMessage(item, persist = true) {
   }
   if (!noticeKey) empty.hidden = true;
   const article = document.createElement('article');
-  article.className = `message${item.me ? ' user' : ''}${item.variant ? ` ${item.variant}` : ''}`;
+  article.className = `message${item.me ? ' user' : ''}${item.variant ? ` ${item.variant}` : ''}${item.stale === true ? ' stale' : ''}`;
   if (noticeKey) article.dataset.noticeKey = noticeKey;
   if (item.variant === 'error') article.setAttribute('role', 'alert');
+  if (item.stale === true) article.dataset.stale = 'true';
   if (!item.me) {
     const avatar = document.createElement('div');
     avatar.className = 'message-avatar';
@@ -2362,6 +2363,14 @@ function addMessage(item, persist = true) {
     paragraph.append(dots);
   }
   content.append(paragraph);
+  if (item.stale === true) {
+    // Kept on screen because the server lost the session: say so on the
+    // message itself, otherwise it reads as a conversation that still works.
+    const staleTag = document.createElement('span');
+    staleTag.className = 'message-stale-tag';
+    staleTag.textContent = '已失效';
+    content.insertBefore(staleTag, paragraph);
+  }
 
   const images = Array.isArray(item.images) ? item.images : [];
   if (images.length) {
@@ -2401,6 +2410,7 @@ function addMessage(item, persist = true) {
 function renderHistory() {
   chat.replaceChildren();
   empty.hidden = history.length > 0;
+  chat.classList.toggle('conversation-stale', history.some((item) => item.stale === true));
   history.forEach((item) => addMessage({ ...item, images: (item.images || []).filter(isPersistentImage) }, false));
   activeFailureNotices.forEach((item) => addMessage(item, false));
 }
@@ -2606,8 +2616,11 @@ async function repairUploadedImageHistory() {
           renderHistory();
           showSessionExpiredNotice();
         } else {
-          // The local conversation is still fresh, so the server simply has no
-          // session for this cookie: keep what the user is reading on screen.
+          // The local conversation is still fresh (or its age is unknown), so
+          // the server simply has no session for this cookie: keep what the
+          // user is reading on screen and mark it as no longer live.
+          history.forEach((item) => { item.stale = true; });
+          saveHistory();
           renderHistory();
           showServerSessionGoneNotice();
         }
@@ -2822,11 +2835,12 @@ function retireSessionForCoordinationConflict() {
 }
 
 function localConversationExpired() {
-  // Only a conversation we can positively prove is still fresh is protected
-  // from an invalid server session. An unknown activity marker keeps the
-  // previous behaviour: the local copy cannot be vouched for.
-  if (!history.length) return false;
-  if (!Number.isFinite(historyLastActivityAt) || historyLastActivityAt <= 0) return true;
+  // Only a conversation we can positively prove has expired is retired here.
+  // An unknown activity marker is not proof of expiry, and deleting what the
+  // user was reading cannot be undone, so an unverifiable copy is kept and the
+  // notice explains that the server no longer has this conversation.
+  if (!history.length) return true;
+  if (!Number.isFinite(historyLastActivityAt) || historyLastActivityAt <= 0) return false;
   return Date.now() - historyLastActivityAt >= HISTORY_TTL_MS;
 }
 
