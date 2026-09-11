@@ -594,13 +594,25 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260910-phase5-recovery-v2"'
+        demo_asset = 'src="/assets/demo.js?v=20260911-expired-reset-v1"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
         self.assertIn("const taskStateV1 = globalThis.TikuTaskStateV1", demo)
         self.assertIn("const taskStateConsumer = taskStateV1.createTaskStateConsumer()", demo)
         self.assertIn("let taskStateContext = taskStateConsumer.current()", demo)
+
+    def test_expired_conversation_reads_the_session_before_it_resets(self):
+        """The reset is a registered command: it must not lead on a fresh page."""
+
+        demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
+        bootstrap = demo.split("async function repairUploadedImageHistory() {", 1)[1]
+        body = bootstrap.split("function runSessionBootstrap() {", 1)[0]
+
+        read_index = body.index("if (sessionResetRequired && !executionContext) {")
+        reset_index = body.index("'/api/reset',")
+        self.assertLess(read_index, reset_index)
+        self.assertIn("'/api/session'", body[read_index:reset_index])
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for bootstrap validation")
     def test_demo_bootstraps_missing_task_state_asset_before_start(self):
@@ -1388,7 +1400,7 @@ const repairSessionSource = block(
   'async function repairUploadedImageHistory()',
   'function clearA3WorkflowState()',
 );
-const retireSessionSource = block('function retireSessionForExternalReset()', 'function expireHistoryIfNeeded()');
+const retireSessionSource = block('function retireSessionForExternalReset(', 'function expireHistoryIfNeeded()');
 const restoreHistorySource = block('function restoreHistory()', 'function flushStartupNotices()');
 const expirySource = block('function expireHistoryIfNeeded()', 'function showSessionExpiredNotice()');
 
@@ -2071,6 +2083,28 @@ function completedAnswerEnvelope(targetHarness, raw, unitId = 'g1-u1') {
   );
   assert.equal(failedPendingHarness.clearHistoryCount(), 0);
   assert.equal(failedPendingHarness.historyLength(), 1);
+
+  // A task start that a pending fence blocks must not wipe the conversation
+  // the user is looking at: the pending result is what the recovery step is
+  // about to ask them to confirm.
+  const fenceBlockedTaskStorage = {
+    activityAt: 0, resetEventId: '', probe: '', requestFenceId: '',
+    fenceRecords: {}, resolvedFenceRecords: {}, lockRecords: {}, probeRecords: {},
+  };
+  const fenceBlockedTaskHarness = createHarness(taskStateV1, fenceBlockedTaskStorage);
+  fenceBlockedTaskHarness.queueJson(fenceBlockedTaskHarness.envelope(fixtures.a3));
+  assert.equal(await fenceBlockedTaskHarness.runSessionBootstrap(), true);
+  assert.equal(fenceBlockedTaskHarness.historyLength(), 1);
+  fenceBlockedTaskStorage.requestFenceId = 'pending-from-suspended-request';
+  const fenceBlockedTaskError = await fenceBlockedTaskHarness.request(
+    '/api/message', { method: 'POST' }, 1000, 'message timeout',
+  ).then(() => null, (error) => error);
+  assert.equal(fenceBlockedTaskError?.code, 'STALE_ACTION');
+  assert.equal(
+    fenceBlockedTaskHarness.clearHistoryCount(), 0,
+    'a fence-blocked task start must keep the visible conversation',
+  );
+  assert.equal(fenceBlockedTaskHarness.historyLength(), 1);
 
   const lazyBootstrapHarness = createHarness(taskStateV1);
   lazyBootstrapHarness.queueJson(lazyBootstrapHarness.envelope(fixtures.a3));
@@ -3125,9 +3159,12 @@ function completedAnswerEnvelope(targetHarness, raw, unitId = 'g1-u1') {
   });
   coldHarness.restoreHistory();
   assert.equal(coldHarness.resetRequired(), true);
+  // The reset is a registered command, so the expired path reads one
+  // authoritative envelope first and only then resets.
+  coldHarness.queueJson({ ok: true, task_state: fixtures.empty });
   coldHarness.queueJson({ ok: true, task_state: fixtures.empty });
   await coldHarness.repairUploadedImageHistory();
-  assert.deepEqual(coldHarness.fetchUrls(), ['/api/reset']);
+  assert.deepEqual(coldHarness.fetchUrls(), ['/api/session', '/api/reset']);
   assert.equal(coldHarness.resetRequired(), false);
   assert.equal(coldHarness.model().snapshot.workflow.exists, false);
   assert.equal(coldHarness.session().a3, null);
@@ -3138,6 +3175,7 @@ function completedAnswerEnvelope(targetHarness, raw, unitId = 'g1-u1') {
     messages: [{ message: 'expired before deferred reset' }],
   });
   deferredResetHarness.restoreHistory();
+  deferredResetHarness.queueJson({ ok: true, task_state: fixtures.empty });
   const releaseDeferredReset = deferredResetHarness.queueDeferredJson({
     ok: true, task_state: fixtures.empty,
   });
@@ -3147,9 +3185,11 @@ function completedAnswerEnvelope(targetHarness, raw, unitId = 'g1-u1') {
     taskGateSettled = true;
     return allowed;
   });
-  await Promise.resolve();
+  await waitForFetch(deferredResetHarness, '/api/reset');
   assert.equal(taskGateSettled, false, 'task start must wait for the reset response');
-  assert.deepEqual(deferredResetHarness.fetchUrls(), ['/api/reset']);
+  assert.deepEqual(
+    deferredResetHarness.fetchUrls(), ['/api/session', '/api/reset'],
+  );
   releaseDeferredReset();
   assert.equal(await deferredBootstrap, true);
   assert.equal(await taskGate, true);
@@ -3161,17 +3201,22 @@ function completedAnswerEnvelope(targetHarness, raw, unitId = 'g1-u1') {
     messages: [{ message: 'expired before failed reset' }],
   });
   failedResetHarness.restoreHistory();
+  failedResetHarness.queueJson({ ok: true, task_state: fixtures.empty });
   failedResetHarness.queueTimeout();
   failedResetHarness.setImmediateTimeout(true);
   assert.equal(await failedResetHarness.runSessionBootstrap(), false);
   failedResetHarness.setImmediateTimeout(false);
   assert.equal(failedResetHarness.resetRequired(), true);
   failedResetHarness.queueJson({ ok: true, task_state: fixtures.empty });
+  failedResetHarness.queueJson({ ok: true, task_state: fixtures.empty });
   assert.equal(
     await failedResetHarness.sessionTaskStartAllowed(), true,
     'task start must retry an expired-session reset that timed out',
   );
-  assert.deepEqual(failedResetHarness.fetchUrls(), ['/api/reset', '/api/reset']);
+  assert.deepEqual(
+    failedResetHarness.fetchUrls(),
+    ['/api/session', '/api/reset', '/api/session', '/api/reset'],
+  );
   assert.equal(failedResetHarness.resetRequired(), false);
   assert.equal(failedResetHarness.resetEvents().length, 1);
   assert.equal(failedResetHarness.requestFenceId(), '');
@@ -3649,8 +3694,9 @@ function completedAnswerEnvelope(targetHarness, raw, unitId = 'g1-u1') {
   assert.equal(resetPublishDeniedHarness.resetRequired(), true);
   resetPublishDeniedHarness.setStorageFailures({ resetSet: true });
   resetPublishDeniedHarness.queueJson({ ok: true, task_state: fixtures.empty });
+  resetPublishDeniedHarness.queueJson({ ok: true, task_state: fixtures.empty });
   assert.equal(await resetPublishDeniedHarness.runSessionBootstrap(), false);
-  assert.deepEqual(resetPublishDeniedHarness.fetchUrls(), ['/api/reset']);
+  assert.deepEqual(resetPublishDeniedHarness.fetchUrls(), ['/api/session', '/api/reset']);
   assert.equal(resetPublishDeniedHarness.resetRequired(), false);
   assert.equal(resetPublishDeniedHarness.resetEvents().length, 0);
   assert.ok(resetPublishDeniedHarness.requestFenceId());
@@ -3658,7 +3704,7 @@ function completedAnswerEnvelope(targetHarness, raw, unitId = 'g1-u1') {
     '/api/message', { method: 'POST' }, 1000, 'message timeout',
   ).then(() => null, (error) => error);
   assert.equal(resetPublishBlockedError?.code, 'STALE_ACTION');
-  assert.deepEqual(resetPublishDeniedHarness.fetchUrls(), ['/api/reset']);
+  assert.deepEqual(resetPublishDeniedHarness.fetchUrls(), ['/api/session', '/api/reset']);
 
   const explicitPublishDeniedHarness = createHarness(taskStateV1);
   const explicitActive = explicitPublishDeniedHarness.envelope(fixtures.a3);
@@ -3706,11 +3752,12 @@ function completedAnswerEnvelope(targetHarness, raw, unitId = 'g1-u1') {
   });
   noLockHarness.restoreHistory();
   noLockHarness.queueJson({ ok: true, task_state: fixtures.empty });
+  noLockHarness.queueJson({ ok: true, task_state: fixtures.empty });
   globalThis.navigator.locks = null;
   assert.equal(await noLockHarness.runSessionBootstrap(), true);
   globalThis.navigator.locks = sessionLockManager;
   assert.equal(noLockHarness.resetRequired(), false);
-  assert.deepEqual(noLockHarness.fetchUrls(), ['/api/reset']);
+  assert.deepEqual(noLockHarness.fetchUrls(), ['/api/session', '/api/reset']);
   assert.equal(noLockHarness.requestFenceId(), '');
 })().catch((error) => {
   console.error(error);

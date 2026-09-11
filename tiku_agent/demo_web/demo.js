@@ -133,7 +133,7 @@ const SESSION_FALLBACK_CHOOSING_TTL_MS = 2000;
 const SESSION_FALLBACK_LOCK_WAIT_MS = 5000;
 const SESSION_FALLBACK_LOCK_POLL_MS = 25;
 const OPERATIONAL_NOTICE_KEYS = new Set([
-  'connection', 'session-recovery', 'history-storage',
+  'connection', 'session-recovery', 'history-storage', 'session-expired',
 ]);
 const LEGACY_EXPIRED_MEDIA_MESSAGE = '题图或结果图片已失效，请重新上传题图；如果问题反复出现，可以点踩告诉我们。';
 const A3_INLINE_ONLY_INTENTS = new Set([
@@ -940,12 +940,12 @@ function sessionLockUnavailableError() {
   );
 }
 
-function retireUnresolvedSessionRequestFence(fenceId) {
+function retireUnresolvedSessionRequestFence(fenceId, options) {
   const id = String(fenceId || '');
   if (!id || id === lastHandledSessionRequestFenceId) return false;
   lastHandledSessionRequestFenceId = id;
   sessionResetEpoch += 1;
-  retireSessionForExternalReset();
+  retireSessionForExternalReset(options);
   return true;
 }
 
@@ -983,7 +983,9 @@ async function withSessionRequestLock(url, callback, { requireSupport = false } 
       (requestEpoch !== sessionResetEpoch || pendingFences.length)
       && isTaskStartingPath(url)
     ) {
-      if (pendingFenceId) retireUnresolvedSessionRequestFence(pendingFenceId);
+      if (pendingFenceId) {
+        retireUnresolvedSessionRequestFence(pendingFenceId, { preserveHistory: true });
+      }
       throw staleSessionActionError(
         pendingFenceId
           ? '上次请求结果尚未确认，请重新连接或开始新对话。'
@@ -2502,6 +2504,20 @@ async function repairUploadedImageHistory() {
         ) throw sessionCoordinationError();
       }
     }
+    // The reset is a registered phase-five command, so it must carry the
+    // durable execution context. A page that has just been loaded has not
+    // consumed any authoritative envelope yet, which is exactly the state an
+    // expired conversation is restored in: without one bounded read first the
+    // reset is rejected before it can obtain the context it needs, and the
+    // user is shown a recovery prompt instead of a new conversation.
+    if (sessionResetRequired && !executionContext) {
+      refreshHistoryActivityFromStorage();
+      if (sessionResetRequired) {
+        await request(
+          '/api/session', {}, SESSION_BOOTSTRAP_TIMEOUT_MS, '会话恢复超时。', false,
+        );
+      }
+    }
     let resetRequired = sessionResetRequired;
     let data;
     if (resetRequired) {
@@ -2616,7 +2632,7 @@ async function repairUploadedImageHistory() {
       showFailureNotice(
         'session-recovery',
         '连接暂时不稳定，上次请求结果尚待确认。当前对话已保留，请重新连接完成确认。',
-        ['retry_connection'],
+        ['retry_connection', 'new_chat'],
         {
           status: 'ERROR', layer: 'session', code: 'STALE_ACTION', retryable: true,
           action: 'retry_connection', request_id: createRequestId(), search_id: sessionContext.search_id || '',
@@ -2748,14 +2764,18 @@ function clearHistory({ preserveStoredHistory = false } = {}) {
   }
 }
 
-function retireSessionForExternalReset() {
+function retireSessionForExternalReset({ preserveHistory = false } = {}) {
   const controller = activeController;
   activeController = null;
   operationVersion += 1;
   if (controller) controller.abort('session-reset');
   invalidateTaskStateContext();
   setBusy(false);
-  clearHistory({ preserveStoredHistory: true });
+  // A fence that blocks a task start retires the session projection, but the
+  // conversation the user is looking at must stay visible: the pending result
+  // is exactly what the recovery step is about to ask them to confirm. Only an
+  // observed external reset really retires the visible conversation.
+  if (!preserveHistory) clearHistory({ preserveStoredHistory: true });
   sessionResetRequired = false;
   sessionResetActivityAt = 0;
   pendingSessionExpiredNotice = false;
@@ -2766,7 +2786,10 @@ function retireSessionForExternalReset() {
   };
   renderHistory();
   closeLightbox();
-  setStatus('ready', '会话已在另一页面重置');
+  setStatus(
+    preserveHistory ? 'error' : 'ready',
+    preserveHistory ? '等待重新连接' : '会话已在另一页面重置',
+  );
 }
 
 function retireSessionForCoordinationConflict() {
@@ -2821,7 +2844,14 @@ function expireHistoryIfNeeded() {
 
 function showSessionExpiredNotice() {
   renderHistory();
-  setStatus('ready', '准备就绪');
+  // Landing silently on an empty home page reads as "the app lost my
+  // conversation". Say what happened and that a new conversation is ready.
+  addMessage({
+    message: '上一轮对话已过期（题图会在最后一次操作 2 小时后清理），已为你开始新对话。',
+    recoveryActions: [],
+    noticeKey: 'session-expired',
+  }, false);
+  setStatus('ready', '已开始新对话');
 }
 
 function replacePending(row, item) {

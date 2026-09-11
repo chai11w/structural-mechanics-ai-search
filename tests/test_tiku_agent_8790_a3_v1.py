@@ -155,6 +155,43 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "enable-durable-execution"):
                 build_app(temp)
 
+    def test_expired_conversation_reset_needs_one_context_read_first(self):
+        """A reloaded page has no execution context yet; reset cannot lead."""
+        import json
+        import time
+        from uuid import uuid4
+        from fastapi.testclient import TestClient
+        with tempfile.TemporaryDirectory() as temp, patch("urllib.request.urlopen") as provider:
+            app = build_app(temp, enable_durable_execution=True)
+            with TestClient(app) as client:
+                # The reloaded page used to send exactly this and was rejected.
+                blind = client.post(
+                    "/api/reset",
+                    json={},
+                    headers={
+                        "X-Session-Coordination-Version": "6",
+                        "X-Session-Request-Fence": f"{int(time.time() * 1000)}:{uuid4().hex}",
+                    },
+                )
+                self.assertEqual(blind.status_code, 409)
+                self.assertEqual(blind.json()["code"], "EXECUTION_CONTEXT_REQUIRED")
+                # One bounded authoritative read supplies the context, and the
+                # reset that follows it succeeds on the first attempt.
+                context = client.get("/api/session").json()["execution"]
+                operation = {
+                    "key": f"{int(time.time() * 1000)}:{uuid4().hex}",
+                    "epoch": context["epoch"],
+                    "state_version": context["state_version"],
+                }
+                reset = client.post(
+                    "/api/reset",
+                    json={},
+                    headers={"X-Tiku-Operation": json.dumps(operation)},
+                )
+                self.assertEqual(reset.status_code, 200)
+                self.assertEqual(reset.json()["code"], "SESSION_RESET")
+            provider.assert_not_called()
+
     def test_phase5_keeps_production_invite_authentication(self):
         from fastapi.testclient import TestClient
         with tempfile.TemporaryDirectory() as temp:
