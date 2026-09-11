@@ -594,7 +594,7 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260911-server-verdict-v1"'
+        demo_asset = 'src="/assets/demo.js?v=20260911-error-truth-v1"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
@@ -631,6 +631,23 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         )[1].split("function showServerSessionGoneNotice() {", 1)[0]
         self.assertNotIn("clearHistory", expiry)
         self.assertIn("retryConnection();", expiry)
+
+    def test_registered_error_table_matches_the_server_registry(self):
+        """The client may only trust the (layer, code) pairs the server admits."""
+
+        import re
+        from tiku_shared.request_protocol import PROTOCOL_REASONS, RequestStatus
+
+        demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
+        block = demo.split("function isRegisteredErrorEnvelope(data) {", 1)[1]
+        block = block.split("function streamedError", 1)[0]
+        client_pairs = set(re.findall(r"'([a-z]+:[A-Z_]+)'", block))
+        server_pairs = {
+            f"{reason.layer.value}:{code}"
+            for code, reason in PROTOCOL_REASONS.items()
+            if reason.status is RequestStatus.ERROR
+        }
+        self.assertEqual(client_pairs, server_pairs)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for bootstrap validation")
     def test_demo_bootstraps_missing_task_state_asset_before_start(self):
@@ -2203,7 +2220,13 @@ function completedAnswerEnvelope(targetHarness, raw, unitId = 'g1-u1') {
           'stream timeout',
         ).then(() => null, (error) => error);
       }
-      assert.equal(badAckError?.code, 'RESPONSE_INVALID', `${testCase.name}/${mode}`);
+      // A registered server error is reported as itself even when the ACK is
+      // untrusted: only unacked successes stay RESPONSE_INVALID. The fence
+      // safety property below is unchanged - the pending fence is preserved.
+      const expectedCode = mode === 'json' || mode === 'stream-result'
+        ? 'RESPONSE_INVALID'
+        : 'QUEUE_FULL';
+      assert.equal(badAckError?.code, expectedCode, `${testCase.name}/${mode}`);
       assert.ok(
         badAckHarness.requestFenceId(),
         `${testCase.name}/${mode}: untrusted ACK must preserve the pending fence`,

@@ -2415,7 +2415,6 @@ function addMessage(item, persist = true) {
 function renderHistory() {
   chat.replaceChildren();
   empty.hidden = history.length > 0;
-  chat.classList.toggle('conversation-stale', history.some((item) => item.stale === true));
   history.forEach((item) => addMessage({ ...item, images: (item.images || []).filter(isPersistentImage) }, false));
   activeFailureNotices.forEach((item) => addMessage(item, false));
 }
@@ -3051,6 +3050,28 @@ function safeHttpError(status, data, requestId = '') {
       MESSAGE_INVALID: '这条消息无法处理，请重新输入后提交。',
       FEEDBACK_INVALID: '反馈内容无法提交，请修改后重试。',
       FEEDBACK_TOO_LARGE: '反馈内容过长，请精简后重试。',
+      // Mirrors _PUBLIC_PROTOCOL_MESSAGES / execution_message on the server, so
+      // a registered failure is explained instead of replaced by a generic one.
+      SERVICE_UNAVAILABLE: '服务暂时异常，请稍后重试。',
+      AGENT_FAILED: '这次处理没有完成，请稍后重试。',
+      AGENT_FAILED_NO_IMAGE: '这次处理没有完成，请重新上传题图。',
+      TOOL_FAILED: '这次处理没有完成，请稍后重试。',
+      QUEUE_FULL: '当前请求较多，请稍后再试。',
+      QUEUE_TIMEOUT: '请求等待超时，请稍后重试。',
+      GLOBAL_DAILY_QUOTA_EXCEEDED: '今日服务额度已用完，请明天再试。',
+      INVITE_DAILY_QUOTA_EXCEEDED: '该邀请码今日额度已用完，请明天再试。',
+      STALE_ACTION: '这个操作已经失效，请使用当前页面中的操作。',
+      STALE_CANDIDATE: '这个候选已经失效，请重新上传题图。',
+      MEDIA_NOT_FOUND: '请求的图片已失效，请重新上传题图。',
+      MEDIA_ANSWERS_UNAVAILABLE: '答案暂时无法发送，请回复“重试”。',
+      MEDIA_ANSWERS_PARTIAL: '答案只发送了一部分，请回复“重试”补发。',
+      MEDIA_CANDIDATES_INCOMPLETE: '候选图片暂时无法完整发送，请回复“重试”。',
+      EXECUTION_CONTEXT_REQUIRED: '请重新连接会话后再操作。',
+      EXECUTION_STALE: '任务已经变化，请重新连接后使用当前操作。',
+      EXECUTION_BUSY: '该会话已有操作正在处理，请重新连接查看进度。',
+      EXECUTION_UNKNOWN: '上次操作结果尚未确认，请先核对进度，暂不重复执行。',
+      EXECUTION_CAPACITY: '执行记录暂时无法接收新操作，请稍后重新连接。',
+      EXECUTION_COST_PENDING: '已有调用的费用尚待核对，当前结果保留，暂不启动新的操作。',
     };
     return new UserVisibleError(
       messages[data.code] || rawDetail || '这次请求没有处理成功，请稍后重试。',
@@ -3074,6 +3095,74 @@ function safeHttpError(status, data, requestId = '') {
     ['retry_request'],
   );
   return new UserVisibleError(`请求失败（HTTP ${status}），请稍后重试。`, ['retry_request']);
+}
+
+function isRegisteredErrorEnvelope(data) {
+  // A terminal error the server registered may be shown as-is even when the
+  // coordination ACK did not arrive: without this every failed request was
+  // answered with "浏览器无法安全确认当前会话", hiding the real reason and the
+  // real retry advice.
+  //
+  // The (layer, code) pair must still be one the server registry admits, so an
+  // unknown or mismatched pair stays fail-closed exactly as before. Mirrors
+  // PROTOCOL_REASONS (status ERROR) in tiku_shared/request_protocol.py.
+  if (
+    !data
+    || typeof data !== 'object'
+    || Array.isArray(data)
+    || String(data.status || '') !== 'ERROR'
+  ) return false;
+  const pairs = [
+    'feedback:FEEDBACK_SAVE_FAILED',
+    'login:LOGIN_RATE_LIMITED',
+    'media:MEDIA_ANSWERS_UNAVAILABLE',
+    'media:MEDIA_NOT_FOUND',
+    'network:NETWORK_UNAVAILABLE',
+    'network:REQUEST_TIMEOUT',
+    'queue:QUEUE_FULL',
+    'queue:QUEUE_TIMEOUT',
+    'session:EXECUTION_ARTIFACT_INVALID',
+    'session:EXECUTION_BUSY',
+    'session:EXECUTION_CAPACITY',
+    'session:EXECUTION_CLOCK_INVALID',
+    'session:EXECUTION_CLOCK_ROLLBACK',
+    'session:EXECUTION_CONTEXT_REQUIRED',
+    'session:EXECUTION_CONTROL_INVALID',
+    'session:EXECUTION_COST_CONFLICT',
+    'session:EXECUTION_COST_PENDING',
+    'session:EXECUTION_COST_TARGET_INVALID',
+    'session:EXECUTION_IDENTITY_INVALID',
+    'session:EXECUTION_INPUT_CONFLICT',
+    'session:EXECUTION_LEASE_LOST',
+    'session:EXECUTION_PARENT_CHANGED',
+    'session:EXECUTION_PARENT_INPUT_MISMATCH',
+    'session:EXECUTION_PARENT_INPUT_UNAVAILABLE',
+    'session:EXECUTION_PARENT_INVALID',
+    'session:EXECUTION_RECOVERY_INVALID',
+    'session:EXECUTION_RESULT_UNAVAILABLE',
+    'session:EXECUTION_STALE',
+    'session:EXECUTION_UNKNOWN',
+    'session:EXECUTION_VERSION_REQUIRED',
+    'tool:AGENT_FAILED',
+    'tool:AGENT_FAILED_NO_IMAGE',
+    'tool:ANSWER_LOOKUP_FAILED',
+    'tool:BANK_ROUTE_FAILED',
+    'tool:CANDIDATE_ACTION_INVALID_STATE',
+    'tool:COARSE_SEARCH_FAILED',
+    'tool:GLOBAL_SEARCH_FAILED',
+    'tool:GLOBAL_SEARCH_UNSUPPORTED_ROUTE',
+    'tool:IMAGE_ANALYSIS_FAILED',
+    'tool:MULTI_DETAIL_FAILED',
+    'tool:MULTI_DETAIL_INVALID',
+    'tool:MULTI_DETECTION_FAILED',
+    'tool:RERANK_FAILED',
+    'tool:SERVICE_UNAVAILABLE',
+    'tool:TOOL_FAILED',
+    'upload:UPLOAD_PERSIST_FAILED',
+  ];
+  const layer = String(data.layer || '').trim();
+  const code = String(data.code || '').trim();
+  return pairs.includes(`${layer}:${code}`);
 }
 
 function streamedError(event) {
@@ -3152,7 +3241,14 @@ async function request(
         resolveSessionRequestFenceFromEnvelope(data, sessionRequestFence);
         throw safeHttpError(response.status, data, requestId);
       }
-      assertSessionRequestFenceAcknowledged(data, sessionRequestFence);
+      const registeredError = isRegisteredErrorEnvelope(data);
+      if (registeredError) {
+        // Keep the fence pending so the next action still reconciles it, but
+        // report what the server said instead of a coordination complaint.
+        preserveSessionRequestFence(sessionRequestFence);
+      } else {
+        assertSessionRequestFenceAcknowledged(data, sessionRequestFence);
+      }
       consumeTaskStateResponse(taskStateRequest, data, { error: true });
       const fenceResolved = resolveSessionRequestFenceFromEnvelope(
         data,
@@ -3164,6 +3260,9 @@ async function request(
         { sessionRequestFence },
       );
       if (emptyResetApplied === false) throw sessionCoordinationError();
+      if (!emptyResetApplied && registeredError) {
+        throw safeHttpError(response.status, data, requestId);
+      }
       if (!fenceResolved) throw sessionCoordinationError();
       throw safeHttpError(response.status, data, requestId);
     }
@@ -3262,7 +3361,14 @@ async function requestStream(
         resolveSessionRequestFenceFromEnvelope(data, sessionRequestFence);
         throw safeHttpError(response.status, data, requestId);
       }
-      assertSessionRequestFenceAcknowledged(data, sessionRequestFence);
+      const registeredError = isRegisteredErrorEnvelope(data);
+      if (registeredError) {
+        // Keep the fence pending so the next action still reconciles it, but
+        // report what the server said instead of a coordination complaint.
+        preserveSessionRequestFence(sessionRequestFence);
+      } else {
+        assertSessionRequestFenceAcknowledged(data, sessionRequestFence);
+      }
       consumeTaskStateResponse(taskStateRequest, data, { error: true });
       const fenceResolved = resolveSessionRequestFenceFromEnvelope(
         data,
@@ -3274,6 +3380,9 @@ async function requestStream(
         { sessionRequestFence },
       );
       if (emptyResetApplied === false) throw sessionCoordinationError();
+      if (!emptyResetApplied && registeredError) {
+        throw safeHttpError(response.status, data, requestId);
+      }
       if (!fenceResolved) throw sessionCoordinationError();
       throw safeHttpError(response.status, data, requestId);
     }
@@ -3327,7 +3436,12 @@ async function requestStream(
             url,
             { authoritativeResponse: true },
           );
-          assertSessionRequestFenceAcknowledged(event, sessionRequestFence);
+          const registeredError = isRegisteredErrorEnvelope(event);
+          if (registeredError) {
+            preserveSessionRequestFence(sessionRequestFence);
+          } else {
+            assertSessionRequestFenceAcknowledged(event, sessionRequestFence);
+          }
           consumeTaskStateResponse(taskStateRequest, event, { error: true });
           const fenceResolved = resolveSessionRequestFenceFromEnvelope(
             event,
@@ -3339,6 +3453,7 @@ async function requestStream(
             { sessionRequestFence },
           );
           if (emptyResetApplied === false) throw sessionCoordinationError();
+          if (!emptyResetApplied && registeredError) throw streamedError(event);
           if (!fenceResolved) throw sessionCoordinationError();
           throw streamedError(event);
         }
