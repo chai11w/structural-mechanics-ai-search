@@ -594,7 +594,7 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260911-expired-reset-v1"'
+        demo_asset = 'src="/assets/demo.js?v=20260911-expired-reset-v2"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
@@ -1538,6 +1538,10 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', 'contr
   function scheduleHistoryExpiry() {}
   function closeLightbox() {}
   function showSessionExpiredNotice() {}
+  function showServerSessionGoneNotice() {}
+  function addMessage(item) {
+    return { remove() {} };
+  }
   function flushStartupNotices() {}
   function showFailureNotice(key, message, recoveryActions = [], protocol = {}) {
     failureNotices.push({ key, message, recoveryActions, protocol });
@@ -2836,12 +2840,18 @@ function completedAnswerEnvelope(targetHarness, raw, unitId = 'g1-u1') {
 
   assert.equal(harness.model().reason, 'OK');
   assert.deepEqual(harness.session(), latestSession);
+  // An authoritative "session invalid" answer retires the session projection,
+  // but the conversation on screen is still fresh here: deleting what the user
+  // is reading (and labelling it "expired") is not this response's business.
+  // A local copy we cannot vouch for is still retired - that is the expired
+  // conversation path covered by the cold/deferred bootstrap cases above, and
+  // localConversationExpired() in demo.js.
   assert.equal(
     harness.clearHistoryCount(),
-    1,
-    'the serialized authoritative invalid session must clear local history',
+    0,
+    'a fresh local conversation must survive an authoritative invalid session',
   );
-  assert.equal(harness.historyLength(), 0);
+  assert.equal(harness.historyLength(), 1);
   assert.deepEqual(
     harness.lifecycle().slice(-6),
     ['begin', 'consume', 'finish', 'begin', 'consume', 'finish'],
@@ -4316,6 +4326,7 @@ const createHarness = new Function('taskStateV1', `
   }
   function renderHistory() {}
   function showSessionExpiredNotice() {}
+  function showServerSessionGoneNotice() {}
   function scheduleHistoryExpiry() {}
   function refreshHistoryActivityFromStorage() { return false; }
   function clearPendingUpload() {}

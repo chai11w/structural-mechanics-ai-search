@@ -133,7 +133,7 @@ const SESSION_FALLBACK_CHOOSING_TTL_MS = 2000;
 const SESSION_FALLBACK_LOCK_WAIT_MS = 5000;
 const SESSION_FALLBACK_LOCK_POLL_MS = 25;
 const OPERATIONAL_NOTICE_KEYS = new Set([
-  'connection', 'session-recovery', 'history-storage', 'session-expired',
+  'connection', 'session-recovery', 'history-storage', 'session-expired', 'session-gone',
 ]);
 const LEGACY_EXPIRED_MEDIA_MESSAGE = '题图或结果图片已失效，请重新上传题图；如果问题反复出现，可以点踩告诉我们。';
 const A3_INLINE_ONLY_INTENTS = new Set([
@@ -2601,9 +2601,16 @@ async function repairUploadedImageHistory() {
     renderHistory();
     if (!data.session?.session_valid) {
       if (history.length) {
-        clearHistory();
-        renderHistory();
-        showSessionExpiredNotice();
+        if (localConversationExpired()) {
+          clearHistory();
+          renderHistory();
+          showSessionExpiredNotice();
+        } else {
+          // The local conversation is still fresh, so the server simply has no
+          // session for this cookie: keep what the user is reading on screen.
+          renderHistory();
+          showServerSessionGoneNotice();
+        }
       } else {
         flushStartupNotices();
       }
@@ -2814,6 +2821,15 @@ function retireSessionForCoordinationConflict() {
   setStatus('error', '等待重新连接');
 }
 
+function localConversationExpired() {
+  // Only a conversation we can positively prove is still fresh is protected
+  // from an invalid server session. An unknown activity marker keeps the
+  // previous behaviour: the local copy cannot be vouched for.
+  if (!history.length) return false;
+  if (!Number.isFinite(historyLastActivityAt) || historyLastActivityAt <= 0) return true;
+  return Date.now() - historyLastActivityAt >= HISTORY_TTL_MS;
+}
+
 function expireHistoryIfNeeded() {
   if (!history.length || !Number.isFinite(historyLastActivityAt) || historyLastActivityAt <= 0) return false;
   if (refreshHistoryActivityFromStorage()) return false;
@@ -2840,6 +2856,17 @@ function expireHistoryIfNeeded() {
   closeLightbox();
   showSessionExpiredNotice();
   return true;
+}
+
+function showServerSessionGoneNotice() {
+  // The server no longer has this conversation. Say so accurately instead of
+  // emptying the screen or claiming the local conversation expired.
+  addMessage({
+    message: '这一轮对话在服务端已经不在了（隔得太久或服务已重启），无法继续；对话内容仍保留在本机，题图需要重新上传。',
+    recoveryActions: ['new_chat'],
+    noticeKey: 'session-gone',
+  }, false);
+  setStatus('ready', '可开始新对话');
 }
 
 function showSessionExpiredNotice() {
