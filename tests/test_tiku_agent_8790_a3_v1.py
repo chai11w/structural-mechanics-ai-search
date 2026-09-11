@@ -192,6 +192,47 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
                 self.assertEqual(reset.json()["code"], "SESSION_RESET")
             provider.assert_not_called()
 
+    def test_conversation_lifetime_has_one_source_and_reaches_the_browser(self):
+        """Client countdown, sessions, fences and executions share one number."""
+        import json
+        import time
+        from uuid import uuid4
+        from fastapi.testclient import TestClient
+        from tiku_agent import fastapi_demo
+        from tiku_agent.conversation_ttl import CONVERSATION_TTL_SECONDS
+        from tiku_agent.execution_store import ExecutionPolicy
+        from tiku_agent.session_store import DEFAULT_SESSION_TTL
+
+        self.assertEqual(DEFAULT_SESSION_TTL.total_seconds(), CONVERSATION_TTL_SECONDS)
+        self.assertEqual(
+            fastapi_demo._SESSION_COORDINATION_RETENTION_SECONDS,
+            CONVERSATION_TTL_SECONDS,
+        )
+        self.assertEqual(ExecutionPolicy().session_ttl, CONVERSATION_TTL_SECONDS)
+
+        with tempfile.TemporaryDirectory() as temp, patch("urllib.request.urlopen") as provider:
+            app = build_app(temp, enable_durable_execution=True)
+            with TestClient(app) as client:
+                session = client.get("/api/session").json()
+                self.assertEqual(
+                    session["conversation_ttl_seconds"], CONVERSATION_TTL_SECONDS
+                )
+                operation = {
+                    "key": f"{int(time.time() * 1000)}:{uuid4().hex}",
+                    "epoch": session["execution"]["epoch"],
+                    "state_version": session["execution"]["state_version"],
+                }
+                reset = client.post(
+                    "/api/reset",
+                    json={},
+                    headers={"X-Tiku-Operation": json.dumps(operation)},
+                )
+                self.assertEqual(reset.status_code, 200)
+                self.assertEqual(
+                    reset.json()["conversation_ttl_seconds"], CONVERSATION_TTL_SECONDS
+                )
+            provider.assert_not_called()
+
     def test_phase5_keeps_production_invite_authentication(self):
         from fastapi.testclient import TestClient
         with tempfile.TemporaryDirectory() as temp:

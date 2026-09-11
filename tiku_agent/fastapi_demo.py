@@ -30,6 +30,7 @@ from PIL import Image
 
 from tiku_agent.a3_runtime import A3_CROP_REVIEW_CODES
 from tiku_agent.agent import AgentResponse
+from tiku_agent.conversation_ttl import CONVERSATION_TTL_SECONDS
 from tiku_agent.feedback_store import SQLiteFeedbackStore
 from tiku_agent.intent_contract import CHAPTERS
 from tiku_agent.invite_access import InviteAccess, InviteIdentity
@@ -129,7 +130,7 @@ SESSION_REQUEST_FENCE_HEADER = "X-Session-Request-Fence"
 SESSION_RECONCILE_FENCES_HEADER = "X-Session-Reconcile-Fences"
 SESSION_COORDINATION_ACK_FIELD = "session_coordination"
 _SESSION_COORDINATION_MAX_RECONCILE_FENCES = 64
-_SESSION_COORDINATION_RETENTION_SECONDS = 2 * 60 * 60
+_SESSION_COORDINATION_RETENTION_SECONDS = CONVERSATION_TTL_SECONDS
 _SESSION_COORDINATION_FUTURE_SKEW_SECONDS = 5 * 60
 _SESSION_REQUEST_FENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$")
 FEEDBACK_TAGS = {
@@ -1973,6 +1974,9 @@ def create_app(
                         f"/api/upload/{path.name}" if path is not None else ""
                     ),
                     "session": _public_session_snapshot(captured.legacy_session),
+                    # One source of truth for how long this conversation lives,
+                    # so the browser countdown and the server expiry agree.
+                    "conversation_ttl_seconds": CONVERSATION_TTL_SECONDS,
                 },
                 captured.task_state,
             )
@@ -2308,7 +2312,11 @@ def create_app(
         reset_task_state = empty_task_state_snapshot()
         try:
             reset_payload = with_public_task_state(
-                {"ok": True, **protocol.to_dict()},
+                {
+                    "ok": True,
+                    "conversation_ttl_seconds": CONVERSATION_TTL_SECONDS,
+                    **protocol.to_dict(),
+                },
                 reset_task_state,
             )
         except Exception as exc:

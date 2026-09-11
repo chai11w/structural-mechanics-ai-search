@@ -15,10 +15,11 @@ import sqlite3
 from typing import Callable
 
 from tiku_agent.state import AgentState
+from tiku_agent.conversation_ttl import CONVERSATION_TTL
 
 
 SESSION_STATE_SCHEMA_VERSION = 1
-DEFAULT_SESSION_TTL = timedelta(hours=2)
+DEFAULT_SESSION_TTL = CONVERSATION_TTL
 
 
 class SessionStore(ABC):

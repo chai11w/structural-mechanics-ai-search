@@ -19,6 +19,8 @@ import threading
 from typing import Any, Callable
 from uuid import uuid4
 
+from tiku_agent.conversation_ttl import CONVERSATION_TTL_SECONDS
+
 
 class ExecutionError(RuntimeError):
     def __init__(self, code: str):
@@ -28,7 +30,7 @@ class ExecutionError(RuntimeError):
 
 @dataclass(frozen=True)
 class ExecutionPolicy:
-    session_ttl: int = 7200
+    session_ttl: int = CONVERSATION_TTL_SECONDS
     epoch_max_age: int = 30 * 86400
     history_ttl: int = 30 * 86400
     lease_seconds: int = 300

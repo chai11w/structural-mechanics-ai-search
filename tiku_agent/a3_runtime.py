@@ -41,6 +41,7 @@ from tiku_agent.execution_runtime import execution_entry, execution_snapshot_sco
 from tiku_shared.atomic_files import atomic_output
 from tiku_agent.execution_handoffs import parent_finalize
 from tiku_agent.agent import AgentResponse
+from tiku_agent.conversation_ttl import CONVERSATION_TTL
 from tiku_agent.a3_checkpoint_context import (
     A3CheckpointBindingV1, a3_checkpoint_request_scope, current_a3_checkpoint_binding,
 )
@@ -498,7 +499,7 @@ class SQLiteA3SessionStore:
         self,
         database_path: str | Path,
         *,
-        ttl: timedelta = timedelta(hours=2),
+        ttl: timedelta = CONVERSATION_TTL,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         if ttl <= timedelta(0):

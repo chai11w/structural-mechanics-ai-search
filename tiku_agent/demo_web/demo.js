@@ -114,7 +114,12 @@ const IMAGE_MAX_DIMENSION = 2560;
 const AUTHOR_CONTACT_FALLBACK = Object.freeze({ label: '联系作者', channel: '微信', value: 'jglxfd6666' });
 const IMAGE_FALLBACK_DIMENSION = 2048;
 const IMAGE_QUALITY_STEPS = [0.88, 0.82, 0.76, 0.70];
-const HISTORY_TTL_MS = 2 * 60 * 60 * 1000;
+// Fallback only: the server publishes its real lifetime as
+// conversation_ttl_seconds on every session response and adoptConversationTtl
+// takes it from there, so the countdown, the browser expiry and the server
+// expiry cannot drift apart.
+const DEFAULT_CONVERSATION_TTL_MS = 2 * 60 * 60 * 1000;
+let conversationTtlMs = DEFAULT_CONVERSATION_TTL_MS;
 const HISTORY_LIMIT = 50;
 const HISTORY_KEY = 'tiku-agent-current-chat-v2';
 const LEGACY_HISTORY_KEY = 'tiku-agent-current-chat-v1';
@@ -261,7 +266,7 @@ function scheduleHistoryExpiry() {
   if (historyExpiryTimer !== null) clearTimeout(historyExpiryTimer);
   historyExpiryTimer = null;
   if (!history.length || !Number.isFinite(historyLastActivityAt) || historyLastActivityAt <= 0) return;
-  const remaining = historyLastActivityAt + HISTORY_TTL_MS - Date.now();
+  const remaining = historyLastActivityAt + conversationTtlMs - Date.now();
   if (remaining <= 0) {
     expireHistoryIfNeeded();
     return;
@@ -2445,7 +2450,7 @@ function restoreHistory() {
       pendingHistoryStorageNotice = '浏览器中的临时对话无法读取，已为你开始新对话。请检查浏览器存储设置。';
       return;
     }
-    if (now - activityAt >= HISTORY_TTL_MS) {
+    if (now - activityAt >= conversationTtlMs) {
       clearHistory({ preserveStoredHistory: true });
       sessionResetRequired = true;
       sessionResetActivityAt = activityAt;
@@ -2834,6 +2839,27 @@ function retireSessionForCoordinationConflict() {
   setStatus('error', '等待重新连接');
 }
 
+function adoptConversationTtl(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return;
+  const nextMs = Math.round(seconds * 1000);
+  if (nextMs === conversationTtlMs) return;
+  conversationTtlMs = nextMs;
+  renderConversationTtl();
+  scheduleHistoryExpiry();
+}
+
+function renderConversationTtl() {
+  // The interface must promise exactly what the server honours.
+  const element = document.getElementById('composer-fine-print');
+  if (!element) return;
+  const minutes = Math.round(conversationTtlMs / 60000);
+  const label = minutes >= 60 && minutes % 60 === 0
+    ? `${minutes / 60} 小时`
+    : `${minutes} 分钟`;
+  element.textContent = `题图会用于云端模型识别 · 最后一次操作 ${label}后自动清理`;
+}
+
 function localConversationExpired() {
   // Only a conversation we can positively prove has expired is retired here.
   // An unknown activity marker is not proof of expiry, and deleting what the
@@ -2841,13 +2867,13 @@ function localConversationExpired() {
   // notice explains that the server no longer has this conversation.
   if (!history.length) return true;
   if (!Number.isFinite(historyLastActivityAt) || historyLastActivityAt <= 0) return false;
-  return Date.now() - historyLastActivityAt >= HISTORY_TTL_MS;
+  return Date.now() - historyLastActivityAt >= conversationTtlMs;
 }
 
 function expireHistoryIfNeeded() {
   if (!history.length || !Number.isFinite(historyLastActivityAt) || historyLastActivityAt <= 0) return false;
   if (refreshHistoryActivityFromStorage()) return false;
-  if (Date.now() - historyLastActivityAt < HISTORY_TTL_MS) {
+  if (Date.now() - historyLastActivityAt < conversationTtlMs) {
     scheduleHistoryExpiry();
     return false;
   }
@@ -3424,6 +3450,7 @@ function updateSessionContext(data) {
     a3SourceWorkflowKey = workflowKey;
   }
   syncA3Interface();
+  adoptConversationTtl(data.conversation_ttl_seconds);
   return { workflowTarget, a3 };
 }
 
@@ -3455,6 +3482,7 @@ function applyResetSessionContext(data) {
   sessionResetRequired = false;
   sessionResetActivityAt = 0;
   clearA3WorkflowState();
+  adoptConversationTtl(data.conversation_ttl_seconds);
   return true;
 }
 

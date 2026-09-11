@@ -518,7 +518,10 @@ class FastApiDemoTest(unittest.TestCase):
         response = client.get("/api/session")
 
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(set(response.json()), {"uploaded_image", "session", "task_state"})
+        self.assertEqual(
+            set(response.json()),
+            {"uploaded_image", "session", "task_state", "conversation_ttl_seconds"},
+        )
         self.assertEqual(response.json()["uploaded_image"], f"/api/upload/{image_path.name}")
         self.assertIsNone(response.json()["session"]["a3"])
         self.assertEqual(
@@ -6359,7 +6362,7 @@ class FastApiDemoTest(unittest.TestCase):
         for expected in (
             'href="/assets/demo.css?v=20260911-stale-conversation-v1"',
             'src="/assets/task_state.js?v=20260830-task-state-3-4-5"',
-            'src="/assets/demo.js?v=20260911-stale-conversation-v1"',
+            'src="/assets/demo.js?v=20260911-conversation-ttl-v1"',
             'src="/assets/execution_control.js?v=20260909-phase5-controls-v1"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
@@ -6383,7 +6386,9 @@ class FastApiDemoTest(unittest.TestCase):
             "taskStateAllowsChildAction('select_candidate', actionTarget)",
             "childTaskId: String(item.childTaskId || '')",
             "event.key === 'Enter'", "!event.shiftKey", "!event.isComposing", "event.keyCode !== 229",
-            "HISTORY_TTL_MS = 2 * 60 * 60 * 1000", "HISTORY_LIMIT = 50", "repairUploadedImageHistory()",
+            "DEFAULT_CONVERSATION_TTL_MS = 2 * 60 * 60 * 1000",
+            "adoptConversationTtl(data.conversation_ttl_seconds)",
+            "HISTORY_LIMIT = 50", "repairUploadedImageHistory()",
             "lastActivityAt: historyLastActivityAt", "saveHistory({ refreshActivity: true })",
             "function scheduleHistoryExpiry()", "function expireHistoryIfNeeded()",
             "if (!data.session?.session_valid)", "window.addEventListener('focus', expireHistoryIfNeeded)",
@@ -6414,7 +6419,7 @@ class FastApiDemoTest(unittest.TestCase):
             "if (conversation) payload.conversation = conversation",
             "function createRecoveryActions", "登录状态已失效，请重新登录。",
             "这次请求没有处理成功，请直接重试；如果仍然失败，请点踩并补充说明。",
-            "if (now - activityAt >= HISTORY_TTL_MS)", "showSessionExpiredNotice();",
+            "if (now - activityAt >= conversationTtlMs)", "showSessionExpiredNotice();",
             "function flushStartupNotices", "pendingSessionExpiredNotice = true",
             "variant: 'error', recoveryActions:",
             "function showFailureNotice", "function resolveFailureNotice",

@@ -594,7 +594,7 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260911-stale-conversation-v1"'
+        demo_asset = 'src="/assets/demo.js?v=20260911-conversation-ttl-v1"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
@@ -1436,6 +1436,9 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', 'contr
   let isBusy = false;
   const SESSION_BOOTSTRAP_TIMEOUT_MS = 15000;
   const HISTORY_TTL_MS = 2 * 60 * 60 * 1000;
+  // The real client adopts the server's conversation_ttl_seconds here; the
+  // harness keeps the fixed fallback so expiry tests stay deterministic.
+  let conversationTtlMs = HISTORY_TTL_MS;
   const HISTORY_LIMIT = 50;
   const HISTORY_KEY = 'history';
   const LEGACY_HISTORY_KEY = 'legacy-history';
@@ -3846,6 +3849,7 @@ const createHarness = new Function('taskStateV1', `
   function isPersistentImage() { return false; }
   function createMessageId() { return 'message-history-binding'; }
   function saveHistory() {}
+  function adoptConversationTtl() {}
 
   ${normalizeA3Source}
   ${workflowSource}
@@ -4239,6 +4243,9 @@ const createHarness = new Function('taskStateV1', `
   const a3ExampleBackdrop = { hidden: true };
   const A3_TIMEOUT_MS = 180000;
   const HISTORY_TTL_MS = 2 * 60 * 60 * 1000;
+  // The real client adopts the server's conversation_ttl_seconds here; the
+  // harness keeps the fixed fallback so expiry tests stay deterministic.
+  let conversationTtlMs = HISTORY_TTL_MS;
   const HISTORY_KEY = 'history';
   const LEGACY_HISTORY_KEY = 'legacy-history';
   const A3_INLINE_ONLY_INTENTS = new Set(['inline']);
