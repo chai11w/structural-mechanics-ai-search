@@ -2451,11 +2451,12 @@ function restoreHistory() {
       return;
     }
     if (now - activityAt >= conversationTtlMs) {
-      clearHistory({ preserveStoredHistory: true });
+      // The local clock only raises the question. Keep the conversation and
+      // let the authoritative read confirm that it is really over: a wrong or
+      // corrected device clock must not delete what the user was reading.
       sessionResetRequired = true;
       sessionResetActivityAt = activityAt;
       pendingSessionExpiredNotice = true;
-      return;
     }
     historyLastActivityAt = activityAt;
     const storedMessages = stored.messages.slice(-HISTORY_LIMIT);
@@ -2519,32 +2520,35 @@ async function repairUploadedImageHistory() {
         ) throw sessionCoordinationError();
       }
     }
-    // The reset is a registered phase-five command, so it must carry the
-    // durable execution context. A page that has just been loaded has not
-    // consumed any authoritative envelope yet, which is exactly the state an
-    // expired conversation is restored in: without one bounded read first the
-    // reset is rejected before it can obtain the context it needs, and the
-    // user is shown a recovery prompt instead of a new conversation.
-    if (sessionResetRequired && !executionContext) {
-      refreshHistoryActivityFromStorage();
-      if (sessionResetRequired) {
-        await request(
-          '/api/session', {}, SESSION_BOOTSTRAP_TIMEOUT_MS, '会话恢复超时。', false,
-        );
+    // The lifetime verdict belongs to the server. A local clock may only raise
+    // the question, so ask before clearing anything - and drop the local
+    // verdict when the server still has this conversation. This read also
+    // supplies the durable execution context a reset must carry: without it the
+    // reset is rejected before it can obtain the context it needs, and the user
+    // is shown a recovery prompt instead of an answer.
+    let resetRequired = sessionResetRequired;
+    let data = null;
+    if (resetRequired) {
+      data = await request(
+        '/api/session', {}, SESSION_BOOTSTRAP_TIMEOUT_MS, '会话恢复超时。', false,
+      );
+      if (data?.session?.session_valid === true) {
+        resetRequired = false;
+        sessionResetRequired = false;
+        sessionResetActivityAt = 0;
+        pendingSessionExpiredNotice = false;
       }
     }
-    let resetRequired = sessionResetRequired;
-    let data;
+    if (resetRequired && !sessionResetCoordinationAvailable()) {
+      flushStartupNotices();
+      showFailureNotice(
+        'connection',
+        '旧对话已经过期，请点击开始新对话后继续。',
+        ['new_chat'],
+      );
+      return false;
+    }
     if (resetRequired) {
-      if (!sessionResetCoordinationAvailable()) {
-        flushStartupNotices();
-        showFailureNotice(
-          'connection',
-          '旧对话已经过期，请点击开始新对话后继续。',
-          ['new_chat'],
-        );
-        return false;
-      }
       const lockedResult = await withSessionRequestLock(
         '/api/reset',
         async (sessionRequestFence) => {
@@ -2586,7 +2590,7 @@ async function repairUploadedImageHistory() {
       }
       resetRequired = lockedResult.reset;
       data = lockedResult.data;
-    } else {
+    } else if (!data) {
       data = await request(
         '/api/session', {}, SESSION_BOOTSTRAP_TIMEOUT_MS, '会话恢复超时。', false,
       );
@@ -2884,17 +2888,21 @@ function expireHistoryIfNeeded() {
   if (controller) controller.abort('history-expired');
   invalidateTaskStateContext();
   setBusy(false);
-  clearHistory({ preserveStoredHistory: true });
+  // Ask the server instead of deleting: it owns the lifetime verdict, and the
+  // conversation stays on screen while the answer is on its way. The interface
+  // still stops accepting actions until that answer arrives.
   sessionResetRequired = true;
   sessionResetActivityAt = expiredActivityAt;
-  renderHistory();
+  pendingSessionExpiredNotice = true;
+  clearA3WorkflowState();
   sessionContext = {
     session_valid: false, phase: 'IDLE', has_active_image: false,
     task_revision: 0, candidate_generation: '', candidate_count: 0, search_id: '', a3: null,
     a3WorkflowId: '', a3WorkflowRevision: 0,
   };
+  renderHistory();
   closeLightbox();
-  showSessionExpiredNotice();
+  retryConnection();
   return true;
 }
 

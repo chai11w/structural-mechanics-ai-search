@@ -594,7 +594,7 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260911-conversation-ttl-v1"'
+        demo_asset = 'src="/assets/demo.js?v=20260911-server-verdict-v1"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
@@ -602,17 +602,35 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         self.assertIn("const taskStateConsumer = taskStateV1.createTaskStateConsumer()", demo)
         self.assertIn("let taskStateContext = taskStateConsumer.current()", demo)
 
-    def test_expired_conversation_reads_the_session_before_it_resets(self):
-        """The reset is a registered command: it must not lead on a fresh page."""
+    def test_expired_conversation_asks_the_server_before_it_resets(self):
+        """The local clock raises the question; the authoritative read answers.
+
+        A reset is also a registered command, so it must not lead on a fresh
+        page: the probe supplies the execution context it needs.
+        """
 
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
         bootstrap = demo.split("async function repairUploadedImageHistory() {", 1)[1]
         body = bootstrap.split("function runSessionBootstrap() {", 1)[0]
 
-        read_index = body.index("if (sessionResetRequired && !executionContext) {")
-        reset_index = body.index("'/api/reset',")
-        self.assertLess(read_index, reset_index)
-        self.assertIn("'/api/session'", body[read_index:reset_index])
+        probe = body.index("data = await request(\n        '/api/session'")
+        cancel = body.index("if (data?.session?.session_valid === true) {")
+        reset = body.index("'/api/reset',")
+        self.assertLess(probe, cancel)
+        self.assertLess(cancel, reset)
+
+        # Neither local path may delete the conversation on its own; the TTL
+        # branch of restoreHistory only records that verification is pending.
+        ttl_branch = demo.split(
+            "if (now - activityAt >= conversationTtlMs) {", 1
+        )[1].split("historyLastActivityAt = activityAt;", 1)[0]
+        self.assertNotIn("clearHistory", ttl_branch)
+        self.assertIn("sessionResetRequired = true;", ttl_branch)
+        expiry = demo.split(
+            "function expireHistoryIfNeeded() {", 1
+        )[1].split("function showServerSessionGoneNotice() {", 1)[0]
+        self.assertNotIn("clearHistory", expiry)
+        self.assertIn("retryConnection();", expiry)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for bootstrap validation")
     def test_demo_bootstraps_missing_task_state_asset_before_start(self):
@@ -1539,6 +1557,7 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', 'contr
   }
   function restoreA3CropHistoryState() {}
   function scheduleHistoryExpiry() {}
+  function retryConnection() {}
   function closeLightbox() {}
   function showSessionExpiredNotice() {}
   function showServerSessionGoneNotice() {}
@@ -3182,6 +3201,25 @@ function completedAnswerEnvelope(targetHarness, raw, unitId = 'g1-u1') {
   assert.equal(coldHarness.model().snapshot.workflow.exists, false);
   assert.equal(coldHarness.session().a3, null);
 
+  // Same local verdict, but the server still has this conversation: the local
+  // clock was wrong, so nothing may be reset or deleted.
+  const locallyExpiredHarness = createHarness(taskStateV1);
+  locallyExpiredHarness.setStoredHistory({
+    lastActivityAt: Date.now() - (2 * 60 * 60 * 1000) - 1,
+    messages: [{ message: 'expired locally but alive on the server' }],
+  });
+  locallyExpiredHarness.restoreHistory();
+  assert.equal(locallyExpiredHarness.resetRequired(), true);
+  const stillAliveEnvelope = locallyExpiredHarness.envelope(fixtures.a3);
+  stillAliveEnvelope.session.session_valid = true;
+  locallyExpiredHarness.queueJson(stillAliveEnvelope);
+  assert.equal(await locallyExpiredHarness.runSessionBootstrap(), true);
+  assert.deepEqual(locallyExpiredHarness.fetchUrls(), ['/api/session']);
+  assert.equal(locallyExpiredHarness.resetRequired(), false);
+  assert.equal(locallyExpiredHarness.clearHistoryCount(), 0);
+  assert.equal(locallyExpiredHarness.historyLength(), 1);
+  assert.equal(locallyExpiredHarness.resetEvents().length, 0);
+
   const deferredResetHarness = createHarness(taskStateV1);
   deferredResetHarness.setStoredHistory({
     lastActivityAt: Date.now() - (2 * 60 * 60 * 1000) - 1,
@@ -4335,6 +4373,7 @@ const createHarness = new Function('taskStateV1', `
   function showSessionExpiredNotice() {}
   function showServerSessionGoneNotice() {}
   function scheduleHistoryExpiry() {}
+  function retryConnection() {}
   function refreshHistoryActivityFromStorage() { return false; }
   function clearPendingUpload() {}
   function releaseAllObjectUrls() {}
@@ -5178,8 +5217,14 @@ assert.equal(taskStateV1.allowsChildAction(harness.model(), 'select_unit'), fals
   assert.equal(expiredUi.cropHidden, true);
   assert.equal(expiredUi.sheetHidden, true);
   assert.equal(expiredUi.exampleHidden, true);
-  assert.equal(expiredUi.historyLength, 0);
-  assert.equal(expiredUi.historyLastActivityAt, 0);
+  // The local clock no longer deletes the conversation: it records that the
+  // server has to confirm the expiry, keeps what the user was reading, and the
+  // interface fails closed until that answer arrives.
+  assert.equal(expiredUi.historyLength, 1);
+  assert.ok(
+    expiredUi.historyLastActivityAt > 0,
+    'the retained conversation keeps its activity marker for the server verdict',
+  );
   assert.equal(expiredUi.operationVersion, beforeExpiry.operationVersion + 1);
   assert.equal(expiredUi.isBusy, false);
   assert.equal(expiredUi.activeController, false);

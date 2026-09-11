@@ -443,7 +443,7 @@ class TikuTaskState8896VerifierTest(unittest.TestCase):
                 ("GET", "/api/session"),
                 ("GET", "/"),
                 ("GET", "/assets/task_state.js?v=20260830-task-state-3-4-5"),
-                ("GET", "/assets/demo.js?v=20260911-conversation-ttl-v1"),
+                ("GET", "/assets/demo.js?v=20260911-server-verdict-v1"),
                 ("POST", "/api/message"),
                 ("POST", "/api/message/stream"),
                 ("POST", "/api/message"),
