@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
+from tiku_shared.evidence_io_budget import EvidenceDeadlineExceeded, EvidenceLockBudget
 from tiku_shared.request_protocol import RequestProtocol
 from tiku_shared.trace_context import (
     TraceContext,
@@ -961,6 +962,75 @@ class TraceEventStoreTest(unittest.TestCase):
         recorder.flush()
         self.assertEqual(recorder.health()["written"], 2)
         self.assertEqual(recorder.health()["pending"], 0)
+
+    def test_lost_lock_is_retried_instead_of_dropped(self):
+        """Losing the lock race writes nothing, so it must not cost an event."""
+
+        class LockContendedStore:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def write(self, event: TraceEvent) -> None:
+                self.calls += 1
+                if self.calls == 1:
+                    raise EvidenceLockBudget("evidence lock budget exhausted")
+
+            def flush(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        store = LockContendedStore()
+        recorder = TraceEventRecorder(store, queue_capacity=4)  # type: ignore[arg-type]
+        self.addCleanup(recorder.close)
+        trace = TraceContext.create()
+        accepted = recorder.record(
+            trace_id=trace.trace_id,
+            event_type="request_received",
+            stage="http_request",
+            outcome="started",
+        )
+        self.assertTrue(recorder.flush(5))
+        health = recorder.health()
+        self.assertIsNotNone(accepted)
+        self.assertEqual(store.calls, 2, "the lock loss must be retried once")
+        self.assertEqual(health["written"], 1)
+        self.assertEqual(health["write_failures"], 0)
+        self.assertEqual(health["dropped"], 0)
+
+    def test_interrupted_write_is_still_dropped_without_retry(self):
+        """A statement cut off mid-flight may have committed; never retry it."""
+
+        class InterruptedStore:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def write(self, event: TraceEvent) -> None:
+                self.calls += 1
+                raise EvidenceDeadlineExceeded("evidence operation budget exhausted")
+
+            def flush(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        store = InterruptedStore()
+        recorder = TraceEventRecorder(store, queue_capacity=4)  # type: ignore[arg-type]
+        self.addCleanup(recorder.close)
+        trace = TraceContext.create()
+        recorder.record(
+            trace_id=trace.trace_id,
+            event_type="request_received",
+            stage="http_request",
+            outcome="started",
+        )
+        self.assertTrue(recorder.flush(5))
+        health = recorder.health()
+        self.assertEqual(store.calls, 1, "an ambiguous failure must not be replayed")
+        self.assertEqual(health["write_failures"], 1)
+        self.assertEqual(health["last_failure_kind"], "EvidenceDeadlineExceeded")
 
     def test_close_drains_accepted_events_and_rejects_later_writes(self):
         class OrderedStore:

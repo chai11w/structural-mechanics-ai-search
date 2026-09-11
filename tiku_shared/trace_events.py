@@ -25,7 +25,7 @@ from weakref import WeakMethod
 
 from tiku_shared.trace_context import current_request_id, current_trace_id, is_valid_trace_id
 from tiku_shared.evidence_io_budget import (
-    EvidenceRLock, check_evidence_budget, evidence_io_budget,
+    EvidenceLockBudget, EvidenceRLock, check_evidence_budget, evidence_io_budget,
     evidence_sqlite_timeout, configure_evidence_connection,
 )
 
@@ -1227,9 +1227,11 @@ class TraceEventRecorder:
                 with evidence_io_budget(0.5, cancel=self._cancel):
                     self.store.write(event)
                 return
-            except TraceEventMaintenanceBusy:
-                # Only fence acquisition can signal Busy, before any transaction.
-                # Never retry an ambiguous SQLite/commit failure.
+            except (TraceEventMaintenanceBusy, EvidenceLockBudget):
+                # Only fence/lock acquisition can signal this, before any
+                # transaction: nothing of ours was written, so waiting and
+                # retrying is safe. Never retry an ambiguous SQLite/commit
+                # failure - those stay a counted drop.
                 with self._condition:
                     self._active_started = None
                     self._maintenance_waiting = True

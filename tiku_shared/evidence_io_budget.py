@@ -11,6 +11,15 @@ class EvidenceDeadlineExceeded(TimeoutError):
     pass
 
 
+class EvidenceLockBudget(EvidenceDeadlineExceeded):
+    """The lock was never acquired, so nothing of ours was written.
+
+    Distinguished from a plain deadline blowout so a caller may retry: unlike a
+    statement interrupted mid-flight, losing the lock race leaves no ambiguous
+    commit behind.
+    """
+
+
 @dataclass(frozen=True)
 class EvidenceIOBudget:
     deadline: float
@@ -84,7 +93,7 @@ class EvidenceRLock:
 
     def __enter__(self):
         if not self.acquire():
-            raise EvidenceDeadlineExceeded("evidence lock budget exhausted")
+            raise EvidenceLockBudget("evidence lock budget exhausted")
         return self
 
     def __exit__(self, *args):
