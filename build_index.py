@@ -22,6 +22,7 @@ os.environ['NO_PROXY'] = '*'
 
 import pandas as pd
 from zhipuai import ZhipuAI
+from tiku_shared.bank_versions import require_legacy_writer
 
 # ============================================================
 # 配置区
@@ -359,6 +360,7 @@ def find_images(chapter_dir: Path) -> list[Path]:
 
 
 def process_chapter(client: ZhipuAI, chapter_dir: Path, resume: bool = False) -> list[dict]:
+    require_legacy_writer()
     chapter_name = chapter_dir.name
     safe_print(f"\n{'='*60}")
     safe_print(f"Chapter: {chapter_name}")
@@ -421,6 +423,7 @@ def process_chapter(client: ZhipuAI, chapter_dir: Path, resume: bool = False) ->
 
 
 def save_chapter_excel(chapter_name: str, records: list[dict]):
+    require_legacy_writer()
     if not records:
         safe_print(f"  No data, skip Excel: {chapter_name}")
         return
@@ -443,6 +446,7 @@ def save_chapter_excel(chapter_name: str, records: list[dict]):
 
 
 def main():
+    require_legacy_writer()
     safe_print("=" * 60)
     safe_print("StructMech Load Extraction")
     safe_print(f"Root: {ROOT}")

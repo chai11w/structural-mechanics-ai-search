@@ -80,6 +80,8 @@ def loads_json(loads: list[dict[str, Any]]) -> str:
 
 
 def backup_once(workbook: Path, backup_dir: Path, seen: set[Path]) -> None:
+    from tiku_shared.bank_versions import require_legacy_writer
+    require_legacy_writer()
     if workbook in seen:
         return
     target = backup_dir / workbook.parent.name / workbook.name
@@ -89,6 +91,9 @@ def backup_once(workbook: Path, backup_dir: Path, seen: set[Path]) -> None:
 
 
 def normalize_workbook(workbook: Path, *, dry_run: bool, backup_dir: Path) -> dict[str, Any]:
+    from tiku_shared.bank_versions import require_legacy_writer
+    if not dry_run:
+        require_legacy_writer()
     summary = {
         "workbook": str(workbook),
         "rows": 0,
@@ -153,6 +158,8 @@ def main() -> int:
     parser.add_argument("--symbolic-root", help="symbolic question bank root")
     parser.add_argument("--apply", action="store_true", help="rewrite Excel files after backup")
     args = parser.parse_args()
+    from tiku_shared.bank_versions import require_legacy_writer
+    require_legacy_writer()
 
     root = Path(args.root) if args.root else search.ROOT
     symbolic = Path(args.symbolic_root) if args.symbolic_root else symbolic_root(root)

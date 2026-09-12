@@ -85,6 +85,8 @@ def classify_row(
 
 
 def backup_workbook(workbook: Path, backup_dir: Path) -> Path:
+    from tiku_shared.bank_versions import require_legacy_writer
+    require_legacy_writer()
     backup_dir.mkdir(parents=True, exist_ok=True)
     target = backup_dir / workbook.name
     shutil.copy2(workbook, target)
@@ -92,6 +94,8 @@ def backup_workbook(workbook: Path, backup_dir: Path) -> Path:
 
 
 def write_workbook(workbook: Path, df: pd.DataFrame, records: list[dict[str, Any]], backup_dir: Path) -> None:
+    from tiku_shared.bank_versions import require_legacy_writer
+    require_legacy_writer()
     by_rel = {record["rel_path"]: record for record in records}
     for column in STRUCTURE_COLUMNS:
         if column not in df.columns:
@@ -126,6 +130,8 @@ def main() -> int:
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--from-results", default="", help="reuse a previous classification_results.json instead of calling Qwen")
     args = parser.parse_args()
+    from tiku_shared.bank_versions import require_legacy_writer
+    require_legacy_writer()
 
     api_key = search.os.environ.get("DASHSCOPE_API_KEY", "") or search.cfg.get("dashscope_api_key", "")
     if not api_key and not args.from_results:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,8 @@ from openpyxl import load_workbook
 
 
 BASE = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE))
+from tiku_shared.bank_versions import require_legacy_writer
 DEFAULT_EXISTING_RESULTS = BASE / ".tmp_symbol_sheets" / "classify_existing_full_qwen_no_thinking" / "classification_results.json"
 DEFAULT_MISSING_RESULTS = BASE / ".tmp_symbol_sheets" / "classify_missing_full_qwen_no_thinking" / "classification_results.json"
 MAIN_KEEP_CATEGORIES = {"main_numeric", "main_assigned_symbolic"}
@@ -159,6 +162,8 @@ def ensure_columns(ws) -> tuple[int, int]:
 
 
 def apply_chapter_update(xlsx_path: Path, delete_rels: set[str], add_records: list[dict], dry_run: bool) -> dict:
+    if not dry_run:
+        require_legacy_writer()
     wb = load_workbook(xlsx_path)
     ws = wb.active
     question_col, loads_col = ensure_columns(ws)
@@ -211,6 +216,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--output-dir")
     args = parser.parse_args()
+    require_legacy_writer()
 
     root = Path(args.root) if args.root else configured_root()
     existing = load_records(Path(args.existing_results))

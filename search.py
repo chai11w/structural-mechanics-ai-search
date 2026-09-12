@@ -1830,6 +1830,15 @@ def answer(rank):
     question_path = target["path"]
     answers = find_answer_files(question_path)
 
+    if store_root() is not None:
+        if not answers:
+            print(f"WARNING: 未找到答案文件 (题目: {question_path})")
+        else:
+            print(f"已找到 {len(answers)} 张答案（受管题库只读，不复制到共享输出目录）：")
+            for path in answers:
+                print(path)
+        return answers
+
     # 清空输出文件夹
     if ANSWER_OUTPUT.exists():
         shutil.rmtree(ANSWER_OUTPUT)

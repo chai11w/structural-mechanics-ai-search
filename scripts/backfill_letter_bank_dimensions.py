@@ -14,11 +14,15 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
 import openpyxl
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tiku_shared.bank_versions import require_legacy_writer
 
 DEFAULT_BANK_ROOT = Path("D:/桌面/答疑、帮做/结构力学/帮做_字母库")
 DEFAULT_VALUES = (
@@ -44,6 +48,7 @@ def load_verdicts(path: Path) -> dict[str, str]:
 
 
 def backup_bank(root: Path) -> Path:
+    require_legacy_writer()
     backup_dir = root.parent / f"{root.name}_备份_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     backup_dir.mkdir(parents=True, exist_ok=False)
     for xlsx in root.glob("*.xlsx"):
@@ -65,6 +70,8 @@ def ensure_dimension_column(ws: Any, header_row: int = 1) -> tuple[int, bool]:
 def backfill_file(
     xlsx_path: Path, verdicts: Mapping[str, str], *, dry_run: bool
 ) -> tuple[int, set[str]]:
+    if not dry_run:
+        require_legacy_writer()
     wb = openpyxl.load_workbook(xlsx_path)
     ws = wb.worksheets[0]
     column, added = ensure_dimension_column(ws)
@@ -88,6 +95,7 @@ def main() -> int:
     parser.add_argument("--values", type=Path, default=DEFAULT_VALUES)
     parser.add_argument("--dry-run", action="store_true", help="report matches without writing or backing up")
     args = parser.parse_args()
+    require_legacy_writer()
 
     root = args.bank_root.resolve()
     if not root.is_dir():

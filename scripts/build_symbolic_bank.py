@@ -22,6 +22,7 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
 from search import _dominant_symbol_family, normalize_load_for_similarity, normalize_load_type, strip_load_unit
+from tiku_shared.bank_versions import require_legacy_writer
 
 DEFAULT_EXISTING_RESULTS = BASE / ".tmp_symbol_sheets" / "classify_existing_full_qwen_no_thinking" / "classification_results.json"
 DEFAULT_MISSING_RESULTS = BASE / ".tmp_symbol_sheets" / "classify_missing_full_qwen_no_thinking" / "classification_results.json"
@@ -99,6 +100,7 @@ def main() -> int:
     parser.add_argument("--missing-results", default=str(DEFAULT_MISSING_RESULTS))
     parser.add_argument("--force", action="store_true", help="overwrite existing output Excel files")
     args = parser.parse_args()
+    require_legacy_writer()
 
     root = Path(args.root) if args.root else configured_root()
     output_root = Path(args.output_root) if args.output_root else default_output_root(root)

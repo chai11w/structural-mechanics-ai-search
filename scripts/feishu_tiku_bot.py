@@ -32,7 +32,8 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from multi_agent_pipeline import MultiAgentCoordinator, is_auto_chapter  # noqa: E402
-from search import ANSWER_OUTPUT, DISPLAY_MAX_RESULTS, answer, cfg  # noqa: E402
+from search import ANSWER_OUTPUT, DISPLAY_MAX_RESULTS, answer, cfg, find_answer_files  # noqa: E402
+from tiku_shared.bank_versions import store_root  # noqa: E402
 from scripts.chapter_judgment_log import append_chapter_judgment_log  # noqa: E402
 from scripts.admin_fee_query import (  # noqa: E402
     AdminFeeQueryService,
@@ -847,11 +848,7 @@ class TikuBot:
                 images=[selected],
             )
 
-        before = answer_output_files()
-        answer(choice)
-        after = answer_output_files()
-        new_files = [path for path in after if path not in before]
-        answer_images = new_files or after[-3:]
+        answer_images = self._answer_images(session, choice)
         self.sessions.save(sender, session)
         if not answer_images:
             return BotResponse(
@@ -888,15 +885,23 @@ class TikuBot:
             self.sessions.clear(sender)
             return BotResponse(texts=[f"[dry-run] 将发送第 {choice} 名答案。"], images=[selected])
 
-        before = answer_output_files()
-        answer(choice)
-        after = answer_output_files()
-        new_files = [path for path in after if path not in before]
-        answer_images = new_files or after[-3:]
+        answer_images = self._answer_images(session, choice)
         self.sessions.clear(sender)
         if not answer_images:
             return BotResponse(texts=["已执行答案提取，但没有找到输出图片。"])
         return BotResponse(texts=[f"第 {choice} 名答案："], images=answer_images)
+
+    @staticmethod
+    def _answer_images(session: TikuSession, choice: int) -> list[Path]:
+        if store_root() is not None:
+            # The selected session candidate pins its own bank version. Never use
+            # another search's global rank cache or clear a shared output folder.
+            return find_answer_files(session.results[choice - 1]["path"])
+        before = answer_output_files()
+        answer(choice)
+        after = answer_output_files()
+        new_files = [path for path in after if path not in before]
+        return new_files or after[-3:]
 
 
 class MockCoordinator:

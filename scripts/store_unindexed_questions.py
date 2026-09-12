@@ -124,6 +124,8 @@ def existing_rels(ws, question_col: int) -> set[str]:
 
 
 def backup_workbook(path: Path, backup_dir: Path, bank: str) -> Path | None:
+    from tiku_shared.bank_versions import require_legacy_writer
+    require_legacy_writer()
     if not path.exists():
         return None
     target_dir = backup_dir / bank
@@ -142,11 +144,15 @@ def append_plans_to_workbook(
     dry_run: bool,
     backup_dir: Path,
 ) -> ApplyResult:
+    from tiku_shared.bank_versions import require_legacy_writer
+    if not dry_run:
+        require_legacy_writer()
     result = ApplyResult(workbook=str(workbook), bank=bank, dry_run=dry_run)
     if not plans:
         return result
 
-    workbook.parent.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        workbook.parent.mkdir(parents=True, exist_ok=True)
     wb, ws, headers = ensure_workbook(workbook)
     question_col = headers["题目名称"]
     loads_col = headers["荷载"]
@@ -307,6 +313,9 @@ def apply_ready_plans(
     dry_run: bool,
     backup_dir: Path,
 ) -> list[ApplyResult]:
+    from tiku_shared.bank_versions import require_legacy_writer
+    if not dry_run:
+        require_legacy_writer()
     grouped: dict[tuple[str, str], list[StorePlan]] = defaultdict(list)
     for plan in plans:
         if plan.status != "ready" or not plan.target_excel or not plan.target_bank:
@@ -424,6 +433,8 @@ def main() -> int:
     parser.add_argument("--output-dir", help="report output directory")
     parser.add_argument("--apply", action="store_true", help="write ready records to Excel; default is dry-run")
     args = parser.parse_args()
+    from tiku_shared.bank_versions import require_legacy_writer
+    require_legacy_writer()
 
     root = Path(args.root)
     symbolic = Path(args.symbolic_root) if args.symbolic_root else symbolic_root(root)
