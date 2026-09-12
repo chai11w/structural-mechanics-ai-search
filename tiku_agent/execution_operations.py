@@ -108,6 +108,7 @@ class OperationStore:
             create_handoff_schema(conn)
             from tiku_agent.execution_units import create_unit_schema
             create_unit_schema(conn)
+            self.background_required = conn.execute("SELECT 1 FROM execution_meta WHERE key='dispatch_schema'").fetchone() is not None
 
     @property
     def current_producer(self):
@@ -194,7 +195,7 @@ class OperationStore:
             ).fetchone():
                 raise ExecutionError("EXECUTION_COST_PENDING")
 
-    def register(self, sid, identity, request, kind, inputs):
+    def register(self, sid, identity, request, kind, inputs, *, dispatch=False):
         req = OperationRequest.parse(request)
         producer = self.producer_for(kind)
         key = session_key(sid)
@@ -202,6 +203,9 @@ class OperationStore:
         store = self.authority
         with store.transaction() as conn:
             now = store.clock(conn)
+            if not dispatch and kind not in {"clear", "control_execution", "recover_operation"}:
+                if conn.execute("SELECT 1 FROM execution_meta WHERE key='dispatch_schema'").fetchone():
+                    raise ExecutionError("EXECUTION_BACKGROUND_REQUIRED")
             self.verify_owner(sid,identity,claim=True)
             row = conn.execute("SELECT * FROM execution_operations WHERE session=? AND epoch=? AND identity=? AND op_key=?",
                                (key, req.epoch, digest(identity), req.key)).fetchone()
@@ -240,7 +244,7 @@ class OperationStore:
                          (operation_id,key,req.epoch,digest(identity),req.key,kind,fingerprint,req.state_version,producer,canonical(target),previous[0] if previous else None,"REGISTERED",now,now))
             return dict(conn.execute("SELECT * FROM execution_operations WHERE id=?",(operation_id,)).fetchone())
 
-    def claim(self, operation_id):
+    def claim(self, operation_id, *, dispatch=False):
         store = self.authority
         failure = None
         writer = None
@@ -249,6 +253,9 @@ class OperationStore:
             row = conn.execute("SELECT * FROM execution_operations WHERE id=?",(operation_id,)).fetchone()
             if row is None:
                 raise ExecutionError("EXECUTION_STALE")
+            if not dispatch and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_dispatch'").fetchone():
+                if conn.execute("SELECT 1 FROM execution_dispatch WHERE operation_id=?", (operation_id,)).fetchone():
+                    raise ExecutionError("EXECUTION_BACKGROUND_REQUIRED")
             if row["producer"] != self.producer_for(row["kind"]):
                 raise ExecutionError("EXECUTION_STALE")
             if row["status"] != "REGISTERED":

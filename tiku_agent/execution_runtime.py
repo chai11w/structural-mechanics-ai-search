@@ -176,6 +176,53 @@ def decode_response(payload):
     return response
 
 
+def execute_claimed(runtime, session_id, writer, execute, *, admission_check=None):
+    """Run a previously claimed operation under the original effect/receipt boundary."""
+    operations = runtime.execution_operations
+    store = operations.authority
+    stop = threading.Event()
+    def heartbeat():
+        while not stop.wait(max(0.05,store.policy.lease_seconds / 3)):
+            try:
+                operations.renew(writer)
+            except Exception:
+                return
+    worker = threading.Thread(target=heartbeat,daemon=True,name="tiku-execution-lease")
+    token = _WRITER.set(writer)
+    worker.start()
+    try:
+        from tiku_shared.model_costs import model_run_binding
+        from tiku_shared.execution_hooks import execution_effect_scope
+        from tiku_agent.execution_effects import ExecutionEffects
+        ledgers = [getattr(target, "cost_ledger", None) for target in (runtime, getattr(runtime, "a2_runtime", None))]
+        ledger_paths = [ledger.path for ledger in ledgers if ledger is not None and getattr(ledger, "path", None) is not None]
+        artifact_roots = [target.artifacts.root for target in (runtime, getattr(runtime, "a2_runtime", None)) if target is not None and getattr(target, "artifacts", None) is not None]
+        with model_run_binding(lambda run_id:operations.bind_cost_run(writer,run_id)), execution_effect_scope(ExecutionEffects(operations, writer, ledger_paths=ledger_paths, artifact_roots=artifact_roots, admission_check=admission_check)):
+            response = execute()
+            child_runtime=getattr(runtime,"a2_runtime",runtime)
+            await_background=getattr(child_runtime,"_await_background_image_work",None)
+            if callable(await_background):
+                await_background(session_id)
+        encoded = encode_response(response)
+        context = operations.finish(writer,encoded,reset=False)
+        if hasattr(response,"text"):
+            response.execution_context = context
+            response.execution_receipt = {"operation_id":writer.operation_id,"attempt_id":writer.attempt_id,"status":"SUCCEEDED","replayed":False}
+        return response
+    except BaseException as exc:
+        try:
+            operations.fail(writer, known_not_started=(
+                type(exc).__name__ in {"_ExecutionCancelled","AgentRuntimeBusyError","AgentBudgetExceededError"}
+                or isinstance(exc, ExecutionError) and exc.code == "EXECUTION_COST_PENDING"))
+        except Exception:
+            pass  # a persisted RUNNING record will become UNKNOWN; never replay it
+        raise
+    finally:
+        stop.set()
+        worker.join(timeout=1)
+        _WRITER.reset(token)
+
+
 def execution_entry(method):
     """Opt-in boundary. Internal A3→A2 calls inherit the same fenced attempt."""
     signature = inspect.signature(method)
@@ -196,6 +243,8 @@ def execution_entry(method):
                 raise ExecutionError("EXECUTION_STALE")
             operations.renew(current)
             return method(runtime,session_id,*args,**kwargs)
+        if operations.background_required and method.__name__ != "clear":
+            raise ExecutionError("EXECUTION_BACKGROUND_REQUIRED")
         request_context = _REQUEST.get()
         raw_request = explicit if explicit is not None else (request_context[0] if request_context else None)
         identity = request_context[1] if request_context else (kwargs.get("identity_key") or "local")
@@ -219,47 +268,7 @@ def execution_entry(method):
                     response.execution_receipt = {"operation_id":row["id"],"status":"SUCCEEDED","replayed":True}
                 return response
             writer = operations.claim(row["id"])
-            stop = threading.Event()
-            def heartbeat():
-                while not stop.wait(max(0.05,store.policy.lease_seconds / 3)):
-                    try:
-                        operations.renew(writer)
-                    except Exception:
-                        return
-            worker = threading.Thread(target=heartbeat,daemon=True,name="tiku-execution-lease")
-            token = _WRITER.set(writer)
-            worker.start()
-            try:
-                from tiku_shared.model_costs import model_run_binding
-                from tiku_shared.execution_hooks import execution_effect_scope
-                from tiku_agent.execution_effects import ExecutionEffects
-                ledgers = [getattr(target, "cost_ledger", None) for target in (runtime, getattr(runtime, "a2_runtime", None))]
-                ledger_paths = [ledger.path for ledger in ledgers if ledger is not None and getattr(ledger, "path", None) is not None]
-                artifact_roots = [target.artifacts.root for target in (runtime, getattr(runtime, "a2_runtime", None)) if target is not None and getattr(target, "artifacts", None) is not None]
-                with model_run_binding(lambda run_id:operations.bind_cost_run(writer,run_id)), execution_effect_scope(ExecutionEffects(operations, writer, ledger_paths=ledger_paths, artifact_roots=artifact_roots)):
-                    response = method(runtime,session_id,*args,**kwargs)
-                    child_runtime=getattr(runtime,"a2_runtime",runtime)
-                    await_background=getattr(child_runtime,"_await_background_image_work",None)
-                    if callable(await_background):
-                        await_background(session_id)
-                encoded = encode_response(response)
-                context = operations.finish(writer,encoded,reset=method.__name__=="clear")
-                if hasattr(response,"text"):
-                    response.execution_context = context
-                    response.execution_receipt = {"operation_id":row["id"],"attempt_id":writer.attempt_id,"status":"SUCCEEDED","replayed":False}
-                return response
-            except BaseException as exc:
-                try:
-                    operations.fail(writer, known_not_started=(
-                        type(exc).__name__ in {"_ExecutionCancelled","AgentRuntimeBusyError","AgentBudgetExceededError"}
-                        or isinstance(exc, ExecutionError) and exc.code == "EXECUTION_COST_PENDING"))
-                except Exception:
-                    pass  # a persisted RUNNING record will become UNKNOWN; never replay it
-                raise
-            finally:
-                stop.set()
-                worker.join(timeout=1)
-                _WRITER.reset(token)
+            return execute_claimed(runtime, session_id, writer, lambda: method(runtime,session_id,*args,**kwargs))
         except ExecutionError as exc:
             from tiku_agent.session_runtime import AgentProtocolError
             raise AgentProtocolError(execution_message(exc.code),code=exc.code) from exc
