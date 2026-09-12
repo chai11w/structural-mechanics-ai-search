@@ -286,6 +286,57 @@ class PublicationStore:
         with self.connection() as db:
             return self._public(self._row(db, operation_id))
 
+    def _history_locked(self, principal):
+        """Only publications on the actual current ancestry are rollback targets."""
+        current = self.current()
+        cursor, seen = pointer_identity(current), set()
+        with self.connection() as db:
+            while cursor:
+                if cursor["operation_id"] in seen or len(seen) >= 100000:
+                    raise PublicationError("publication-history-invalid")
+                seen.add(cursor["operation_id"])
+                row = self._row(db, cursor["operation_id"])
+                plan = json.loads(row["plan"])
+                expected = {"schema": 1, "operation_id": row["id"], "version": plan["candidate_version"],
+                    "revision": (plan["base"]["revision"] if plan["base"] else 0) + 1,
+                    "parent": pointer_identity(plan["base"])}
+                result = json.loads(row["result"]) if row["result"] else None
+                if row["state"] != "published" or result != expected or cursor != pointer_identity(result):
+                    raise PublicationError("publication-history-invalid")
+                if len(seen) == 1 and (result != current or plan["requested_by"]["principal"] != principal):
+                    raise PublicationError("publication-not-owned")
+                if plan["requested_by"]["principal"] == principal:
+                    at = db.execute("SELECT MIN(at) FROM audit WHERE operation_id=? AND event='published'", (row["id"],)).fetchone()[0]
+                    yield {**result, "published_at": at, "kind": plan["summary"].get("kind", "changes" if plan["base"] else "installation"),
+                           "changed_records": len(plan["summary"].get("changes", []))}
+                cursor = result["parent"]
+
+    def history(self, *, principal, before=None, limit=20):
+        self.identity(principal, "installation")
+        if (before is not None and (type(before) is not int or before < 1)
+                or type(limit) is not int or not 1 <= limit <= 50):
+            raise PublicationError("invalid-history-page")
+        with write_lock(self.lock):
+            self._recover_locked()
+            items = []
+            for item in self._history_locked(principal):
+                if before is None or item["revision"] < before:
+                    items.append(item)
+                    if len(items) > limit:
+                        break
+            return {"current": self.current(), "items": items[:limit],
+                    "next_before": items[limit - 1]["revision"] if len(items) > limit else None}
+
+    def historical(self, operation_id, *, principal):
+        self.operation_id(operation_id)
+        self.identity(principal, "installation")
+        with write_lock(self.lock):
+            self._recover_locked()
+            for item in self._history_locked(principal):
+                if item["operation_id"] == operation_id:
+                    return {key: item[key] for key in ("schema", "revision", "version", "operation_id", "parent")}
+        raise PublicationError("rollback-target-not-published")
+
     def prepare(self, operation_id, *, expected, summary, principal, channel):
         """Seal a writer-owned candidate built by the typed bank mutation service."""
         identity = self.identity(principal, channel)
