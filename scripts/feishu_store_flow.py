@@ -192,6 +192,8 @@ class FeishuStoreService:
         )
 
     def apply_plan(self, draft: StoreDraft) -> StoreApplyResult:
+        from tiku_shared.bank_versions import require_legacy_writer
+        require_legacy_writer()
         plan = self.prepare_plan(draft)
         if self.dry_run:
             return StoreApplyResult(plan=plan, dry_run=True)

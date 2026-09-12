@@ -94,6 +94,8 @@ class FeishuDeleteService:
         )
 
     def apply_plan(self, plan: DeletePlan) -> DeleteApplyResult:
+        from tiku_shared.bank_versions import require_legacy_writer
+        require_legacy_writer()
         if self.dry_run:
             return DeleteApplyResult(plan=plan, dry_run=True)
 

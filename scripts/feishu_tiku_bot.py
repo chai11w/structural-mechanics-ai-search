@@ -63,6 +63,9 @@ from scripts.feishu_store_flow import (  # noqa: E402
     is_store_entry_command,
 )
 from tiku_agent.a3_text_orientation import RapidOcrTextPageOrienter  # noqa: E402
+from scripts.feishu_event_security import (  # noqa: E402
+    EventSecurityError, FeishuEventVerifier, MAX_EVENT_BYTES, verified_sender, require_maintainer,
+)
 from tiku_shared.multi_question import (  # noqa: E402
     build_block_contact_sheet as _build_block_contact_sheet,
     chinese_question_number_to_int as _chinese_question_number_to_int,
@@ -110,6 +113,8 @@ class FeishuTikuOptions:
     app_id: str = ""
     app_secret: str = ""
     verification_token: str | None = None
+    encrypt_key: str | None = None
+    maintenance_sender_ids: tuple[str, ...] = ()
     dry_run: bool = False
     session_ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS
     temp_dir: Path = BASE / ".tmp_feishu_tiku"
@@ -347,9 +352,14 @@ class TikuBot:
             )
         return enrolled
 
+    def _require_maintenance(self, sender: str) -> None:
+        if self.options.maintenance_sender_ids or os.environ.get("TIKU_BANK_STORE"):
+            require_maintainer(sender, self.options.maintenance_sender_ids)
+
     def receive_image(self, sender: str, image_path: Path) -> BotResponse:
         session = self.sessions.get(sender)
         if session.state in STORE_STATES:
+            self._require_maintenance(sender)
             return self._handle_store_image(sender, session, image_path)
 
         if self.chapter_mode(sender) == CHAPTER_MODE_AUTO:
@@ -374,11 +384,13 @@ class TikuBot:
             return self._handle_delete_confirmation(sender, session, clean)
 
         if is_store_entry_command(clean):
+            self._require_maintenance(sender)
             session = TikuSession(state="store_waiting_question")
             self.sessions.save(sender, session)
             return BotResponse(texts=["已进入新增题目模式，请发送题目图。\n\n0  取消"])
 
         if session.state in STORE_STATES:
+            self._require_maintenance(sender)
             return self._handle_store_text(sender, session, clean)
 
         if session.state in {"waiting_multi_question", "waiting_multi_choice"} and clean == "0":
@@ -456,6 +468,7 @@ class TikuBot:
     ) -> BotResponse:
         if choice < 1 or choice > len(session.results):
             return BotResponse(texts=[f"当前只有 {len(session.results)} 个候选，请回复 -1 到 -{len(session.results)} 删除。"])
+        self._require_maintenance(sender)
         try:
             plan = self.delete_service.prepare_plan(
                 session.results[choice - 1],
@@ -472,6 +485,7 @@ class TikuBot:
         return BotResponse(texts=[format_delete_confirmation(plan)])
 
     def _handle_delete_confirmation(self, sender: str, session: TikuSession, clean: str) -> BotResponse:
+        self._require_maintenance(sender)
         if clean == "0":
             session.state = session.delete_return_state or "waiting_choice"
             session.pending_delete = None
@@ -1069,17 +1083,40 @@ class FeishuTikuBridge:
         self.client = client
         self.options = options
         self._seen_event_ids = RecentEventIdCache()
+        strict = bool(options.encrypt_key or options.maintenance_sender_ids or os.environ.get("TIKU_BANK_STORE"))
+        self.verifier = FeishuEventVerifier(encrypt_key=options.encrypt_key,
+            verification_token=options.verification_token, app_id=options.app_id) if strict else None
+
+    def handle_request(self, raw: bytes, headers) -> dict[str, Any]:
+        if self.verifier:
+            try:
+                callback = self.verifier.verify(raw, headers)
+                return self._handle_payload(callback.payload, callback)
+            except EventSecurityError as error:
+                return {"ok": False, "error": str(error)}
+        try:
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError()
+        except (ValueError, UnicodeError):
+            return {"ok": False, "error": "invalid json"}
+        return self.handle_payload(payload)
 
     def handle_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.verifier:
+            return {"ok": False, "error": "verified-event-required"}
+        return self._handle_payload(payload)
+
+    def _handle_payload(self, payload: dict[str, Any], callback=None) -> dict[str, Any]:
         if "encrypt" in payload:
             return {"ok": False, "error": "encrypted events are not supported in MVP"}
 
         if is_url_verification(payload):
-            if not self._valid_token(payload):
+            if callback is None and not self._valid_token(payload):
                 return {"ok": False, "error": "invalid verification token"}
             return {"challenge": payload.get("challenge")}
 
-        if not self._valid_token(payload):
+        if callback is None and not self._valid_token(payload):
             return {"ok": False, "error": "invalid verification token"}
 
         header = payload.get("header") or {}
@@ -1094,7 +1131,7 @@ class FeishuTikuBridge:
         event = payload.get("event") or {}
         message = event.get("message") or {}
         message_id = str(message.get("message_id") or "")
-        sender = extract_sender(event)
+        sender = callback.sender if callback else extract_sender(event)
         if not message_id:
             return {"ok": True, "ignored": "missing-message-id"}
         if is_stale_message(extract_message_created_at(payload, event, message), self.options.max_message_age_seconds):
@@ -1103,17 +1140,21 @@ class FeishuTikuBridge:
 
         thread = threading.Thread(
             target=self._process_and_reply,
-            args=(message_id, sender, message),
+            args=(message_id, sender, message, callback),
             daemon=True,
         )
         thread.start()
         return {"ok": True, "accepted": message_id}
 
-    def _process_and_reply(self, message_id: str, sender: str, message: dict[str, Any]) -> None:
+    def _process_and_reply(self, message_id: str, sender: str, message: dict[str, Any], callback=None) -> None:
         try:
-            response = self._response_for_message(message_id, sender, message)
+            if self.verifier:
+                with verified_sender(callback):
+                    response = self._response_for_message(message_id, sender, message)
+            else:
+                response = self._response_for_message(message_id, sender, message)
         except Exception as exc:
-            response = BotResponse(texts=[f"处理失败：{exc}"])
+            response = BotResponse(texts=["处理未完成，请查询当前状态后重试。" if self.verifier else f"处理失败：{exc}"])
         for text in response.texts:
             self.client.reply_text(message_id, text)
         for image in response.images:
@@ -1171,19 +1212,27 @@ class FeishuHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "not found"}, status=404)
 
     def do_POST(self) -> None:
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length).decode("utf-8")
         try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            self._send_json({"ok": False, "error": "invalid json"}, status=400)
+            lengths = self.headers.get_all("Content-Length", [])
+            if len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,8}", lengths[0]) or self.headers.get("Transfer-Encoding"):
+                raise ValueError()
+            length = int(lengths[0])
+            if not 0 < length <= MAX_EVENT_BYTES:
+                raise ValueError()
+        except ValueError:
+            self._send_json({"ok": False, "error": "invalid event size"}, status=400)
             return
 
         if self.path not in {"/feishu/events", "/"}:
             self._send_json({"ok": False, "error": "not found"}, status=404)
             return
 
-        result = self.bridge.handle_payload(payload)
+        self.connection.settimeout(15)
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            self._send_json({"ok": False, "error": "incomplete event"}, status=400)
+            return
+        result = self.bridge.handle_request(raw, self.headers)
         status = 200 if result.get("ok", True) else 403
         self._send_json(result, status=status)
 
@@ -1782,6 +1831,8 @@ def load_options(args: argparse.Namespace) -> FeishuTikuOptions:
         app_id=app_id,
         app_secret=app_secret,
         verification_token=verification_token,
+        encrypt_key=get_env_or_user("FEISHU_ENCRYPT_KEY") or cfg.get("feishu_encrypt_key"),
+        maintenance_sender_ids=normalize_admin_sender_ids(cfg.get("feishu_bank_maintainer_ids")),
         dry_run=args.dry_run,
         session_ttl_seconds=args.session_ttl_minutes * 60,
         temp_dir=Path(args.temp_dir),
