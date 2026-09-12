@@ -594,7 +594,7 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260911-error-truth-v1"'
+        demo_asset = 'src="/assets/demo.js?v=20260912-recovery-guards-v1"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
@@ -1438,6 +1438,9 @@ const repairSessionSource = block(
 const retireSessionSource = block('function retireSessionForExternalReset(', 'function expireHistoryIfNeeded()');
 const restoreHistorySource = block('function restoreHistory()', 'function flushStartupNotices()');
 const expirySource = block('function expireHistoryIfNeeded()', 'function showSessionExpiredNotice()');
+const expiryScheduleSource = block('function scheduleHistoryExpiry(', 'function createRequestId()');
+const retryConnectionSource = block('async function retryConnection()', 'form.addEventListener');
+const saveHistorySource = block('function saveHistory(', 'function releaseObjectUrl');
 
 const createHarness = new Function('taskStateV1', 'sharedSessionStorage', 'controls', `
   controls ||= {};
@@ -1542,6 +1545,7 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', 'contr
   function setTimeout(callback, delay) {
     const id = ++timerId;
     timeoutDelays.push(Number(delay));
+    controls.onTimer?.({ id, callback, delay: Number(delay) });
     if (immediateTimeout) callback();
     else if (Number(delay) === SESSION_FALLBACK_LOCK_POLL_MS) {
       controls.onFallbackPoll?.(Number(delay), sharedStorage);
@@ -1573,8 +1577,9 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', 'contr
     closeLightbox();
   }
   function restoreA3CropHistoryState() {}
-  function scheduleHistoryExpiry() {}
-  function retryConnection() {}
+  ${expiryScheduleSource}
+  const reconnect = ${retryConnectionSource};
+  function retryConnection() { if (controls.autoReconnect) return reconnect(); }
   function closeLightbox() {}
   function showSessionExpiredNotice() {}
   function showServerSessionGoneNotice() {}
@@ -1585,7 +1590,8 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', 'contr
   function showFailureNotice(key, message, recoveryActions = [], protocol = {}) {
     failureNotices.push({ key, message, recoveryActions, protocol });
   }
-  function saveHistory() {}
+  const persistHistory = ${saveHistorySource};
+  function saveHistory(options) { if (controls.persistHistory) return persistHistory(options); }
   function isLegacyInlineOnlyMessage() { return false; }
   function currentChildActionTarget() { return null; }
   function normalizeAuthorContact() { return null; }
@@ -1925,6 +1931,7 @@ const createHarness = new Function('taskStateV1', 'sharedSessionStorage', 'contr
     resolvedFailureNotices: () => [...resolvedFailureNotices],
     statusUpdates: () => structuredClone(statusUpdates),
     timeoutDelays: () => [...timeoutDelays],
+    expiryTimer: () => historyExpiryTimer,
     commitExternalReset: (eventId) => {
       localStorage.setItem(SESSION_RESET_EVENT_KEY, eventId);
       localStorage.removeItem(SESSION_ACTIVITY_KEY);
@@ -1968,6 +1975,43 @@ function completedAnswerEnvelope(targetHarness, raw, unitId = 'g1-u1') {
 }
 
 (async () => {
+  // Registered errors without a complete ACK are display-only, even if they
+  // carry a valid empty snapshot. They must not reset this or another tab.
+  for (const ack of [false,
+    () => ({ version: '5', completed_fences: [] }),
+    (ids) => ({ version: '6', completed_fences: ids.slice(0, -1) }),
+    (ids) => ({ version: '6', completed_fences: [...ids, 'unexpected-fence'] }),
+    true,
+  ]) {
+    for (const mode of ['json', 'stream-http-error', 'stream-error']) {
+      const h = createHarness(taskStateV1);
+      h.setStoredHistory({ lastActivityAt: Date.now(), messages: [{ message: 'keep my conversation' }] });
+      h.restoreHistory();
+      const error = {
+        status: 'ERROR', layer: 'tool', code: 'SERVICE_UNAVAILABLE',
+        retryable: true, action: 'retry_request', message: 'temporary outage',
+        task_state: fixtures.empty,
+      };
+      if (mode === 'stream-error') h.queueEvent({ type: 'error', ...error }, { ack });
+      else h.queueHttpError(error, 503, { ack });
+      const failure = await (mode === 'json'
+        ? h.request('/api/message', { method: 'POST' }, 1000, 'timeout')
+        : h.requestStream('/api/message/stream', { method: 'POST' }, 1000, 'timeout')
+      ).then(() => null, (reason) => reason);
+      assert.equal(failure?.code, 'SERVICE_UNAVAILABLE', mode);
+      assert.equal(h.historyLength(), ack === true ? 0 : 1, mode);
+      assert.equal(h.clearHistoryCount(), ack === true ? 1 : 0, mode);
+      assert.equal(h.resetEvents().length, ack === true ? 1 : 0, mode);
+      assert.equal(Boolean(h.requestFenceId()), ack !== true, mode);
+      if (ack !== true) {
+        assert.deepEqual(h.lifecycle().slice(-2), ['begin', 'finish'], mode);
+        h.queueJson(h.envelope(fixtures.a3));
+        assert.equal(await h.runSessionBootstrap(), true);
+        assert.equal(h.requestFenceId(), '');
+        assert.equal(h.historyLength(), 1);
+      }
+    }
+  }
   for (const [name, terminalSnapshot] of [
     ['wait-next-unit', fixtures.a3_answer_wait],
     ['complete-page', fixtures.a3_answer_complete],
@@ -3226,7 +3270,11 @@ function completedAnswerEnvelope(targetHarness, raw, unitId = 'g1-u1') {
 
   // Same local verdict, but the server still has this conversation: the local
   // clock was wrong, so nothing may be reset or deleted.
-  const locallyExpiredHarness = createHarness(taskStateV1);
+  const expiryTimers = [];
+  const locallyExpiredHarness = createHarness(taskStateV1, null, {
+    onTimer: (timer) => expiryTimers.push(timer),
+    autoReconnect: true,
+  });
   locallyExpiredHarness.setStoredHistory({
     lastActivityAt: Date.now() - (2 * 60 * 60 * 1000) - 1,
     messages: [{ message: 'expired locally but alive on the server' }],
@@ -3242,6 +3290,45 @@ function completedAnswerEnvelope(targetHarness, raw, unitId = 'g1-u1') {
   assert.equal(locallyExpiredHarness.clearHistoryCount(), 0);
   assert.equal(locallyExpiredHarness.historyLength(), 1);
   assert.equal(locallyExpiredHarness.resetEvents().length, 0);
+
+  const originalActivity = locallyExpiredHarness.historyActivityAt();
+  for (let check = 0; check < 2; check += 1) {
+    const timer = expiryTimers.find((item) => item.id === locallyExpiredHarness.expiryTimer());
+    assert.ok(timer, 'a live server session must schedule another expiry check');
+    assert.ok(timer.delay > 0 && timer.delay <= 60000, 'recheck must be bounded without a tight loop');
+    locallyExpiredHarness.queueJson(locallyExpiredHarness.envelope(fixtures.a3));
+    const readsBefore = locallyExpiredHarness.fetchUrls().length;
+    timer.callback();
+    assert.equal(locallyExpiredHarness.resetRequired(), true);
+    assert.equal(await locallyExpiredHarness.runSessionBootstrap(), true);
+    assert.equal(locallyExpiredHarness.fetchUrls().length, readsBefore + 1, 'timer must reconnect automatically');
+    assert.equal(locallyExpiredHarness.historyActivityAt(), originalActivity, 'reads must not extend local activity');
+    assert.equal(locallyExpiredHarness.clearHistoryCount(), 0);
+  }
+  const finalExpiryTimer = expiryTimers.find((item) => item.id === locallyExpiredHarness.expiryTimer());
+  locallyExpiredHarness.queueJson({ ok: true, session: { session_valid: false }, task_state: fixtures.empty });
+  locallyExpiredHarness.queueJson({ ok: true, task_state: fixtures.empty });
+  finalExpiryTimer.callback();
+  assert.equal(await locallyExpiredHarness.runSessionBootstrap(), true);
+  assert.equal(locallyExpiredHarness.historyLength(), 0, 'confirmed expiry still clears history');
+  assert.equal(locallyExpiredHarness.expiryTimer(), null);
+
+  const repairedImageHarness = createHarness(taskStateV1, null, { persistHistory: true });
+  const imageActivity = Date.now() - (2 * 60 * 60 * 1000) - 1;
+  repairedImageHarness.setStoredHistory({
+    lastActivityAt: imageActivity,
+    messages: [{ me: true, message: '我发了一张题图。', images: [] }],
+  });
+  repairedImageHarness.restoreHistory();
+  repairedImageHarness.queueJson({
+    ...repairedImageHarness.envelope(fixtures.a3), uploaded_image: '/api/media/restored.jpg',
+  });
+  assert.equal(await repairedImageHarness.runSessionBootstrap(), true);
+  assert.deepEqual(repairedImageHarness.historyMessages()[0].images, ['/api/media/restored.jpg']);
+  assert.equal(repairedImageHarness.historyActivityAt(), imageActivity);
+  assert.equal(repairedImageHarness.resetRequired(), false, 'saving repaired media must not restart expiry');
+  assert.notEqual(repairedImageHarness.expiryTimer(), null);
+  assert.equal(await repairedImageHarness.sessionTaskStartAllowed(), true);
 
   const deferredResetHarness = createHarness(taskStateV1);
   deferredResetHarness.setStoredHistory({

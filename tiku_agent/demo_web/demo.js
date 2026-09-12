@@ -262,19 +262,22 @@ function normalizeFeedbackImages(value) {
   })).filter((item) => item.kind === 'a3_overlay' && isPersistentImage(item.url));
 }
 
-function scheduleHistoryExpiry() {
+function scheduleHistoryExpiry({ serverConfirmedAlive = false } = {}) {
   if (historyExpiryTimer !== null) clearTimeout(historyExpiryTimer);
   historyExpiryTimer = null;
   if (!history.length || !Number.isFinite(historyLastActivityAt) || historyLastActivityAt <= 0) return;
   const remaining = historyLastActivityAt + conversationTtlMs - Date.now();
-  if (remaining <= 0) {
+  if (remaining <= 0 && !serverConfirmedAlive) {
     expireHistoryIfNeeded();
     return;
   }
+  // A server-confirmed live session can outlast the local deadline (for
+  // example after a device clock correction). Recheck without extending the
+  // last activity time or immediately asking the same question in a loop.
   historyExpiryTimer = setTimeout(() => {
     historyExpiryTimer = null;
     expireHistoryIfNeeded();
-  }, remaining);
+  }, remaining > 0 ? remaining : Math.min(conversationTtlMs, 60 * 1000));
 }
 
 function createRequestId() {
@@ -1616,7 +1619,7 @@ function clientProtocolError(message, code, requestId, recoveryActions = ['retry
   });
 }
 
-function saveHistory({ refreshActivity = false } = {}) {
+function saveHistory({ refreshActivity = false, serverConfirmedAlive = false } = {}) {
   if (refreshActivity || !Number.isFinite(historyLastActivityAt) || historyLastActivityAt <= 0) {
     historyLastActivityAt = touchSharedSessionActivity();
   } else {
@@ -1636,7 +1639,7 @@ function saveHistory({ refreshActivity = false } = {}) {
       ), 0);
     }
   }
-  scheduleHistoryExpiry();
+  scheduleHistoryExpiry({ serverConfirmedAlive });
 }
 
 function releaseObjectUrl(url) {
@@ -2637,13 +2640,14 @@ async function repairUploadedImageHistory() {
       }
       return true;
     }
+    scheduleHistoryExpiry({ serverConfirmedAlive: true });
     flushStartupNotices();
     if (!isPersistentImage(data.uploaded_image)) return true;
     for (let index = history.length - 1; index >= 0; index -= 1) {
       const item = history[index];
       if (item.me && item.message === '我发了一张题图。' && (!Array.isArray(item.images) || !item.images.length)) {
         item.images = [data.uploaded_image];
-        saveHistory();
+        saveHistory({ serverConfirmedAlive: true });
         renderHistory();
         return true;
       }
@@ -2849,7 +2853,7 @@ function adoptConversationTtl(value) {
   if (nextMs === conversationTtlMs) return;
   conversationTtlMs = nextMs;
   renderConversationTtl();
-  scheduleHistoryExpiry();
+  scheduleHistoryExpiry({ serverConfirmedAlive: sessionContext.session_valid === true });
 }
 
 function renderConversationTtl() {
@@ -3242,13 +3246,13 @@ async function request(
         throw safeHttpError(response.status, data, requestId);
       }
       const registeredError = isRegisteredErrorEnvelope(data);
-      if (registeredError) {
-        // Keep the fence pending so the next action still reconciles it, but
-        // report what the server said instead of a coordination complaint.
+      if (registeredError && !sessionRequestFenceAcknowledgedByEnvelope(data, sessionRequestFence)) {
+        // An unacknowledged error is display-only. Do not consume its state or
+        // let an empty snapshot clear history and broadcast a cross-tab reset.
         preserveSessionRequestFence(sessionRequestFence);
-      } else {
-        assertSessionRequestFenceAcknowledged(data, sessionRequestFence);
+        throw safeHttpError(response.status, data, requestId);
       }
+      assertSessionRequestFenceAcknowledged(data, sessionRequestFence);
       consumeTaskStateResponse(taskStateRequest, data, { error: true });
       const fenceResolved = resolveSessionRequestFenceFromEnvelope(
         data,
@@ -3362,13 +3366,12 @@ async function requestStream(
         throw safeHttpError(response.status, data, requestId);
       }
       const registeredError = isRegisteredErrorEnvelope(data);
-      if (registeredError) {
-        // Keep the fence pending so the next action still reconciles it, but
-        // report what the server said instead of a coordination complaint.
+      if (registeredError && !sessionRequestFenceAcknowledgedByEnvelope(data, sessionRequestFence)) {
+        // Match the JSON transport: report the error without adopting state.
         preserveSessionRequestFence(sessionRequestFence);
-      } else {
-        assertSessionRequestFenceAcknowledged(data, sessionRequestFence);
+        throw safeHttpError(response.status, data, requestId);
       }
+      assertSessionRequestFenceAcknowledged(data, sessionRequestFence);
       consumeTaskStateResponse(taskStateRequest, data, { error: true });
       const fenceResolved = resolveSessionRequestFenceFromEnvelope(
         data,
@@ -3437,11 +3440,11 @@ async function requestStream(
             { authoritativeResponse: true },
           );
           const registeredError = isRegisteredErrorEnvelope(event);
-          if (registeredError) {
+          if (registeredError && !sessionRequestFenceAcknowledgedByEnvelope(event, sessionRequestFence)) {
             preserveSessionRequestFence(sessionRequestFence);
-          } else {
-            assertSessionRequestFenceAcknowledged(event, sessionRequestFence);
+            throw streamedError(event);
           }
+          assertSessionRequestFenceAcknowledged(event, sessionRequestFence);
           consumeTaskStateResponse(taskStateRequest, event, { error: true });
           const fenceResolved = resolveSessionRequestFenceFromEnvelope(
             event,
