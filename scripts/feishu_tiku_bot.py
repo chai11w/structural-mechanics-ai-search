@@ -115,6 +115,7 @@ class FeishuTikuOptions:
     verification_token: str | None = None
     encrypt_key: str | None = None
     maintenance_sender_ids: tuple[str, ...] = ()
+    bank_management_config: Path | None = None
     dry_run: bool = False
     session_ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS
     temp_dir: Path = BASE / ".tmp_feishu_tiku"
@@ -1086,6 +1087,50 @@ class FeishuTikuBridge:
         strict = bool(options.encrypt_key or options.maintenance_sender_ids or os.environ.get("TIKU_BANK_STORE"))
         self.verifier = FeishuEventVerifier(encrypt_key=options.encrypt_key,
             verification_token=options.verification_token, app_id=options.app_id) if strict else None
+        self.management = None
+        if options.bank_management_config:
+            if options.dry_run:
+                raise ValueError("dry-run 不能启用统一写入；请使用隔离题库验证")
+            if not self.verifier or not os.environ.get("TIKU_BANK_STORE"):
+                raise ValueError("统一写入必须同时配置可信事件和发布题库")
+            file = Path(options.bank_management_config)
+            if file.stat().st_size > 64 * 1024:
+                raise ValueError("飞书管理配置过大")
+            config = json.loads(file.read_bytes())
+            if Path(config["published_store"]).resolve() != Path(os.environ["TIKU_BANK_STORE"]).resolve():
+                raise ValueError("飞书检索与管理必须使用同一发布题库")
+            from scripts.feishu_bank_management import FeishuBankManagement
+            self.management = FeishuBankManagement(config, app_id=options.app_id, maintainers=options.maintenance_sender_ids,
+                client=client, classify=lambda path: bot.store_service.classify_question(path, bot.coordinator),
+                fallback=self._managed_search, candidate=self._managed_candidate, autostart=False)
+            self.management.thread.start()
+
+    @staticmethod
+    def _managed_session_key(event):
+        import hashlib
+        return "feishu-chat-" + hashlib.sha256(json.dumps([event["sender"], event["chat_id"]]).encode()).hexdigest()
+
+    def _managed_candidate(self, event, rank):
+        results = self.bot.sessions.get(self._managed_session_key(event)).results
+        if not 1 <= rank <= len(results):
+            from scripts.bank_writer_client import BankWriteError
+            raise BankWriteError("当前没有该序号的搜索候选，请重新检索")
+        return results[rank - 1]
+
+    def _managed_search(self, event):
+        key = self._managed_session_key(event)
+        if event["kind"] == "text":
+            response = self.bot.receive_text(event["sender"] if is_admin_fee_query(event["text"]) else key, event["text"])
+        else:
+            path = self.management.incoming / (self.management.context(event["message_id"], event["image_key"]) + ".jpg")
+            self.client.download_message_image(event["message_id"], event["image_key"], path)
+            response = self.bot.receive_image(key, path)
+        return {"items": [*[{"text": text} for text in response.texts],
+            *[{"image": self.management._save_image(Path(path).read_bytes())} for path in response.images]]}
+
+    def close(self):
+        if self.management:
+            self.management.close()
 
     def handle_request(self, raw: bytes, headers) -> dict[str, Any]:
         if self.verifier:
@@ -1125,6 +1170,14 @@ class FeishuTikuBridge:
             return {"ok": True, "ignored": event_type or "unknown"}
 
         event_id = str(header.get("event_id") or "")
+        if self.management and callback and callback.sender in self.options.maintenance_sender_ids:
+            message = (payload.get("event") or {}).get("message") or {}
+            if is_stale_message(extract_message_created_at(payload, payload["event"], message), self.options.max_message_age_seconds):
+                return {"ok": True, "ignored": "stale-message"}
+            try:
+                return self.management.admit(callback)
+            except ValueError:
+                return {"ok": False, "error": "invalid-business-event"}
         if event_id and self._seen_event_ids.seen_or_add(event_id):
             return {"ok": True, "duplicate": event_id}
 
@@ -1833,6 +1886,7 @@ def load_options(args: argparse.Namespace) -> FeishuTikuOptions:
         verification_token=verification_token,
         encrypt_key=get_env_or_user("FEISHU_ENCRYPT_KEY") or cfg.get("feishu_encrypt_key"),
         maintenance_sender_ids=normalize_admin_sender_ids(cfg.get("feishu_bank_maintainer_ids")),
+        bank_management_config=Path(os.environ["FEISHU_BANK_MANAGEMENT_CONFIG"]) if os.environ.get("FEISHU_BANK_MANAGEMENT_CONFIG") else None,
         dry_run=args.dry_run,
         session_ttl_seconds=args.session_ttl_minutes * 60,
         temp_dir=Path(args.temp_dir),
@@ -1986,7 +2040,11 @@ def main(argv: list[str] | None = None) -> int:
     server = ThreadingHTTPServer((args.host, args.port), FeishuHandler)
     print(f"Feishu tiku bot listening on http://{args.host}:{args.port}/feishu/events", flush=True)
     print(f"dry_run={options.dry_run}", flush=True)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        FeishuHandler.bridge.close()
     return 0
 
 

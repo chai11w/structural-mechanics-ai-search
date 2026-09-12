@@ -60,6 +60,6 @@ python -B -X utf8 -m unittest discover -s tests -p test_feishu_store_flow.py -q
 python -B -X utf8 -m unittest discover -s tests -p test_multi_agent_rerank_policy.py -q
 ```
 
-平台项目的完整候选构建、语义校验、私有 HTTP 写入服务、任务固定批次、力答所有者页面和回执已连接并通过隔离联调，平台提交为 `d9a4deb`。仍需完成：原题号迁入、回滚计划、飞书持久在线任务与一次确认适配、旧写者完整治理、不同 Windows 服务身份与 NTFS ACL、真实 DeepSeek/跨端/8790 验收及正式部署授权。正式服务禁止通过同一个 Windows 身份访问私有写入状态和生产写权限。
+平台项目的完整候选构建、语义校验、私有 HTTP 写入服务、任务固定批次、力答所有者页面和回执已连接并通过隔离联调，平台基础提交为 `d9a4deb`。飞书已进一步接通持久管理任务、可信消息与后台作业，保留原多答案上传和一次确认，新增、替换答案和删除调用同一服务。具体交互、等待提示、恢复和配置见 [飞书统一写入](feishu-managed-callbacks.md)。仍需完成：原题号迁入、回滚计划、旧写者完整治理、不同 Windows 服务身份与 NTFS ACL、真实 DeepSeek/飞书/跨端/8790 验收及正式部署授权。正式服务禁止通过同一个 Windows 身份访问私有写入状态和生产写权限。
 
 当前文件 fsync、SQLite FULL 和原子替换处理进程中断；Windows 存储设备断电恢复能力还需按实际部署验证。未启用历史版本和遗留 staging 目录的自动清理，以免删除在途候选或恢复所需文件；上线前必须核验备份与版本目录容量和可控保留策略。
