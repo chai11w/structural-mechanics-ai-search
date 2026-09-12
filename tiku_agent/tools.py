@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 import search
+from tiku_shared.bank_versions import pin_bank
 from tiku_shared.execution_hooks import bounded_transport_retries
 from multi_agent_pipeline import (
     AUTO_CHAPTER_MIN_CONFIDENCE,
@@ -112,7 +113,8 @@ def _named_tool(name: str):
         def wrapped(*args, **kwargs):
             started = time.perf_counter()
             try:
-                result = function(*args, **kwargs).with_tool(name)
+                with pin_bank():
+                    result = function(*args, **kwargs).with_tool(name)
             except Exception as exc:
                 _emit_tool_finished(
                     name,
@@ -520,7 +522,7 @@ def coarse_search_tool(
 
     config = config or AgentToolConfig()
     try:
-        excel_root = search.ROOT if route == "main" else symbolic_root(search.ROOT)
+        excel_root = search.bank_root() if route == "main" else symbolic_root(search.bank_root())
         filter_type = normalize_structure_type(structure_type)
         scan = search.scan_chapter_candidates(
             loads,
@@ -858,7 +860,7 @@ def _collect_global_perfect_candidates(
     threshold: float,
     checkpoint_counts: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
-    excel_root = search.ROOT if route == "main" else symbolic_root(search.ROOT)
+    excel_root = search.bank_root() if route == "main" else symbolic_root(search.bank_root())
     filter_type = normalize_structure_type(structure_type)
     by_content: dict[str, dict[str, Any]] = {}
 

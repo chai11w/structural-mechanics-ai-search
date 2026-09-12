@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import search
+from tiku_shared.bank_versions import bank_read, symbolic_root as published_symbolic_root
 from dimensions import (
     PARTICIPATING_STRUCTURE_TYPES,
     dimension_evidence_from_normalized,
@@ -76,8 +77,8 @@ class PipelineResult:
 
 
 def symbolic_root(main_root: Path | None = None) -> Path:
-    root = Path(main_root or search.ROOT)
-    return root.parent / f"{root.name}_字母库"
+    root = Path(main_root or search.bank_root())
+    return published_symbolic_root(root)
 
 
 class QwenClassifier:
@@ -266,9 +267,9 @@ class RuleRouter:
         category, load_details = classify_loads(normalized)
 
         if category in self.MAIN_CATEGORIES:
-            return RouteDecision("main", category, "numeric or assigned-symbol load", search.ROOT), load_details
+            return RouteDecision("main", category, "numeric or assigned-symbol load", search.bank_root()), load_details
         if category == "symbolic_unassigned":
-            return RouteDecision("symbolic", category, "unassigned symbolic load", symbolic_root(search.ROOT)), load_details
+            return RouteDecision("symbolic", category, "unassigned symbolic load", symbolic_root(search.bank_root())), load_details
         if category == "mixed_symbolic_numeric":
             return RouteDecision("needs_review", category, "mixed symbolic and numeric load", None), load_details
         return RouteDecision("needs_review", category, "empty, unknown, or unsupported load", None), load_details
@@ -327,6 +328,7 @@ class MultiAgentCoordinator:
     def analyze_image_scope(self, image_path: str | Path) -> dict[str, Any]:
         return self.qwen.analyze_image_scope(image_path)
 
+    @bank_read
     def search_loads(
         self,
         loads: list[dict[str, Any]],
@@ -562,6 +564,7 @@ def load_bank_excel(excel_root: Path, chapter: str):
     return search.load_bank_excel(excel_root, chapter)
 
 
+@bank_read
 def rank_bank_candidates(
     query_loads: list[dict[str, Any]],
     chapter: str,
@@ -739,7 +742,7 @@ def write_last_search(results: list[dict[str, Any]]) -> None:
         for item in results
     ]
     try:
-        search.LAST_SEARCH_FILE.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        search.last_search_file().write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     except OSError as exc:
         print(f"WARNING: cannot write last search cache: {exc}")
 

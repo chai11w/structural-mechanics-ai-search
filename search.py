@@ -37,6 +37,7 @@ from collections import Counter
 import pandas as pd
 from zhipuai import ZhipuAI
 
+from tiku_shared.bank_versions import bank_read, main_root, pin_question_path, require_legacy_writer, runtime_file, store_root
 from tiku_shared.model_costs import submit_with_model_cost_context, timed_model_call
 from tiku_shared.execution_hooks import bounded_transport_retries, execution_observer
 from tiku_shared.image_payload import image_to_model_data_url
@@ -60,6 +61,14 @@ _BANK_EXCEL_CACHE: dict[str, tuple[int, int, pd.DataFrame]] = {}
 ROOT = Path(cfg.get("root", r"D:\桌面\答疑、帮做\结构力学\帮做"))
 ANSWER_OUTPUT = Path(cfg.get("answer_output", r"D:\桌面\答疑、帮做\答案输出"))
 LAST_SEARCH_FILE = ROOT / "_last_search.json"
+
+def bank_root():
+    return main_root(ROOT)
+
+
+def last_search_file():
+    return runtime_file("_last_search.json", LAST_SEARCH_FILE)
+
 ZHIPUAI_API_KEY = os.environ.get("ZHIPUAI_API_KEY") or cfg.get("zhipuai_api_key", "")
 DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY") or cfg.get("dashscope_api_key", "")
 TOP_K = cfg.get("top_k", 3)
@@ -1355,7 +1364,7 @@ def load_bank_excel(excel_root, chapter_name):
 
 def load_chapter_excel(chapter_name):
     """加载主库章节 Excel，返回 DataFrame 或 None。"""
-    return load_bank_excel(ROOT, chapter_name)
+    return load_bank_excel(bank_root(), chapter_name)
 
 
 @dataclass(frozen=True)
@@ -1429,7 +1438,7 @@ def _rel_path_from_question_path(question_path):
     p = Path(str(question_path))
     if p.is_absolute():
         try:
-            return p.relative_to(ROOT).as_posix()
+            return p.relative_to(bank_root()).as_posix()
         except ValueError:
             return p.as_posix()
     return str(question_path).replace("\\", "/")
@@ -1488,17 +1497,17 @@ def _find_relocated_question_image(relative_path, chapter_name=None):
 
     candidate_anchors = []
     for end in range(len(parts) - 1, 0, -1):
-        anchor = ROOT.joinpath(*parts[:end])
+        anchor = bank_root().joinpath(*parts[:end])
         if anchor.is_dir():
             candidate_anchors.append(anchor)
             break
 
     if chapter_name:
-        chapter_anchor = ROOT / chapter_name
+        chapter_anchor = bank_root() / chapter_name
         if chapter_anchor.is_dir() and chapter_anchor not in candidate_anchors:
             candidate_anchors.append(chapter_anchor)
     elif len(parts) > 1:
-        chapter_anchor = ROOT / parts[0]
+        chapter_anchor = bank_root() / parts[0]
         if chapter_anchor.is_dir() and chapter_anchor not in candidate_anchors:
             candidate_anchors.append(chapter_anchor)
 
@@ -1517,7 +1526,7 @@ def _find_relocated_question_image(relative_path, chapter_name=None):
         scored = []
         for candidate in candidates:
             try:
-                cand_rel = candidate.relative_to(ROOT).as_posix().split("/")
+                cand_rel = candidate.relative_to(bank_root()).as_posix().split("/")
             except ValueError:
                 cand_rel = candidate.as_posix().split("/")
             scored.append((
@@ -1551,12 +1560,13 @@ def _backup_excel_for_path_repair(xlsx_path):
 
 
 def _update_excel_path(chapter_name, old_rel, new_rel):
+    require_legacy_writer()
     """更新 Excel 中失效的题目路径"""
     if old_rel == new_rel:
         return False
-    xlsx_path = ROOT / f"{chapter_name}.xlsx"
+    xlsx_path = bank_root() / f"{chapter_name}.xlsx"
     if not xlsx_path.exists():
-        matches = list(ROOT.glob(f"*{chapter_name}*.xlsx"))
+        matches = list(bank_root().glob(f"*{chapter_name}*.xlsx"))
         if not matches:
             return False
         xlsx_path = matches[0]
@@ -1575,13 +1585,15 @@ def _update_excel_path(chapter_name, old_rel, new_rel):
     return True
 
 
+@bank_read
 def resolve_question_path(question_path, chapter_name=None, update_excel=False):
     """Resolve stale Excel question paths and optionally repair the workbook."""
+    update_excel = update_excel and store_root() is None
     old_rel = _rel_path_from_question_path(question_path)
-    exists, exact_case, actual_path = _exact_case_path(ROOT, old_rel)
+    exists, exact_case, actual_path = _exact_case_path(bank_root(), old_rel)
 
     if exists and actual_path is not None:
-        new_rel = actual_path.relative_to(ROOT).as_posix()
+        new_rel = actual_path.relative_to(bank_root()).as_posix()
         repaired = new_rel != old_rel or not exact_case
         if repaired and update_excel and chapter_name:
             _update_excel_path(chapter_name, old_rel, new_rel)
@@ -1590,16 +1602,17 @@ def resolve_question_path(question_path, chapter_name=None, update_excel=False):
     relocated = _find_relocated_question_image(old_rel, chapter_name)
     if relocated is not None and relocated.is_file():
         try:
-            new_rel = relocated.relative_to(ROOT).as_posix()
+            new_rel = relocated.relative_to(bank_root()).as_posix()
         except ValueError:
             new_rel = relocated.as_posix()
         if update_excel and chapter_name:
             _update_excel_path(chapter_name, old_rel, new_rel)
         return relocated, new_rel, True
 
-    return ROOT / old_rel, old_rel, False
+    return bank_root() / old_rel, old_rel, False
 
 
+@bank_read
 def search(
     query_loads,
     chapter_name,
@@ -1609,7 +1622,7 @@ def search(
     rerank_provider=None,
     rerank_model=None,
 ):
-    scan = scan_chapter_candidates(query_loads, chapter_name, ROOT)
+    scan = scan_chapter_candidates(query_loads, chapter_name, bank_root())
     if scan is None:
         print(f"ERROR: Chapter '{chapter_name}' not found")
         return
@@ -1627,7 +1640,7 @@ def search(
     if not top or top[0][0] == 0:
         print("(未找到高相似度匹配，以下是章节内最近题目)")
 
-    output_path = ROOT / "_search_result.txt"
+    output_path = runtime_file("_search_result.txt", ROOT / "_search_result.txt")
     lines = []
     paths = []
     for rank, (score, name) in enumerate(top, 1):
@@ -1650,7 +1663,7 @@ def search(
 
     result_text = "\n".join(lines) if lines else "无匹配结果"
     output_path.write_text(result_text, encoding="utf-8")
-    LAST_SEARCH_FILE.write_text(json.dumps(paths, ensure_ascii=False), encoding="utf-8")
+    last_search_file().write_text(json.dumps(paths, ensure_ascii=False), encoding="utf-8")
     print(result_text)
     print(f"\n结果已保存: {output_path}")
 
@@ -1668,7 +1681,7 @@ def search(
             if not reranked:
                 no_match_text = "未找到可靠相似题。"
                 output_path.write_text(no_match_text, encoding="utf-8")
-                LAST_SEARCH_FILE.write_text("[]", encoding="utf-8")
+                last_search_file().write_text("[]", encoding="utf-8")
                 print(f"\n{no_match_text}")
                 print(f"\n复筛结果已保存: {output_path}")
                 return
@@ -1693,7 +1706,7 @@ def search(
                 })
             rerank_text = "\n".join(rerank_lines)
             output_path.write_text(rerank_text, encoding="utf-8")
-            LAST_SEARCH_FILE.write_text(json.dumps(rerank_paths, ensure_ascii=False), encoding="utf-8")
+            last_search_file().write_text(json.dumps(rerank_paths, ensure_ascii=False), encoding="utf-8")
             print("\nLLM复筛结果:")
             print(rerank_text)
             print(f"\n复筛结果已保存: {output_path}")
@@ -1709,8 +1722,9 @@ def search(
 # ============================================================
 
 def store_chapter_excel(chapter_name, records):
+    require_legacy_writer()
     """追加记录到章节 Excel"""
-    xlsx_path = ROOT / f"{chapter_name}.xlsx"
+    xlsx_path = bank_root() / f"{chapter_name}.xlsx"
 
     # 加载现有数据
     if xlsx_path.exists():
@@ -1730,6 +1744,7 @@ def store_chapter_excel(chapter_name, records):
 
 
 def store(chapter_name, *, image_path=None, rel_path=None, loads_json=None):
+    require_legacy_writer()
     client = ZhipuAI(api_key=ZHIPUAI_API_KEY)
 
     if image_path:
@@ -1741,9 +1756,9 @@ def store(chapter_name, *, image_path=None, rel_path=None, loads_json=None):
             print("未识别到荷载，取消储存")
             return
 
-        # 用相对于 ROOT 的路径作为题目名称
+        # 用相对于 bank_root() 的路径作为题目名称
         try:
-            rel_path = str(Path(image_path).relative_to(ROOT)).replace("\\", "/")
+            rel_path = str(Path(image_path).relative_to(bank_root())).replace("\\", "/")
         except ValueError:
             rel_path = Path(image_path).name
 
@@ -1761,13 +1776,15 @@ def store(chapter_name, *, image_path=None, rel_path=None, loads_json=None):
 # 答案查询
 # ============================================================
 
+@bank_read
 def find_answer_files(question_path):
     """根据题目路径定位答案文件，返回路径列表
 
     规则: 题目路径里以"题目"开头的目录，替换为同级"答案"文件夹，
     然后匹配 {编号}, {编号}+, {编号}++, ... 等所有图片
     """
-    p, _, _ = resolve_question_path(question_path, update_excel=False)
+    with pin_question_path(question_path, ROOT):
+        p, _, _ = resolve_question_path(question_path, update_excel=False)
     parts = p.parts
     stem = p.stem  # 文件名不含扩展，如 "3"
 
@@ -1786,13 +1803,10 @@ def find_answer_files(question_path):
         return []
 
     # 匹配 stem, stem+, stem++, stem+++ 的所有图片
-    found = []
-    for ext in [".jpg", ".jpeg", ".png"]:
-        for suffix in ["", "+", "++", "+++"]:
-            f = answer_dir / f"{stem}{suffix}{ext}"
-            if f.is_file():
-                found.append(f)
-    return found
+    pattern = re.compile(re.escape(stem) + r"\+*")
+    return sorted((file for file in answer_dir.iterdir() if file.is_file()
+        and file.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+        and pattern.fullmatch(file.stem)), key=lambda file: (len(file.stem), file.name))
 
 
 def answer(rank):
@@ -1803,11 +1817,11 @@ def answer(rank):
         print("无匹配答案，跳过")
         return
 
-    if not LAST_SEARCH_FILE.exists():
+    if not last_search_file().exists():
         print("ERROR: 找不到上次检索结果，请先运行 search")
         return
 
-    last = json.loads(LAST_SEARCH_FILE.read_text(encoding="utf-8"))
+    last = json.loads(last_search_file().read_text(encoding="utf-8"))
     target = next((x for x in last if x["rank"] == rank), None)
     if target is None:
         print(f"ERROR: 排名 {rank} 不在上次结果中（共 {len(last)} 个）")
