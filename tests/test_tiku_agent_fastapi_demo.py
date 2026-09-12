@@ -6362,7 +6362,7 @@ class FastApiDemoTest(unittest.TestCase):
         for expected in (
             'href="/assets/demo.css?v=20260911-stale-conversation-v1"',
             'src="/assets/task_state.js?v=20260830-task-state-3-4-5"',
-            'src="/assets/demo.js?v=20260911-error-truth-v1"',
+            'src="/assets/demo.js?v=20260912-recovery-guards-v1"',
             'src="/assets/execution_control.js?v=20260909-phase5-controls-v1"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
@@ -6390,7 +6390,7 @@ class FastApiDemoTest(unittest.TestCase):
             "adoptConversationTtl(data.conversation_ttl_seconds)",
             "HISTORY_LIMIT = 50", "repairUploadedImageHistory()",
             "lastActivityAt: historyLastActivityAt", "saveHistory({ refreshActivity: true })",
-            "function scheduleHistoryExpiry()", "function expireHistoryIfNeeded()",
+            "function scheduleHistoryExpiry(", "function expireHistoryIfNeeded()",
             "if (!data.session?.session_valid)", "window.addEventListener('focus', expireHistoryIfNeeded)",
             "document.addEventListener('visibilitychange'",
             "data.intent === 'a3_session_reset'",

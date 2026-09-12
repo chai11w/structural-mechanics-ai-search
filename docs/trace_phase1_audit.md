@@ -315,6 +315,11 @@ feedback persistence emit joined events without storing user/model text, paths o
 messages. The 8790, 8896 and demo launchers each own a store under their existing runtime root;
 none depends on 8795.
 
+The asynchronous writer also exposes bounded, payload-free per-stage timings in
+health; see [Trace write diagnostics](trace_write_diagnostics.md) for interpretation,
+transaction uncertainty and in-memory retention. This diagnostic addition does not
+change the write budget or retry policy, and requires a separate production release.
+
 Roadmap batch 2.4 is complete. `tiku_shared/response_store.py` persists one server-authored,
 privacy-bounded response projection per trace in runtime-local `responses.sqlite3`. JSON and
 stream results, A3 parent replies, A2 child replies and targetable server errors receive
