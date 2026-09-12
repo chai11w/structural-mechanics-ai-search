@@ -1587,7 +1587,10 @@ def create_app(
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
         session_id = _session_id(request, cookie_name=session_cookie)
-        result = HTMLResponse(_read_demo_page(), headers={"Cache-Control": "no-store"})
+        page = _read_demo_page()
+        if background_execution:
+            page = page.replace('<body>', '<body data-background-execution="1">', 1)
+        result = HTMLResponse(page, headers={"Cache-Control": "no-store"})
         _set_session_cookie(
             result,
             session_id,

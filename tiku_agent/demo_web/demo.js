@@ -40,6 +40,10 @@ function showTaskStateBootstrapFailure() {
 })();
 
 function startDemo(taskStateV1) {
+const backgroundEnabled = document.body.dataset.backgroundExecution === '1';
+let backgroundClient = null;
+let backgroundRecovery = null;
+let backgroundObserverEpoch = '';
 const $ = (selector) => document.querySelector(selector);
 const chat = $('#chat');
 const empty = $('#empty');
@@ -251,7 +255,7 @@ function syncVisualViewport() {
 }
 
 function isPersistentImage(url) {
-  return typeof url === 'string' && (url.startsWith('/api/media/') || url.startsWith('/api/upload/'));
+  return typeof url === 'string' && (url.startsWith('/api/media/') || url.startsWith('/api/upload/') || /^\/api\/jobs\/[0-9a-f]{32}\/media\/m\d{1,2}$/.test(url));
 }
 
 function normalizeFeedbackImages(value) {
@@ -909,6 +913,7 @@ function assertSessionRequestCoordination(
   url,
   { authoritativeResponse = false } = {},
 ) {
+  if (!isTaskStateRequestPath(url) && !fence) return true;
   assertSessionRequestLease(fence);
   if (authoritativeResponse && fence?.inherited && !fence?.ownRecord) return true;
   return assertSessionRequestFenceCurrent(
@@ -1148,6 +1153,7 @@ function applyAuthoritativeEmptyAfterCoordinationFailure(envelope, sessionReques
 }
 
 function resolveSessionRequestFenceFromEnvelope(envelope, sessionRequestFence) {
+  if (!sessionRequestFence) return true;
   if (!sessionRequestFenceAcknowledgedByEnvelope(envelope, sessionRequestFence)) {
     preserveSessionRequestFence(sessionRequestFence);
     return false;
@@ -1676,6 +1682,8 @@ function remember(item) {
     workflowRevision: Number(item.workflowRevision || 0),
     messageId: String(item.messageId || ''),
     responseId: String(item.responseId || ''),
+    backgroundKey: String(item.backgroundKey || ''),
+    backgroundEpoch: String(item.backgroundEpoch || ''),
     noticeKey: String(item.noticeKey || ''),
     createdAt: Number(item.createdAt || 0),
     feedback: item.feedback || null,
@@ -2318,6 +2326,22 @@ function createMediaCard(url, index, item) {
 }
 
 function addMessage(item, persist = true) {
+  if (persist && backgroundEnabled && executionContext?.epoch) {
+    // A tab may type before another tab's storage event is dispatched. Preserve
+    // already-published replies from the same epoch before saving that input.
+    try {
+      const stored = JSON.parse(safeLocalStorageGet(HISTORY_KEY) || '{}');
+      const missing = (Array.isArray(stored.messages) ? stored.messages : []).filter(old => old.backgroundKey
+        && old.backgroundEpoch === executionContext.epoch && !history.some(local => local.backgroundKey === old.backgroundKey));
+      if (missing.length) {
+        history.push(...missing);
+        history.sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+        renderHistory();
+      }
+    } catch (_) { /* The normal history save reports unavailable storage. */ }
+  }
+  if (persist && ((item.responseId && history.some(old => old.responseId === item.responseId))
+      || (item.backgroundKey && history.some(old => old.backgroundKey === item.backgroundKey)))) return null;
   item = { ...item, createdAt: Number(item.createdAt || Date.now()) };
   const noticeKey = String(item.noticeKey || '').trim();
   const retryAction = normalizeRetryAction(item.retryAction);
@@ -2423,6 +2447,7 @@ function renderHistory() {
 }
 
 function isLegacyInlineOnlyMessage(item, index, messages) {
+  if (item?.backgroundKey) return false;
   if (A3_INLINE_ONLY_INTENTS.has(String(item?.intent || ''))) return true;
   if (!item?.me) return false;
   const next = messages[index + 1];
@@ -2712,6 +2737,7 @@ function runSessionBootstrap() {
     .finally(() => {
       if (sessionBootstrap !== pending) return;
       sessionBootstrapPending = false;
+      if (ready && backgroundEnabled) setTimeout(resumeBackgroundJobs, 0);
       if (!ready) sessionBootstrap = null;
     });
   sessionBootstrap = pending;
@@ -2719,6 +2745,10 @@ function runSessionBootstrap() {
 }
 
 async function sessionTaskStartAllowed() {
+  if (backgroundEnabled && (!backgroundClient || !sessionRequestLockAvailable())) {
+    showFailureNotice('connection', '此浏览器无法安全协调后台任务，请刷新页面或更换浏览器。');
+    return false;
+  }
   refreshHistoryActivityFromStorage();
   // A fence can appear while an earlier bootstrap request is still in flight
   // (for example, another tab may start a task at that exact moment).  Do not
@@ -2756,6 +2786,10 @@ async function sessionTaskStartAllowed() {
     break;
   }
   if (!ready) return false;
+  if (backgroundEnabled && backgroundClient.pending(executionContext?.epoch).length) {
+    resumeBackgroundJobs();
+    return false;
+  }
   if (!sessionResetRequired) return true;
   setStatus('error', '需要先重新建立会话');
   showFailureNotice(
@@ -2797,6 +2831,10 @@ function clearHistory({ preserveStoredHistory = false } = {}) {
 }
 
 function retireSessionForExternalReset({ preserveHistory = false } = {}) {
+  if (backgroundEnabled && !preserveHistory) {
+    executionContext = null;
+    backgroundObserverEpoch = '';
+  }
   const controller = activeController;
   activeController = null;
   operationVersion += 1;
@@ -3316,6 +3354,7 @@ async function requestStream(
   sessionLockHeld = false,
   sessionRequestFence = null,
 ) {
+  if (backgroundEnabled && !sessionLockHeld) return requestBackgroundJob(url, options, onProgress);
   if (!sessionLockHeld && isTaskStateRequestPath(url)) {
     if (isTaskStartingPath(url)) touchSharedSessionActivity();
     return withSessionRequestLock(
@@ -3851,6 +3890,7 @@ async function selectA3Unit(target) {
       updatePendingMessage(pending, event.message);
       setStatus('working', event.message);
     });
+    if (data.backgroundHandled) { pending.remove(); return; }
     if (operation !== operationVersion) return;
     pending.remove();
     const response = responseItem(data);
@@ -4158,6 +4198,7 @@ async function submitA3Crop() {
       a3CropStatus.textContent = event.message;
       setStatus('working', event.message);
     });
+    if (data.backgroundHandled) {  return; }
     if (operation !== operationVersion) return;
     const response = responseItem(data);
     if (isPersistentImage(data.submitted_crop)) {
@@ -4367,6 +4408,7 @@ async function prepareA3Units() {
       a3SheetCount.textContent = event.message;
       setStatus('working', event.message);
     });
+    if (data.backgroundHandled) {  return; }
     if (operation !== operationVersion) return;
     const response = responseItem(data);
     a3PrepareSelection.clear();
@@ -4499,6 +4541,7 @@ async function sendTextValue(value, displayValue = value, actionContext = null, 
       else updatePendingMessage(pending, event.message);
       setStatus('working', event.message);
     }, '', { renewTimeoutOnProgress: true });
+    if (data.backgroundHandled) { pending?.remove(); return; }
     if (operation !== operationVersion) return;
     pending?.remove();
     if (data.intent === 'a3_session_reset') {
@@ -4614,6 +4657,7 @@ async function submitPreparedImage(prepared, uploadRow) {
     }, '网络上传失败，请检查网络后重试。', {
       renewTimeoutOnProgress: autoPrepareAll,
     });
+    if (data.backgroundHandled) { pending.remove(); uploadRow.remove(); clearPendingUpload(); return; }
     if (operation !== operationVersion) return;
     if (!isPersistentImage(data.uploaded_image)) throw new UserVisibleError('服务端处理失败，未返回已上传的题图，请直接重新上传。');
     pending.remove();
@@ -4777,6 +4821,28 @@ async function resetConversation() {
 
 async function retryConnection() {
   if (isBusy) return;
+  if (backgroundEnabled && backgroundClient) {
+    try {
+      const unresolved = backgroundClient.records().filter(record => !record.done)
+        .sort((a, b) => b.key.localeCompare(a.key));
+      const record = unresolved.find(record => !executionContext || record.epoch === executionContext.epoch);
+      if (record) {
+        // This hint grants no authority: GET lookup verifies current login,
+        // session and epoch before any result can be displayed. In particular,
+        // do not wait on the legacy runtime's long-held session lock first.
+        try {
+          await backgroundClient.query(record);
+          backgroundObserverEpoch = record.epoch;
+          await resumeBackgroundJobs();
+          return;
+        } catch (error) {
+          if (error?.code !== 'EXECUTION_STALE') throw error;
+          // A server-rejected old epoch cannot block initialization of the
+          // current conversation. Preserve its receipt, then read current state.
+        }
+      }
+    } catch (error) { backgroundNotice(error); return; }
+  }
   setStatus('working', '正在恢复会话…');
   await runSessionBootstrap();
 }
@@ -4945,6 +5011,159 @@ window.visualViewport?.addEventListener('resize', syncVisualViewport, { passive:
 window.visualViewport?.addEventListener('scroll', syncVisualViewport, { passive: true });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) expireHistoryIfNeeded(); });
 
+function backgroundNotice(error) {
+  const login = error?.status === 401;
+  const missing = error?.code === 'EXECUTION_NOT_FOUND';
+  setStatus('error', login ? '需要重新登录' : '原任务待核对');
+  showFailureNotice('connection', login ? '登录已失效，请重新登录。'
+    : missing ? '尚未找到上次提交的任务。不会自动重发，请重新连接核对，或开始新对话。'
+      : (error?.message || '暂时无法读取原任务，请重新连接。'),
+    login ? ['relogin'] : ['retry_connection', 'new_chat']);
+}
+
+function initializeBackgroundJobs() {
+  const api = globalThis.TikuBackgroundJobs;
+  if (!api) { showTaskStateBootstrapFailure(); return; }
+  try {
+    backgroundClient = api.createClient({
+      storage: window.localStorage, locks: navigator.locks,
+      fetch: (...args) => fetch(...args), currentEpoch: () => executionContext?.epoch || backgroundObserverEpoch,
+      async deliver(job, record) {
+        // Refresh current action authority separately. Never consume the result's
+        // historical TaskState or use reconnect to bind a new session/grant.
+        const current = await request('/api/session', {}, SESSION_BOOTSTRAP_TIMEOUT_MS, '会话核对超时。', false);
+        if (executionContext?.epoch !== record.epoch) return;
+        if (!updateSessionContext(current)) throw sessionCoordinationError();
+        const render = async () => {
+          if (executionContext?.epoch !== record.epoch) return;
+          // Merge the shared visible history without running startup expiry,
+          // clearing action authority, or reopening an old crop workspace.
+          const stored = JSON.parse(safeLocalStorageGet(HISTORY_KEY) || '{}');
+          if (Array.isArray(stored.messages)) history = stored.messages.slice(-HISTORY_LIMIT);
+          renderHistory();
+          const key = 'job:' + record.id;
+          const result = job.publication?.result;
+          if (job.status === 'SUCCEEDED' && job.publication?.status === 'READY') {
+            const child = result.task_state?.active_child_task;
+            const workflow = result.task_state?.workflow;
+            const item = {
+              ...responseItem(result), backgroundKey: key, backgroundEpoch: record.epoch,
+              messageId: 'job-' + record.id,
+              createdAt: Number.isFinite(job.accepted_at) ? job.accepted_at * 1000 : Date.now(),
+              childTaskId: String(child?.task_id || ''),
+              childTaskRevision: Number(child?.task_revision || 0),
+              childCandidateGeneration: String(child?.candidate_generation || ''),
+              workflowId: String(workflow?.workflow_id || ''),
+              workflowRevision: Number(workflow?.task_revision || 0),
+              a3: normalizeA3Snapshot(result.session?.a3),
+            };
+            // Targets describe history; existing branded action checks compare
+            // them with the freshly read authority before enabling each button.
+            const uploaded = record.kind === 'handle_image' ? result.uploaded_image
+              : record.kind === 'handle_crop' ? result.submitted_crop : '';
+            if (isPersistentImage(uploaded)) addMessage({
+              message: record.kind === 'handle_image' ? '我发了一张题图。' : '我提交了裁剪后的题图。',
+              me: true, images: [uploaded], backgroundKey: key + ':input', backgroundEpoch: record.epoch,
+              imageAlt: record.kind === 'handle_image' ? '已上传题图' : '裁剪后的题图',
+            });
+            addMessage(item);
+            setResponseStatus(result);
+            maybeOpenAutoPreparedA3Sheet(item);
+          } else {
+            const message = job.status === 'UNKNOWN' ? '任务执行结果尚未确认，请在任务状态中核对；不会自动重试。'
+              : job.status === 'CANCELLED' ? '原任务已停止。'
+                : job.publication?.status === 'UNAVAILABLE' ? '原任务已完成，但保存的结果已不可用。'
+                  : job.publication?.status === 'FAILED' ? '原任务已处理，但结果准备失败；不会重新搜索。'
+                    : '原任务未能完成，请在任务状态中查看。';
+            addMessage({ message, variant: 'error', backgroundKey: key, backgroundEpoch: record.epoch });
+            setStatus('error', '任务状态已返回');
+          }
+          // The receipt cannot become delivered until visible history is durable.
+          const saved = JSON.parse(safeLocalStorageGet(HISTORY_KEY) || '{}');
+          if (!saved.messages?.some(item => item.backgroundKey === key)) throw sessionCoordinationError();
+          resolveFailureNotice('connection');
+          resolveFailureNotice('session-recovery');
+          syncTaskStateActionButtons();
+        };
+        if (navigator.locks?.request) await navigator.locks.request('tiku-agent-background-history-v1', render);
+        else await render(); // Read-only recovery remains available without task mutation support.
+      },
+    });
+    backgroundClient.records();
+  } catch (error) { backgroundClient = null; backgroundNotice(error); }
+  window.addEventListener('storage', event => {
+    if (event.key?.startsWith(api.prefix) && event.newValue) {
+      // A second tab may observe, but never submits a stored intent.
+      if (!isBusy) setTimeout(retryConnection, 0);
+    }
+  });
+}
+
+async function requestBackgroundJob(url, options, onProgress) {
+  if (!backgroundClient) throw sessionCoordinationError();
+  const resetEpoch = sessionResetEpoch;
+  let record;
+  try {
+    try {
+      await withSessionRequestLock(url, async fence => {
+        const headers = new Headers();
+        applySessionCoordinationHeaders(headers, fence);
+        assertSessionRequestCoordination(fence, url);
+        record = await backgroundClient.submit(url, options, executionContext, fence, headers);
+        // An acknowledged operation is now protected by the persistent job
+        // receipt. Unacknowledged fences remain pending until reconciliation.
+        if (record.id) resolveSessionRequestFence(fence);
+      });
+    } catch (error) {
+      if (!record) throw error;
+    }
+    invalidateTaskStateContext();
+    // invalidateTaskStateContext retires action authority, not the epoch used
+    // for read-only observation. The execution context is refreshed at delivery.
+    await backgroundClient.observe(record, event => {
+      if (resetEpoch === sessionResetEpoch && executionContext?.epoch === record.epoch) onProgress?.(event);
+    });
+  } catch (error) {
+    if (resetEpoch === sessionResetEpoch && (!record || executionContext?.epoch === record.epoch)) backgroundNotice(error);
+  }
+  return { backgroundHandled: true };
+}
+
+async function resumeBackgroundJobs() {
+  const epoch = executionContext?.epoch || backgroundObserverEpoch;
+  if (!backgroundClient || !epoch || backgroundRecovery || isBusy) return;
+  const resetEpoch = sessionResetEpoch;
+  const operation = operationVersion;
+  let records;
+  try {
+    const shared = JSON.parse(safeLocalStorageGet(HISTORY_KEY) || '{}');
+    if (Array.isArray(shared.messages)) {
+      history = shared.messages.slice(-HISTORY_LIMIT);
+      renderHistory();
+    }
+    // done means the shared history was durably written. Do not fetch old
+    // completed records merely because normal history retention removed them.
+    records = backgroundClient.pending(epoch);
+  }
+  catch (error) { backgroundNotice(error); return; }
+  if (!records.length) return;
+  setBusy(true);
+  backgroundRecovery = (async () => {
+    for (const record of records) {
+      if ((executionContext?.epoch || backgroundObserverEpoch) !== epoch) break;
+      try { await backgroundClient.observe(record, event => {
+        if (resetEpoch === sessionResetEpoch && (executionContext?.epoch || backgroundObserverEpoch) === epoch) setStatus('working', event.message);
+      }); }
+      catch (error) {
+        if (resetEpoch === sessionResetEpoch && (executionContext?.epoch || backgroundObserverEpoch) === epoch) backgroundNotice(error);
+        break;
+      }
+    }
+  })();
+  try { await backgroundRecovery; }
+  finally { backgroundRecovery = null; if (operation === operationVersion) setBusy(false); }
+}
+
 function createExecutionPanel() {
   const panel = $('#execution-panel');
   const api = globalThis.TikuExecutionControl;
@@ -5075,8 +5294,12 @@ function createExecutionPanel() {
       return client.execute(current.view, current.view.controls.findIndex((item) => item.action === 'reset_session'));
     }); },
     async probe() {
+      const generation = taskStateRequestGeneration;
+      const resetEpoch = sessionResetEpoch;
       try {
-        const result = await client.inspect(); acceptExecutionContext(result.envelope); render(result.view);
+        const result = await client.inspect();
+        if (generation !== taskStateRequestGeneration || resetEpoch !== sessionResetEpoch) return;
+        acceptExecutionContext(result.envelope); render(result.view);
         if (client.hasPending()) showFailureNotice('execution-control',
           '上次操作尚未确认，请核对后再继续。', ['verify_operation']);
       }
@@ -5091,5 +5314,6 @@ restoreHistory();
 resizeComposer();
 updateComposer();
 if (pendingHistoryStorageNotice && !sessionResetRequired) flushStartupNotices();
-if (history.length || sessionResetRequired) retryConnection();
+if (backgroundEnabled) initializeBackgroundJobs();
+if (backgroundEnabled || history.length || sessionResetRequired) retryConnection();
 }
