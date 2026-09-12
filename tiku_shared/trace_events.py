@@ -24,6 +24,9 @@ from uuid import uuid4
 from weakref import WeakMethod
 
 from tiku_shared.trace_context import current_request_id, current_trace_id, is_valid_trace_id
+from tiku_shared.trace_write_diagnostics import (
+    TraceWriteDiagnostics, write_call, write_context, write_stage, write_transaction,
+)
 from tiku_shared.evidence_io_budget import (
     EvidenceLockBudget, EvidenceRLock, check_evidence_budget, evidence_io_budget,
     evidence_sqlite_timeout, configure_evidence_connection,
@@ -754,36 +757,46 @@ class SQLiteTraceEventStore:
                 raise TraceCleanupDriftError("trace store identity is unavailable") from exc
 
     def write(self, event: TraceEvent) -> None:
+        write_transaction("not_started")
         check_evidence_budget()
         if not isinstance(event, TraceEvent):
             raise TypeError("event must be a TraceEvent")
-        _trace_reject_linked_path(self.path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        _trace_reject_linked_path(self.path)
-        if _trace_lexists(self.path) and not self.path.is_file():
-            raise TraceEventMaintenanceError("trace database path is not a regular file")
-        with self._path_lock, self._lock, _trace_writer_maintenance_lock(self.path):
+        with write_stage("path_checks"):
             _trace_reject_linked_path(self.path)
-            existed = _trace_lexists(self.path)
-            with closing(
-                sqlite3.connect(self.path, timeout=evidence_sqlite_timeout(self._write_timeout_seconds))
-            ) as connection:
-                configure_evidence_connection(connection)
-                _prepare_trace_store_for_write(
-                    connection, allow_create=not existed
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            _trace_reject_linked_path(self.path)
+            if _trace_lexists(self.path) and not self.path.is_file():
+                raise TraceEventMaintenanceError("trace database path is not a regular file")
+        with (
+            write_context("path_lock", self._path_lock),
+            write_context("store_lock", self._lock),
+            write_context("maintenance_lock", _trace_writer_maintenance_lock(self.path)),
+        ):
+            with write_stage("path_checks"):
+                _trace_reject_linked_path(self.path)
+                existed = _trace_lexists(self.path)
+            with write_stage("connect"):
+                connection = sqlite3.connect(
+                    self.path, timeout=evidence_sqlite_timeout(self._write_timeout_seconds)
                 )
-                connection.commit()
-                connection.execute("BEGIN IMMEDIATE")
+            try:
+                with write_stage("schema"):
+                    configure_evidence_connection(connection)
+                    _prepare_trace_store_for_write(connection, allow_create=not existed)
+                write_call("schema_commit", connection.commit)
+                write_transaction("begin_unknown")
+                write_call("begin", connection.execute, "BEGIN IMMEDIATE")
+                write_transaction("active")
                 try:
                     if self._max_rows is not None:
-                        current_rows = int(
-                            connection.execute(
-                                "SELECT COUNT(*) FROM trace_events"
-                            ).fetchone()[0]
-                        )
-                        if current_rows >= self._max_rows:
-                            raise TraceEventCapacityError("trace event capacity exhausted")
-                    connection.execute(
+                        with write_stage("capacity"):
+                            current_rows = int(
+                                connection.execute("SELECT COUNT(*) FROM trace_events").fetchone()[0]
+                            )
+                            if current_rows >= self._max_rows:
+                                raise TraceEventCapacityError("trace event capacity exhausted")
+                    write_call(
+                        "insert", connection.execute,
                         """
                         INSERT INTO trace_events (
                             event_id, schema_version, trace_id, event_type, occurred_at,
@@ -797,19 +810,27 @@ class SQLiteTraceEventStore:
                         """,
                         _event_row(event),
                     )
-                    check_evidence_budget()
+                    write_call("precommit_check", check_evidence_budget)
                 except sqlite3.IntegrityError as exc:
-                    connection.rollback()
-                    if event.event_type in TERMINAL_EVENT_TYPES and self._has_terminal(
-                        connection, event.trace_id
+                    write_transaction("rollback_unknown")
+                    write_call("rollback", connection.rollback)
+                    write_transaction("rolled_back")
+                    if event.event_type in TERMINAL_EVENT_TYPES and write_call(
+                        "duplicate_check", self._has_terminal, connection, event.trace_id
                     ):
                         raise DuplicateTerminalEvent("trace terminal already recorded") from exc
                     raise
                 except BaseException:
-                    connection.rollback()
+                    write_transaction("rollback_unknown")
+                    write_call("rollback", connection.rollback)
+                    write_transaction("rolled_back")
                     raise
                 else:
-                    connection.commit()
+                    write_transaction("commit_unknown")
+                    write_call("commit", connection.commit)
+                    write_transaction("committed")
+            finally:
+                write_call("close", connection.close)
 
     def capacity_snapshot(self) -> dict[str, Any]:
         """Return bounded row capacity state without creating or changing the database."""
@@ -1036,6 +1057,7 @@ class TraceEventRecorder:
         self._duplicate_terminals = 0
         self._last_failure_kind = ""
         self._last_failure_at = ""
+        self._write_diagnostics = TraceWriteDiagnostics(TRACE_EVENT_TYPES)
         self._active_started = None
         self._maintenance_waiting = False
         self._cancel = Event()
@@ -1110,6 +1132,7 @@ class TraceEventRecorder:
         result["status"] = "degraded" if reasons else "ok"
         result["current_reasons"] = reasons
         result["capacity"] = capacity
+        result["write_diagnostics"] = self._write_diagnostics.snapshot()
         return result
 
     def flush(self, timeout=5.0) -> bool:
@@ -1224,8 +1247,13 @@ class TraceEventRecorder:
                 self._active_started = monotonic()
                 self._maintenance_waiting = False
             try:
-                with evidence_io_budget(0.5, cancel=self._cancel):
-                    self.store.write(event)
+                with self._write_diagnostics.attempt(
+                    event.event_type,
+                    retryable=(TraceEventMaintenanceBusy, EvidenceLockBudget),
+                    duplicate=(DuplicateTerminalEvent,),
+                ):
+                    with evidence_io_budget(0.5, cancel=self._cancel):
+                        self.store.write(event)
                 return
             except (TraceEventMaintenanceBusy, EvidenceLockBudget):
                 # Only fence/lock acquisition can signal this, before any
