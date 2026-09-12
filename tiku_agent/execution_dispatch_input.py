@@ -44,7 +44,7 @@ def _json_value(value, depth=0):
 
 
 def freeze_input(runtime, kind, parameters, image, policy):
-    if (kind not in METHOD_FIELDS or not callable(getattr(runtime, kind, None))
+    if (type(kind) is not str or kind not in METHOD_FIELDS or not callable(getattr(runtime, kind, None))
             or type(parameters) is not dict or set(parameters) - (METHOD_FIELDS[kind] - {"image_path"})):
         raise ExecutionError("EXECUTION_INPUT_INVALID")
     _json_value(parameters)

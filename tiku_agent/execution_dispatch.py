@@ -220,16 +220,28 @@ class DispatchStore:
     def observe(self, sid, identity, grant, request, *, result=False):
         """Authorized read, no claim, session creation/renewal or delivery side effect."""
         request = OperationRequest.parse(request)
-        with self.store.transaction() as conn:
-            now = self.store.clock(conn)
-            self._admission(conn, sid, identity, grant, request.epoch, now, budget=False)
-            operation = self.operations.lookup(sid, identity, request)
+        with self.store.reading() as conn:
+            now = self.store.read_clock(conn)
+            self._grant(conn, sid, identity, grant, now)
+            session = self.store._session(conn, session_key(sid), now)
+            if not self.store._valid_session(session, now) or session["epoch"] != request.epoch:
+                raise ExecutionError("EXECUTION_STALE")
+            owner = conn.execute("SELECT * FROM execution_owners WHERE session=? AND epoch=?", (session_key(sid), request.epoch)).fetchone()
+            if owner is None or owner["identity"] != digest(identity):
+                raise ExecutionError("EXECUTION_STALE")
+            operation = conn.execute("SELECT * FROM execution_operations WHERE session=? AND identity=? AND epoch=? AND op_key=?",
+                                     (session_key(sid), digest(identity), request.epoch, request.key)).fetchone()
             if operation is None:
                 return None
             job = conn.execute("SELECT * FROM execution_dispatch WHERE operation_id=?", (operation["id"],)).fetchone()
             if job is None:
                 return None
             self._grant(conn, sid, identity, job["grant_id"], now)
+            now = self.store.read_clock(conn)
+            self._local_grant(conn, sid, identity, grant, now)
+            self._local_grant(conn, sid, identity, job["grant_id"], now)
+            if not self.store._valid_session(session, now):
+                raise ExecutionError("EXECUTION_STALE")
             receipt = self._receipt(operation, job, now)
             if result and operation["status"] == "SUCCEEDED":
                 # Private business receipt only; stable public publication is 6.3.
@@ -319,7 +331,12 @@ class DispatchStore:
             # UNKNOWN payloads and every live input remain protected. Saturation
             # rejects new work instead of deleting unresolved evidence.
             removed = conn.execute("DELETE FROM execution_dispatch_inputs WHERE operation_id IN (SELECT d.operation_id FROM execution_dispatch d JOIN execution_operations o ON o.id=d.operation_id WHERE d.status IN ('SETTLED','REVOKED') AND o.status IN ('SUCCEEDED','FAILED','CANCELLED') AND d.updated<? LIMIT 100)", (now - self.policy.input_ttl,)).rowcount
-            conn.execute("DELETE FROM execution_dispatch_grants WHERE id IN (SELECT id FROM execution_dispatch_grants WHERE (expires<=? OR revoked=1) AND NOT EXISTS (SELECT 1 FROM execution_dispatch d WHERE d.grant_id=execution_dispatch_grants.id) LIMIT 100)", (now,))
+            binding_guard = ""
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_http_bindings'").fetchone():
+                # HTTP login references have their own lifecycle; never violate
+                # those foreign keys while purging otherwise unused grants.
+                binding_guard = " AND NOT EXISTS (SELECT 1 FROM execution_http_bindings b WHERE b.grant_id=execution_dispatch_grants.id)"
+            conn.execute("DELETE FROM execution_dispatch_grants WHERE id IN (SELECT id FROM execution_dispatch_grants WHERE (expires<=? OR revoked=1) AND NOT EXISTS (SELECT 1 FROM execution_dispatch d WHERE d.grant_id=execution_dispatch_grants.id)" + binding_guard + " LIMIT 100)", (now,))
             return {"inputs_removed": removed}
 
 

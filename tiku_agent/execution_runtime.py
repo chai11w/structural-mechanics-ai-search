@@ -176,7 +176,7 @@ def decode_response(payload):
     return response
 
 
-def execute_claimed(runtime, session_id, writer, execute, *, admission_check=None):
+def execute_claimed(runtime, session_id, writer, execute, *, admission_check=None, prepare_result=None):
     """Run a previously claimed operation under the original effect/receipt boundary."""
     operations = runtime.execution_operations
     store = operations.authority
@@ -204,6 +204,13 @@ def execute_claimed(runtime, session_id, writer, execute, *, admission_check=Non
             if callable(await_background):
                 await_background(session_id)
         encoded = encode_response(response)
+        if prepare_result is not None:
+            try:
+                prepare_result(writer, response, encoded)
+            except Exception:
+                # Business completion remains durable even if presentation or
+                # media preparation fails. A bounded publisher repairs delivery.
+                pass
         context = operations.finish(writer,encoded,reset=False)
         if hasattr(response,"text"):
             response.execution_context = context

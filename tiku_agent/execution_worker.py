@@ -20,8 +20,10 @@ STAGES = frozenset({"queued", "running", "dequeued", "searching", "recognizing",
 
 
 class BackgroundWorker:
-    def __init__(self, dispatch, private_dir, *, capabilities=None):
+    def __init__(self, dispatch, private_dir, *, capabilities=None, publication=None, trace_recorder=None):
         self.dispatch = dispatch
+        self.publication = publication
+        self.trace_recorder = trace_recorder
         self.root = Path(private_dir).absolute()
         # Only generated files under the authority's private runtime are used.
         authority_root = dispatch.store.path.parent.resolve()
@@ -85,6 +87,28 @@ class BackgroundWorker:
         claimed = self.dispatch.claim_next()
         if claimed is None:
             return False
+        from tiku_shared.trace_context import TraceContext, trace_context_scope
+        from tiku_shared.trace_events import trace_event_scope, record_trace_event, record_public_terminal
+        writer, operation, private, parsed = claimed
+        context = TraceContext("trace_" + writer.operation_id, "req_" + writer.operation_id)
+        with trace_context_scope(context), trace_event_scope(self.trace_recorder, trace_id=context.trace_id,
+                request_id=context.request_id, identity_key=private["identity_key"], session_key=writer.session):
+            record_trace_event("stage_started", stage="background_execution", outcome="started", safe_attributes={"operation": operation["kind"]})
+            try:
+                self._run_claimed(claimed)
+                if self.publication is not None:
+                    self.publication.publish(writer.operation_id)
+            finally:
+                with self.dispatch.store.transaction() as conn:
+                    status = conn.execute("SELECT status FROM execution_operations WHERE id=?", (writer.operation_id,)).fetchone()[0]
+                tracer = getattr(self.publication, "trace", None)
+                if tracer is not None:
+                    tracer.complete(writer.operation_id)
+                else:
+                    record_public_terminal(stage="background_execution", outcome="success" if status == "SUCCEEDED" else "error", failed=status != "SUCCEEDED")
+        return True
+
+    def _run_claimed(self, claimed):
         writer, operation, private, parsed = claimed
         path = None
         error = ""
@@ -104,8 +128,9 @@ class BackgroundWorker:
                                  (stage, now, writer.operation_id))
             execute_claimed(self.dispatch.runtime, private["session_id"], writer,
                 lambda: getattr(self.dispatch.runtime, operation["kind"])(private["session_id"], **params,
-                    identity_key=private["identity_key"], request_id=operation["id"], progress=progress,
-                    task_state_capabilities=self.capabilities), admission_check=check)
+                    identity_key=private["identity_key"], request_id="req_" + operation["id"], progress=progress,
+                    task_state_capabilities=self.capabilities), admission_check=check,
+                prepare_result=self.publication.prepare if self.publication is not None else None)
         except BaseException as exc:
             error = safe_error(exc)
             # Covers failure before execute_claimed installs its effect boundary.
