@@ -210,6 +210,9 @@ class PublicationStore:
                     question_id TEXT PRIMARY KEY, owner TEXT NOT NULL, draft_id TEXT NOT NULL,
                     UNIQUE(owner, draft_id)
                 );
+                CREATE TABLE IF NOT EXISTS identity_imports (
+                    digest TEXT PRIMARY KEY, payload TEXT NOT NULL, at REAL NOT NULL
+                );
             """)
 
     @contextmanager
@@ -246,6 +249,50 @@ class PublicationStore:
             question_id = "Q_" + str(uuid4())
             db.execute("INSERT INTO reservations VALUES (?, ?, ?)", (question_id, owner, draft_id))
             return question_id
+
+    def import_reservations(self, *, migration_digest, reservations):
+        """Offline provisioning only; no HTTP/model operation and no bank publication.
+
+        Import a frozen legacy identity manifest into an unused writer. A retry
+        verifies the original bindings even after installation has published;
+        it never repairs or overwrites a competing reservation.
+        """
+        if (not isinstance(migration_digest, str) or not re.fullmatch(r"[a-f0-9]{64}", migration_digest)
+                or not isinstance(reservations, list) or not 1 <= len(reservations) <= 100000):
+            raise PublicationError("invalid-identity-import")
+        ids, bindings = set(), set()
+        for item in reservations:
+            if (not isinstance(item, dict) or set(item) != {"question_id", "owner", "draft_id"}
+                    or not isinstance(item["question_id"], str)
+                    or not re.fullmatch(r"Q_[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", item["question_id"])
+                    or not all(isinstance(item[key], str) and 1 <= len(item[key]) <= 256
+                               and not any(ord(char) < 32 for char in item[key]) for key in ("owner", "draft_id"))):
+                raise PublicationError("invalid-identity-import")
+            binding = (item["owner"], item["draft_id"])
+            if item["question_id"] in ids or binding in bindings:
+                raise PublicationError("duplicate-import-identity")
+            ids.add(item["question_id"]); bindings.add(binding)
+        payload = canonical(sorted(reservations, key=lambda item: item["question_id"])).decode()
+        with write_lock(self.lock), self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = db.execute("SELECT payload FROM identity_imports WHERE digest=?", (migration_digest,)).fetchone()
+            if previous:
+                if previous[0] != payload:
+                    raise PublicationError("identity-import-changed")
+                for item in reservations:
+                    row = db.execute("SELECT owner, draft_id FROM reservations WHERE question_id=?", (item["question_id"],)).fetchone()
+                    if row is None or tuple(row) != (item["owner"], item["draft_id"]):
+                        raise PublicationError("imported-reservation-changed")
+                return {"migration_digest": migration_digest, "count": len(reservations), "replayed": True}
+            if (self.current() is not None or db.execute("SELECT 1 FROM operations LIMIT 1").fetchone()
+                    or db.execute("SELECT 1 FROM reservations LIMIT 1").fetchone()
+                    or db.execute("SELECT 1 FROM identity_imports LIMIT 1").fetchone()
+                    or any((self.root / "versions").iterdir())):
+                raise PublicationError("identity-import-requires-unused-writer")
+            db.executemany("INSERT INTO reservations VALUES (?, ?, ?)",
+                           [(item["question_id"], item["owner"], item["draft_id"]) for item in reservations])
+            db.execute("INSERT INTO identity_imports VALUES (?, ?, ?)", (migration_digest, payload, time.time()))
+            return {"migration_digest": migration_digest, "count": len(reservations), "replayed": False}
 
     def candidate_directory(self, operation_id):
         return reject_links(self.private / "candidates" / self.operation_id(operation_id))

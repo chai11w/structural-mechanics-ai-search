@@ -83,6 +83,43 @@ class PublicationTests(unittest.TestCase):
         self.approved(prepared)
         return self.store.execute(prepared["operation_id"], plan_digest=prepared["plan_digest"])
 
+    def test_identity_import_preserves_bindings_and_retries_after_publication(self):
+        rows = [{"question_id": "Q_" + str(uuid4()), "owner": "owner-one", "draft_id": "draft-" + str(i)} for i in range(3)]
+        result = self.store.import_reservations(migration_digest="a" * 64, reservations=rows)
+        self.assertFalse(result["replayed"])
+        self.assertIsNone(self.store.current())
+        self.store = self.reopen()
+        for row in rows:
+            self.assertEqual(self.store.reserve(owner=row["owner"], draft_id=row["draft_id"]), row["question_id"])
+        self.publish("installed")
+        self.assertTrue(self.store.import_reservations(migration_digest="a" * 64, reservations=list(reversed(rows)))["replayed"])
+        with self.assertRaisesRegex(PublicationError, "identity-import-changed"):
+            self.store.import_reservations(migration_digest="a" * 64, reservations=[{**rows[0], "owner": "other"}, *rows[1:]])
+        with self.assertRaisesRegex(PublicationError, "requires-unused-writer"):
+            self.store.import_reservations(migration_digest="b" * 64, reservations=rows)
+        with self.store.connection() as db:
+            db.execute("UPDATE reservations SET draft_id='tampered' WHERE question_id=?", (rows[0]["question_id"],))
+        with self.assertRaisesRegex(PublicationError, "imported-reservation-changed"):
+            self.store.import_reservations(migration_digest="a" * 64, reservations=rows)
+
+    def test_identity_import_is_atomic_and_refuses_competing_allocations(self):
+        import sqlite3
+        rows = [{"question_id": "Q_" + str(uuid4()), "owner": "owner-one", "draft_id": "draft-" + str(i)} for i in range(2)]
+        with self.assertRaisesRegex(PublicationError, "duplicate-import-identity"):
+            self.store.import_reservations(migration_digest="a" * 64, reservations=[rows[0], rows[0]])
+        with self.store.connection() as db:
+            db.executescript("CREATE TRIGGER fail_import BEFORE INSERT ON reservations WHEN NEW.draft_id='draft-1' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.import_reservations(migration_digest="a" * 64, reservations=rows)
+        with self.store.connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM reservations").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM identity_imports").fetchone()[0], 0)
+            db.execute("DROP TRIGGER fail_import")
+        existing = self.store.reserve(owner="owner-one", draft_id="draft-0")
+        with self.assertRaisesRegex(PublicationError, "requires-unused-writer"):
+            self.store.import_reservations(migration_digest="a" * 64, reservations=rows)
+        self.assertEqual(self.store.reserve(owner="owner-one", draft_id="draft-0"), existing)
+
     def child(self, prepared, checkpoint, *, popen=False):
         arguments = [sys.executable, "-B", "-X", "utf8", "-c", CHILD, str(self.directory),
                      prepared["operation_id"], prepared["plan_digest"], "unused", checkpoint]
