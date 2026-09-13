@@ -4,6 +4,7 @@ import gc
 import sqlite3
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -13,6 +14,36 @@ from tests.test_background_http import BackgroundHttpFixture
 
 
 class BackgroundA3HttpTests(unittest.TestCase):
+    def test_explicit_recovery_uses_original_publication_and_no_second_scoreable_reply(self):
+        with TestClient(self.h.app) as client:
+            self.h.login(client)
+            self.sid = client.cookies.get('tiku_phase6_session')
+            self.command(client, 'handle_image')
+            self.command(client, 'select_unit', {'unit_id': 'g1-u1', **self.target()})
+            context = client.get('/api/session').json()['execution']
+            with patch.object(self.f.a3, '_after_a2_response', side_effect=RuntimeError('parent interrupted')):
+                submitted = client.post('/api/jobs', json={'kind': 'handle_crop', 'parameters': {
+                    'bounds': {'x': 0.1, 'y': 0.1, 'width': .7, 'height': .7}, 'unit_id': 'g1-u1', **self.target()}},
+                    headers=self.h.headers(context))
+                self.assertEqual(submitted.status_code, 202, submitted.text)
+                source = submitted.json()['job']['operation_id']
+                self.assertEqual(self.h.wait_result(client, source)['status'], 'UNKNOWN')
+            with closing(sqlite3.connect(self.h.responses.path)) as conn:
+                before = conn.execute('SELECT count(*) FROM public_responses').fetchone()[0]
+            context = client.get('/api/execution').json()['execution']
+            headers = self.h.headers(context)
+            for _ in range(2):
+                ack = client.post('/api/execution/recover', json={'source_operation_id': source}, headers=headers)
+                self.assertEqual(ack.status_code, 200, ack.text)
+                self.assertNotIn('response_id', ack.json())
+                self.assertEqual(ack.json()['images'], [])
+            job = self.h.wait_result(client, source)
+            self.assertEqual(job['publication']['status'], 'READY')
+            self.assertEqual(self.f.calls, ['page', 'g1-u1', 'child'])
+            with closing(sqlite3.connect(self.h.responses.path)) as conn:
+                self.assertEqual(conn.execute('SELECT count(*) FROM public_responses').fetchone()[0], before + 1)
+                self.assertEqual(conn.execute('SELECT count(*) FROM public_responses WHERE trace_id=?', ('trace_' + source,)).fetchone()[0], 1)
+
     def setUp(self):
         self.f = a3_fixture.ExecutionDispatchA3Tests()
         self.f.setUp()

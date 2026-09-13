@@ -8,7 +8,7 @@ import re
 import threading
 import time
 
-from tiku_agent.execution_dispatch import safe_error, terminal_stage
+from tiku_agent.execution_dispatch import input_is_protected, safe_error, terminal_stage
 from tiku_agent.execution_runtime import execute_claimed
 from tiku_agent.execution_store import ExecutionError
 from tiku_agent.task_state_runtime import TaskStateEntryCapabilities
@@ -144,8 +144,8 @@ class BackgroundWorker:
                     conn.execute("UPDATE execution_operations SET status='FAILED',updated=? WHERE id=?", (now, writer.operation_id))
                 conn.execute("UPDATE execution_dispatch SET status='SETTLED',error_code=?,progress_stage=?,progress_version=progress_version+1,updated=? WHERE operation_id=?",
                              (error, terminal_stage(row["status"]), now, writer.operation_id))
-            if path is not None:
-                path.unlink(missing_ok=True)
+                if path is not None and not input_is_protected(conn, writer.operation_id):
+                    path.unlink(missing_ok=True)
         return True
 
     def _materialize(self, writer, private, extension):
@@ -181,7 +181,7 @@ class BackgroundWorker:
                     continue
                 row = conn.execute("SELECT status,updated FROM execution_operations WHERE id=?", (match[1],)).fetchone()
                 # Unknown/active inputs remain protected even after a long outage.
-                if row and (row["status"] not in {"SUCCEEDED", "FAILED", "CANCELLED"}
+                if row and (input_is_protected(conn, match[1])
                             or row["updated"] + self.dispatch.policy.input_ttl >= now):
                     continue
                 if path.stat().st_mtime + self.dispatch.policy.input_ttl >= now:

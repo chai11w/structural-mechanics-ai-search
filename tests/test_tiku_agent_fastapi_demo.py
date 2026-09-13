@@ -6362,8 +6362,8 @@ class FastApiDemoTest(unittest.TestCase):
         for expected in (
             'href="/assets/demo.css?v=20260912-background-controls-v1"',
             'src="/assets/task_state.js?v=20260830-task-state-3-4-5"',
-            'src="/assets/demo.js?v=20260912-phase6-4-v1"',
-            'src="/assets/execution_control.js?v=20260909-phase5-controls-v1"',
+            'src="/assets/demo.js?v=20260913-phase6-5-v1"',
+            'src="/assets/execution_control.js?v=20260913-phase6-5-controls-v1"',
             'id="session-drawer"',
             'id="menu-button"', 'id="lightbox"', 'role="log" aria-live="polite"',
             'role="status" aria-live="polite"', 'role="button" tabindex="0" aria-label="上传题图"',

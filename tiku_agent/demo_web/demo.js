@@ -5066,6 +5066,14 @@ function initializeBackgroundJobs() {
               me: true, images: [uploaded], backgroundKey: key + ':input', backgroundEpoch: record.epoch,
               imageAlt: record.kind === 'handle_image' ? '已上传题图' : '裁剪后的题图',
             });
+            const previousNotice = history.findIndex(old => old.backgroundKey === key && !old.responseId);
+            if (previousNotice >= 0) {
+              history.splice(previousNotice, 1);
+              const recoveredInput = history.findIndex(old => old.backgroundKey === key + ':input');
+              history.splice(recoveredInput >= 0 ? recoveredInput + 1 : Math.min(previousNotice, history.length), 0, item);
+              saveHistory();
+              renderHistory();
+            }
             addMessage(item);
             setResponseStatus(result);
             maybeOpenAutoPreparedA3Sheet(item);
@@ -5080,7 +5088,9 @@ function initializeBackgroundJobs() {
           }
           // The receipt cannot become delivered until visible history is durable.
           const saved = JSON.parse(safeLocalStorageGet(HISTORY_KEY) || '{}');
-          if (!saved.messages?.some(item => item.backgroundKey === key)) throw sessionCoordinationError();
+          const persisted = saved.messages?.find(item => item.backgroundKey === key);
+          if (!persisted || (job.status === 'SUCCEEDED' && job.publication?.status === 'READY'
+              && persisted.responseId !== result.response_id)) throw sessionCoordinationError();
           resolveFailureNotice('connection');
           resolveFailureNotice('session-recovery');
           syncTaskStateActionButtons();
@@ -5215,6 +5225,12 @@ function createExecutionPanel() {
     publish() {
       if (!safeLocalStorageSet(eventKey, createRequestId())) throw sessionCoordinationError();
     },
+    async beforeCommitted(result, action, target, operation) {
+      if (backgroundEnabled && action === 'recover_operation') {
+        await backgroundClient.queueRecovery(target.source_operation_id,
+          { epoch: operation.epoch, state_version: operation.state_version });
+      }
+    },
     committed(result, current, action) {
       retire();
       const same = result.execution?.epoch === current.execution?.epoch
@@ -5226,6 +5242,9 @@ function createExecutionPanel() {
       if (action === 'reset_session' && authoritativeTaskStateIsEmpty()) {
         if (!applyResetSessionContext(envelope) || !publishSessionReset()) throw sessionCoordinationError();
         clearHistory(); renderHistory();
+      } else if (backgroundEnabled && action === 'recover_operation') {
+        updateSessionContext(current);
+        setTimeout(resumeBackgroundJobs, 0);
       } else if (same && result.text) {
         addMessage(responseItem(result));
       } else {

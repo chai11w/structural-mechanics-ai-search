@@ -112,6 +112,12 @@ const host = {taskStateV1,storage, locks:{request:async (name,options,fn)=>{asse
  await assert.rejects(client.execute(next.view,0),/任务已更新/);
  assert.equal(client.hasPending(),false); assert.equal(cleared[1].own,true);
  assert.equal(commits.length,1);
+ mode='ok';
+ host.beforeCommitted=async()=>{throw new Error('delivery storage unavailable');};
+ await assert.rejects(client.execute((await client.inspect()).view,0),/delivery storage/);
+ assert.equal(client.hasPending(),true); // ACK cannot discard unfinished durable delivery
+ host.beforeCommitted=async()=>{};
+ await client.retry(); assert.equal(client.hasPending(),false);
  host.locks.request=async(name,options,fn)=>fn(null);
  const before=calls.length; await assert.rejects(client.retry(),/另一页面/); assert.equal(calls.length,before);
  stored.set(api.JOURNAL_KEY,'{broken'); assert.throws(()=>client.hasPending(),/记录损坏/);

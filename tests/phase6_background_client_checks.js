@@ -119,6 +119,26 @@ async function run() {
     const value = api.command('/api/image/stream', { body:data });
     assert.equal(value.kind,'handle_image'); assert.equal(await value.body.text(),'image');
   });
+  await test('explicit recovery survives reload and observes original job without POST', async () => {
+    const f = fixture(), client = api.createClient(f.host), original = await submit(f, client);
+    f.status('UNKNOWN'); await client.observe(original);
+    f.status('SUCCEEDED'); await client.queueRecovery(id, f.context);
+    const restored = api.createClient(f.host);
+    assert.equal(restored.pending(epoch).length, 1);
+    await restored.observe(restored.pending(epoch)[0]);
+    assert.equal(f.delivered[1].value.publication.result.response_id, 'response-stable');
+    assert.equal(f.calls.filter(c => c.path === '/api/jobs').length, 1);
+    assert.equal(restored.pending(epoch).length, 0);
+  });
+  await test('recovery without an old receipt remains read-only and storage failure is visible', async () => {
+    const f = fixture(), client = api.createClient(f.host);
+    const record = await client.queueRecovery(id, f.context);
+    await client.observe(record);
+    assert.equal(f.calls.filter(c => c.method === 'POST').length, 0);
+    const broken = fixture(); broken.host.storage.setItem = () => { throw Error('full'); };
+    await assert.rejects(api.createClient(broken.host).queueRecovery(id, broken.context), /full/);
+    assert.equal(broken.delivered.length, 0);
+  });
   console.log(count + ' client checks passed');
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });

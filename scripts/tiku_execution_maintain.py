@@ -1,4 +1,4 @@
-"""Inspect phase-five execution or apply an explicitly reviewed local plan.
+"""Inspect phase-five/six execution or apply an explicitly reviewed local plan.
 
 This tool never discovers, stops or restarts services and never calls models.
 """

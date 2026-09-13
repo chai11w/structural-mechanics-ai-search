@@ -5,7 +5,7 @@ introduced separately. A grant is created only by a trusted authenticated entry.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
@@ -199,6 +199,8 @@ class DispatchStore:
                 raise ExecutionError("EXECUTION_CAPACITY")
             # Account for database/WAL and a disposable materialization copy.
             self.store.storage_capacity(extra=3 * size + 8192)
+            if not self.accepting:
+                raise ExecutionError("EXECUTION_SHUTTING_DOWN")
             operation = self.operations.register(sid, identity, request, kind, inputs, dispatch=True)
             conn.execute("INSERT INTO execution_dispatch (operation_id,grant_id,status,accepted,deadline,updated) VALUES (?,?,'WAITING',?,?,?)",
                          (operation["id"], grant, now, now + self.policy.queue_seconds, now))
@@ -309,7 +311,13 @@ class DispatchStore:
                     if operation["deadline"] <= now:
                         self._revoke(conn, operation["id"], now, "EXECUTION_QUEUE_TIMEOUT")
                         continue
+                    if not self.accepting:
+                        return None  # shutdown won during the bounded control read
                     writer = self.operations.claim(operation["id"], dispatch=True)
+                    writer = replace(writer, write_authorizer=lambda connection, instant,
+                        sid=private["session_id"], identity=private["identity_key"],
+                        grant=operation["grant_id"], epoch=operation["epoch"]:
+                        self._admission(connection, sid, identity, grant, epoch, instant, budget=False))
                 except Exception as exc:
                     self._revoke(conn, operation["id"], now, safe_error(exc))
                     continue
@@ -330,7 +338,13 @@ class DispatchStore:
             self._settle(conn, now)
             # UNKNOWN payloads and every live input remain protected. Saturation
             # rejects new work instead of deleting unresolved evidence.
-            removed = conn.execute("DELETE FROM execution_dispatch_inputs WHERE operation_id IN (SELECT d.operation_id FROM execution_dispatch d JOIN execution_operations o ON o.id=d.operation_id WHERE d.status IN ('SETTLED','REVOKED') AND o.status IN ('SUCCEEDED','FAILED','CANCELLED') AND d.updated<? LIMIT 100)", (now - self.policy.input_ttl,)).rowcount
+            removed = 0
+            candidates = conn.execute("SELECT d.operation_id FROM execution_dispatch d JOIN execution_dispatch_inputs i ON i.operation_id=d.operation_id WHERE d.status IN ('SETTLED','REVOKED') AND d.updated<? ORDER BY d.updated LIMIT 1000", (now - self.policy.input_ttl,)).fetchall()
+            for row in candidates:
+                if not input_is_protected(conn, row[0]):
+                    removed += conn.execute("DELETE FROM execution_dispatch_inputs WHERE operation_id=?", (row[0],)).rowcount
+                if removed >= 100:
+                    break
             binding_guard = ""
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_http_bindings'").fetchone():
                 # HTTP login references have their own lifecycle; never violate
@@ -338,6 +352,22 @@ class DispatchStore:
                 binding_guard = " AND NOT EXISTS (SELECT 1 FROM execution_http_bindings b WHERE b.grant_id=execution_dispatch_grants.id)"
             conn.execute("DELETE FROM execution_dispatch_grants WHERE id IN (SELECT id FROM execution_dispatch_grants WHERE (expires<=? OR revoked=1) AND NOT EXISTS (SELECT 1 FROM execution_dispatch d WHERE d.grant_id=execution_dispatch_grants.id)" + binding_guard + " LIMIT 100)", (now,))
             return {"inputs_removed": removed}
+
+
+def input_is_protected(conn, operation_id):
+    """Cancellation retires authority, not unresolved model/accounting evidence."""
+    row = conn.execute("SELECT status FROM execution_operations WHERE id=?", (operation_id,)).fetchone()
+    if row is None:
+        return False
+    if row[0] not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+        return True
+    return bool(conn.execute(
+        "SELECT 1 FROM execution_effects WHERE operation_id=? AND "
+        "(status NOT IN ('CONFIRMED','NOT_SENT') OR (status='CONFIRMED' AND usage_known=0)) "
+        "UNION ALL SELECT 1 FROM execution_cost_runs r LEFT JOIN execution_cost_outbox c ON c.run_id=r.run_id "
+        "WHERE r.operation_id=? AND (c.status IS NULL OR c.status<>'CONFIRMED') "
+        "UNION ALL SELECT 1 FROM execution_files WHERE operation_id=? AND status<>'PUBLISHED' LIMIT 1",
+        (operation_id, operation_id, operation_id)).fetchone())
 
 
 def safe_error(exc):

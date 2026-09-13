@@ -132,6 +132,23 @@
         : '/api/jobs/lookup?key=' + encodeURIComponent(record.key) + '&epoch=' + record.epoch;
       return accept(record, await http(path));
     }
+    async function queueRecovery(operationId, context) {
+      if (!ID.test(operationId) || !validContext(context)) throw invalid();
+      // Only an explicitly acknowledged recovery calls this function. Persist
+      // its read-only delivery before the control journal may be discarded.
+      const data = await http('/api/jobs/' + operationId);
+      if (!KINDS.has(data.job?.kind) || data.job.status !== 'SUCCEEDED') throw invalid();
+      const key = 'recovery:' + operationId;
+      const previous = records();
+      if (!previous.some(record => record.key === key) && previous.length >= 64) {
+        const old = previous.find(record => record.done);
+        if (!old) throw failure('STORAGE_FULL', '任务恢复记录已满，请先核对原任务。');
+        storage.removeItem(PREFIX + old.key);
+      }
+      const record = { schema: 1, key, ...context, kind: data.job.kind, id: operationId, cursor: 0, done: false };
+      accept(record, data);
+      return record;
+    }
     async function observe(record, onProgress = () => {}) {
       if (observing.has(record.key)) return observing.get(record.key);
       const work = (async () => {
@@ -176,7 +193,7 @@
       observing.set(record.key, work);
       try { return await work; } finally { observing.delete(record.key); }
     }
-    return { records, pending, submit, query, observe, prefix: PREFIX };
+    return { records, pending, submit, query, queueRecovery, observe, prefix: PREFIX };
   }
   return { createClient, command, parseRecord, prefix: PREFIX };
 });

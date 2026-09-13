@@ -20,6 +20,8 @@ TABLES = ("execution_sessions", "execution_states", "execution_tasks", "executio
           "execution_attempts", "execution_owners", "execution_cost_runs", "execution_task_attempts",
           "execution_effects", "execution_collectors", "execution_cost_outbox", "execution_files",
           "execution_handoffs", "execution_unit_batches", "execution_unit_checks")
+BACKGROUND_TABLES = ("execution_dispatch_grants", "execution_dispatch", "execution_dispatch_inputs",
+                     "execution_http_logins", "execution_http_bindings", "execution_publications", "execution_public_media")
 SCAN_LIMIT = 10000
 HASH_LIMIT = 256 * 1024 * 1024
 
@@ -31,10 +33,13 @@ def execution_policy(conn):
 
 def source_digest(conn):
     hasher = hashlib.sha256()
-    for table in TABLES:
+    available = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    for table in (*TABLES, *(table for table in BACKGROUND_TABLES if table in available)):
         hasher.update(table.encode())
         for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid"):
-            hasher.update(canonical(list(row)).encode())
+            values = [{"blob_sha256": hashlib.sha256(value).hexdigest(), "bytes": len(value)}
+                      if isinstance(value, bytes) else value for value in row]
+            hasher.update(canonical(values).encode())
             hasher.update(b"\n")
     for row in conn.execute("SELECT key,value FROM execution_meta WHERE key<>'clock' ORDER BY key"):
         hasher.update(canonical(list(row)).encode())
@@ -111,6 +116,7 @@ def _file_record(root, path):
 
 
 def _cleanup_plan(conn, database, roots, limit, created, compact):
+    from tiku_agent.execution_operations import protected_publications
     policy = execution_policy(conn)
     cutoff = created - policy.history_ttl
     sessions = {row["session"]:dict(row) for row in conn.execute("SELECT * FROM execution_sessions")}
@@ -120,6 +126,7 @@ def _cleanup_plan(conn, database, roots, limit, created, compact):
     eligible = {key for key,op in operations.items() if op["status"] in {"SUCCEEDED", "FAILED", "CANCELLED"}
         and op["updated"] < cutoff and key not in pending_costs and
         (op["session"] not in sessions or sessions[op["session"]]["epoch"] != op["epoch"] or sessions[op["session"]]["expires"] <= created)}
+    eligible.difference_update(protected_publications(conn, created))
     protected = set()
     unresolved_epochs = {(op["session"], op["epoch"]) for key, op in operations.items()
                          if key in pending_costs or op["status"] in {"REGISTERED", "RUNNING", "UNKNOWN"}}

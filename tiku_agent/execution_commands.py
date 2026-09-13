@@ -242,6 +242,10 @@ def run_command(runtime, sid, kind, inputs, *, operation_request=None, identity_
                                  (operations.authority.clock(conn), source_id))
                     conn.execute("UPDATE execution_handoffs SET status='COMMITTED',updated=? WHERE operation_id=?",
                                  (operations.authority.clock(conn), source_id))
+                    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_dispatch'").fetchone():
+                        conn.execute("UPDATE execution_dispatch SET status='SETTLED',error_code='',progress_stage='completed',"
+                                     "progress_version=progress_version+1,updated=? WHERE operation_id=?",
+                                     (operations.authority.clock(conn), source_id))
                 if response is not None:
                     response.execution_context = final_context
                     response.execution_receipt = {"operation_id":row["id"], "attempt_id":writer.attempt_id, "status":"SUCCEEDED", "replayed":False}

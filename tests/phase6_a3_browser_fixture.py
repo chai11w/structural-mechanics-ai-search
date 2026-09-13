@@ -29,6 +29,15 @@ def main():
     tools.answer_candidate = lambda *a, **kw: ToolResult(ok=True, data={'copied_paths': [str(image)]})
     if '--automatic' in sys.argv:
         test.f.a3.auto_cropper = FakeAutoCropper(second_status='auto_ready')
+    if '--recover-child' in sys.argv:
+        original = test.f.a3._after_a2_response
+        interrupted = [False]
+        def interrupt_parent(*args, **kwargs):
+            if not interrupted[0]:
+                interrupted[0] = True
+                raise RuntimeError('synthetic parent interruption after durable child')
+            return original(*args, **kwargs)
+        test.f.a3._after_a2_response = interrupt_parent
 
     @app.middleware('http')
     async def login(request: Request, call_next):

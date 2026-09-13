@@ -662,6 +662,8 @@ def create_app(
     session_cookie = str(session_cookie).strip()
     if not session_cookie:
         raise ValueError("session_cookie is required")
+    if not background_execution and getattr(getattr(runtime, "execution_operations", None), "background_required", False):
+        raise ValueError("persisted background runtime requires background_execution=True; drain or migrate it explicitly")
     if background_execution and (runtime is None or feedback_store is None or response_store is None):
         raise ValueError("background mode requires explicit isolated runtime, feedback and response stores")
     if background_execution:
@@ -2094,7 +2096,17 @@ def create_app(
             kwargs = {"task_state_capabilities": _JSON_TASK_STATE_CAPABILITIES}
             response = (runtime.recover_operation(session_id, payload["source_operation_id"], **kwargs)
                 if recover else runtime.control_execution(session_id, payload["scope"], payload["target"], **kwargs))
-            return _agent_json(response, runtime, session_id, response_store=response_store,
+            if background is not None and recover:
+                # Recovery acknowledges local reconciliation only. The original
+                # detached publication owns the one scoreable business reply.
+                from copy import copy
+                response = copy(response)
+                response.text = "原任务已恢复，正在读取保存的结果。"
+                response.images = []
+                response.uploaded_image_path = response.submitted_crop_path = response.feedback_overlay_path = None
+                response.intent = "execution_recovered"
+            return _agent_json(response, runtime, session_id,
+                response_store=None if background is not None and recover else response_store,
                 identity_key=_identity_key(request) or "local", secure_cookie=_is_secure_request(request),
                 cookie_name=session_cookie, task_state_capabilities=_JSON_TASK_STATE_CAPABILITIES)
 

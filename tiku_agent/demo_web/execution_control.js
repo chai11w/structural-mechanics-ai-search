@@ -134,6 +134,7 @@
       if (!model.available || !model.consistent || !host.acknowledged(data, entry.fence)) throw fail();
       if (entry.action !== 'reset_session' && (data.operation?.status !== 'SUCCEEDED'
           || !/^[0-9a-f]{32}$/.test(data.operation.operation_id))) throw fail();
+      await host.beforeCommitted?.(data, entry.action, entry.target, entry.operation);
       erase(entry);
       host.publish();
       // A lost response can be replayed after a later state change. Only a new
