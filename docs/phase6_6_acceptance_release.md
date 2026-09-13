@@ -57,7 +57,7 @@
 
 ## 8898 发布记录
 
-- 固定发布 **`292537f0ff99c58a80b15c7674afb412f3740442`**，入口 `http://127.0.0.1:8898/`。开发文档后续提交不要求移动此已验证代码版本。
+- 首批修正版 **`292537f0ff99c58a80b15c7674afb412f3740442`**，入口 `http://127.0.0.1:8898/`。开发文档后续提交不要求移动此已验证代码版本。
 - 首次候选的首页 401 问题已修正为跳转 `/invite`，API 仍保持 401。另修复数字开头 operation ID 不符合 Trace `operation` 符号约束的问题：提交及流观察使用 `op_<id>` 引用，不放宽校验。新增确定性数字 ID 回归要求零诊断拒绝；合成测试 provider 的 call_type 同步改为合规的下划线命名。原候选已丢失的诊断事件没有伪造补回，旧日志保存在离线快照中。
 - 已通过真实 HTTP 登录、会话绑定、提交、SUCCEEDED/READY、原键三次读取、流订阅、旧协议拒绝与邀请码禁用检查。发布探针总计 3 个无图片提示任务、0 次模型调用、0 个费用效果；三个临时验收邀请码均已禁用。用户邀请码保持导入状态。
 - 已实际演练平滑停机：先停新服务看门狗，核验 Python 全部参数及独立 console 中只有目标进程后发送 SIGBREAK。Uvicorn 记录 `Application shutdown complete` 后做完整新 runtime 离线备份，五个 SQLite 文件的 quick_check/foreign_key_check 全通过。没有对 8790/8896/飞书发停止信号。
@@ -74,4 +74,6 @@
 
 后台 worker 复用旧流接口 `_public_progress_event` 的公开白名单，只保存经过校验的阶段文案、已知章节或有界校验计数。dispatch v1 增加兼容列 `progress_message`，启动时在事务内补列，保留原操作、队列截止、费用和状态；读出时再次按同一白名单校验。网页将最新步骤传给原有处理中气泡，不再统一改成“任务正在后台处理…”。仍按原键读取，观察不调用模型。
 
-验证：`test_background_progress` 覆盖步骤/计数变化、重新读取、私有文案拒绝和旧表兼容升级；客户端契约增加步骤变化检查。真实浏览器 `phase6_progress_browser_acceptance.js` 的 8 项检查通过：气泡连续显示路线检查、整页理解、1/2、2/2，调用数保持 1；刷新及新对话后面板仍隐藏。截图 `output/playwright/phase6-progress-restored.png` 已视觉检查。最终全量回归 **1,728 tests / OK，279.486 秒，无跳过**；日志 `.tmp_tests/phase6_6/progress-full.log`。发布版本在更新完成后记录。
+验证：`test_background_progress` 覆盖步骤/计数变化、重新读取、私有文案拒绝和旧表兼容升级；客户端契约增加步骤变化检查。真实浏览器 `phase6_progress_browser_acceptance.js` 的 8 项检查通过：气泡连续显示路线检查、整页理解、1/2、2/2，调用数保持 1；刷新及新对话后面板仍隐藏。截图 `output/playwright/phase6-progress-restored.png` 已视觉检查。最终全量回归 **1,728 tests / OK，279.486 秒，无跳过**；日志 `.tmp_tests/phase6_6/progress-full.log`。已发布固定版本 **`658f0ccd965eb8362a0a43822550a872acb4121c`**，8898 计划任务及 manifest 同步指向该版本。
+
+发布前确认无排队、运行中或待交付任务，核验进程身份后平滑关闭 8898，为完整 runtime 建立离线备份 `F:\cc\_backups\7-题库检索\2026-09-13\phase6-8898\ui-progress-before-658f0cc`。上线验证健康状态为 `ok`，实际提供的 CSS/JS 与固定版本逐字节一致，旧表补列成功，SQLite 完整性检查通过；原有 6 个操作的状态和结果全部保留，执行效果与费用记录数量不变，未新增模型调用。证据 `ui-progress-smoke.json` 保存于同级备份目录。新版 Python PID 为 32584，8790/8896 仍分别为原 PID 25988/24180；看门狗连续健康检查通过。PID 仅为本次证据，后续维护须重新核验。
