@@ -18,6 +18,7 @@ from tiku_agent.checkpoint_stage_input import FrozenCheckpointInput, materialize
 from tiku_agent.checkpoint_submission_budget import current_checkpoint_budget
 from tiku_shared.trace_context import is_valid_trace_id
 from tiku_shared.evidence_io_budget import evidence_io_budget, check_evidence_budget, EvidenceDeadlineExceeded
+from tiku_shared.bank_readers import BankReaderLease
 from tiku_shared.trace_events import _trace_writer_maintenance_lock, _trace_reject_linked_path, TraceEventMaintenanceError
 
 
@@ -31,6 +32,7 @@ class QueuedCapture:
     kind: str
     created: float
     byte_size: int
+    bank_lease: BankReaderLease | None = field(default=None, repr=False, compare=False)
 
 
 class AsyncCheckpointRecorder:
@@ -138,6 +140,22 @@ class AsyncCheckpointRecorder:
             elif not self.resource_leases.acquire(job.token, paths, job.created + self.max_age_seconds):
                 code = "CAPTURE_RESOURCE_CLEARING"
             else:
+                bank_lease = None
+                try:
+                    # Own a separate OS handle before queue admission completes.
+                    # Acquiring only when the consumer starts leaves a GC gap.
+                    lease_started = perf_counter()
+                    bank_lease = self.engine.bank_catalog.lease()
+                    if budget is not None and not budget.charge(perf_counter() - lease_started):
+                        bank_lease.close()
+                        self.resource_leases.release(job.token, cleanup=False)
+                        return self._reject("CAPTURE_REQUEST_BUDGET_EXHAUSTED")
+                    job = replace(job, bank_lease=bank_lease)
+                except Exception:
+                    if bank_lease is not None:
+                        bank_lease.close()
+                    self.resource_leases.release(job.token, cleanup=False)
+                    return self._reject("CAPTURE_BANK_UNAVAILABLE")
                 self._queue.append(job)
                 self._pending += 1
                 self._bytes += size
@@ -222,6 +240,8 @@ class AsyncCheckpointRecorder:
             except BaseException:
                 result, partial = A2CaptureRecordResultV1(True, False, "CAPTURE_CONSUMER_FAILED"), False
             finally:
+                if job.bank_lease is not None:
+                    job.bank_lease.close()
                 # Do not put file deletion in the shutdown caller or under the queue lock.
                 # Keep this job active until cleanup finishes, so a blocked unlink is visible.
                 try:
@@ -269,6 +289,8 @@ class AsyncCheckpointRecorder:
                 self._cancel.set()
                 while self._queue:
                     job = self._queue.popleft()
+                    if job.bank_lease is not None:
+                        job.bank_lease.close()
                     self.resource_leases.release(job.token, cleanup=False)
                     self._pending -= 1
                     self._bytes -= job.byte_size

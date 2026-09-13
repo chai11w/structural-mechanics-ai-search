@@ -103,6 +103,56 @@ def _native_lock(stream, exclusive):
     return acquire, lambda: fcntl.flock(stream, fcntl.LOCK_UN)
 
 
+class BankReaderLease:
+    """One independent read handle, transferable to a queued worker.
+
+    Acquisition never waits or reuses thread-local state. A rejected queue item
+    closes it immediately; an accepted item owns it until its worker finishes.
+    """
+
+    def __init__(self, root):
+        self._mutex = threading.Lock()
+        self._pid = os.getpid()
+        self._stream = None
+        if not root:
+            return
+        path = _path(root)
+        stream = path.open("rb")
+        release = None
+        try:
+            acquire, unlock = _native_lock(stream, False)
+            if not acquire():
+                raise BankReadersBusy("bank retention busy")
+            release = unlock
+            _validate(stream, _path(root))
+        except BaseException:
+            try:
+                if release is not None:
+                    release()
+            finally:
+                stream.close()
+            raise
+        self._stream, self._release = stream, release
+
+    def close(self):
+        with self._mutex:
+            stream, self._stream = self._stream, None
+            if stream is not None:
+                try:
+                    # A fork inherits the descriptor, not ownership of the
+                    # parent's flock. Closing the child copy must not unlock it.
+                    if self._pid == os.getpid():
+                        self._release()
+                finally:
+                    stream.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
 @contextmanager
 def _gate(root, *, exclusive, timeout):
     path = _path(root)

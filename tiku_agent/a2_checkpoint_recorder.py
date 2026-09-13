@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import stat
 from threading import Lock
@@ -49,6 +50,7 @@ class A2CheckpointRecorderV1:
         self, store: Any, *, producer: ProducerVersionV1,
         media_root: str | Path | None = None,
         bank_root: str | Path | None = None,
+        published_bank_root: str | Path | None = None,
         gate: A2CheckpointCaptureGateV1 | None = None, clock: Any | None = None,
         trace_recorder=None,
     ) -> None:
@@ -63,7 +65,12 @@ class A2CheckpointRecorderV1:
         if bank_root is None:
             from search import ROOT
             bank_root = ROOT
-        self.bank_catalog = CheckpointBankCatalog({"main": bank_root})
+        published_bank_root = (os.environ.get("TIKU_BANK_STORE", "")
+                               if published_bank_root is None else published_bank_root)
+        roots = {"main": bank_root}
+        if published_bank_root:
+            roots["published"] = published_bank_root
+        self.bank_catalog = CheckpointBankCatalog(roots)
         self.gate = gate or A2CheckpointCaptureGateV1()
         self.clock = clock or (lambda: datetime.now(UTC))
         self._lock = Lock()
@@ -130,13 +137,14 @@ class A2CheckpointRecorderV1:
         decision = self.gate.decide(admission)
         if not decision.permitted:
             return A2CaptureRecordResultV1(False, False, decision.reason_code)
-        common = None
+        common = lease = None
         try:
             # Validate identity before any filesystem or Store access.
             if not is_valid_trace_id(context.trace_id):
                 return self._result(False, "CAPTURE_TRACE_REQUIRED")
             context.owner()
             tool_result, payload = materialize_a2_stage_input(freeze_a2_stage_input(tool_result, payload or {}))
+            lease = self.bank_catalog.lease()
             metadata = tool_result.data.get("checkpoint_producer") or tool_result.data.get("checkpoint_rerank", {}).get("producer", {})
             if metadata:
                 context = replace(context, producer=replace(context.producer, **{
@@ -217,6 +225,7 @@ class A2CheckpointRecorderV1:
                 except Exception:
                     self._result(False, "FAILED_ARTIFACT_UNAVAILABLE")
             checkpoint = replace(checkpoint, predecessor_checkpoint_id=predecessor_checkpoint_id, failure=failure)
+            return self.record(checkpoint, admission=admission)
         except CheckpointStoreError:
             return self._result(False, "STORE_REJECTED")
         except Exception:
@@ -233,7 +242,9 @@ class A2CheckpointRecorderV1:
                 except Exception:
                     pass
             return rejected
-        return self.record(checkpoint, admission=admission)
+        finally:
+            if lease is not None:
+                lease.close()
 
     def record(self, checkpoint: IntermediateCheckpointV1, *, admission: A2CaptureAdmissionV1) -> A2CaptureRecordResultV1:
         decision = self.gate.decide(admission)
@@ -242,7 +253,8 @@ class A2CheckpointRecorderV1:
         if type(checkpoint) is not IntermediateCheckpointV1:
             return self._result(False, "CAPTURE_INVALID")
         try:
-            stored = self.store.put_checkpoint(checkpoint)
+            with self.bank_catalog.lease():
+                stored = self.store.put_checkpoint(checkpoint)
         except CheckpointStoreError:
             return self._result(False, "STORE_REJECTED")
         except Exception:

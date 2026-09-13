@@ -17,8 +17,8 @@ from tiku_shared import bank_versions
 
 CHILD = """
 import json, os, sys
-from tiku_shared.bank_readers import reader_gate, maintenance_gate, BankReadersBusy
-gate = reader_gate if sys.argv[2] == 'reader' else maintenance_gate
+from tiku_shared.bank_readers import reader_gate, maintenance_gate, BankReadersBusy, BankReaderLease
+gate = {'reader': reader_gate, 'maintenance': maintenance_gate, 'lease': BankReaderLease}[sys.argv[2]]
 try:
     with gate(sys.argv[1]):
         print(json.dumps({'acquired': True}), flush=True)
@@ -185,6 +185,44 @@ class ReaderGateTests(unittest.TestCase):
             self.assertFalse(unavailable.exists())
             with self.assertRaises(FileNotFoundError), bank_versions.pin_bank():
                 pass
+
+    def test_transferable_lease_outlives_caller_context_and_closes_in_worker(self):
+        marker = self.root / readers.GATE_NAME
+        before = (marker.read_bytes(), marker.stat().st_mtime_ns, marker.stat().st_ino)
+        with readers.reader_gate():
+            lease = readers.BankReaderLease(self.root)
+        self.addCleanup(lease.close)
+        with self.assertRaises(OSError):
+            os.write(lease._stream.fileno(), b"x")
+        self.assert_maintenance_busy()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(lease.close).result(timeout=3)
+        lease.close()  # Concurrent/shutdown ownership can release only once.
+        child, acquired = self.child("maintenance")
+        self.assertTrue(acquired); self.finish(child)
+        self.assertEqual(before, (marker.read_bytes(), marker.stat().st_mtime_ns, marker.stat().st_ino))
+
+    def test_transferable_lease_refuses_busy_or_corrupt_gate_without_leaking_handle(self):
+        child, acquired = self.child("maintenance")
+        self.assertTrue(acquired)
+        with self.assertRaises(readers.BankReadersBusy):
+            readers.BankReaderLease(self.root)
+        self.finish(child)
+        marker = self.root / readers.GATE_NAME
+        marker.write_bytes(b"broken")
+        with self.assertRaisesRegex(ValueError, "invalid bank reader gate"):
+            readers.BankReaderLease(self.root)
+        marker.write_bytes(readers.GATE_BYTES)
+        child, acquired = self.child("maintenance")
+        self.assertTrue(acquired); self.finish(child)
+
+    def test_process_abort_releases_transferable_lease(self):
+        child, acquired = self.child("lease")
+        self.assertTrue(acquired)
+        self.assert_maintenance_busy()
+        self.finish(child, abort=True)
+        child, acquired = self.child("maintenance")
+        self.assertTrue(acquired); self.finish(child)
 
 
 if __name__ == "__main__":

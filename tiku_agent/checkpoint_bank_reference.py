@@ -1,11 +1,11 @@
-"""Logical references to current question-bank files; construction performs no I/O."""
+"""Logical references to legacy or versioned bank files; construction does no I/O."""
 
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 from types import MappingProxyType
 from typing import Mapping
-from tiku_shared.bank_readers import bank_access
+from tiku_shared.bank_readers import BankReaderLease, reader_gate
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,11 @@ class BankReferenceV1:
                 raise ValueError("reserved bank filename")
         if PurePosixPath(key).suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
             raise ValueError("unsupported bank media")
-        if self.lookup_mode != "current":
+        if self.bank_id == "published":
+            if (self.lookup_mode != "version" or len(parts) < 4 or parts[0] != "versions"
+                    or not re.fullmatch(r"[a-f0-9]{64}", parts[1]) or parts[2] not in {"main", "symbolic"}):
+                raise ValueError("invalid published bank reference")
+        elif self.lookup_mode != "current":
             raise ValueError("unsupported bank lookup mode")
 
     def to_dict(self):
@@ -52,7 +56,8 @@ class CheckpointBankCatalog:
     def __init__(self, roots: Mapping[str, str | Path]):
         self.roots = dict(roots)
         for key, root in self.roots.items():
-            BankReferenceV1(key, "chapter", "image.png")
+            if not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", key):
+                raise ValueError("invalid bank id")
             path = Path(root)
             if not path.is_absolute() or ".." in path.parts:
                 raise ValueError("bank root must be absolute")
@@ -63,13 +68,18 @@ class CheckpointBankCatalog:
         path = Path(path)
         if not path.is_absolute() or ".." in path.parts:
             raise ValueError("bank image must have an absolute source location")
+        published = self.roots.get("published")
+        if published is not None and path.is_relative_to(published):
+            return BankReferenceV1("published", chapter, path.relative_to(published).as_posix(), "version")
         matches = [(root, key) for key, root in self.roots.items() if path.is_relative_to(root)]
         if not matches:
             raise ValueError("image is outside configured banks")
         root, key = max(matches, key=lambda item: len(item[0].parts))
         return BankReferenceV1(key, chapter, path.relative_to(root).as_posix())
 
-    @bank_access
+    def lease(self):
+        return BankReaderLease(self.roots.get("published", ""))
+
     def read(self, reference: BankReferenceV1) -> bytes:
         # Revalidate paths on every read. Never repair or search for a replacement.
         from tiku_agent.checkpoint_store import _reject_linked_path, _inspect_image
@@ -78,11 +88,12 @@ class CheckpointBankCatalog:
         root = self.roots.get(reference.bank_id)
         if root is None:
             raise ValueError("bank is not configured")
-        target = root.joinpath(*reference.relative_key.split("/"))
-        _reject_linked_path(target)
-        if not target.resolve().is_relative_to(root.resolve()):
-            raise ValueError("bank reference escaped its root")
-        with target.open("rb") as stream:
-            content = stream.read(MAX_ARTIFACT_BYTES + 1)
-        _inspect_image(content)
-        return content
+        with reader_gate(root if reference.bank_id == "published" else ""):
+            target = root.joinpath(*reference.relative_key.split("/"))
+            _reject_linked_path(target)
+            if not target.resolve().is_relative_to(root.resolve()):
+                raise ValueError("bank reference escaped its root")
+            with target.open("rb") as stream:
+                content = stream.read(MAX_ARTIFACT_BYTES + 1)
+            _inspect_image(content)
+            return content

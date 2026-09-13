@@ -53,9 +53,10 @@ def build_argument_parser():
     artifact.add_argument("--checkpoint-id", required=True)
     artifact.add_argument("--artifact-id", required=True)
     artifact.add_argument("--include-content", action="store_true", help="Include base64 image bytes; no preview file is created")
-    bank = commands.add_parser("bank-image", help="Read the current bank image through an audited checkpoint reference")
+    bank = commands.add_parser("bank-image", help="Read a bank image through an audited checkpoint reference")
     bank.add_argument("--checkpoint-id", required=True)
     bank.add_argument("--bank-root", type=Path, required=True, help="Trusted current root for bank id main")
+    bank.add_argument("--published-bank-root", type=Path, help="Trusted published store for version-bound references")
     selection = bank.add_mutually_exclusive_group(required=True)
     selection.add_argument("--answer-ordinal", type=int)
     selection.add_argument("--candidate-id")
@@ -109,8 +110,11 @@ def main(argv=None):
                 result["content_base64"] = base64.b64encode(artifact.content).decode("ascii")
         elif args.command == "bank-image":
             from tiku_agent.checkpoint_bank_reference import CheckpointBankCatalog
+            roots = {"main": args.bank_root}
+            if args.published_bank_root is not None:
+                roots["published"] = args.published_bank_root
             reference, content = service.bank_image(args.checkpoint_id,
-                catalog=CheckpointBankCatalog({"main": args.bank_root}),
+                catalog=CheckpointBankCatalog(roots),
                 answer_ordinal=args.answer_ordinal, candidate_id=args.candidate_id or "")
             result = {"reference": reference.to_dict(), "byte_size": len(content),
                       "current_sha256": sha256(content).hexdigest()}
