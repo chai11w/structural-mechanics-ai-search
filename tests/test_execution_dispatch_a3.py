@@ -50,6 +50,7 @@ class ExecutionDispatchA3Tests(unittest.TestCase):
                 paid(selected["unit_id"])
                 return super().verify(page, crop, selected, understanding)
         tools = FakeTools().toolbox()
+        self.tools = tools
         def analyze(*args, **kwargs):
             paid("child")
             return ToolResult(ok=True, data={"loads": [{"type": "集中", "raw": "P"}], "chapter_hint": "4力法"})
@@ -62,10 +63,11 @@ class ExecutionDispatchA3Tests(unittest.TestCase):
             page_observer=Observer(), crop_verifier=Verifier(), cost_ledger=self.ledger,
             max_concurrent_tasks=1, max_queued_tasks=2, queue_wait_seconds=55)
         attach_execution(self.a3, self.store, configuration_version="dispatch-a3-v1")
-        self.dispatch = DispatchStore(self.a3, authorize=lambda identity, version: identity == "invite" and version == 1)
-        self.worker = BackgroundWorker(self.dispatch, self.root / "worker")
         self.store.context("s")
-        self.grant = self.dispatch.create_grant("s", "invite", auth_version=1, expires_at=time.time() + 3600)
+        if getattr(self, "detached", True):
+            self.dispatch = DispatchStore(self.a3, authorize=lambda identity, version: identity == "invite" and version == 1)
+            self.worker = BackgroundWorker(self.dispatch, self.root / "worker")
+            self.grant = self.dispatch.create_grant("s", "invite", auth_version=1, expires_at=time.time() + 3600)
         image = io.BytesIO()
         Image.new("RGB", (1000, 800), "white").save(image, format="PNG")
         self.image = image.getvalue()

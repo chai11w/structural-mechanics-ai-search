@@ -271,6 +271,7 @@ def build_app(
     checkpoint_code_revision: str = "",
     enable_a3_checkpoint_capture: bool = False,
     enable_durable_execution: bool = False,
+    background_execution: bool = False,
 ):
     _validate_queue_settings(
         max_concurrent_tasks,
@@ -278,6 +279,15 @@ def build_app(
         queue_wait_seconds,
     )
     root = Path(runtime_dir).resolve()
+    if background_execution:
+        if not float(queue_wait_seconds).is_integer():
+            raise ValueError("background queue deadline must use whole seconds")
+        if not enable_durable_execution or control_db is None or invite_config is not None:
+            raise ValueError("background execution requires durable execution and an isolated control database")
+        if Path(control_db).absolute() != root / "control.sqlite3":
+            raise ValueError("background control database must be runtime/control.sqlite3")
+        if any(part in {".tmp_tiku_agent_v2_prod_8790", ".tmp_feishu_tiku"} for part in root.parts):
+            raise ValueError("background execution requires a separate runtime")
     if type(enable_durable_execution) is not bool:
         raise TypeError("enable_durable_execution must be boolean")
     if (root / "execution.sqlite3").exists() and not enable_durable_execution:
@@ -344,7 +354,7 @@ def build_app(
         )
         retention_runner = CheckpointRetentionRunner(
             runtime_root=root,
-            runtime_name=EVIDENCE_RUNTIME_NAME,
+            runtime_name="tiku_agent_phase6_8898" if background_execution else EVIDENCE_RUNTIME_NAME,
             repository_root=repository,
             backup_root=backup_root,
             capacity=evidence_capacity,
@@ -391,17 +401,25 @@ def build_app(
         from tiku_agent.execution_runtime import attach_execution
         from tiku_agent.execution_store import ExecutionStore
         attach_execution(runtime, ExecutionStore(root / "execution.sqlite3"))
+    if background_execution:
+        from tiku_agent.execution_dispatch import DispatchStore, DispatchPolicy
+        DispatchStore(runtime, authorize=lambda identity, version: control_store.active_invitation(identity, version) is not None,
+                      policy=DispatchPolicy(max_concurrent=max_concurrent_tasks, max_queued=max_queued_tasks,
+                                            queue_seconds=int(queue_wait_seconds)))
+        from tiku_agent.background_auth import BackgroundInviteAccess
+        access = BackgroundInviteAccess(control_store, cookie_name="tiku_phase6_8898_invite")
+    else:
+        access = SQLiteInviteAccess(control_store) if control_store is not None else InviteAccess(invite_config) if invite_config else None
+    from tiku_shared.response_store import SQLiteResponseStore
     app = create_app(
         runtime=runtime,
         incoming_dir=root / "incoming",
-        session_cookie=SESSION_COOKIE,
+        session_cookie="tiku_phase6_8898_session" if background_execution else SESSION_COOKIE,
         output_watchdog=output_watchdog,
-        invite_access=(
-            SQLiteInviteAccess(control_store)
-            if control_store is not None
-            else InviteAccess(invite_config) if invite_config else None
-        ),
+        invite_access=access,
         feedback_store=SQLiteFeedbackStore(root / "feedback.sqlite3"),
+        response_store=SQLiteResponseStore(root / "responses.sqlite3"),
+        background_execution=background_execution,
         feedback_retention_days_provider=(
             (lambda: int(control_store.settings()["feedback_retention_days"]))
             if control_store is not None
