@@ -77,3 +77,7 @@
 验证：`test_background_progress` 覆盖步骤/计数变化、重新读取、私有文案拒绝和旧表兼容升级；客户端契约增加步骤变化检查。真实浏览器 `phase6_progress_browser_acceptance.js` 的 8 项检查通过：气泡连续显示路线检查、整页理解、1/2、2/2，调用数保持 1；刷新及新对话后面板仍隐藏。截图 `output/playwright/phase6-progress-restored.png` 已视觉检查。最终全量回归 **1,728 tests / OK，279.486 秒，无跳过**；日志 `.tmp_tests/phase6_6/progress-full.log`。已发布固定版本 **`658f0ccd965eb8362a0a43822550a872acb4121c`**，8898 计划任务及 manifest 同步指向该版本。
 
 发布前确认无排队、运行中或待交付任务，核验进程身份后平滑关闭 8898，为完整 runtime 建立离线备份 `F:\cc\_backups\7-题库检索\2026-09-13\phase6-8898\ui-progress-before-658f0cc`。上线验证健康状态为 `ok`，实际提供的 CSS/JS 与固定版本逐字节一致，旧表补列成功，SQLite 完整性检查通过；原有 6 个操作的状态和结果全部保留，执行效果与费用记录数量不变，未新增模型调用。证据 `ui-progress-smoke.json` 保存于同级备份目录。新版 Python PID 为 32584，8790/8896 仍分别为原 PID 25988/24180；看门狗连续健康检查通过。PID 仅为本次证据，后续维护须重新核验。
+
+### 接收提示文案修正
+
+按用户确认，将接收后的“任务已接收，正在排队…”简化为“任务已接收”，实际开始后继续显示既有步骤进度；同步更新脚本缓存版本。15 项客户端契约检查通过。8898 已平滑切换至固定版本 `53a53cbb58ee12dd8083ce9e1a2cd6d501e215fc`，实际返回脚本与发布文件一致，健康检查通过；原有 10 个操作及执行效果、费用记录保留，8790/8896 PID 未变。完整离线备份位于发布备份目录的 `acceptance-copy-before-53a53cb/runtime`，验证证据为 `acceptance-copy-smoke.json`。
