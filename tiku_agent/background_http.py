@@ -19,6 +19,7 @@ from tiku_agent.execution_operations import OperationRequest
 from tiku_agent.execution_runtime import OPERATION_HEADER
 from tiku_agent.execution_store import ExecutionError, digest, session_key
 from tiku_agent.execution_worker import BackgroundWorker
+from tiku_agent.session_runtime import AgentBudgetExceededError
 from tiku_agent.task_state_runtime import TaskStateEntryCapabilities
 from tiku_shared.trace_context import trace_context_scope
 from tiku_shared.trace_events import current_trace_event_session, record_trace_event, record_public_terminal, trace_event_session_scope
@@ -27,6 +28,10 @@ from tiku_shared.trace_events import current_trace_event_session, record_trace_e
 PROTOCOL_HEADER = "X-Tiku-Background"
 LEGACY_BUSINESS_PATHS = frozenset({"/api/image", "/api/image/stream", "/api/message", "/api/message/stream",
                                  "/api/a3/select", "/api/a3/select/stream", "/api/a3/prepare/stream", "/api/a3/crop/stream"})
+# These domain failures occur before durable admission. Storage/commit errors,
+# authentication, conflicts with an existing key and missing lookup are NOT proof.
+ADMISSION_REJECTIONS = frozenset({"EXECUTION_QUEUE_FULL", "EXECUTION_INPUT_INVALID", "EXECUTION_INPUT_TOO_LARGE",
+    "EXECUTION_CAPACITY", "EXECUTION_COST_PENDING", "INVITE_DAILY_QUOTA_EXCEEDED", "GLOBAL_DAILY_QUOTA_EXCEEDED"})
 
 
 class BackgroundHTTP:
@@ -233,7 +238,7 @@ class BackgroundHTTP:
                 path.unlink(missing_ok=True)
 
     @staticmethod
-    def failure(exc):
+    def failure(exc, *, admission_rejected=False):
         code = getattr(exc, "code", "EXECUTION_UNAVAILABLE")
         codes = {"BACKGROUND_PROTOCOL_REQUIRED", "EXECUTION_AUTH_REQUIRED", "EXECUTION_AUTH_UNAVAILABLE",
                  "EXECUTION_CONTEXT_REQUIRED", "EXECUTION_STALE", "EXECUTION_BUSY", "EXECUTION_INPUT_CONFLICT",
@@ -244,7 +249,10 @@ class BackgroundHTTP:
         status = (401 if code.startswith("EXECUTION_AUTH") else 404 if code in {"EXECUTION_NOT_FOUND", "EXECUTION_RESULT_UNAVAILABLE"}
                   else 413 if code == "EXECUTION_INPUT_TOO_LARGE" else 429 if code in {"EXECUTION_QUEUE_FULL", "EXECUTION_SUBSCRIPTION_LIMIT"}
                   else 503 if code in {"EXECUTION_UNAVAILABLE", "EXECUTION_CAPACITY", "EXECUTION_SHUTTING_DOWN"} else 409)
-        return JSONResponse({"schema_version": 1, "code": code, "message": "请核对任务状态后再操作。"}, status_code=status,
+        payload = {"schema_version": 1, "code": code, "message": "请核对任务状态后再操作。"}
+        if admission_rejected:
+            payload["admission"] = "rejected"
+        return JSONResponse(payload, status_code=status,
                             headers={"Cache-Control": "private, no-store"})
 
     async def body(self, request, limit):
@@ -279,6 +287,7 @@ class BackgroundHTTP:
         @app.post("/api/jobs")
         @app.post("/api/jobs/image")
         async def submit(request: Request):
+            accepted = False
             try:
                 self.require_protocol(request, task=True)
                 credentials = self.credentials(request)
@@ -304,13 +313,15 @@ class BackgroundHTTP:
                 # Copy only immutable command/auth data into the background
                 # admission call. Cancellation may lose ACK, never the commit.
                 ack = await asyncio.to_thread(self.dispatch.accept, *credentials, operation, kind, parameters, image=image)
+                accepted = True
                 record_trace_event("stage_finished", stage="background_submission", outcome="success",
                                    safe_attributes={"operation": "op_" + ack["operation_id"], "completed": True})
                 ack["trace_id"] = "trace_" + ack["operation_id"]
                 return JSONResponse({"schema_version": 1, "job": ack}, status_code=202,
                                     headers={"Location": "/api/jobs/" + ack["operation_id"], "Cache-Control": "private, no-store"})
             except Exception as exc:
-                return self.failure(exc)
+                return self.failure(exc, admission_rejected=(not accepted and isinstance(exc, (ExecutionError, AgentBudgetExceededError))
+                    and exc.code in ADMISSION_REJECTIONS))
 
         @app.get("/api/jobs/lookup")
         async def lookup(request: Request, key: str, epoch: str):

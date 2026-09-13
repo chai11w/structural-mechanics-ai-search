@@ -81,3 +81,13 @@
 ### 接收提示文案修正
 
 按用户确认，将接收后的“任务已接收，正在排队…”简化为“任务已接收”，实际开始后继续显示既有步骤进度；同步更新脚本缓存版本。15 项客户端契约检查通过。8898 已平滑切换至固定版本 `53a53cbb58ee12dd8083ce9e1a2cd6d501e215fc`，实际返回脚本与发布文件一致，健康检查通过；原有 10 个操作及执行效果、费用记录保留，8790/8896 PID 未变。完整离线备份位于发布备份目录的 `acceptance-copy-before-53a53cb/runtime`，验证证据为 `acceptance-copy-smoke.json`。
+
+### 独立验收问题修复（2026-09-13，仅本地）
+
+修复接收被明确拒绝后仍阻塞原对话，以及旧 epoch 未完成记录累计 64 条后阻塞新对话的问题。提交接口为受控的接收前拒绝增加证明字段；网页核验后展示具体原因并解除本次意图和 fence，允许用户手动重试。未知接收、一般提交异常和 lookup 404 继续保留原键；已持久接收后的诊断失败不返回拒绝证明。新提交在共享 Web Lock 内取得匹配的服务端当前 epoch/version 后清理旧 epoch 的浏览器传输记录，保持服务端 UNKNOWN、取消及费用证据；晚到查询不能重新创建已退役记录。协议与保留规则分别见 6.3、6.4 的验收修正。
+
+新增 `test_background_rejection` 的 3 项测试，覆盖真实满队列、输入/额度拒绝、提交后丢 ACK 及诊断失败；客户端契约扩展至 21 项，覆盖拒绝证明校验、64 条旧记录、过时绑定、当前 pending 保护、晚到观察和存储失败。真实 Chromium 新增 `phase6_admission_browser_acceptance.js` 的 8 项检查通过；原 `phase6_browser_acceptance.js` 更新旧文案断言后 19 项检查通过，六次业务提交仍只有六次调用和 attempt。浏览器夹具和端口均独立，测试结束已关闭，新增付费模型调用为 0。
+
+网页 JS 缓存地址及三个固定地址断言同步更新，JS 语法、CLI 帮助和 `git diff --check` 通过。此批不改变 CLI/飞书/检索 Skill 的入口或检索排序逻辑，不修改 live 数据、不合并或推送，不更新 8898 固定 release；生产运行版本仍为上一节记录的 `53a53cb`。
+
+最终全量回归：**1,731 tests / OK，235.219 秒，无跳过**。日志：`C:\Users\31492\AppData\Local\Temp\phase6-fix-162fee6eba20444f9500ce1192becc63\regression-final.log`。可重复运行 `python -B -m unittest discover -s tests -q`；浏览器以 `python -B -m tests.phase6_browser_fixture` 启动新的隔离夹具，登录 `/fixture/start` 后依次执行上述新增和原有两个浏览器脚本。

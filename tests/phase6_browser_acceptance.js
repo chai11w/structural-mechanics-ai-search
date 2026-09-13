@@ -39,7 +39,7 @@ async (page) => {
     await page.reload();
     second = await context.newPage();
     await second.goto(origin);
-    await page.getByText('任务正在后台处理…', { exact: true }).first().waitFor();
+    await page.waitForFunction(() => document.querySelector('#status-text').textContent === '正在处理当前请求…');
     await gate(true);
     await waitReply(page, ('refresh-running' + suffix));
     await waitReply(second, ('refresh-running' + suffix));

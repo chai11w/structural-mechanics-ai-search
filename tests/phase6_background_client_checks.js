@@ -39,6 +39,93 @@ async function submit(f, client) {
 async function run() {
   let count = 0;
   async function test(name, action) { await action(); count++; console.log('PASS ' + name); }
+  await test('explicit admission rejection releases intent and allows a manual retry', async () => {
+    for (const [code, status] of [['EXECUTION_QUEUE_FULL', 429], ['EXECUTION_INPUT_INVALID', 409],
+      ['EXECUTION_INPUT_TOO_LARGE', 413], ['EXECUTION_CAPACITY', 503], ['EXECUTION_COST_PENDING', 409],
+      ['INVITE_DAILY_QUOTA_EXCEEDED', 409], ['GLOBAL_DAILY_QUOTA_EXCEEDED', 409]]) {
+      const f = fixture(), client = api.createClient(f.host), original = f.host.fetch;
+      let posts = 0;
+      f.host.fetch = async (path, options) => {
+        if (path !== '/api/jobs') return original(path, options);
+        posts++;
+        return Response.json({schema_version:1, code, admission:'rejected', message:'private provider text'}, {status});
+      };
+      await assert.rejects(submit(f, client), e => e.admissionRejected && e.code === code && !e.message.includes('private'));
+      assert.equal(client.pending(epoch).length, 0);
+      assert.equal(posts, 1, 'no automatic resubmission');
+      f.host.fetch = original;
+      await client.observe(await submit(f, client));
+      assert.equal(f.delivered.length, 1);
+    }
+  });
+  await test('unmarked or inconsistent rejection never discards uncertain admission', async () => {
+    for (const [data,status] of [
+      [{schema_version:1,code:'EXECUTION_QUEUE_FULL'},429],
+      [{schema_version:2,code:'EXECUTION_QUEUE_FULL',admission:'rejected'},429],
+      [{schema_version:1,code:'EXECUTION_QUEUE_FULL',admission:'rejected'},503],
+      [{schema_version:1,code:'EXECUTION_UNAVAILABLE',admission:'rejected'},503],
+    ]) {
+      const f = fixture(), client = api.createClient(f.host), original = f.host.fetch;
+      f.host.fetch = (path, options) => path === '/api/jobs' ? Response.json(data, {status}) : original(path, options);
+      const record = await submit(f, client);
+      assert.equal(record.id, ''); assert.equal(client.pending(epoch).length, 1);
+      await assert.rejects(submit(f, client), e => e.code === 'PENDING_JOB');
+    }
+  });
+  function retired(f, count = 64) {
+    const records = [];
+    for (let i = 0; i < count; i++) {
+      const record = {schema:1,key:'retired-'+String(i).padStart(4,'0'),epoch:'c'.repeat(32),
+        state_version:0,kind:'handle_text',id,cursor:0,done:false};
+      f.entries.set(api.prefix+record.key, JSON.stringify(record)); records.push(record);
+    }
+    return records;
+  }
+  await test('fresh binding retires 64 old epoch receipts without reviving late observers', async () => {
+    const f = fixture(), client = api.createClient(f.host), old = retired(f);
+    let release;
+    const original = f.host.fetch;
+    f.host.fetch = async (path, options) => path === '/api/jobs/'+id
+      ? new Promise(resolve => { release = () => resolve(Response.json({schema_version:1,job:f.job()})); })
+      : original(path, options);
+    const late = client.query(old[0]);
+    const rejection = assert.rejects(late, e => e.code === 'EXECUTION_STALE');
+    const current = await submit(f, client);
+    release(); await rejection;
+    assert.equal(client.records().length, 1);
+    assert.equal(client.records()[0].epoch, epoch);
+    f.host.fetch = original;
+    await client.observe(current);
+    assert.equal(f.delivered.length, 1);
+  });
+  await test('stale or unauthorized binding cannot erase another epochs recovery records', async () => {
+    for (const unauthorized of [false,true]) {
+      const f = fixture(), client = api.createClient(f.host); retired(f);
+      const before = [...f.entries];
+      f.host.fetch = async path => {
+        assert.equal(path, '/api/jobs/session');
+        return unauthorized ? Response.json({code:'EXECUTION_AUTH_REQUIRED'},{status:401})
+          : Response.json({schema_version:1,execution:{epoch:'d'.repeat(32),state_version:0}});
+      };
+      await assert.rejects(submit(f, client));
+      assert.deepEqual([...f.entries], before);
+    }
+  });
+  await test('current unresolved receipt remains protected when old records fill capacity', async () => {
+    const f = fixture(), client = api.createClient(f.host);
+    retired(f,63); const record={schema:1,key:'current-pending',epoch,state_version:4,kind:'handle_text',id:'',cursor:0,done:false};
+    f.entries.set(api.prefix+record.key,JSON.stringify(record));
+    await assert.rejects(submit(f,client), e=>e.code==='PENDING_JOB');
+    assert.equal(f.entries.size,64); assert.equal(f.calls.length,0);
+  });
+  await test('failed rejection cleanup remains visible instead of authorizing retry', async () => {
+    const f=fixture(), client=api.createClient(f.host), original=f.host.fetch;
+    f.host.storage.removeItem=()=>{};
+    f.host.fetch=(path,options)=>path==='/api/jobs'
+      ? Response.json({schema_version:1,code:'EXECUTION_QUEUE_FULL',admission:'rejected'},{status:429}) : original(path,options);
+    await assert.rejects(submit(f,client),e=>e.code==='RESPONSE_INVALID' && !e.admissionRejected);
+    assert.equal(client.pending(epoch).length,1);
+  });
   await test('original progress changes by step and counter without another POST', async () => {
     const f = fixture(), client = api.createClient(f.host), record = await submit(f, client);
     const messages = ['正在理解整页题目和图形关系…', '已完成 1/2 张自动裁图校验…', '已完成 2/2 张自动裁图校验…'];

@@ -13,4 +13,4 @@ class BackgroundFrontendTests(unittest.TestCase):
         result = subprocess.run([shutil.which('node'), 'tests/phase6_background_client_checks.js'],
                                 cwd=ROOT, capture_output=True, text=True, encoding='utf-8', timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('15 client checks passed', result.stdout)
+        self.assertIn('21 client checks passed', result.stdout)

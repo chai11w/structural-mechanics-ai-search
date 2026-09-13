@@ -10,6 +10,15 @@
   const KEY = /^[A-Za-z0-9:_.-]{8,128}$/;
   const KINDS = new Set(['handle_text', 'handle_image', 'select_unit', 'prepare_units', 'handle_crop']);
   const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED', 'UNKNOWN']);
+  const REJECTIONS = {
+    EXECUTION_QUEUE_FULL: [429, '当前任务较多，本次任务未接收，请稍后重新提交。'],
+    EXECUTION_INPUT_INVALID: [409, '本次任务未接收，请检查输入后重新提交。'],
+    EXECUTION_INPUT_TOO_LARGE: [413, '图片或输入过大，本次任务未接收，请调整后重新提交。'],
+    EXECUTION_CAPACITY: [503, '服务存储容量暂时不足，本次任务未接收，请稍后重新提交。'],
+    EXECUTION_COST_PENDING: [409, '服务有费用待核对，本次任务未接收，请核对后重新提交。'],
+    INVITE_DAILY_QUOTA_EXCEEDED: [409, '今日使用额度已用完，本次任务未接收，请额度恢复后重新提交。'],
+    GLOBAL_DAILY_QUOTA_EXCEEDED: [409, '服务今日额度已用完，本次任务未接收，请额度恢复后重新提交。'],
+  };
   function failure(code, message, status = 0) {
     return Object.assign(new Error(message), { code, status, background: true });
   }
@@ -59,8 +68,10 @@
       if (result.length > 64) throw failure('STORAGE_FULL', '任务恢复记录已满，请先核对原任务。');
       return result.sort((left, right) => left.key.localeCompare(right.key));
     }
-    function save(record) {
+    function save(record, { create = false } = {}) {
       const existing = storage.getItem(PREFIX + record.key);
+      // An in-flight observer must not recreate a receipt retired by another tab.
+      if (!existing && !create) throw failure('EXECUTION_STALE', '原任务记录已退役。');
       if (existing) {
         const old = parseRecord(existing);
         if (old.epoch !== record.epoch || old.kind !== record.kind || (old.id && record.id && old.id !== record.id)) throw invalid();
@@ -82,13 +93,19 @@
       try {
         const response = await host.fetch(path, { ...options, cache: 'no-store', credentials: 'same-origin', signal: controller.signal });
         const data = await response.json();
-        if (!response.ok) throw failure(data.code || 'EXECUTION_UNAVAILABLE',
-          response.status === 401 ? '登录已失效，请重新登录。' : '原任务暂时无法读取，请核对任务状态。', response.status);
+        if (!response.ok) {
+          const rejection = REJECTIONS[data.code];
+          const admissionRejected = options.method === 'POST' && ['/api/jobs', '/api/jobs/image'].includes(path)
+            && data.schema_version === 1 && data.admission === 'rejected' && rejection?.[0] === response.status;
+          throw Object.assign(failure(data.code || 'EXECUTION_UNAVAILABLE', admissionRejected ? rejection[1]
+            : response.status === 401 ? '登录已失效，请重新登录。' : '原任务暂时无法读取，请核对任务状态。', response.status),
+            { admissionRejected });
+        }
         if (data.schema_version !== 1) throw invalid();
         return data;
       } finally { clearTimeout(timer); }
     }
-    function accept(record, data) {
+    function accept(record, data, { create = false } = {}) {
       const job = data?.job;
       if (data?.schema_version !== 1 || !job || !ID.test(job.operation_id)
           || (record.id && job.operation_id !== record.id) || job.kind !== record.kind
@@ -96,7 +113,7 @@
           || !Number.isSafeInteger(job.progress_version) || job.progress_version < 0) throw invalid();
       record.id = job.operation_id;
       record.cursor = Math.max(record.cursor, job.progress_version);
-      save(record);
+      save(record, { create });
       return job;
     }
     function pending(epoch) { return records().filter(record => !record.done && record.epoch === epoch); }
@@ -109,20 +126,30 @@
       const bound = await http('/api/jobs/session', { method: 'POST', headers: { 'X-Tiku-Background': '1' } });
       if (!validContext(bound.execution) || bound.execution.epoch !== context.epoch
           || bound.execution.state_version !== context.state_version) throw failure('EXECUTION_STALE', '会话已更新，请重新连接。');
+      // Only a fresh server binding under the shared submission Web Lock proves
+      // which epoch is current. A stale tab's cached context cannot prune records.
+      // Retire transport metadata, never mark unknown business execution done.
+      for (const old of records().filter(r => r.epoch !== bound.execution.epoch)) storage.removeItem(PREFIX + old.key);
       const previous = records();
       // Completed records are only transport receipts; visible history owns its retention.
       for (const old of previous.filter(r => r.done).slice(0, Math.max(0, previous.length - 49))) storage.removeItem(PREFIX + old.key);
       if (records().length >= 64) throw failure('STORAGE_FULL', '任务恢复记录已满，请先核对原任务。');
       const record = { schema: 1, key: fence.id, ...context, kind: value.kind, id: '', cursor: 0, done: false };
-      save(record); // Required before any business POST, including before ACK loss.
+      if (storage.getItem(PREFIX + record.key)) throw invalid();
+      save(record, { create: true }); // Required before any business POST, including before ACK loss.
       const requestHeaders = new Headers(headers);
       requestHeaders.set('X-Tiku-Background', '1');
       requestHeaders.set('X-Tiku-Operation', JSON.stringify({ key: record.key, ...context }));
       requestHeaders.set('content-type', value.kind === 'handle_image' ? (value.body.type || 'application/octet-stream') : 'application/json');
       try {
         accept(record, await http(value.path, { method: 'POST', headers: requestHeaders, body: value.body }));
-      } catch (_) {
-        // Even a rejection may have followed admission. Keep intent and discover.
+      } catch (error) {
+        if (error.admissionRejected && !record.id) {
+          storage.removeItem(PREFIX + record.key);
+          if (storage.getItem(PREFIX + record.key) !== null) throw invalid();
+          throw error;
+        }
+        // Uncertain admission (including an unmarked error) keeps its intent.
         // No automatic POST retry, no regenerated key, no retained private body.
       }
       return record;
@@ -146,7 +173,7 @@
         storage.removeItem(PREFIX + old.key);
       }
       const record = { schema: 1, key, ...context, kind: data.job.kind, id: operationId, cursor: 0, done: false };
-      accept(record, data);
+      accept(record, data, { create: true });
       return record;
     }
     async function observe(record, onProgress = () => {}) {

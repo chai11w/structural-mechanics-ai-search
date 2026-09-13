@@ -5012,6 +5012,11 @@ window.visualViewport?.addEventListener('scroll', syncVisualViewport, { passive:
 document.addEventListener('visibilitychange', () => { if (!document.hidden) expireHistoryIfNeeded(); });
 
 function backgroundNotice(error) {
+  if (error?.admissionRejected) {
+    setStatus('error', '任务未接收');
+    showFailureNotice('connection', error.message, []);
+    return;
+  }
   const login = error?.status === 401;
   const missing = error?.code === 'EXECUTION_NOT_FOUND';
   setStatus('error', login ? '需要重新登录' : '原任务待核对');
@@ -5119,7 +5124,12 @@ async function requestBackgroundJob(url, options, onProgress) {
         const headers = new Headers();
         applySessionCoordinationHeaders(headers, fence);
         assertSessionRequestCoordination(fence, url);
-        record = await backgroundClient.submit(url, options, executionContext, fence, headers);
+        try {
+          record = await backgroundClient.submit(url, options, executionContext, fence, headers);
+        } catch (error) {
+          if (error?.admissionRejected) resolveSessionRequestFence(fence);
+          throw error;
+        }
         // An acknowledged operation is now protected by the persistent job
         // receipt. Unacknowledged fences remain pending until reconciliation.
         if (record.id) resolveSessionRequestFence(fence);
