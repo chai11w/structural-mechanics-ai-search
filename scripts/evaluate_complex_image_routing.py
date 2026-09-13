@@ -47,6 +47,10 @@ _ROUTE_PATTERN = re.compile(r"(?<![A-Za-z0-9])A([123])(?![A-Za-z0-9])", re.IGNOR
 
 
 def load_local_config() -> dict:
+    from tiku_shared.configuration import external_configuration
+    external = external_configuration(BASE)
+    if external is not None:
+        return external
     config: dict = {}
     for name in ("config.json", "config.local.json"):
         path = BASE / name

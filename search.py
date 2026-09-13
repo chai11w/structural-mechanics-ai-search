@@ -48,6 +48,10 @@ from tiku_shared.image_payload import image_to_model_data_url
 
 def load_local_config():
     base = Path(__file__).parent
+    from tiku_shared.configuration import external_configuration
+    external = external_configuration(base)
+    if external is not None:
+        return external
     cfg = {}
     for name in ("config.json", "config.local.json"):
         p = base / name

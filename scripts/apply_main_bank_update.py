@@ -28,6 +28,10 @@ MAIN_KEEP_CATEGORIES = {"main_numeric", "main_assigned_symbolic"}
 
 
 def load_config() -> dict:
+    from tiku_shared.configuration import external_configuration
+    external = external_configuration(BASE)
+    if external is not None:
+        return external
     cfg: dict = {}
     for name in ("config.json", "config.local.json"):
         path = BASE / name

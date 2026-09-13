@@ -30,6 +30,10 @@ CHAPTERS = ["2静定结构", "3静定结构位移", "4力法", "5位移法", "6�
 
 
 def load_config() -> dict:
+    from tiku_shared.configuration import external_configuration
+    external = external_configuration(BASE)
+    if external is not None:
+        return external
     cfg: dict = {}
     for name in ("config.json", "config.local.json"):
         path = BASE / name

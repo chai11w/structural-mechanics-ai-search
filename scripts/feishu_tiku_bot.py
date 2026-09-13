@@ -1905,6 +1905,7 @@ def load_options(args: argparse.Namespace) -> FeishuTikuOptions:
         max_message_age_seconds=args.max_message_age_minutes * 60,
         working_reaction=args.working_reaction or None,
         admin_sender_ids=admin_sender_ids,
+        admin_fee_db=Path(args.admin_fee_db),
         enroll_admin_sender_once=args.enroll_admin_sender_once,
         dimension_filter_enabled=(
             bool(args.enable_dimension_filter)
@@ -1939,6 +1940,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--app-secret-env", default="FEISHU_TIKU_APP_SECRET")
     parser.add_argument("--verification-token-env", default="FEISHU_TIKU_VERIFICATION_TOKEN")
     parser.add_argument("--temp-dir", default=str(BASE / ".tmp_feishu_tiku"))
+    parser.add_argument("--admin-fee-db", type=Path, default=DEFAULT_FEE_DB,
+                        help="现有 8790 费用数据库的固定只读来源")
     parser.add_argument("--session-ttl-minutes", type=int, default=10)
     parser.add_argument("--max-message-age-minutes", type=int, default=15)
     parser.add_argument("--top", type=int, default=3)
