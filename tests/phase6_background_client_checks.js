@@ -39,6 +39,24 @@ async function submit(f, client) {
 async function run() {
   let count = 0;
   async function test(name, action) { await action(); count++; console.log('PASS ' + name); }
+  await test('original progress changes by step and counter without another POST', async () => {
+    const f = fixture(), client = api.createClient(f.host), record = await submit(f, client);
+    const messages = ['正在理解整页题目和图形关系…', '已完成 1/2 张自动裁图校验…', '已完成 2/2 张自动裁图校验…'];
+    let index = 0;
+    f.host.fetch = async (_path, options) => {
+      assert.notEqual(options.method, 'POST');
+      const job = f.job();
+      if (index < messages.length) {
+        job.status = 'RUNNING'; job.publication = {status:'NOT_READY'};
+        job.progress = {type:'progress', stage:index ? 'a3_auto_validating' : 'a3_understanding', message:messages[index++]};
+      }
+      return Response.json({schema_version:1,job});
+    };
+    const seen = [];
+    await client.observe(record, event => seen.push(event.message));
+    assert.deepEqual(seen, messages);
+    assert.equal(f.delivered.length, 1);
+  });
   await test('ACK loss -> fresh client original-key discovery, one POST', async () => {
     const f = fixture(); f.loseAck();
     await submit(f, api.createClient(f.host));

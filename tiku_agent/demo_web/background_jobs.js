@@ -183,7 +183,13 @@
               save(record);
               return job;
             }
-          } else onProgress({ message: job.status === 'REGISTERED' ? '任务已接收，正在排队…' : '任务正在后台处理…' });
+          } else {
+            const progress = job.progress;
+            if (job.status === 'REGISTERED') onProgress({ message: '任务已接收，正在排队…' });
+            else if (progress?.type === 'progress' && typeof progress.message === 'string'
+                && progress.message.length <= 256 && /^[a-z][a-z0-9_]{0,63}$/.test(progress.stage)) onProgress(progress);
+            else onProgress({ message: '正在处理当前请求…' });
+          }
           // Authoritative latest-snapshot polling is bounded and works with any
           // number of tabs; it does not consume the two NDJSON subscription slots.
           await sleep(1000);

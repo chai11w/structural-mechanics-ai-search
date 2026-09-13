@@ -14,11 +14,6 @@ from tiku_agent.execution_store import ExecutionError
 from tiku_agent.task_state_runtime import TaskStateEntryCapabilities
 
 
-# Store only a fixed stage vocabulary, never arbitrary model/progress text.
-STAGES = frozenset({"queued", "running", "dequeued", "searching", "recognizing", "reranking",
-                    "thinking", "answering", "preparing", "cropping", "verifying", "completed"})
-
-
 class BackgroundWorker:
     def __init__(self, dispatch, private_dir, *, capabilities=None, publication=None, trace_recorder=None):
         self.dispatch = dispatch
@@ -119,13 +114,16 @@ class BackgroundWorker:
                 params["image_path"] = path
             check = lambda: self.dispatch.check_running(writer, private, operation["grant_id"])
             check()
-            def progress(stage, _text):
-                stage = stage if stage in STAGES else "running"
+            def progress(stage, message):
+                # Use the same public vocabulary, chapter and bounded counters as
+                # the original stream. Never persist arbitrary provider text.
+                from tiku_agent.fastapi_demo import _public_progress_event
+                event = _public_progress_event(stage, message)
                 with self.dispatch.store.transaction() as conn:
                     now = self.dispatch.store.clock(conn)
                     writer.validate(conn, self.dispatch.store, writer.session, writer.epoch, now)
-                    conn.execute("UPDATE execution_dispatch SET progress_stage=?,progress_version=progress_version+1,updated=? WHERE operation_id=? AND status='CLAIMED'",
-                                 (stage, now, writer.operation_id))
+                    conn.execute("UPDATE execution_dispatch SET progress_stage=?,progress_message=?,progress_version=progress_version+1,updated=? WHERE operation_id=? AND status='CLAIMED'",
+                                 (event["stage"], event["message"], now, writer.operation_id))
             execute_claimed(self.dispatch.runtime, private["session_id"], writer,
                 lambda: getattr(self.dispatch.runtime, operation["kind"])(private["session_id"], **params,
                     identity_key=private["identity_key"], request_id="req_" + operation["id"], progress=progress,

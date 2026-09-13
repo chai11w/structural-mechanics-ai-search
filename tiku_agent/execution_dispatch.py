@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS execution_dispatch (
     status TEXT NOT NULL CHECK(status IN ('WAITING','CLAIMED','SETTLED','REVOKED')),
     accepted REAL NOT NULL, deadline REAL NOT NULL, updated REAL NOT NULL,
     error_code TEXT NOT NULL DEFAULT '', progress_version INTEGER NOT NULL DEFAULT 0,
-    progress_stage TEXT NOT NULL DEFAULT 'queued');
+    progress_stage TEXT NOT NULL DEFAULT 'queued', progress_message TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS execution_dispatch_queue ON execution_dispatch(status,accepted);
 CREATE TABLE IF NOT EXISTS execution_dispatch_inputs (
     operation_id TEXT PRIMARY KEY REFERENCES execution_dispatch(operation_id) ON DELETE CASCADE,
@@ -84,6 +84,9 @@ class DispatchStore:
             for statement in SCHEMA.split(";"):
                 if statement.strip():
                     conn.execute(statement)
+            # Additive upgrade: retain every original operation and queue deadline.
+            if "progress_message" not in {row[1] for row in conn.execute("PRAGMA table_info(execution_dispatch)")}:
+                conn.execute("ALTER TABLE execution_dispatch ADD COLUMN progress_message TEXT NOT NULL DEFAULT ''")
             definition = canonical(vars(self.policy))
             old = conn.execute("SELECT value FROM execution_meta WHERE key='dispatch_policy'").fetchone()
             if old and old[0] != definition:
@@ -212,12 +215,15 @@ class DispatchStore:
 
     @staticmethod
     def _receipt(operation, job, now):
+        from tiku_agent.fastapi_demo import _public_progress_event
+        progress = _public_progress_event(job["progress_stage"], job["progress_message"])
         status = operation["status"]
         if status == "RUNNING" and operation["lease_until"] <= now:
             status = "UNKNOWN"
         return {"operation_id": operation["id"], "kind": operation["kind"], "status": status,
                 "dispatch_status": job["status"], "accepted_at": job["accepted"], "queue_deadline": job["deadline"],
-                "error_code": job["error_code"], "progress_version": job["progress_version"], "progress_stage": job["progress_stage"]}
+                "error_code": job["error_code"], "progress_version": job["progress_version"], "progress_stage": job["progress_stage"],
+                "progress": progress}
 
     def observe(self, sid, identity, grant, request, *, result=False):
         """Authorized read, no claim, session creation/renewal or delivery side effect."""

@@ -2,7 +2,7 @@ async page => {
   const origin = page.url().split('/').slice(0,3).join('/');
   const counts = async () => (await page.context().request.get(origin + '/fixture/counts')).json();
   await page.reload();
-  await page.locator('#execution-panel').waitFor();
+  await page.locator('#execution-panel').waitFor({state:'attached'});
   await page.locator('#top-new-chat').click();
   await page.waitForFunction(() => document.querySelector('#status-text').textContent === '任务状态已更新');
   const before = await counts();

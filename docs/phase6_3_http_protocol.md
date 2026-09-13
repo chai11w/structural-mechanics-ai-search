@@ -66,7 +66,7 @@ Content-Length 与实际累积字节均检查。未完整接收的正文不会�
 ## 3. 观察、结果和反馈
 
 `job` 包含 operation_id、kind、status、dispatch_status、首次接收时间、原排队期限、受控错误码、
-progress_version、固定词表 progress_stage 与独立后台 trace_id。
+progress_version、公开 progress_stage 与独立后台 trace_id。2026-09-13 补回 `progress` 对象（type/stage/message）：与旧流接口使用同一公开文案白名单，支持章节名和有界校验计数；任意 provider 文本不能进入持久进度或公共响应。
 原排队预算保持 1 运行、2 排队、55 秒；观察或重发不延长截止时间。
 
 `publication.status` 与业务状态分别解释：

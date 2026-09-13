@@ -2,6 +2,7 @@
 import json
 import socket
 import sys
+import time
 
 from fastapi import Request
 from fastapi.responses import RedirectResponse
@@ -38,6 +39,19 @@ def main():
                 raise RuntimeError('synthetic parent interruption after durable child')
             return original(*args, **kwargs)
         test.f.a3._after_a2_response = interrupt_parent
+    if '--progress-demo' in sys.argv:
+        original_image = test.f.a3.handle_image
+        def progress_image(*args, **kwargs):
+            for stage, message in (
+                ('triage', '正在检查图片并决定处理路线…'),
+                ('a3_understanding', '正在理解整页题目和图形关系…'),
+                ('a3_auto_validating', '已完成 1/2 张自动裁图校验…'),
+                ('a3_auto_validating', '已完成 2/2 张自动裁图校验…'),
+            ):
+                kwargs['progress'](stage, message)
+                time.sleep(2)
+            return original_image(*args, **kwargs)
+        test.f.a3.handle_image = progress_image
 
     @app.middleware('http')
     async def login(request: Request, call_next):

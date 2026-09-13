@@ -9,6 +9,8 @@ async page => {
     && !Object.keys(localStorage).filter(k => k.startsWith('tiku-agent-background-job-v1:'))
       .map(k => JSON.parse(localStorage.getItem(k))).some(r => !r.done), null, {timeout:20000});
   const showControls = async () => {
+    // Explicit diagnostic opt-in; the product keeps this panel hidden.
+    await page.addStyleTag({content: '.execution-panel:not([hidden]) { display: block !important; }'});
     if (!(await page.locator('#execution-panel').getAttribute('open')) &&
         !(await page.locator('#execution-panel').evaluate(el => el.open))) await page.locator('#execution-panel summary').click();
   };
@@ -47,7 +49,7 @@ async page => {
   await page.getByRole('button',{name:'核对并恢复已保存结果',exact:true}).click();
   await page.locator('#execution-retry').waitFor();
   await page.reload();
-  await page.locator('#execution-panel').waitFor();
+  await page.locator('#execution-panel').waitFor({state:'attached'});
   await showControls();
   await page.locator('#execution-retry').click();
   await page.getByText('我还不能确定',{exact:false}).waitFor();

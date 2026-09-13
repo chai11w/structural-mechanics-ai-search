@@ -18,7 +18,7 @@ async page => {
   await page.reload();
   await boot;
   await page.waitForFunction(()=>document.querySelector('#status-text').textContent==='准备就绪');
-  await page.locator('#execution-panel').waitFor();
+  await page.locator('#execution-panel').waitFor({state:'attached'});
   await reset();
   const before = await counts();
   await page.locator('#file').setInputFiles('.tmp_phase6_4/synthetic-page.png');
