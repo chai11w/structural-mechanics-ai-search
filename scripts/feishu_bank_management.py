@@ -257,6 +257,9 @@ class FeishuBankManagement:
             return f"{verb}题目：{task['question_id']}\n章节：{task['fields']['chapter']}\n答案：{len(task['answers']) if task['change'] != 'delete-record' else 0} 张\n入库记录：{status['operation_id']}\n发布序号：{status['result']['revision']}"
         if status["state"] in {"failed", "conflict", "cancelled"}:
             task["phase"] = status["state"]
+        if status["state"] in {"failed", "approved"} and status.get("error") in {"insufficient-bank-space", "bank-space-check-failed"}:
+            reason = "磁盘空间不足" if status["error"] == "insufficient-bank-space" else "无法核对磁盘容量"
+            return f"题号：{task['question_id']}\n{reason}，本次操作已暂停。资料与原操作已保留，请处理存储后回复 状态 继续。"
         messages = {"prepared": "计划已准备，等待确认", "preparing": "正在核对题目和答案，请稍等", "approved": "已确认，等待写入", "publishing": "正在存入，请稍等",
             "failed": "准备未完成，可回复 1 重试；修改或取消会撤销旧计划", "conflict": "题库已变化，请取消旧计划后重新准备", "cancelled": "旧计划已取消", "not-submitted": "原操作尚未提交，可回复 1 继续"}
         return f"题号：{task['question_id']}\n{messages.get(status['state'], '原操作状态待核实')}"

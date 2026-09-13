@@ -5,11 +5,13 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from tiku_shared.bank_publication import PublicationError, PublicationStore, canonical, verify_bundle, write_lock
+from tiku_shared.bank_publication import (PublicationError, PublicationStore, canonical, verify_bundle, write_lock,
+    require_storage_space, MINIMUM_BANK_FREE_BYTES, BANK_WRITE_MARGIN_BYTES)
 
 
 def validate_fixture(directory):
@@ -82,6 +84,55 @@ class PublicationTests(unittest.TestCase):
         prepared = self.candidate(label)
         self.approved(prepared)
         return self.store.execute(prepared["operation_id"], plan_digest=prepared["plan_digest"])
+
+    def test_space_check_combines_same_volume_and_rejects_unknown_capacity(self):
+        available = MINIMUM_BANK_FREE_BYTES + BANK_WRITE_MARGIN_BYTES + 100
+        with patch("tiku_shared.bank_publication.shutil.disk_usage", return_value=SimpleNamespace(free=available)):
+            require_storage_space([(self.store.root, 100)])
+            with self.assertRaisesRegex(PublicationError, "insufficient-bank-space"):
+                require_storage_space([(self.store.root, 60), (self.store.backups, 60)])
+        with patch("tiku_shared.bank_publication.shutil.disk_usage", side_effect=OSError("private disk detail")):
+            with self.assertRaisesRegex(PublicationError, "^bank-space-check-failed$"):
+                require_storage_space([(self.store.root, 0)])
+
+    def test_low_space_rejects_freezing_without_losing_candidate(self):
+        operation = "op_" + uuid4().hex
+        with patch("tiku_shared.bank_publication.shutil.disk_usage", return_value=SimpleNamespace(free=0)):
+            with self.assertRaisesRegex(PublicationError, "insufficient-bank-space"):
+                self.candidate("space-test", operation_id=operation)
+        self.assertIsNone(self.store.current())
+        self.assertEqual(list((self.store.private / "bundles").iterdir()), [])
+        self.assertTrue((self.store.candidate_directory(operation) / "registry.json").is_file())
+        result = self.store.prepare(operation, expected=None, summary={"label": "space-test"},
+                                    principal="owner-one", channel="lida")
+        self.assertEqual(result["state"], "prepared")
+
+    def test_low_space_after_approval_preserves_bank_and_retries_same_publication(self):
+        original = self.publish("before-space-test")["result"]
+        prepared = self.candidate("after-space-test")
+        self.approved(prepared)
+        with patch("tiku_shared.bank_publication.shutil.disk_usage", return_value=SimpleNamespace(free=0)):
+            with self.assertRaisesRegex(PublicationError, "insufficient-bank-space"):
+                self.store.execute(prepared["operation_id"], plan_digest=prepared["plan_digest"])
+        self.assertEqual(self.store.current(), original)
+        self.assertFalse((self.store.backups / prepared["operation_id"]).exists())
+        self.assertEqual(self.store.status(prepared["operation_id"])["error"], "insufficient-bank-space")
+        self.store = self.reopen()
+        result = self.store.execute(prepared["operation_id"], plan_digest=prepared["plan_digest"])
+        self.assertEqual(result["result"]["revision"], original["revision"] + 1)
+        with patch("tiku_shared.bank_publication.shutil.disk_usage", return_value=SimpleNamespace(free=0)):
+            replay = self.store.execute(prepared["operation_id"], plan_digest=prepared["plan_digest"])
+        self.assertEqual(replay["result"], result["result"])
+
+    def test_backup_capacity_is_checked_separately_from_publication_destination(self):
+        original = self.publish("before-backup-space")["result"]
+        prepared = self.candidate("after-backup-space"); self.approved(prepared)
+        def available(path):
+            return SimpleNamespace(free=0 if Path(path) == self.store.backups else 100 * 1024 ** 3)
+        with patch("tiku_shared.bank_publication.shutil.disk_usage", side_effect=available):
+            with self.assertRaisesRegex(PublicationError, "insufficient-bank-space"):
+                self.store.execute(prepared["operation_id"], plan_digest=prepared["plan_digest"])
+        self.assertEqual(self.store.current(), original)
 
     def test_identity_import_preserves_bindings_and_retries_after_publication(self):
         rows = [{"question_id": "Q_" + str(uuid4()), "owner": "owner-one", "draft_id": "draft-" + str(i)} for i in range(3)]

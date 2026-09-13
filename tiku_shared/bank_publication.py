@@ -24,6 +24,8 @@ from tiku_shared.bank_file_retention import FileRetentionView, initialize_schema
 
 _HASH = re.compile(r"[a-f0-9]{64}")
 _OPERATION = re.compile(r"op_[a-f0-9]{32}")
+MINIMUM_BANK_FREE_BYTES = 20 * 1024 ** 3
+BANK_WRITE_MARGIN_BYTES = 64 * 1024 ** 2
 
 
 class PublicationError(RuntimeError):
@@ -163,9 +165,39 @@ def verify_bundle(directory, version):
     return manifest
 
 
+def require_storage_space(requirements):
+    """Check combined additional bytes per volume without deleting or reserving files.
+
+    This is a preflight, not a reservation against unrelated disk writers. Keep
+    the transaction's existing I/O failure/recovery handling as the final guard.
+    """
+    volumes = {}
+    try:
+        for destination, size in requirements:
+            if type(size) is not int or size < 0:
+                raise PublicationError("invalid-storage-requirement")
+            directory = reject_links(destination)
+            while not directory.exists():
+                directory = directory.parent
+            device = directory.stat().st_dev
+            free = shutil.disk_usage(directory).free
+            previous = volumes.get(device, (0, free))
+            volumes[device] = (previous[0] + size, min(previous[1], free))
+    except OSError:
+        raise PublicationError("bank-space-check-failed") from None
+    for required, free in volumes.values():
+        if free < required + MINIMUM_BANK_FREE_BYTES + BANK_WRITE_MARGIN_BYTES:
+            raise PublicationError("insufficient-bank-space")
+
+
+def bundle_size(manifest):
+    return sum(item["size"] for item in manifest["files"]) + len(canonical(manifest))
+
+
 def copy_bundle(source, destination, version):
     """Copy bytes, not hard links; readers may keep this version after later edits."""
     manifest = verify_bundle(source, version)
+    require_storage_space([(destination, bundle_size(manifest))])
     destination.mkdir()
     for name in ("main", "symbolic"):
         (destination / name).mkdir()
@@ -547,11 +579,19 @@ class PublicationStore:
                 self._event(db, operation_id, "publishing", {"plan_digest": plan_digest})
             try:
                 self.checkpoint("before-backup")
-                self._backup(row, plan)
-                self.checkpoint("after-backup")
                 version = plan["candidate_version"]
                 source = self.private / "bundles" / version
-                verify_bundle(source, version)
+                manifest = verify_bundle(source, version)
+                requirements = [(self.private, 0), (self.backups, 0), (self.root, 0)]
+                if not (self.root / "versions" / version).exists():
+                    requirements.append((self.root, bundle_size(manifest)))
+                if plan["base"] and not (self.backups / row["id"]).exists():
+                    base_version = plan["base"]["version"]
+                    requirements.append((self.backups, bundle_size(
+                        verify_bundle(self.root / "versions" / base_version, base_version))))
+                require_storage_space(requirements)
+                self._backup(row, plan)
+                self.checkpoint("after-backup")
                 self.validator(source)
                 verify_bundle(source, version)
                 destination = self.root / "versions" / version
