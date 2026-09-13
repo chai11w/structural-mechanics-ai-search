@@ -91,3 +91,13 @@
 网页 JS 缓存地址及三个固定地址断言同步更新，JS 语法、CLI 帮助和 `git diff --check` 通过。此批不改变 CLI/飞书/检索 Skill 的入口或检索排序逻辑，不修改 live 数据、不合并或推送，不更新 8898 固定 release；生产运行版本仍为上一节记录的 `53a53cb`。
 
 最终全量回归：**1,731 tests / OK，235.219 秒，无跳过**。日志：`C:\Users\31492\AppData\Local\Temp\phase6-fix-162fee6eba20444f9500ce1192becc63\regression-final.log`。可重复运行 `python -B -m unittest discover -s tests -q`；浏览器以 `python -B -m tests.phase6_browser_fixture` 启动新的隔离夹具，登录 `/fixture/start` 后依次执行上述新增和原有两个浏览器脚本。
+
+### 验收修复发布至 8898（2026-09-13）
+
+用户明确授权后，将上述修复发布至固定目录 `F:\cc\_deploy\7-题库检索\8898\200fbd839fa187d311a4975a23ce12f3272d5dd9`。发布前确认无 REGISTERED/RUNNING/UNKNOWN、等待派发、待交付或费用待确认项；核验完整 Python 与看门狗参数、计划任务和监听归属后，禁用启动任务并仅停止目标看门狗，再向独立 console 中的原服务发送 SIGBREAK。日志确认 `Application shutdown complete`，未强杀业务进程。
+
+完整离线 runtime、原/新 manifest、计划任务 XML、源码 bundle、状态指纹、完整性检查和上线证据保存在 `F:\cc\_backups\7-题库检索\2026-09-13\phase6-8898\admission-fix-200fbd8`。备份 ACL 仅当前用户、SYSTEM、Administrators。原有配置只复用经检查的 root/top_k/answer_output 三项，不复制秘密。离线与上线后的 7 个 SQLite 数据库 quick_check/foreign_key_check 均通过。
+
+计划任务及 manifest 已切到 `200fbd8`，新服务 PID 33924，完整启动参数与固定源码核验通过。健康为 ok，首页跳转邀请登录正常；实际返回的 background_jobs.js/demo.js 与固定 release 逐字节一致。操作、尝试、效果、费用、文件、派发、结果和媒体表的内容指纹与停机前一致：13 个操作、13 个 attempt、57 个效果、29 个费用运行及确认 outbox、11 份 READY 结果均保留；上线检查未新建业务调用。证据为备份目录中的 `release-smoke.json`。
+
+新看门狗连续两个健康周期通过（16:36:15、16:36:36）；8790/8896 保持原 PID 25988/24180，未操作飞书服务。PID 与时间仅为本次证据，后续维护重新核验。仍未合并主线或推送；回退不得用旧快照覆盖发布后新增业务或费用证据。
