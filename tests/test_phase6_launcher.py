@@ -18,6 +18,9 @@ class Phase6LauncherTests(unittest.TestCase):
             for _ in range(2):
                 app = build_app(root)
                 with TestClient(app) as client:
+                    landing = client.get("/", follow_redirects=False)
+                    self.assertEqual((landing.status_code, landing.headers.get("location")), (303, "/invite"))
+                    self.assertEqual(client.get("/invite").status_code, 200)
                     self.assertEqual(client.get("/api/jobs/session").status_code, 401)
                     self.assertEqual(client.get("/health").status_code, 200)
                     self.assertEqual(client.post("/api/invite/login", data={"code": code}, follow_redirects=False).status_code, 303)

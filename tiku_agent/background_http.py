@@ -10,7 +10,7 @@ import time
 from uuid import uuid4
 
 from fastapi import Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
 from tiku_agent.background_auth import BackgroundInviteAccess
 from tiku_agent.background_publication import BackgroundPublication
@@ -113,6 +113,8 @@ class BackgroundHTTP:
                 self.require_origin(request)
             self.login(request)
         except Exception:
+            if request.method == "GET" and path == "/":
+                return RedirectResponse("/invite", status_code=303)
             return JSONResponse({"code": "EXECUTION_AUTH_REQUIRED", "message": "请重新登录。"}, status_code=401)
         if request.method == "POST" and path in LEGACY_BUSINESS_PATHS:
             return JSONResponse({"code": "BACKGROUND_PROTOCOL_REQUIRED", "message": "此服务使用后台任务协议，请更新页面后提交。", "protocol_version": 1}, status_code=409)
@@ -303,7 +305,7 @@ class BackgroundHTTP:
                 # admission call. Cancellation may lose ACK, never the commit.
                 ack = await asyncio.to_thread(self.dispatch.accept, *credentials, operation, kind, parameters, image=image)
                 record_trace_event("stage_finished", stage="background_submission", outcome="success",
-                                   safe_attributes={"operation": ack["operation_id"], "completed": True})
+                                   safe_attributes={"operation": "op_" + ack["operation_id"], "completed": True})
                 ack["trace_id"] = "trace_" + ack["operation_id"]
                 return JSONResponse({"schema_version": 1, "job": ack}, status_code=202,
                                     headers={"Location": "/api/jobs/" + ack["operation_id"], "Cache-Control": "private, no-store"})
@@ -392,6 +394,6 @@ class BackgroundHTTP:
                     else:
                         self._subscriptions.pop(scope, None)
                 record_trace_event("stage_finished", stage="background_observation", outcome=outcome,
-                                   safe_attributes={"operation": operation_id, "completed": outcome == "success"})
+                                   safe_attributes={"operation": "op_" + operation_id, "completed": outcome == "success"})
                 if not event_session.terminal_attempted:
                     record_public_terminal(stage="background_observation", outcome=outcome, failed=outcome != "success")

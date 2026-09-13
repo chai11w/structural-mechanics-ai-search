@@ -68,6 +68,26 @@ class BackgroundHttpFixture:
 
 
 class BackgroundHttpTests(unittest.TestCase):
+    def test_numeric_operation_id_keeps_submission_trace_valid(self):
+        h = self.h
+        with patch("tiku_agent.execution_operations.uuid4", side_effect=lambda: SimpleNamespace(hex="0" + uuid4().hex[1:])):
+            with TestClient(h.app) as client:
+                context = h.login(client)
+                ack = client.post("/api/jobs", json={"kind": "handle_text", "parameters": {"text": "numeric trace"}}, headers=h.headers(context))
+                self.assertEqual(ack.status_code, 202, ack.text)
+                operation_id = ack.json()["job"]["operation_id"]
+                self.assertTrue(operation_id.startswith("0"))
+                self.assertEqual(h.wait_result(client, operation_id)["status"], "SUCCEEDED")
+                self.assertEqual(client.get("/api/jobs/" + operation_id + "/stream").status_code, 200)
+        self.assertEqual(h.recorder.health()["validation_rejections"], 0)
+        with closing(sqlite3.connect(h.trace_store.path)) as conn:
+            rows = conn.execute("SELECT safe_attributes_json FROM trace_events WHERE stage='background_submission'").fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(json.loads(rows[0][0])["operation"], "op_" + operation_id)
+            observations = conn.execute("SELECT safe_attributes_json FROM trace_events WHERE stage='background_observation' AND event_type='stage_finished'").fetchall()
+            self.assertTrue(observations)
+            self.assertTrue(all(json.loads(row[0])["operation"] == "op_" + operation_id for row in observations))
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

@@ -58,7 +58,7 @@ class DispatchFixture:
                     return {"input_tokens": 10, "output_tokens": 3}
                 def invoke():
                     timed_model_call(provider, provider="dashscope", model="qwen3-vl-plus",
-                                     call_type="dispatch-test", usage_getter=lambda value: value)
+                                     call_type="dispatch_test", usage_getter=lambda value: value)
                 invoke()
                 owner.after_call()
                 if text == "twice":

@@ -39,7 +39,7 @@ class ExecutionDispatchA3Tests(unittest.TestCase):
                 owner.calls.append(label)
                 return {"input_tokens": 10, "output_tokens": 3}
             timed_model_call(invoke, provider="dashscope", model="qwen3-vl-plus",
-                             call_type="dispatch-a3", usage_getter=lambda value: value)
+                             call_type="dispatch_a3", usage_getter=lambda value: value)
         class Observer(FakeObserver):
             def observe(self, image):
                 paid("page")
