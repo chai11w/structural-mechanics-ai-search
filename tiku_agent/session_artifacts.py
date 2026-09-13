@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from tiku_agent.tools import DEFAULT_RUNTIME_DIR
 from tiku_shared.atomic_files import atomic_copy
+from tiku_shared.bank_readers import bank_access
 
 
 class SessionArtifacts:
@@ -32,6 +33,7 @@ class SessionArtifacts:
         atomic_copy(source_path, target)
         return target
 
+    @bank_access
     def persist_media(self, session_id: str, source: str | Path) -> Path:
         """Copy one user-visible candidate or answer into session storage."""
         source_path = Path(source)

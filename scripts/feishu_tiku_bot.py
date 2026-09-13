@@ -34,6 +34,7 @@ if str(BASE) not in sys.path:
 from multi_agent_pipeline import MultiAgentCoordinator, is_auto_chapter  # noqa: E402
 from search import ANSWER_OUTPUT, DISPLAY_MAX_RESULTS, answer, cfg, find_answer_files  # noqa: E402
 from tiku_shared.bank_versions import store_root  # noqa: E402
+from tiku_shared.bank_readers import bank_access  # noqa: E402
 from scripts.chapter_judgment_log import append_chapter_judgment_log  # noqa: E402
 from scripts.admin_fee_query import (  # noqa: E402
     AdminFeeQueryService,
@@ -358,6 +359,7 @@ class TikuBot:
         if self.options.maintenance_sender_ids or os.environ.get("TIKU_BANK_STORE"):
             require_maintainer(sender, self.options.maintenance_sender_ids)
 
+    @bank_access
     def receive_image(self, sender: str, image_path: Path) -> BotResponse:
         session = self.sessions.get(sender)
         if session.state in STORE_STATES:
@@ -374,6 +376,7 @@ class TikuBot:
         self.sessions.save(sender, session)
         return BotResponse(texts=[format_chapter_prompt(image_path)])
 
+    @bank_access
     def receive_text(self, sender: str, text: str) -> BotResponse:
         clean = text.strip()
 
@@ -1122,6 +1125,7 @@ class FeishuTikuBridge:
             raise BankWriteError("当前没有该序号的搜索候选，请重新检索")
         return results[rank - 1]
 
+    @bank_access
     def _managed_search(self, event):
         key = self._managed_session_key(event)
         if event["kind"] == "text":
@@ -1204,6 +1208,7 @@ class FeishuTikuBridge:
         thread.start()
         return {"ok": True, "accepted": message_id}
 
+    @bank_access
     def _process_and_reply(self, message_id: str, sender: str, message: dict[str, Any], callback=None) -> None:
         try:
             if self.verifier:

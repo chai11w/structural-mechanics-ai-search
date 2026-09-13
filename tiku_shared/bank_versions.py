@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import re
 
+from tiku_shared.bank_readers import bank_access, reader_gate
+
 _CURRENT = ContextVar("published_bank", default=None)
 _VERSION = re.compile(r"[a-f0-9]{64}")
 
@@ -41,6 +43,11 @@ def runtime_file(name, fallback):
 
 
 def read_version(root, version):
+    with reader_gate(root):
+        return _read_version(root, version)
+
+
+def _read_version(root, version):
     if not isinstance(version, str) or not _VERSION.fullmatch(version):
         raise ValueError("invalid bank version")
     directory = root / "versions" / version
@@ -62,6 +69,7 @@ def read_version(root, version):
     return BankVersion(directory / "main", directory / "symbolic", version)
 
 
+@bank_access
 def active_version():
     root = store_root()
     if root is None:
@@ -74,12 +82,27 @@ def active_version():
 
 @contextmanager
 def pin_bank(version=None):
-    pinned = version or _CURRENT.get() or active_version()
-    token = _CURRENT.set(pinned)
-    try:
-        yield pinned
-    finally:
-        _CURRENT.reset(token)
+    inherited = version or _CURRENT.get()
+    with reader_gate(_pinned_store(inherited) if inherited is not None else None):
+        pinned = inherited or active_version()
+        token = _CURRENT.set(pinned)
+        try:
+            yield pinned
+        finally:
+            _CURRENT.reset(token)
+
+
+def _pinned_store(version):
+    # A trusted validation worker explicitly pins its private copy with no
+    # publication version. Its environment must not route it back to production.
+    if version.version is None:
+        return ""
+    directory = version.main.parent
+    if (not isinstance(version.version, str) or not _VERSION.fullmatch(version.version)
+            or directory.name != version.version or directory.parent.name != "versions"
+            or version.main.name != "main" or version.symbolic != directory / "symbolic"):
+        raise ValueError("invalid pinned bank version")
+    return directory.parent.parent
 
 
 def bank_read(function):
@@ -103,6 +126,16 @@ def symbolic_root(main):
 @contextmanager
 def pin_question_path(path, legacy_root):
     """Old candidates retain their original version, even after deletion in a newer publication."""
+    current, root, candidate = _CURRENT.get(), store_root(), Path(path)
+    gate = (root if root and candidate.is_absolute() and candidate.is_relative_to(root / "versions")
+            else _pinned_store(current) if current is not None else None)
+    with reader_gate(gate):
+        with _pin_question_path(path, legacy_root):
+            yield
+
+
+@contextmanager
+def _pin_question_path(path, legacy_root):
     candidate = Path(path)
     root = store_root()
     selected = None

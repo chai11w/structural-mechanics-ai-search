@@ -18,6 +18,8 @@ import sqlite3
 import time
 from uuid import uuid4
 
+from tiku_shared.bank_readers import initialize_reader_gate
+
 
 _HASH = re.compile(r"[a-f0-9]{64}")
 _OPERATION = re.compile(r"op_[a-f0-9]{32}")
@@ -196,6 +198,7 @@ class PublicationStore:
             directory.mkdir(parents=True, exist_ok=True)
         self.lock = self.private / "writer.lock"
         with write_lock(self.lock), self.connection() as db:
+            initialize_reader_gate(self.root)
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS operations (
                     id TEXT PRIMARY KEY, plan TEXT NOT NULL, digest TEXT NOT NULL,

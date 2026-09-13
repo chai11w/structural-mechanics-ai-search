@@ -5,6 +5,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 from types import MappingProxyType
 from typing import Mapping
+from tiku_shared.bank_readers import bank_access
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,7 @@ class CheckpointBankCatalog:
         root, key = max(matches, key=lambda item: len(item[0].parts))
         return BankReferenceV1(key, chapter, path.relative_to(root).as_posix())
 
+    @bank_access
     def read(self, reference: BankReferenceV1) -> bytes:
         # Revalidate paths on every read. Never repair or search for a replacement.
         from tiku_agent.checkpoint_store import _reject_linked_path, _inspect_image

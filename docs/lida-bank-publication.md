@@ -11,6 +11,7 @@
 ```text
 bank-store/
   active.json                 当前版本、递增发布序号、操作编号及上一版引用
+  reader-gate.lock             检索共享占用与保留维护的固定锁标识
   versions/<manifest-sha256>/
     manifest.json             完整文件清单、大小与 SHA-256
     registry.json             本版永久题号对应表
@@ -69,3 +70,21 @@ python -B -X utf8 -m unittest discover -s tests -p test_multi_agent_rerank_polic
 平台项目的完整候选构建、语义校验、私有 HTTP 写入服务、任务固定批次、力答所有者页面和回执已连接并通过隔离联调，平台基础提交为 `d9a4deb`。飞书已进一步接通持久管理任务、可信消息与后台作业，保留原多答案上传和一次确认，新增、替换答案和删除调用同一服务。具体交互、等待提示、恢复和配置见 [飞书统一写入](feishu-managed-callbacks.md)。历史文件和账本完整时的回滚已实现，仍需完成：原题号迁入、灾难后的整套备份恢复、旧写者完整治理、不同 Windows 服务身份与 NTFS ACL、真实 DeepSeek/飞书/跨端/8790 验收及正式部署授权。正式服务禁止通过同一个 Windows 身份访问私有写入状态和生产写权限。
 
 当前文件 fsync、SQLite FULL 和原子替换处理进程中断；Windows 存储设备断电恢复能力还需按实际部署验证。未启用历史版本和遗留 staging 目录的自动清理，以免删除在途候选或恢复所需文件；上线前必须核验备份与版本目录容量和可控保留策略。
+
+## 历史清理前的读取保护
+
+`tiku_shared/bank_readers.py` 为受管题库增加独立的操作系统共享锁。读取端只读打开发布根目录的 `reader-gate.lock`，不调用写入服务，不创建或改写题库文件。Windows 使用 `LockFileEx`，其他平台使用 `flock`；清理维护尝试独占同一锁，有读者时立即返回 `BankReadersBusy`，不排队阻塞后续读者。新版本发布仍沿用原单写锁与指针切换，不取得这个独占锁，正在读取的旧版本可以继续使用。
+
+保护覆盖版本/清单读取之前、旧候选题目定位与答案复制、Agent 会话载入到 SQLite 保存，以及网页 JSON/流式业务执行到展示图片持久化。飞书的受管检索到独立回复图片保存也在同一范围内；旧 Bridge 路径则持有到回复图片交给传输接口之后。接口已经复制到自己目录的图片继续按原会话规则提供。底层检查点原题图片读取也取得共享锁。
+
+同一线程中的嵌套调用复用锁；线程池中的工作自行持有句柄，不复用从调用线程传播过来的“已加锁”标记，因此后台工作比调用者晚结束时仍受保护。正常退出主动释放，进程异常退出由操作系统释放。缺失、坏内容或链接形式的锁文件拒绝，不由检索端自动修复。读取被已持有的短时维护独占锁挡住时等待释放，最长 30 秒；维护必须把备份、哈希、递归删除和服务等待放在独占区间之外。
+
+显式 `BankVersion(..., version=None)` 仍用于可信 worker 的私有副本验证。此时内部嵌套读库沿用指定副本，不因进程环境中的 `TIKU_BANK_STORE` 指向不可用目录而接触生产题库。真实发布版本则按自己的发布目录取得读取保护；普通受管读取缺少锁文件仍然失败。该私有 Python 对象不作为模型参数提供。
+
+写入器构造时，在现有写锁内初始化固定锁文件。已有受管安装需要先完成程序升级和这项初始化，再启动新版读者；旧版读者即使看见这个文件也不会遵守该协议，因此清理前还须核实所有实际读取进程的程序版本。锁文件位于版本目录之外，保留其文件身份，不随历史目录删除或替换。完整恢复应还原它的原字节，新安装或旧格式恢复缺少时只能由受控安装/写入器补建。
+
+`maintenance_gate` 是内部维护原语，不是删除授权，也不是模型工具。安全清理还须停住管理写者、持有原写锁，并在独占区间内重新核验持久候选与任务引用、30 天边界和具体清理计划。当前只接合读取保护，未实现历史文件到期状态或清理入口；不能仅因取得独占锁就删除旧目录。
+
+读取保护专项 `python -B -X utf8 -m unittest discover -s tests -p 'test_bank_reader*.py' -q` 实际 **10 项通过（2.625 秒）**，使用真实 Windows 文件句柄和独立进程验证共享/独占互斥、只读句柄拒绝写入、后台线程独立持锁、进程直接退出、损坏/硬链接拒绝及读取清单前的保护；联调覆盖实际 SQLite 保存、六张旧答案复制、网页 JSON/流式图片复制与飞书管理回复保存。网页运行时和飞书业务结果为隔离替身，未调用模型或发送真实消息。
+
+相关回归初次 341 项通过；随后修正私有副本错误依赖环境题库的问题，新增对应检查并复测，最终 **342 项通过（44.499 秒）**，无跳过。组合模式为 `test_bank*.py`、`test_tiku_agent_tools.py`、`test_tiku_agent_session_runtime.py`、`test_tiku_agent_fastapi_demo.py`、`test_tiku_agent_session_artifacts.py`、`test_tiku_agent_session_store.py`、`test_a3_runtime.py`、`test_external_load_screen_runtime.py`、`test_a2_runtime_checkpoint_wiring.py`、`test_feishu*.py`、`test_multi_agent_rerank_policy.py`。平台的 12 项副本管理检查也通过（29.480 秒），含不可用环境题库下的实际副本构建。日志为 `F:/ruanjian/li-da-phase4-probe/bank-reader-integration-fixed-1bd28e8.log`、`bank-readers-final-regression-1bd28e8.log` 和 `bank-reader-private-copy-regression-1bd28e8.log`。这不是正式 ACL、在线 8790、全量题库兼容或完整清理验收。

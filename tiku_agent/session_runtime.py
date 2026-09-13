@@ -26,6 +26,7 @@ from tiku_agent.external_load_screen import (
 )
 from tiku_agent.session_artifacts import SessionArtifacts, session_key
 from tiku_agent.session_store import SessionStore
+from tiku_shared.bank_readers import bank_access, reader_gate
 from tiku_agent.state import AgentState
 from tiku_agent import task_state_contract as task_state_contract
 from tiku_agent.task_state_builder import READ_MISSING, READ_OK, READ_UNREADABLE
@@ -1370,6 +1371,7 @@ class AgentSessionRuntime:
         """Resolve one session-owned upload without exposing arbitrary paths."""
         return self._resolve_artifact(session_id, "uploads", filename)
 
+    @bank_access
     def persist_media(self, session_id: str, source: str | Path) -> Path | None:
         """Keep candidate/answer media available for the live conversation."""
         clean_session_id = self._clean_session_id(session_id)
@@ -1780,7 +1782,7 @@ class AgentSessionRuntime:
         lock = self._lock(session_id)
         try:
             with self._execution_gate.enter(progress, session_key=lock):
-                with lock:
+                with lock, reader_gate():
                     try:
                         self._await_background_image_work(session_id)
                         ensure_execution_cost_available(self)

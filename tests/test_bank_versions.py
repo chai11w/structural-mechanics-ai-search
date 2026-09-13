@@ -9,10 +9,12 @@ from unittest.mock import patch
 
 import search
 from tiku_shared import bank_versions
+from tiku_shared.bank_readers import initialize_reader_gate
 from multi_agent_pipeline import symbolic_root
 
 
 def publish(root, label, revision):
+    initialize_reader_gate(root)
     raw = json.dumps({"schema": 1, "files": [], "label": label}).encode()
     version = hashlib.sha256(raw).hexdigest()
     directory = root / "versions" / version

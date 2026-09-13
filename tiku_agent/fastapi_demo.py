@@ -56,6 +56,7 @@ from tiku_agent.task_state_contract import TaskStateSnapshotV1, empty_task_state
 from tiku_agent.task_state_runtime import TaskStateEntryCapabilities
 from tiku_agent.tool_result import is_public_tool_code
 from tiku_shared.model_costs import SQLiteModelCostLedger
+from tiku_shared.bank_readers import bank_access
 from tiku_shared.request_protocol import (
     PROTOCOL_REASONS,
     RequestAction,
@@ -1756,6 +1757,7 @@ def create_app(
     ) -> Response:
         """Hold the per-session gate for the complete synchronous task path."""
 
+        execute = bank_access(execute)
         if not coordination.versioned:
             # Headerless non-browser callers predate browser coordination and
             # retain their existing runtime admission/queue semantics.
@@ -1861,6 +1863,7 @@ def create_app(
         )
         return result
 
+    @bank_access
     def phase5_command_response(request, session_id, execute):
         coordination, rejection = _parse_session_coordination_headers(request, task_request=False)
         if rejection:
@@ -4982,7 +4985,7 @@ async def _stream_agent_events(
             dict(trace_meta or {})
         ):
             try:
-                payload = await asyncio.to_thread(execute, progress)
+                payload = await asyncio.to_thread(bank_access(execute), progress)
                 coordination_ack = current_coordination_ack()
                 if coordination_ack is not None:
                     _with_session_coordination_ack(
