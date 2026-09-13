@@ -185,7 +185,7 @@
             }
           } else {
             const progress = job.progress;
-            if (job.status === 'REGISTERED') onProgress({ message: '任务已接收，正在排队…' });
+            if (job.status === 'REGISTERED') onProgress({ message: '任务已接收' });
             else if (progress?.type === 'progress' && typeof progress.message === 'string'
                 && progress.message.length <= 256 && /^[a-z][a-z0-9_]{0,63}$/.test(progress.stage)) onProgress(progress);
             else onProgress({ message: '正在处理当前请求…' });
