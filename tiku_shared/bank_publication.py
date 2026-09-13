@@ -19,6 +19,7 @@ import time
 from uuid import uuid4
 
 from tiku_shared.bank_readers import initialize_reader_gate
+from tiku_shared.bank_file_retention import FileRetentionView, initialize_schema as initialize_retention_schema
 
 
 _HASH = re.compile(r"[a-f0-9]{64}")
@@ -217,6 +218,8 @@ class PublicationStore:
                     digest TEXT PRIMARY KEY, payload TEXT NOT NULL, at REAL NOT NULL
                 );
             """)
+            FileRetentionView(db).validate_all()
+            initialize_retention_schema(db)
 
     @contextmanager
     def connection(self):
@@ -341,6 +344,7 @@ class PublicationStore:
         current = self.current()
         cursor, seen = pointer_identity(current), set()
         with self.connection() as db:
+            retention = FileRetentionView(db)
             while cursor:
                 if cursor["operation_id"] in seen or len(seen) >= 100000:
                     raise PublicationError("publication-history-invalid")
@@ -358,7 +362,8 @@ class PublicationStore:
                 if plan["requested_by"]["principal"] == principal:
                     at = db.execute("SELECT MIN(at) FROM audit WHERE operation_id=? AND event='published'", (row["id"],)).fetchone()[0]
                     yield {**result, "published_at": at, "kind": plan["summary"].get("kind", "changes" if plan["base"] else "installation"),
-                           "changed_records": len(plan["summary"].get("changes", []))}
+                           "changed_records": len(plan["summary"].get("changes", [])),
+                           "files_status": retention.published_status(self.root, result["version"])}
                 cursor = result["parent"]
 
     def history(self, *, principal, before=None, limit=20):
@@ -384,6 +389,10 @@ class PublicationStore:
             self._recover_locked()
             for item in self._history_locked(principal):
                 if item["operation_id"] == operation_id:
+                    if item["files_status"] == "expired":
+                        raise PublicationError("rollback-target-expired")
+                    if item["files_status"] != "available":
+                        raise PublicationError("rollback-target-unavailable")
                     return {key: item[key] for key in ("schema", "revision", "version", "operation_id", "parent")}
         raise PublicationError("rollback-target-not-published")
 
