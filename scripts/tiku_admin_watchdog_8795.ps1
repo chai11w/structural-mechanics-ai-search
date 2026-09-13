@@ -2,11 +2,14 @@ param(
     [int]$Port = 8795,
     [string]$AdminRuntime,
     [string]$SourceRuntime,
+    [string]$ControlDb,
+    [string]$FeedbackDatabase,
     [string]$PythonExe = "python"
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "watchdog_process_guard.ps1")
+. (Join-Path $PSScriptRoot "tiku_agent_watchdog_8790_safety.ps1")
 
 if ($Port -ne 8795) {
     throw "This watchdog is restricted to port 8795."
@@ -33,6 +36,16 @@ $AdminArguments = @(
     "--admin-runtime", "$AdminRuntime",
     "--source-runtime", "$SourceRuntime"
 )
+foreach ($setting in @(
+    @{value=$ControlDb; flag='--control-db'},
+    @{value=$FeedbackDatabase; flag='--feedback-database'}
+)) {
+    if ($setting.value) {
+        if (-not [IO.Path]::IsPathFullyQualified($setting.value)) { throw 'Service state paths must be absolute.' }
+        $AdminArguments += @($setting.flag, [IO.Path]::GetFullPath($setting.value))
+    }
+}
+$AdminLaunchArguments = @($AdminArguments | ForEach-Object { ConvertTo-Tiku8790CommandLineArgument -Argument ([string]$_) })
 
 $LogDir = Join-Path $AdminRuntime "service_logs"
 $StatusFile = Join-Path $LogDir "watchdog_8795.status"
@@ -60,7 +73,7 @@ function Test-Health {
 
 function Start-Admin {
     $process = Start-Process $PythonExe `
-        -ArgumentList $AdminArguments `
+        -ArgumentList $AdminLaunchArguments `
         -WorkingDirectory $ProjectDir `
         -RedirectStandardOutput $OutLog `
         -RedirectStandardError $ErrLog `

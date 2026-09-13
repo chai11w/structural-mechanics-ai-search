@@ -141,9 +141,21 @@ def _validate_evidence_configuration(
     return resolved_backup
 
 
-def _evidence_repository_root(runtime: Path) -> Path:
+def _evidence_repository_root(runtime: Path, data_root: str | Path | None = None) -> Path:
     """A linked release can retain runtime data in its own primary checkout."""
     repository = BASE.resolve()
+    if data_root is not None:
+        declared = Path(data_root)
+        if not declared.is_absolute() or any(
+            part.is_symlink() or getattr(part, "is_junction", lambda: False)()
+            for part in (declared, *declared.parents)
+        ):
+            raise ValueError("evidence data root must be an absolute ordinary directory")
+        declared = declared.resolve()
+        if (not declared.is_dir() or declared.parent == declared or runtime.parent != declared
+                or declared.is_relative_to(repository) or repository.is_relative_to(declared)):
+            raise ValueError("evidence runtime must be an immediate child of the separate declared data root")
+        return declared
     if not runtime.is_relative_to(repository) and (repository / ".git").is_file():
         try:
             result = subprocess.run(
@@ -251,6 +263,8 @@ def build_app(
     *,
     control_db: str | Path | None = None,
     invite_config: str | Path | None = None,
+    feedback_database: str | Path | None = None,
+    evidence_data_root: str | Path | None = None,
     model_timeout_seconds: float = 120.0,
     grounding_timeout_seconds: float = 180.0,
     enable_auto_crop: bool = True,
@@ -291,7 +305,9 @@ def build_app(
     if enable_a2_checkpoint_capture and evidence_capacity is None:
         raise ValueError("A2 capture requires evidence capacity and retention")
     producer = _capture_producer(checkpoint_code_revision) if enable_a2_checkpoint_capture else None
-    repository = _evidence_repository_root(root) if evidence_capacity is not None else BASE.resolve()
+    if evidence_data_root is not None and evidence_capacity is None:
+        raise ValueError("evidence data root requires evidence capacity and retention")
+    repository = _evidence_repository_root(root, evidence_data_root) if evidence_capacity is not None else BASE.resolve()
     backup_root = _validate_evidence_configuration(
         evidence_capacity,
         backup_root=checkpoint_retention_backup_root,
@@ -401,7 +417,9 @@ def build_app(
             if control_store is not None
             else InviteAccess(invite_config) if invite_config else None
         ),
-        feedback_store=SQLiteFeedbackStore(root / "feedback.sqlite3"),
+        feedback_store=SQLiteFeedbackStore(
+            Path(feedback_database).resolve() if feedback_database is not None else root / "feedback.sqlite3"
+        ),
         feedback_retention_days_provider=(
             (lambda: int(control_store.settings()["feedback_retention_days"]))
             if control_store is not None
@@ -447,6 +465,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime-dir", type=Path, default=DEFAULT_RUNTIME_DIR)
     parser.add_argument("--control-db", type=Path)
     parser.add_argument("--invite-config", type=Path)
+    parser.add_argument("--feedback-database", type=Path)
+    parser.add_argument("--evidence-data-root", type=Path)
     parser.add_argument("--enable-a2-checkpoint-capture", action="store_true", default=False)
     parser.add_argument("--enable-a3-checkpoint-capture", action="store_true", default=False)
     parser.add_argument("--enable-durable-execution", action="store_true", default=False,
@@ -552,6 +572,8 @@ def main() -> int:
             args.runtime_dir,
             control_db=args.control_db,
             invite_config=args.invite_config,
+            feedback_database=args.feedback_database,
+            evidence_data_root=args.evidence_data_root,
             model_timeout_seconds=args.model_timeout_seconds,
             grounding_timeout_seconds=args.grounding_timeout_seconds,
             enable_auto_crop=args.enable_auto_crop,

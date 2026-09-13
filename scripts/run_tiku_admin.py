@@ -28,6 +28,8 @@ def build_app(
     *,
     admin_runtime: str | Path = DEFAULT_ADMIN_RUNTIME,
     source_runtime: str | Path = DEFAULT_SOURCE_RUNTIME,
+    control_db: str | Path | None = None,
+    feedback_database: str | Path | None = None,
     allow_local_setup: bool = True,
 ):
     admin_root = Path(admin_runtime).resolve()
@@ -36,11 +38,11 @@ def build_app(
         admin_root / "invite_code_encryption.key"
     )
     control_store = SQLiteControlStore(
-        admin_root / "control.sqlite3",
+        Path(control_db).resolve() if control_db is not None else admin_root / "control.sqlite3",
         invitation_vault=invitation_vault,
     )
     feedback_store = SQLiteFeedbackStore(
-        source_root / "feedback.sqlite3", cases_root=source_root / "feedback_cases"
+        Path(feedback_database).resolve() if feedback_database is not None else source_root / "feedback.sqlite3"
     )
     reporter = AdminReporter(
         control_store=control_store,
@@ -66,6 +68,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8795)
     parser.add_argument("--admin-runtime", type=Path, default=DEFAULT_ADMIN_RUNTIME)
     parser.add_argument("--source-runtime", type=Path, default=DEFAULT_SOURCE_RUNTIME)
+    parser.add_argument("--control-db", type=Path)
+    parser.add_argument("--feedback-database", type=Path)
     parser.add_argument("--disable-local-setup", action="store_true")
     return parser
 
@@ -76,6 +80,8 @@ def main() -> int:
         build_app(
             admin_runtime=args.admin_runtime,
             source_runtime=args.source_runtime,
+            control_db=args.control_db,
+            feedback_database=args.feedback_database,
             allow_local_setup=not args.disable_local_setup,
         ),
         host=args.host,

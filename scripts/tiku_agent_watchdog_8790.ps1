@@ -18,6 +18,8 @@ param(
     [double]$PerInviteDailyBudgetCny = 0,
     [string]$InviteConfig,
     [string]$ControlDb,
+    [string]$FeedbackDatabase,
+    [string]$EvidenceDataRoot,
     [switch]$DisableAutoCrop,
     [switch]$DisableA3TextOrientation,
     [switch]$DisableOutputWatchdog,
@@ -142,6 +144,15 @@ if ($InviteConfig) {
 }
 if ($ControlDb) {
     $BotArguments += @("--control-db", "$ControlDb")
+}
+foreach ($setting in @(
+    @{value=$FeedbackDatabase; flag='--feedback-database'},
+    @{value=$EvidenceDataRoot; flag='--evidence-data-root'}
+)) {
+    if ($setting.value) {
+        if (-not [IO.Path]::IsPathFullyQualified($setting.value)) { throw 'Service state paths must be absolute.' }
+        $BotArguments += @($setting.flag, [IO.Path]::GetFullPath($setting.value))
+    }
 }
 if ($DisableAutoCrop) {
     $BotArguments += "--disable-auto-crop"
