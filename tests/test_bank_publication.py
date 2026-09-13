@@ -11,7 +11,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from tiku_shared.bank_publication import (PublicationError, PublicationStore, canonical, verify_bundle, write_lock,
-    require_storage_space, MINIMUM_BANK_FREE_BYTES, BANK_WRITE_MARGIN_BYTES)
+    require_storage_space, MINIMUM_BANK_FREE_BYTES, BANK_WRITE_MARGIN_BYTES, digest, bundle_size)
 
 
 def validate_fixture(directory):
@@ -79,6 +79,20 @@ class PublicationTests(unittest.TestCase):
         review = self.store.review(prepared["operation_id"], principal=principal, channel=channel)
         return self.store.approve(prepared["operation_id"], plan_digest=prepared["plan_digest"],
                                   challenge=review["approval_challenge"], principal=principal, channel=channel)
+
+    def legacy_candidate(self, label):
+        """Fixture of a pre-upgrade frozen plan, before any owner approval."""
+        prepared = self.candidate(label)
+        plan = dict(prepared["plan"]); plan.pop("recovery_policy")
+        plan_digest = digest(canonical(plan))
+        with self.store.connection() as db:
+            db.execute("UPDATE operations SET plan=?,digest=? WHERE id=?",
+                       (canonical(plan).decode(), plan_digest, prepared["operation_id"]))
+            event = db.execute("SELECT sequence,detail FROM audit WHERE operation_id=? AND event='prepared'",
+                               (prepared["operation_id"],)).fetchone()
+            detail = json.loads(event["detail"]); detail["plan_digest"] = plan_digest
+            db.execute("UPDATE audit SET detail=? WHERE sequence=?", (canonical(detail).decode(), event["sequence"]))
+        return self.store.status(prepared["operation_id"])
 
     def publish(self, label):
         prepared = self.candidate(label)
@@ -200,7 +214,12 @@ class PublicationTests(unittest.TestCase):
 
     def test_full_external_backup_and_repeat_execution_preserve_single_publication(self):
         first = self.publish("initial")
-        second = self.publish("replacement")
+        second = self.legacy_candidate("replacement")
+        replay = self.store.prepare(second["operation_id"], expected=first["result"], summary={"label": "replacement"},
+                                    principal="owner-one", channel="lida")
+        self.assertEqual(replay["plan_digest"], second["plan_digest"])
+        self.approved(second)
+        second = self.reopen().execute(second["operation_id"], plan_digest=second["plan_digest"])
         pointer = self.store.current()
         repeated = self.reopen().execute(second["operation_id"], plan_digest=second["plan_digest"])
         self.assertEqual(repeated["result"], pointer)
@@ -211,6 +230,40 @@ class PublicationTests(unittest.TestCase):
         receipt = json.loads((backup / "receipt.json").read_bytes())
         self.assertEqual(receipt["approval"]["plan_digest"], second["plan_digest"])
         self.assertTrue((self.directory / "bank/versions" / first["result"]["version"]).is_dir())
+
+    def test_new_publication_retains_old_version_and_receipt_without_an_extra_bank_copy(self):
+        first = self.publish("initial")
+        second = self.candidate("replacement"); self.approved(second)
+        candidate = self.store.private / "bundles" / second["plan"]["candidate_version"]
+        required = bundle_size(verify_bundle(candidate, second["plan"]["candidate_version"]))
+        # Enough for the new published copy, but not another old-bank copy.
+        with patch("tiku_shared.bank_publication.shutil.disk_usage", return_value=SimpleNamespace(
+                free=MINIMUM_BANK_FREE_BYTES + BANK_WRITE_MARGIN_BYTES + required)):
+            result = self.store.execute(second["operation_id"], plan_digest=second["plan_digest"])
+        receipt_root = self.store.backups / second["operation_id"]
+        self.assertEqual([path.name for path in receipt_root.iterdir()], ["receipt.json"])
+        receipt = json.loads((receipt_root / "receipt.json").read_bytes())
+        self.assertEqual(receipt["plan"]["recovery_policy"], "retained-versions")
+        self.assertEqual(receipt["plan"]["base"], first["result"])
+        self.assertEqual(receipt["approval"]["plan_digest"], second["plan_digest"])
+        verify_bundle(self.store.root / "versions" / first["result"]["version"], first["result"]["version"])
+        self.assertEqual(self.reopen().execute(second["operation_id"], plan_digest=second["plan_digest"])["result"], result["result"])
+
+    def test_missing_or_corrupt_retained_base_and_receipt_are_not_silently_replaced(self):
+        original = self.publish("initial")["result"]
+        item = self.candidate("second"); self.approved(item)
+        interrupted = self.child(item, "after-backup")
+        self.assertEqual(interrupted.returncode, 73, interrupted.stderr)
+        receipt = self.store.backups / item["operation_id"] / "receipt.json"
+        original_receipt = receipt.read_bytes()
+        receipt.write_bytes(b'{}')
+        with self.assertRaisesRegex(PublicationError, "backup-receipt-mismatch"):
+            self.reopen().execute(item["operation_id"], plan_digest=item["plan_digest"])
+        receipt.write_bytes(original_receipt)
+        (self.store.root / "versions" / original["version"] / "registry.json").write_bytes(b'{}')
+        with self.assertRaisesRegex(PublicationError, "bundle-integrity-failed"):
+            self.reopen().execute(item["operation_id"], plan_digest=item["plan_digest"])
+        self.assertEqual(self.store.current(), original)
 
     def test_reusing_operation_with_changed_payload_rejected_but_same_request_is_idempotent(self):
         item = self.candidate("initial")
@@ -249,7 +302,7 @@ class PublicationTests(unittest.TestCase):
 
     def test_corrupted_external_backup_cannot_be_treated_as_a_reusable_backup(self):
         self.publish("initial")
-        item = self.candidate("second"); self.approved(item)
+        item = self.legacy_candidate("second"); self.approved(item)
         interrupted = self.child(item, "after-backup")
         self.assertEqual(interrupted.returncode, 73, interrupted.stderr)
         backup = self.directory / "backups" / item["operation_id"] / "bank/registry.json"

@@ -194,6 +194,16 @@ def bundle_size(manifest):
     return sum(item["size"] for item in manifest["files"]) + len(canonical(manifest))
 
 
+def independent_preimage_required(plan):
+    """Existing frozen plans retain their original backup contract on retry."""
+    policy = plan.get("recovery_policy")
+    if policy is None and "recovery_policy" not in plan:
+        return True
+    if policy != "retained-versions":
+        raise PublicationError("unsupported-recovery-policy")
+    return False
+
+
 def copy_bundle(source, destination, version):
     """Copy bytes, not hard links; readers may keep this version after later edits."""
     manifest = verify_bundle(source, version)
@@ -437,16 +447,18 @@ class PublicationStore:
         with write_lock(self.lock):
             self._recover_locked()
             version = seal_bundle(directory, self.validator)
-            plan = {"schema": 1, "operation_id": operation_id, "base": expected,
-                    "candidate_version": version, "summary": summary, "requested_by": identity}
-            plan_json = canonical(plan).decode(); plan_digest = digest(plan_json.encode())
             with self.connection() as db:
                 previous = db.execute("SELECT id FROM operations WHERE id=?", (operation_id,)).fetchone()
-                if previous:
-                    row = self._row(db, operation_id)
-                    if row["digest"] != plan_digest:
-                        raise PublicationError("idempotency-conflict")
-                    return self._public(row)
+                row = self._row(db, operation_id) if previous else None
+            plan = {"schema": 1, "operation_id": operation_id, "base": expected,
+                    "candidate_version": version, "summary": summary, "requested_by": identity}
+            if row is None or "recovery_policy" in json.loads(row["plan"]):
+                plan["recovery_policy"] = "retained-versions"
+            plan_json = canonical(plan).decode(); plan_digest = digest(plan_json.encode())
+            if row:
+                if row["digest"] != plan_digest:
+                    raise PublicationError("idempotency-conflict")
+                return self._public(row)
             if self.current() != expected:
                 raise PublicationError("bank-version-changed")
             destination = self.private / "bundles" / version
@@ -519,20 +531,25 @@ class PublicationStore:
                     self._event(db, operation_id, "cancelled", {"plan_digest": plan_digest, **identity})
                 return self._public(self._row(db, operation_id))
 
-    def _backup(self, row, plan):
+    def _record_receipt(self, row, plan):
+        # New plans retain the immutable old version, not a second full copy.
+        # The approved policy is inside the plan digest; old plans stay intact.
+        independent = independent_preimage_required(plan)
         destination = self.backups / row["id"]
         receipt = {"schema": 1, "plan_digest": row["digest"], "plan": plan, "approval": json.loads(row["approval"])}
+        if plan["base"]:
+            verify_bundle(self.root / "versions" / plan["base"]["version"], plan["base"]["version"])
         if not destination.exists():
             temporary = self.backups / ("pending-" + uuid4().hex)
             temporary.mkdir()
-            if plan["base"]:
+            if plan["base"] and independent:
                 base = plan["base"]["version"]
                 copy_bundle(self.root / "versions" / base, temporary / "bank", base)
             atomic_json(temporary / "receipt.json", receipt)
             os.replace(temporary, destination); sync_directory(destination.parent)
         if json.loads(reject_links(destination / "receipt.json").read_bytes()) != receipt:
             raise PublicationError("backup-receipt-mismatch")
-        if plan["base"]:
+        if plan["base"] and independent:
             verify_bundle(destination / "bank", plan["base"]["version"])
 
     def _recover_locked(self):
@@ -545,7 +562,7 @@ class PublicationStore:
                 if (current and current["operation_id"] == row["id"] and current["version"] == plan["candidate_version"]
                         and current["revision"] == expected_revision and current.get("parent") == pointer_identity(plan["base"])):
                     verify_bundle(self.root / "versions" / current["version"], current["version"])
-                    self._backup(row, plan)
+                    self._record_receipt(row, plan)
                     db.execute("UPDATE operations SET state='published', result=?, error=NULL WHERE id=?",
                                (canonical(current).decode(), row["id"]))
                     self._event(db, row["id"], "published", {"pointer": current, "recovered": True})
@@ -585,12 +602,13 @@ class PublicationStore:
                 requirements = [(self.private, 0), (self.backups, 0), (self.root, 0)]
                 if not (self.root / "versions" / version).exists():
                     requirements.append((self.root, bundle_size(manifest)))
-                if plan["base"] and not (self.backups / row["id"]).exists():
+                if (plan["base"] and independent_preimage_required(plan)
+                        and not (self.backups / row["id"]).exists()):
                     base_version = plan["base"]["version"]
                     requirements.append((self.backups, bundle_size(
                         verify_bundle(self.root / "versions" / base_version, base_version))))
                 require_storage_space(requirements)
-                self._backup(row, plan)
+                self._record_receipt(row, plan)
                 self.checkpoint("after-backup")
                 self.validator(source)
                 verify_bundle(source, version)
