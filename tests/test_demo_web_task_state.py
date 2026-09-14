@@ -594,7 +594,7 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260912-recovery-guards-v1"'
+        demo_asset = 'src="/assets/demo.js?v=20260913-admission-v3"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
@@ -714,6 +714,7 @@ assert.deepEqual(missing.starts, [readyModel]);
         node_test = r"""
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const backgroundEnabled = false;
 const source = fs.readFileSync('./tiku_agent/demo_web/demo.js', 'utf8');
 const start = source.indexOf('function showFailureNotice');
 const end = source.indexOf('function setFeedbackPending', start);
@@ -873,6 +874,7 @@ assert.equal(harness.empty(), false);
         node_test = r"""
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const backgroundEnabled = false;
 const source = fs.readFileSync('./tiku_agent/demo_web/demo.js', 'utf8');
 const start = source.indexOf('function isExplicitSessionResetText');
 const end = source.indexOf('function sessionRequestLockAvailable', start);
@@ -959,6 +961,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const taskStateV1 = require('./tiku_agent/demo_web/task_state.js');
 const fixtures = JSON.parse(fs.readFileSync(0, 'utf8'));
+const backgroundEnabled = false;
 const source = fs.readFileSync('./tiku_agent/demo_web/demo.js', 'utf8');
 
 const constants = source.slice(
@@ -1305,7 +1308,7 @@ const retryHarness = createRetryHarness();
             "if (pendingHistoryStorageNotice && !sessionResetRequired) flushStartupNotices();",
             startup,
         )
-        self.assertIn("if (history.length || sessionResetRequired) retryConnection();", startup)
+        self.assertIn("if (backgroundEnabled || history.length || sessionResetRequired) retryConnection();", startup)
         self.assertNotIn("runSessionBootstrap();", startup)
         self.assertNotIn("checkHealth();", startup)
         self.assertNotIn("request('/health'", demo)
@@ -1378,6 +1381,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const taskStateV1 = require('./tiku_agent/demo_web/task_state.js');
 const fixtures = globalThis.__a3Fixtures;
+const backgroundEnabled = false;
 const source = fs.readFileSync('./tiku_agent/demo_web/demo.js', 'utf8');
 let sessionLockGate = null;
 let sessionLockTail = Promise.resolve();
@@ -3948,6 +3952,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const taskStateV1 = require('./tiku_agent/demo_web/task_state.js');
 const fixtures = globalThis.__a3Fixtures;
+const backgroundEnabled = false;
 const source = fs.readFileSync('./tiku_agent/demo_web/demo.js', 'utf8');
 
 function block(start, end) {
@@ -4223,6 +4228,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const taskStateV1 = require('./tiku_agent/demo_web/task_state.js');
 const fixtures = JSON.parse(process.argv[2]);
+const backgroundEnabled = false;
 const source = fs.readFileSync('./tiku_agent/demo_web/demo.js', 'utf8');
 
 function block(start, end) {

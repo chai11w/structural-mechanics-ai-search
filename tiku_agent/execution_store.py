@@ -160,7 +160,21 @@ class ExecutionStore:
                 _TRANSACTION.reset(token)
             conn.close()
 
-    def clock(self, conn) -> float:
+    @contextmanager
+    def reading(self):
+        """A committed snapshot which cannot update the execution authority."""
+        conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
+            yield conn
+        finally:
+            if conn.in_transaction:
+                conn.rollback()
+            conn.close()
+
+    def read_clock(self, conn) -> float:
         now = float(self.now())
         if not math.isfinite(now) or now <= 0:
             raise ExecutionError("EXECUTION_CLOCK_INVALID")
@@ -168,7 +182,10 @@ class ExecutionStore:
         previous = float(row[0]) if row else now
         if now < previous - 300:
             raise ExecutionError("EXECUTION_CLOCK_ROLLBACK")
-        now = max(previous, now)
+        return max(previous, now)
+
+    def clock(self, conn) -> float:
+        now = self.read_clock(conn)
         conn.execute("INSERT OR REPLACE INTO execution_meta VALUES ('clock',?)", (str(now),))
         return now
 

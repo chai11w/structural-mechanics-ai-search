@@ -2,42 +2,38 @@
 
 ## Current State
 
-- 截至 2026-09-12，阶段 1～5 完成，6/7 未启动；工作主线 `codex/mainline-bounded-autonomy-v1` 已推送 `e08efa2`。已清理合并完的 `codex/mainline-fix` 及工作区；较早分支保留，今日 `codex/lida-bank-release` 由另一任务处理。
-- 8790 已发布 `e08efa2633f9b26e4a70047fe3bbb92ac43fd087`，固定工作区 `.worktrees/8790-release-e08efa2`；前版 `0be3808` 及旧回退目录保留。runtime、8795 控制库、durable execution 与 A2/A3 Checkpoint 沿用。8 库备份、任务 XML、验证证据见 `F:\cc\_backups\7-题库检索\2026-09-12\web-session-e08efa2\`。
-- 本版 1629 项回归通过；四份线上前端资产匹配、未登录 API 返回 401，看门狗跨周期稳定。真实样本：22 次操作成功、75 个模型效果与 52 条费用已确认、15 个父子交接已提交、2 个多题批次；费用/父子归属一致。本轮无新增模型调用，不替代登录态浏览器人工验收。
-- A3-V1 经整页理解、裁图、双门禁与选题进入 A2；8790/8896/8788 已停四方向 RapidOCR。
-- 阶段 4、阶段 5 的验收范围仍按各自批次解释，本批只读冒烟不替代真实样本验收。
+- 交接日期：2026-09-12。当前工作目录为 `F:\cc\_worktrees\7-题库检索\phase6-background-execution`，分支 `codex/phase6-background-execution`。新对话必须在此 worktree 继续；主目录 `F:\cc\7-题库检索` 不是阶段 6 开发 checkout。
+- 阶段 1～5 已完成；本 worktree 的 **6.1～6.3 DONE，6.4～6.6 未实现**。下一项是 6.4 网页刷新/断网恢复；阶段 7 暂停/继续仍延期。
+- 已提交开发基线：6.1 `8dbfada`、6.2 `05d16e9`、6.3 `c14d71f`。交接前代码工作区干净，无开发半成品或运行中的开发任务；本次仅维护交接文档。
+- 6.3 最终全量 **1,695 tests / OK，161.744 秒，无跳过**，含新增 26 项；日志 `.tmp_phase6_3/full-regression-final.log`。仅使用合成 provider 与隔离数据库，没有新增付费模型样本。
+- 离线 HTTP 探针断流/重复查询后仍为 1 次调用、1 个 attempt、1 条 Response，数据库检查与 drain 通过。证据与限制见 [6.3 交付文档](../docs/phase6_3_http_protocol.md)。
+- 阶段 6 仅本地开发，未推送、未合入主线、未上线。已有生产发布授权不延伸到本批；后续发布需单独授权。
+- 本会话记录的 8790 最新发布是 `c5ec463`（Trace 分段耗时诊断），不是阶段 6；本次交接不重新探测生产进程。主线 `codex/mainline-bounded-autonomy-v1` 与当前 worktree 必须区分。
 
 ## Implemented
 
-- 会话生命周期由服务端裁决；无匹配请求确认的注册错误仅显示、不清历史；本地到期而服务端仍存活时，最多 60 秒后再查，不延长活动时间。无服务端会话但本地仍新鲜时保留内容并标记“已失效”。
-- 会话时长单一出处：`conversation_ttl.py` 供会话库、协调保留、执行库会话与 A3 裁图媒体共用，并经会话响应下发 `conversation_ttl_seconds`，浏览器倒计时与文案取自该值。
-- 失败照实显示：客户端只把服务端注册表内的 (layer, code) 组合原样呈现（parity 测试锁定），未知或错配仍 fail-closed；Trace 写入把“抢锁失败”（30 秒内重试）与“中途被打断”（丢弃、不重放）分开，健康可区分 kind。
-- A3-V1 以 `unit_id` 绑定题目、框和裁图，多题校验上限 10；服务端校验状态、编号与 unit 集合，媒体按期过期。
-- 共享复筛为综合分 `>=90%` 全部，否则 Top 3；8896 为 `>=95%`；章节解析失败后仅经授权搜字母库。
-- 使用量按父 workflow 页数与进入 A2 的题数统计；费用归属稳定邀请码，A3/子 A2 共用账本；反馈 v8 绑定服务端 Response，v7 只读兼容。
-- 五态协议、Trace/Response 使用注册 code/白名单、唯一终态与幂等隐私投影；诊断 CLI 只读、retention 默认 dry-run。候选原子交付，媒体可重发，同题重试沿用 `search_id`。
-- 8790 与 8795 分别实现有界队列、请求限长与登录限速，8790 另有 JSON 工作线程；费用库异常时邀请码删除 fail-closed。
-- 看门狗核对端口、PID、Python 与 argv，并绑定固定 checkout/入口与 manifest；主线含后台 Trace 诊断与运营概览，8795 运行版本须另核验。
-- 阶段 3 的 `TaskStateSnapshotV1` 支持锁内单读、异常 fail-closed、跨出口一致快照与 branded 动作授权；拒绝 stale/ABA，未知结果不自动重放。
-- 阶段 4 贯通 A2/A3 九阶段及父子 revision、输入、Artifact、识别筛选、候选分数与答案引用；不替代 Task State 或动作授权。
-- Checkpoint/Artifact 有 TTL、容量、审计、清理与 retention（记录 30 天、图片 3/7 天、反馈/调查 365/90 天）；异步采集上限 128 项、8 MiB、120 秒，写失败不阻断业务，读/管理 fail-closed。
-- 候选/答案以 `bank_id/chapter/relative_key/lookup_mode=current` 只采引用，业务仍复制答案；原图/裁图保留 Artifact，裁图名不可变。
-- 阶段五持久化幂等操作、租约、模型效果、费用 outbox、父子收据与逐题结果，绑定会话代次、任务与配置版本；待对账阻止新调用。
-- 前端隐藏诊断面板但保留可见重置核对入口；非空旧库须显式迁移，已有执行库时禁用开关会拒绝旧写入路径。
+- 6.1 冻结接收/执行/观察边界、现有取消链和 F01～F18 验收目标；[完整计划](../docs/phase6_execution_plan.md) 是阶段 6 规范入口。
+- 6.2 提供私有持久输入、原子接收、同键去重与独立 worker，复用原 execution 权威；A2 与 A3 五类操作已覆盖。保持 1 运行/2 排队/55 秒原截止时间，授权/额度在接收、领取、模型发送前重验；UNKNOWN 不盲目重发。见 [内核文档](../docs/phase6_2_background_kernel.md)。
+- 6.3 提供 `/api/jobs` 提交、原键发现、只读查询/NDJSON 订阅，观察取消不取消业务；独立登录 Cookie/grant 支持注销撤销。`background_execution` 默认关闭，生产 launcher 尚未接入；旧业务接口在新模式明确拒绝。
+- 6.3 冻结公共结果/媒体与 Response 归属；后台有界修复交付不重搜，重复观察/评分复用同一回复。历史快照不授权当前动作，HTTP/后台 Trace 分开。实现入口为 `background_http.py`、`background_publication.py`、`background_auth.py`、`background_trace.py`。
+- 既有会话 TTL 由 `conversation_ttl.py` 单一定义、服务端裁决；未确认错误不清历史，本地到期但服务端存活时最多 60 秒后复查。保留旧阶段的恢复与失效提示行为。
+- 阶段 3 TaskState 使用锁内单读、公开白名单和 branded 动作；跨题/跨 revision 拒绝，无 Web Lock 时关闭任务入口。前端仍在 `tiku_agent/demo_web/` 使用旧业务协议，尚未消费后台任务。
+- A3-V1 以 unit_id 绑定整页理解、裁图、双门禁与 A2；多题上限 10。共享复筛 >=90% 全部，否则 Top 3；8896 为 >=95%，章节不明须授权后搜字母库。
+- 费用归属稳定邀请码，父 A3/子 A2 共账本；阶段 5 持久幂等操作、租约、模型效果、费用 outbox、父子/逐题收据与配置版本，待对账阻止新调用。
+- Trace/Response 使用受限投影与唯一终态，反馈 v8 绑定服务端 Response；新增 Trace 分段耗时只用于定位，未改变 0.5 秒写预算与既有重试语义。
+- Checkpoint/Artifact 九阶段证据具备 TTL、容量、审计和异步有界采集；题库答案保留当前位置引用，原图/裁图保存 Artifact。证据不替代业务状态或动作授权。
+- 8790/8795 的控制库认证、动态额度、登录限速、队列及固定 release/manifest 看门狗边界沿用；新阶段未修改生产或飞书入口。
 
 ## In Progress
 
-- Trace 超预算丢事件仍需定位；本次已保存重启前健康基线并完成现有业务样本核查。后续使用继续关注过期/恢复、错误提示与证据健康，不自动推进收费采样或后续阶段。
-- 方向评估仍为离线基线；恢复前须复核样本与工作区。
+- 当前开发停在 6.3 完成处，等待新对话继续 **6.4 网页恢复**；本次交接不提前实现该步骤。
 
 ## Not Implemented
 
-- Cloudflare Access、边缘登录限速和测试者邮箱名单仍需账户侧配置；应用内限速不能替代边缘策略。
-- 阶段 6 后台任务与 HTTP 流解耦未实现；阶段 7 暂停/继续仍延期，须用户另行选择后规划。
-- 尚无可复用的 8790 计划任务 release 发布器；本批两次发布均为受控手工流程，`switch_tiku_agent_8790_control.ps1` 只迁移控制库。
-- RapidOrientation 封装、阈值、8896 影子和 8790 发布未实现；需提取 ONNX 置信度并固定版本/模型哈希。
-- Paddle splitter 驱动的裁剪及回退属于 A3 V2，暂不继续。
+- 6.4 网页保存操作键/凭据、重连恢复、结果去重和多标签页真实浏览器验收。
+- 6.5 完整崩溃/重启、UNKNOWN、本地安全恢复、过期/撤销、文件清理竞争与版本切换矩阵；6.6 全门验收、真实样本范围及可回退发布。
+- 阶段 7 暂停/继续；Cloudflare Access、边缘限速及测试者名单仍未完成账户侧核验。
+- 可复用 8790 release 发布器尚无；RapidOrientation 校准/封装及 Paddle V2 继续延期。
 
 ## Architecture Rules
 
@@ -53,16 +49,15 @@
 
 ## Known Risks
 
-- 8790 固定 release 是运行依赖。计划任务已配置失败每分钟重启、最多 999 次、无执行时限；当前看门狗正常。仅核验配置与运行稳定性，未故意终止生产进程测试恢复；登录触发不等于开机无人登录自启。
-- 重启前 Trace dropped/write_failures 均为 10，最后为 `EvidenceDeadlineExceeded`（09-12 17:01:57 +08:00）；Checkpoint 29/29 成功、无积压。Trace 写入预算 0.5 秒，聚合计数无法定位耗时或逐次归类；历史失败未修复，重启归零不是修复证据。
-- 阶段五真实模型样本仍偏少；关注错绑、跨题费用、客户端时间、多题混排、裁剪边界、小荷载、低清与旋转。
-- Cloudflare Access 与边缘登录限速未从账户侧核验，NATAPP 可达也不证明公网登录闭环；无 Web Lock 时任务入口 fail-closed，发放前不应同时给出公网地址与邀请码，并需覆盖测试者浏览器。
-- 方向阈值未校准，无法同时保证误旋安全与召回，不能直接上线。
-- Qwen 冷调用有长尾：1 运行/2 排队/55 秒等待，超额拒绝或超时重试；超容量可丢证据，样本无丢失不保证任意负载。
-- 旧 `parse_chapter` 会把“第4章”映射为 `4力法`；严格入口对纯数字返回 `uncertain`，未迁移入口仍可能误搜。
-- 邀请码转发会共享额度，完成后落账可能使最后一个在途任务略超阈值。
-- 题库引用读取当前文件、不保存历史字节，移动或删除原文件会改变可读证据；诊断预览最多 100 行，截断不等于丢失，复筛只存排名与分数。
-- 阶段五产生新业务操作后不能直接回退旧会话库；须保留执行库、费用证据与媒体，以兼容状态的修复版本处理，供应商恰好一次不在保证范围内。
+- 6.3 的接口/ASGI 与子进程证据不替代 6.4 真实浏览器验收，也不等于 F01～F18 全门完成；旧网页直接接新模式会收到 409，不能先切生产开关。
+- 后台结果区分业务 SUCCEEDED 与 publication READY/FAILED/UNAVAILABLE；旧快照只供展示，当前动作必须重新授权。查询不续会话，不得靠重连恢复已失效 epoch。
+- 发布最多 3 次；容量/到期失败保留业务收据，不通过重新调用模型补旧结果。强制停机、未 drain 调用和版本迁移仍需 6.5 闭环。
+- Trace marker 与诊断入库间崩溃可能丢事件；诊断不是业务权威。此前 10 次 Trace 写失败未补回，根因仍待分段证据；诊断为进程内有界数据，重启清空不等于修复。
+- 真实模型样本仍偏少；后续关注父子错绑、跨题费用、多题混排、裁剪边界、小荷载、低清与旋转。供应商恰好一次不在保证范围内。
+- 生产固定 release 是运行依赖，既有计划任务配置不证明无人登录冷启动；不能因阶段 6 本地完成就覆盖生产 checkout。
+- Qwen 冷调用有长尾，容量外拒绝；邀请码共享额度、完成后记账可能使最后一个在途略超阈值。NATAPP 可达不等于公网鉴权闭环。
+- 旧 parse_chapter 把“第4章”映射为 `4力法`，严格入口对纯数字返回 uncertain；历史题库引用读取当前文件，移除文件会影响证据可读性。
+- 阶段 5 产生新操作后不能回退旧会话库；必须保留执行库、费用和媒体，以兼容状态的修复版本处理。
 
 ## Do Not Do
 
@@ -79,14 +74,14 @@
 
 ## Next Best Step
 
-1. 对比本次备份与 `/health`，以备份库隔离定位 Trace 超预算耗时；不能靠放宽预算或重启宣告修复。
-2. 后续使用观察会话过期/恢复与错误提示；本轮现有样本核查已完成，未重放用户任务。
-3. 账户侧配置 8790/8795 的 Cloudflare Access 与边缘限速后再受控发放邀请码；阶段 6 需用户选择后规划，不提前实现暂停/继续。
+1. 在本 worktree 先读 `docs/phase6_execution_plan.md`、`docs/phase6_3_http_protocol.md`，再定位 `tiku_agent/demo_web/demo.js` 的请求协调/本地存储/提交/恢复逻辑及 `execution_control.js`、`task_state.js`；从 6.4 的操作键持久化、原键发现和只读重连切片开始，不重做后台内核。
+2. 延续 Web Lock、pending fence、服务端 TTL 与 epoch/revision 校验；补齐刷新、断网、多标签页、ACK 丢失及稳定 Response 去重的隔离浏览器验证。只查询原任务，不自动重发业务。
+3. 6.4 完成后再进入 6.5/6.6。测试/原型继续用本 worktree 独立 runtime、Cookie、媒体与控制测试配置；真实付费采样、推送和上线按各自授权处理。
 
 ## Important Commands
 
-- `python -m unittest discover -s tests -p 'test_*.py'`
-- `python scripts/run_tiku_agent_8790.py --help`
-- `python scripts/tiku_diagnostics.py --help`
-- `python scripts/tiku_checkpoint_diagnostics.py --help`
-- `python scripts/tiku_retention.py --help`
+- `Set-Location -LiteralPath 'F:\cc\_worktrees\7-题库检索\phase6-background-execution'`
+- `git status --short`；`git log -3 --oneline`
+- `Get-Content -LiteralPath 'docs/phase6_execution_plan.md'`
+- `python -B scripts/run_phase6_http_probe.py`（仅创建新隔离 runtime，不监听端口）
+- `python -B -m unittest discover -s tests -q`（全量回归；改动前无需为交接重复运行）

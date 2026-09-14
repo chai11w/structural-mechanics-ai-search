@@ -285,6 +285,8 @@ def build_app(
     checkpoint_code_revision: str = "",
     enable_a3_checkpoint_capture: bool = False,
     enable_durable_execution: bool = False,
+    background_execution: bool = False,
+    background_production: bool = False,
 ):
     _validate_queue_settings(
         max_concurrent_tasks,
@@ -292,6 +294,31 @@ def build_app(
         queue_wait_seconds,
     )
     root = Path(runtime_dir).resolve()
+    if background_production and not background_execution:
+        raise ValueError("production background profile requires background execution")
+    shared_control_root = None
+    if background_production:
+        if control_db is None or feedback_database is None or evidence_data_root is None:
+            raise ValueError("production background profile requires explicit control, feedback and evidence paths")
+        for configured in (runtime_dir, control_db, feedback_database, evidence_data_root):
+            path = Path(configured)
+            if not path.is_absolute() or any(
+                item.is_symlink() or getattr(item, "is_junction", lambda: False)()
+                for item in (path, *path.parents)
+            ):
+                raise ValueError("production service paths must be absolute ordinary paths")
+        shared_control_root = Path(control_db).absolute().parent
+        if Path(feedback_database).absolute().parent != shared_control_root:
+            raise ValueError("shared feedback must be beside the control database")
+    if background_execution:
+        if not float(queue_wait_seconds).is_integer():
+            raise ValueError("background queue deadline must use whole seconds")
+        if not enable_durable_execution or control_db is None or invite_config is not None:
+            raise ValueError("background execution requires durable execution and an isolated control database")
+        if not background_production and Path(control_db).absolute() != root / "control.sqlite3":
+            raise ValueError("background control database must be runtime/control.sqlite3")
+        if any(part in ({".tmp_feishu_tiku"} if background_production else {".tmp_tiku_agent_v2_prod_8790", ".tmp_feishu_tiku"}) for part in root.parts):
+            raise ValueError("background execution requires a separate runtime")
     if type(enable_durable_execution) is not bool:
         raise TypeError("enable_durable_execution must be boolean")
     if (root / "execution.sqlite3").exists() and not enable_durable_execution:
@@ -360,7 +387,7 @@ def build_app(
         )
         retention_runner = CheckpointRetentionRunner(
             runtime_root=root,
-            runtime_name=EVIDENCE_RUNTIME_NAME,
+            runtime_name="tiku_agent_phase6_8898" if background_execution and not background_production else EVIDENCE_RUNTIME_NAME,
             repository_root=repository,
             backup_root=backup_root,
             capacity=evidence_capacity,
@@ -407,19 +434,31 @@ def build_app(
         from tiku_agent.execution_runtime import attach_execution
         from tiku_agent.execution_store import ExecutionStore
         attach_execution(runtime, ExecutionStore(root / "execution.sqlite3"))
+    if background_execution:
+        from tiku_agent.execution_dispatch import DispatchStore, DispatchPolicy
+        DispatchStore(runtime, authorize=lambda identity, version: control_store.active_invitation(identity, version) is not None,
+                      policy=DispatchPolicy(max_concurrent=max_concurrent_tasks, max_queued=max_queued_tasks,
+                                            queue_seconds=int(queue_wait_seconds)))
+        from tiku_agent.background_auth import BackgroundInviteAccess
+        access = BackgroundInviteAccess(control_store, cookie_name="tiku_phase6_8790_invite" if background_production else "tiku_phase6_8898_invite")
+    else:
+        access = SQLiteInviteAccess(control_store) if control_store is not None else InviteAccess(invite_config) if invite_config else None
+    from tiku_shared.response_store import SQLiteResponseStore
     app = create_app(
         runtime=runtime,
         incoming_dir=root / "incoming",
-        session_cookie=SESSION_COOKIE,
+        session_cookie="tiku_phase6_8898_session" if background_execution and not background_production else SESSION_COOKIE,
         output_watchdog=output_watchdog,
-        invite_access=(
-            SQLiteInviteAccess(control_store)
-            if control_store is not None
-            else InviteAccess(invite_config) if invite_config else None
-        ),
+        invite_access=access,
         feedback_store=SQLiteFeedbackStore(
             Path(feedback_database).resolve() if feedback_database is not None else root / "feedback.sqlite3"
         ),
+        response_store=SQLiteResponseStore(
+            Path(feedback_database).absolute().with_name("responses.sqlite3")
+            if feedback_database is not None else root / "responses.sqlite3"
+        ),
+        background_execution=background_execution,
+        background_shared_control_root=shared_control_root,
         feedback_retention_days_provider=(
             (lambda: int(control_store.settings()["feedback_retention_days"]))
             if control_store is not None
@@ -471,6 +510,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-a3-checkpoint-capture", action="store_true", default=False)
     parser.add_argument("--enable-durable-execution", action="store_true", default=False,
                         help="Enable phase-five execution; existing sessions require offline migration")
+    parser.add_argument("--enable-background-execution", action="store_true", default=False,
+                        help="Enable phase-six production background jobs with explicit shared service paths")
     parser.add_argument("--checkpoint-code-revision", default="")
     parser.add_argument("--max-checkpoint-rows", type=_positive_int, required=True)
     parser.add_argument("--max-artifact-rows", type=_positive_int, required=True)
@@ -590,6 +631,8 @@ def main() -> int:
             enable_a2_checkpoint_capture=args.enable_a2_checkpoint_capture,
             enable_a3_checkpoint_capture=args.enable_a3_checkpoint_capture,
             enable_durable_execution=args.enable_durable_execution,
+            background_execution=args.enable_background_execution,
+            background_production=args.enable_background_execution,
             checkpoint_code_revision=args.checkpoint_code_revision,
             checkpoint_retention_backup_root=(
                 args.checkpoint_retention_backup_root

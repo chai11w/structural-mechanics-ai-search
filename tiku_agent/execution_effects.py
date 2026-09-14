@@ -42,12 +42,13 @@ def collector_metadata(collector):
 
 
 class ExecutionEffects:
-    def __init__(self, operations, writer, *, ledger_paths=(), artifact_roots=()):
+    def __init__(self, operations, writer, *, ledger_paths=(), artifact_roots=(), admission_check=None):
         self.operations = operations
         self.store = operations.authority
         self.writer = writer
         self.ledger_keys = {digest(str(Path(path).resolve()).casefold()) for path in ledger_paths}
         self.artifact_roots = tuple(Path(path).resolve() for path in artifact_roots)
+        self.admission_check = admission_check
 
     def prepare_file(self, path, temporary):
         if not any(path.is_relative_to(root) and temporary.is_relative_to(root) for root in self.artifact_roots):
@@ -106,6 +107,8 @@ class ExecutionEffects:
     def prepare_model(self, *, call_id, run_id, provider, model, call_type):
         with self.store.transaction() as conn:
             now = self._validate(conn)
+            if self.admission_check is not None:
+                self.admission_check()
             if conn.execute("SELECT 1 FROM execution_effects WHERE operation_id=? AND status='UNKNOWN' LIMIT 1",
                             (self.writer.operation_id,)).fetchone():
                 raise ExecutionError("EXECUTION_UNKNOWN")
@@ -122,6 +125,8 @@ class ExecutionEffects:
     def model_sent(self, call_id):
         with self.store.transaction() as conn:
             now = self._validate(conn)
+            if self.admission_check is not None:
+                self.admission_check()
             self.operations.ensure_cost_available()
             changed = conn.execute("UPDATE execution_effects SET status='SENT',updated=? "
                                    "WHERE call_id=? AND attempt_id=? AND status='PREPARED'",

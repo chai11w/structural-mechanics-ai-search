@@ -11,6 +11,13 @@ from uuid import uuid4
 from tiku_agent.execution_store import ExecutionError, ExecutionStore, canonical, digest, session_key
 
 
+def protected_publications(conn, now):
+    """A late repaired delivery keeps its own retention boundary."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_publications'").fetchone():
+        return set()
+    return {row[0] for row in conn.execute("SELECT operation_id FROM execution_publications WHERE status<>'EXPIRED' AND expires>?", (now,))}
+
+
 @dataclass(frozen=True)
 class OperationRequest:
     key: str
@@ -41,10 +48,17 @@ class ExecutionWriter:
     token: str
     producer: str = ""
     producer_reader: object = field(default=None, compare=False, repr=False)
+    write_authorizer: object = field(default=None, compare=False, repr=False)
 
     def validate(self, conn, store, key, epoch, now):
         if (self.authority, self.session, self.epoch) != (store.authority, key, epoch):
             raise ExecutionError("EXECUTION_STALE")
+        if self.write_authorizer is not None:
+            # Detached authority governs state/artifact/result writes as well
+            # as model admission. Evidence and cost settlement bypass this
+            # writer check so a revoked login never erases an already sent call.
+            self.write_authorizer(conn, now)
+            now = store.clock(conn)
         row = conn.execute("SELECT status,token,lease_until FROM execution_operations WHERE id=?", (self.operation_id,)).fetchone()
         if row is None or row["status"] != "RUNNING" or row["token"] != self.token or row["lease_until"] <= now:
             raise ExecutionError("EXECUTION_LEASE_LOST")
@@ -108,6 +122,7 @@ class OperationStore:
             create_handoff_schema(conn)
             from tiku_agent.execution_units import create_unit_schema
             create_unit_schema(conn)
+            self.background_required = conn.execute("SELECT 1 FROM execution_meta WHERE key='dispatch_schema'").fetchone() is not None
 
     @property
     def current_producer(self):
@@ -194,7 +209,7 @@ class OperationStore:
             ).fetchone():
                 raise ExecutionError("EXECUTION_COST_PENDING")
 
-    def register(self, sid, identity, request, kind, inputs):
+    def register(self, sid, identity, request, kind, inputs, *, dispatch=False):
         req = OperationRequest.parse(request)
         producer = self.producer_for(kind)
         key = session_key(sid)
@@ -202,6 +217,9 @@ class OperationStore:
         store = self.authority
         with store.transaction() as conn:
             now = store.clock(conn)
+            if not dispatch and kind not in {"clear", "control_execution", "recover_operation"}:
+                if conn.execute("SELECT 1 FROM execution_meta WHERE key='dispatch_schema'").fetchone():
+                    raise ExecutionError("EXECUTION_BACKGROUND_REQUIRED")
             self.verify_owner(sid,identity,claim=True)
             row = conn.execute("SELECT * FROM execution_operations WHERE session=? AND epoch=? AND identity=? AND op_key=?",
                                (key, req.epoch, digest(identity), req.key)).fetchone()
@@ -240,7 +258,7 @@ class OperationStore:
                          (operation_id,key,req.epoch,digest(identity),req.key,kind,fingerprint,req.state_version,producer,canonical(target),previous[0] if previous else None,"REGISTERED",now,now))
             return dict(conn.execute("SELECT * FROM execution_operations WHERE id=?",(operation_id,)).fetchone())
 
-    def claim(self, operation_id):
+    def claim(self, operation_id, *, dispatch=False):
         store = self.authority
         failure = None
         writer = None
@@ -249,6 +267,9 @@ class OperationStore:
             row = conn.execute("SELECT * FROM execution_operations WHERE id=?",(operation_id,)).fetchone()
             if row is None:
                 raise ExecutionError("EXECUTION_STALE")
+            if not dispatch and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_dispatch'").fetchone():
+                if conn.execute("SELECT 1 FROM execution_dispatch WHERE operation_id=?", (operation_id,)).fetchone():
+                    raise ExecutionError("EXECUTION_BACKGROUND_REQUIRED")
             if row["producer"] != self.producer_for(row["kind"]):
                 raise ExecutionError("EXECUTION_STALE")
             if row["status"] != "REGISTERED":
@@ -373,6 +394,8 @@ class OperationStore:
                                      "AND NOT EXISTS (SELECT 1 FROM execution_effects e LEFT JOIN execution_cost_outbox c ON c.run_id=e.run_id WHERE e.operation_id=o.id AND (e.status<>'CONFIRMED' OR e.usage_known=0 OR c.status IS NULL OR c.status<>'CONFIRMED')) "
                                      "AND NOT EXISTS (SELECT 1 FROM execution_cost_outbox c JOIN execution_cost_runs r ON r.run_id=c.run_id WHERE r.operation_id=o.id AND c.status<>'CONFIRMED') "
                                      "AND NOT EXISTS (SELECT 1 FROM execution_files f WHERE f.operation_id=o.id) LIMIT 100",(now-store.policy.history_ttl,now)).fetchall()
+            protected = protected_publications(conn, now)
+            removable = [row for row in removable if row[0] not in protected]
             for row in removable:
                 self._delete_operation_rows(conn, row[0])
             # Children before parents; current epoch and unresolved-session history stay.

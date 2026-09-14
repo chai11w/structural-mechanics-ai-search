@@ -657,11 +657,25 @@ def create_app(
     checkpoint_capture_start: Callable[[], object] | None = None,
     checkpoint_capture_close: Callable[[], object] | None = None,
     media_cache_seconds: float = 0.0,
+    background_execution: bool = False,
+    background_shared_control_root: str | Path | None = None,
 ) -> FastAPI:
     """Create a local-only demo app without any existing Feishu configuration."""
     session_cookie = str(session_cookie).strip()
     if not session_cookie:
         raise ValueError("session_cookie is required")
+    if not background_execution and getattr(getattr(runtime, "execution_operations", None), "background_required", False):
+        raise ValueError("persisted background runtime requires background_execution=True; drain or migrate it explicitly")
+    if background_execution and (runtime is None or feedback_store is None or response_store is None):
+        raise ValueError("background mode requires explicit isolated runtime, feedback and response stores")
+    if background_execution:
+        private_root = runtime.execution_dispatch.store.path.parent.resolve()
+        private_incoming = Path(incoming_dir).absolute()
+        if (not private_incoming.resolve().is_relative_to(private_root)
+                or private_incoming.resolve() != private_incoming
+                or any(parent.is_symlink() for parent in [private_incoming, *private_incoming.parents])):
+            raise ValueError("background incoming directory must belong to the isolated runtime")
+    background = None
     media_cache_seconds = max(0.0, float(media_cache_seconds))
     media_cache_header = (
         f"private, max-age={int(media_cache_seconds)}"
@@ -688,6 +702,8 @@ def create_app(
     async def lifespan(_app: FastAPI):
         cleanup_task = None
         checkpoint_retention_task = None
+        if background is not None:
+            background.start()
         if checkpoint_capture_start is not None:
             checkpoint_capture_start()
         if callable(cleaner) and cleanup_interval_seconds > 0:
@@ -704,6 +720,10 @@ def create_app(
         try:
             yield
         finally:
+            background_drained = True
+            if background is not None:
+                drain = await asyncio.to_thread(background.close)
+                background_drained = drain["drained"] and drain["publisher_drained"]
             if checkpoint_retention_task is not None:
                 checkpoint_retention_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -712,9 +732,9 @@ def create_app(
                 cleanup_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await cleanup_task
-            if checkpoint_capture_close is not None:
+            if checkpoint_capture_close is not None and background_drained:
                 await asyncio.to_thread(checkpoint_capture_close)
-            if trace_event_recorder is not None:
+            if trace_event_recorder is not None and background_drained:
                 await asyncio.to_thread(trace_event_recorder.close)
 
     app = FastAPI(
@@ -730,6 +750,12 @@ def create_app(
     response_store = response_store or SQLiteResponseStore(
         feedback_store.path.with_name("responses.sqlite3")
     )
+    if background_execution:
+        from tiku_agent.background_http import BackgroundHTTP
+        background = BackgroundHTTP(runtime, invite_access, response_store, feedback_store,
+                                    session_cookie=session_cookie, trace_recorder=trace_event_recorder,
+                                    shared_control_root=background_shared_control_root)
+        background.install(app)
     invite_login_limiter = FailureRateLimiter(
         attempts=10,
         window_seconds=600,
@@ -1113,6 +1139,11 @@ def create_app(
                 },
             )
             try:
+                if background is not None:
+                    rejection = background.authenticate(request)
+                    if rejection is not None:
+                        _record_generic_terminal(rejection.status_code)
+                        return rejection
                 if _forwarded_proto(request) == "http":
                     result = RedirectResponse(
                         str(request.url.replace(scheme="https")), status_code=308
@@ -1154,7 +1185,7 @@ def create_app(
                         _record_generic_terminal(result.status_code)
                         return result
                 phase5 = getattr(runtime, "execution_operations", None)
-                if phase5 is not None and existing_session and not request.url.path.startswith('/api/invite/'):
+                if phase5 is not None and existing_session and not request.url.path.startswith('/api/invite/') and not (background is not None and request.url.path.startswith('/api/jobs')):
                     try:
                         phase5.verify_owner(existing_session, _identity_key(request) or "local")
                     except ExecutionError:
@@ -1186,7 +1217,7 @@ def create_app(
                 if request.url.path.startswith("/api/"):
                     result.headers.setdefault("Cache-Control", "private, no-store")
                     result.headers["X-Request-ID"] = _request_id(request)
-                if trace_meta["response_mode"] != "stream":
+                if trace_meta["response_mode"] != "stream" or (background is not None and request.url.path.startswith("/api/jobs/") and result.status_code >= 400):
                     _record_generic_terminal(result.status_code)
                 return result
             except asyncio.CancelledError:
@@ -1292,10 +1323,16 @@ def create_app(
                     ),
                     status_code=401,
                 )
+            try:
+                login_cookie = invite_access.issue_cookie(identity)
+            except ExecutionError as exc:
+                if background is not None:
+                    return background.failure(exc)
+                raise
             result = RedirectResponse("/", status_code=303)
             result.set_cookie(
                 invite_access.cookie_name,
-                invite_access.issue_cookie(identity),
+                login_cookie,
                 max_age=invite_access.auth_max_age_seconds,
                 httponly=True,
                 secure=_is_secure_request(request),
@@ -1311,6 +1348,8 @@ def create_app(
     @app.post("/api/invite/logout")
     def invite_logout(request: Request) -> Response:
         result = RedirectResponse("/invite", status_code=303)
+        if background is not None:
+            background.logout(request)
         if invite_access is not None:
             result.delete_cookie(
                 invite_access.cookie_name,
@@ -1410,6 +1449,7 @@ def create_app(
             message_id,
             task_revision=rated_response.task_revision,
         )
+        background_exports = []
         try:
             saved = feedback_store.upsert(
                 message_id=message_id,
@@ -1434,9 +1474,9 @@ def create_app(
                 workflow_search_id=rated_response.workflow_search_id,
                 intent=rated_response.intent,
                 conversation=conversation,
-                media_resolver=lambda url: _resolve_feedback_media(
-                    runtime, session_id, url
-                ),
+                media_resolver=lambda url: (background.feedback_media(request, url, background_exports)
+                    if background is not None and str(url).startswith("/api/jobs/")
+                    else _resolve_feedback_media(runtime, session_id, url)),
                 retention_days=(
                     int(feedback_retention_days_provider())
                     if feedback_retention_days_provider is not None
@@ -1445,6 +1485,9 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            if background is not None:
+                background.release_feedback_media(background_exports)
         protocol = RequestProtocol(
             status=RequestStatus.SUCCESS,
             layer=RequestLayer.FEEDBACK,
@@ -1549,7 +1592,10 @@ def create_app(
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
         session_id = _session_id(request, cookie_name=session_cookie)
-        result = HTMLResponse(_read_demo_page(), headers={"Cache-Control": "no-store"})
+        page = _read_demo_page()
+        if background_execution:
+            page = page.replace('<body>', '<body data-background-execution="1">', 1)
+        result = HTMLResponse(page, headers={"Cache-Control": "no-store"})
         _set_session_cookie(
             result,
             session_id,
@@ -2055,7 +2101,17 @@ def create_app(
             kwargs = {"task_state_capabilities": _JSON_TASK_STATE_CAPABILITIES}
             response = (runtime.recover_operation(session_id, payload["source_operation_id"], **kwargs)
                 if recover else runtime.control_execution(session_id, payload["scope"], payload["target"], **kwargs))
-            return _agent_json(response, runtime, session_id, response_store=response_store,
+            if background is not None and recover:
+                # Recovery acknowledges local reconciliation only. The original
+                # detached publication owns the one scoreable business reply.
+                from copy import copy
+                response = copy(response)
+                response.text = "原任务已恢复，正在读取保存的结果。"
+                response.images = []
+                response.uploaded_image_path = response.submitted_crop_path = response.feedback_overlay_path = None
+                response.intent = "execution_recovered"
+            return _agent_json(response, runtime, session_id,
+                response_store=None if background is not None and recover else response_store,
                 identity_key=_identity_key(request) or "local", secure_cookie=_is_secure_request(request),
                 cookie_name=session_cookie, task_state_capabilities=_JSON_TASK_STATE_CAPABILITIES)
 
@@ -2787,6 +2843,7 @@ def _current_public_trace_meta() -> dict[str, object]:
 def _normalized_trace_endpoint(path: object) -> str:
     clean = str(path or "/").split("?", 1)[0]
     for prefix, template in (
+        ("/api/jobs/", "/api/jobs/:id"),
         ("/api/media/", "/api/media/:id"),
         ("/api/upload/", "/api/upload/:id"),
         ("/api/a3/crop/", "/api/a3/crop/:unit_id"),

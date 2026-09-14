@@ -26,12 +26,16 @@ param(
     [switch]$EnableA2CheckpointCapture,
     [switch]$EnableA3CheckpointCapture,
     [switch]$EnableDurableExecution,
+    [switch]$EnableBackgroundExecution,
     [Parameter(Mandatory = $true)][string]$ReleaseManifest,
     [Parameter(Mandatory = $true)][string]$ExpectedCommit,
     [string]$PythonExe = "python"
 )
 
 $ErrorActionPreference = "Stop"
+if ($EnableBackgroundExecution -and (-not $EnableDurableExecution -or -not $ControlDb -or -not $FeedbackDatabase -or -not $EvidenceDataRoot)) {
+    throw "Background execution requires durable execution and explicit shared service paths."
+}
 . (Join-Path $PSScriptRoot "watchdog_process_guard.ps1")
 . (Join-Path $PSScriptRoot "tiku_agent_watchdog_8790_safety.ps1")
 
@@ -156,6 +160,9 @@ foreach ($setting in @(
 }
 if ($DisableAutoCrop) {
     $BotArguments += "--disable-auto-crop"
+}
+if ($EnableBackgroundExecution) {
+    $BotArguments += "--enable-background-execution"
 }
 if ($DisableA3TextOrientation) {
     $BotArguments += "--disable-a3-text-orientation"
@@ -293,6 +300,11 @@ try {
                 $botProcess = Get-ManagedBotProcess
             }
             if ($botProcess -and -not $botProcess.HasExited) {
+                if ($EnableBackgroundExecution) {
+                    Write-Status "Background process is alive but health is unavailable; preserving accepted work."
+                    Start-Sleep -Seconds 20
+                    continue
+                }
                 if (-not (Test-BotProcess -ProcessId $botProcess.Id)) {
                     throw "Refusing to stop unverified PID $($botProcess.Id) for 8790."
                 }
@@ -327,6 +339,11 @@ try {
                     $botProcess = $null
                 }
                 "timeout_verified" {
+                    if ($EnableBackgroundExecution) {
+                        $botProcess = $candidate
+                        Write-Status "Background candidate still starting; preserving verified process."
+                        break
+                    }
                     if ($candidate.HasExited -or -not (Test-BotLaunch -ProcessId $candidate.Id)) {
                         throw "Candidate PID $($candidate.Id) changed identity after startup timeout; refusing cleanup. PID file was not changed."
                     }
