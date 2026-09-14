@@ -124,6 +124,11 @@
       host.retire();
       const { response, data } = await json(spec.path, { method: 'POST', headers, body: JSON.stringify(spec.body) });
       if (!response.ok) {
+        if (response.status === 401) {
+          const error = fail('登录状态已失效，请重新登录后核对上次操作。');
+          error.status = 401;
+          throw error;
+        }
         // These command errors roll the SQLite command transaction back.
         // Never retire inherited business fences on a rejected command.
         if (response.status === 409 && TERMINAL_REJECTIONS.has(data?.code)) erase(entry, true);

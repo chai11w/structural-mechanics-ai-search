@@ -8,6 +8,7 @@ import re
 import threading
 import time
 from uuid import uuid4
+from urllib.parse import urlsplit
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
@@ -35,7 +36,13 @@ ADMISSION_REJECTIONS = frozenset({"EXECUTION_QUEUE_FULL", "EXECUTION_INPUT_INVAL
 
 
 class BackgroundHTTP:
-    def __init__(self, runtime, access, responses, feedback, *, session_cookie, trace_recorder=None, shared_control_root=None):
+    def __init__(self, runtime, access, responses, feedback, *, session_cookie, trace_recorder=None, shared_control_root=None, public_origin=""):
+        self.public_origin = str(public_origin).rstrip("/")
+        if self.public_origin:
+            parsed = urlsplit(self.public_origin)
+            if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                    or parsed.path or parsed.query or parsed.fragment or parsed.netloc != parsed.netloc.lower()):
+                raise ValueError("public origin must be an exact HTTPS origin")
         production = shared_control_root is not None
         if (not isinstance(access, BackgroundInviteAccess)
                 or session_cookie in {"tiku_agent_invite", "tiku_admin_session", access.cookie_name}
@@ -151,20 +158,22 @@ class BackgroundHTTP:
             conn.execute("UPDATE execution_http_logins SET revoked=1 WHERE id=?", (login.login_id,))
             conn.execute("UPDATE execution_dispatch_grants SET revoked=1 WHERE id IN (SELECT grant_id FROM execution_http_bindings WHERE login_id=?)", (login.login_id,))
 
-    @staticmethod
-    def require_origin(request):
+    def require_origin(self, request):
         if request.headers.get("sec-fetch-site", "").lower() in {"cross-site", "same-site"}:
             raise ExecutionError("EXECUTION_AUTH_REQUIRED")
         origin = request.headers.get("origin")
-        scheme = "https" if request.headers.get("x-forwarded-proto") == "https" else request.url.scheme
-        if origin and origin != f"{scheme}://{request.headers.get('host')}":
+        forwarded = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+        scheme = "https" if forwarded == "https" else request.url.scheme
+        allowed = {f"{scheme}://{request.headers.get('host')}"}
+        if self.public_origin:
+            allowed.add(self.public_origin)
+        if origin and origin not in allowed:
             raise ExecutionError("EXECUTION_AUTH_REQUIRED")
 
-    @staticmethod
-    def require_protocol(request, *, task=False):
+    def require_protocol(self, request, *, task=False):
         if request.headers.get(PROTOCOL_HEADER) != "1":
             raise ExecutionError("BACKGROUND_PROTOCOL_REQUIRED")
-        BackgroundHTTP.require_origin(request)
+        self.require_origin(request)
         if task:
             from tiku_agent.fastapi_demo import _parse_session_coordination_headers
             coordination, error = _parse_session_coordination_headers(request, task_request=True)

@@ -659,6 +659,7 @@ def create_app(
     media_cache_seconds: float = 0.0,
     background_execution: bool = False,
     background_shared_control_root: str | Path | None = None,
+    background_public_origin: str = "",
 ) -> FastAPI:
     """Create a local-only demo app without any existing Feishu configuration."""
     session_cookie = str(session_cookie).strip()
@@ -754,7 +755,8 @@ def create_app(
         from tiku_agent.background_http import BackgroundHTTP
         background = BackgroundHTTP(runtime, invite_access, response_store, feedback_store,
                                     session_cookie=session_cookie, trace_recorder=trace_event_recorder,
-                                    shared_control_root=background_shared_control_root)
+                                    shared_control_root=background_shared_control_root,
+                                    public_origin=background_public_origin)
         background.install(app)
     invite_login_limiter = FailureRateLimiter(
         attempts=10,
@@ -1142,6 +1144,12 @@ def create_app(
                 if background is not None:
                     rejection = background.authenticate(request)
                     if rejection is not None:
+                        if rejection.status_code == 401 and not request.url.path.startswith("/api/jobs"):
+                            return request_protocol_response(
+                                request, "请先使用有效邀请码登录。",
+                                RequestProtocol.from_code("LOGIN_REQUIRED", request_id=_request_id(request)),
+                                status_code=401, headers={"Cache-Control": "no-store"},
+                            )
                         _record_generic_terminal(rejection.status_code)
                         return rejection
                 if _forwarded_proto(request) == "http":

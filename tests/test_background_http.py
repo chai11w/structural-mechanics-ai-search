@@ -68,6 +68,33 @@ class BackgroundHttpFixture:
 
 
 class BackgroundHttpTests(unittest.TestCase):
+    def test_public_https_origin_survives_proxy_without_forwarded_proto(self):
+        h = self.h
+        h.app.state.background.public_origin = "https://tiku.example.test"
+        with TestClient(h.app) as client:
+            context = h.login(client)
+            for headers in ({"Origin": "https://tiku.example.test", "Sec-Fetch-Site": "same-origin"},):
+                bound = client.post("/api/jobs/session", headers={"X-Tiku-Background": "1", **headers})
+                self.assertEqual(bound.status_code, 200, bound.text)
+            for origin, site in (("https://evil.example.test", "same-origin"),
+                                 ("https://tiku.example.test", "cross-site")):
+                rejected = client.post("/api/jobs/session", headers={"X-Tiku-Background": "1", "Origin": origin, "Sec-Fetch-Site": site})
+                self.assertEqual(rejected.status_code, 401)
+            reset = client.post("/api/reset", headers={**h.headers(context), "Origin": "https://tiku.example.test", "Sec-Fetch-Site": "same-origin"})
+            self.assertEqual(reset.status_code, 200, reset.text)
+            self.assertNotEqual(reset.json()["execution"]["epoch"], context["epoch"])
+            self.assertEqual(h.f.calls, [])
+            bound = client.post("/api/jobs/session", headers={"X-Tiku-Background": "1", "Origin": "https://testserver", "X-Forwarded-Proto": " https, http"})
+            self.assertEqual(bound.status_code, 200, bound.text)
+
+    def test_legacy_auth_failure_has_login_envelope_without_acknowledging_fences(self):
+        with TestClient(self.h.app) as client:
+            response = client.post("/api/reset", headers={"X-Session-Coordination-Version": "6", "X-Session-Request-Fence": "1700000000000:0123456789abcdef"})
+            self.assertEqual(response.status_code, 401)
+            self.assertEqual(response.json()["code"], "LOGIN_REQUIRED")
+            self.assertEqual(response.json()["action"], "relogin")
+            self.assertNotIn("session_coordination", response.json())
+
     def test_numeric_operation_id_keeps_submission_trace_valid(self):
         h = self.h
         with patch("tiku_agent.execution_operations.uuid4", side_effect=lambda: SimpleNamespace(hex="0" + uuid4().hex[1:])):

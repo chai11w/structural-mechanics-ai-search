@@ -2520,7 +2520,7 @@ function flushStartupNotices() {
     pendingHistoryStorageNotice = '';
     showFailureNotice('history-storage', message);
   }
-  if (pendingSessionExpiredNotice) {
+  if (pendingSessionExpiredNotice && !sessionResetRequired) {
     pendingSessionExpiredNotice = false;
     showSessionExpiredNotice();
   }
@@ -2960,14 +2960,9 @@ function showServerSessionGoneNotice() {
 
 function showSessionExpiredNotice() {
   renderHistory();
-  // Landing silently on an empty home page reads as "the app lost my
-  // conversation". Say what happened and that a new conversation is ready.
-  addMessage({
-    message: '上一轮对话已过期（题图会在最后一次操作 2 小时后清理），已为你开始新对话。',
-    recoveryActions: [],
-    noticeKey: 'session-expired',
-  }, false);
-  setStatus('ready', '已开始新对话');
+  // Keep the empty home visible after the acknowledged reset. A transient
+  // chat message would hide it again despite there being no conversation.
+  setStatus('ready', '上一轮对话已过期，可以开始新对话');
 }
 
 function replacePending(row, item) {
@@ -5300,7 +5295,7 @@ function createExecutionPanel() {
       try { retry.hidden = !client.hasPending(); } catch (_error) { retry.hidden = true; }
       resolveFailureNotice('execution-control');
       showFailureNotice('execution-control', note.textContent,
-        retry.hidden ? ['retry_connection'] : ['verify_operation']);
+        error.status === 401 ? ['relogin'] : retry.hidden ? ['retry_connection'] : ['verify_operation']);
     } finally { working = false; refresh.disabled = false; retry.disabled = false; }
   }
   const inspect = () => run(() => client.inspect());

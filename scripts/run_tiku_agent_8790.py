@@ -287,6 +287,7 @@ def build_app(
     enable_durable_execution: bool = False,
     background_execution: bool = False,
     background_production: bool = False,
+    public_origin: str = "",
 ):
     _validate_queue_settings(
         max_concurrent_tasks,
@@ -459,6 +460,7 @@ def build_app(
         ),
         background_execution=background_execution,
         background_shared_control_root=shared_control_root,
+        background_public_origin=public_origin,
         feedback_retention_days_provider=(
             (lambda: int(control_store.settings()["feedback_retention_days"]))
             if control_store is not None
@@ -505,6 +507,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--control-db", type=Path)
     parser.add_argument("--invite-config", type=Path)
     parser.add_argument("--feedback-database", type=Path)
+    parser.add_argument("--public-origin", default="", help="Exact HTTPS browser origin for a TLS-terminating public proxy")
     parser.add_argument("--evidence-data-root", type=Path)
     parser.add_argument("--enable-a2-checkpoint-capture", action="store_true", default=False)
     parser.add_argument("--enable-a3-checkpoint-capture", action="store_true", default=False)
@@ -614,6 +617,7 @@ def main() -> int:
             control_db=args.control_db,
             invite_config=args.invite_config,
             feedback_database=args.feedback_database,
+            public_origin=args.public_origin,
             evidence_data_root=args.evidence_data_root,
             model_timeout_seconds=args.model_timeout_seconds,
             grounding_timeout_seconds=args.grounding_timeout_seconds,

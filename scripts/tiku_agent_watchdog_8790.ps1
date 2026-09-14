@@ -19,6 +19,7 @@ param(
     [string]$InviteConfig,
     [string]$ControlDb,
     [string]$FeedbackDatabase,
+    [string]$PublicOrigin,
     [string]$EvidenceDataRoot,
     [switch]$DisableAutoCrop,
     [switch]$DisableA3TextOrientation,
@@ -163,6 +164,9 @@ if ($DisableAutoCrop) {
 }
 if ($EnableBackgroundExecution) {
     $BotArguments += "--enable-background-execution"
+}
+if ($PublicOrigin) {
+    $BotArguments += @("--public-origin", $PublicOrigin)
 }
 if ($DisableA3TextOrientation) {
     $BotArguments += "--disable-a3-text-orientation"

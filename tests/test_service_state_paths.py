@@ -48,11 +48,12 @@ class ServiceStatePathsTest(unittest.TestCase):
                         evidence_capacity=capacity(), checkpoint_retention_backup_root=root / "evidence backups",
                         checkpoint_retention_interval_seconds=60, checkpoint_retention_backup_keep_runs=3,
                         enable_durable_execution=background, background_execution=background,
-                        background_production=background)
+                        background_production=background, public_origin="https://deployment.example.test" if background else "")
                 try:
                     access = assembly.call_args.kwargs["invite_access"]
                     self.assertIsNotNone(access.authenticate_code(invitation.json()["code"]))
                     if background:
+                        self.assertEqual(search_app.state.background.public_origin, "https://deployment.example.test")
                         with TestClient(search_app) as search:
                             search.cookies.set("tiku_agent_session", "existing-session")
                             identity = access.authenticate_code(invitation.json()["code"])
