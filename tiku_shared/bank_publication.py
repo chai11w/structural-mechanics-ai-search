@@ -6,6 +6,7 @@ it through arbitrary Python or changing its database. A bank-specific validator
 must check the registry, Excel and media relationship before a bundle is sealed.
 """
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import hmac
 import json
@@ -15,6 +16,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import stat
 import time
 from uuid import uuid4
 
@@ -116,15 +118,28 @@ def write_lock(path, timeout=30):
 
 def inventory(directory):
     directory = reject_links(directory)
-    files, folded = [], set()
-    for path in sorted(directory.rglob("*")):
-        reject_links(path)
-        if path.is_dir():
-            continue
+    files, folded, entries = [], set(), []
+    # Walk each directory once. Re-resolving every file's entire ancestor chain
+    # performs tens of thousands of redundant filesystem queries on Windows.
+    def walk(parent):
+        with os.scandir(parent) as children:
+            for child in children:
+                info = child.stat(follow_symlinks=False)
+                if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                    raise PublicationError("linked-path")
+                path = Path(child.path)
+                if stat.S_ISDIR(info.st_mode):
+                    walk(path)
+                else:
+                    # Windows DirEntry.stat omits the link count; use a fresh
+                    # lstat for files so hard links still fail closed.
+                    entries.append((path, path.lstat()))
+    walk(directory)
+    for path, info in sorted(entries):
         relative = path.relative_to(directory).as_posix()
         if relative == "manifest.json":
             continue
-        if not path.is_file() or path.stat().st_nlink != 1 or relative.casefold() in folded:
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or relative.casefold() in folded:
             raise PublicationError("ambiguous-bundle-file")
         # No alternate data streams, traversal, or Windows normalized-name aliases.
         parts = PurePosixPath(relative).parts
@@ -133,9 +148,14 @@ def inventory(directory):
         if parts[0] not in ("main", "symbolic") and relative != "registry.json":
             raise PublicationError("unexpected-bundle-file")
         folded.add(relative.casefold())
-        files.append({"path": relative, "size": path.stat().st_size, "sha256": file_digest(path)})
+        files.append({"path": relative, "size": info.st_size})
     if "registry.json" not in folded or not all((directory / bank).is_dir() for bank in ("main", "symbolic")):
         raise PublicationError("incomplete-bundle")
+    # Bound outstanding I/O; each pass still hashes every byte and builds the
+    # same deterministic manifest. No cache survives a verification boundary.
+    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="bank-hash") as pool:
+        for item, sha256 in zip(files, pool.map(file_digest, (directory / item["path"] for item in files))):
+            item["sha256"] = sha256
     return files
 
 
@@ -211,12 +231,16 @@ def copy_bundle(source, destination, version):
     destination.mkdir()
     for name in ("main", "symbolic"):
         (destination / name).mkdir()
-    for item in manifest["files"]:
+    for parent in sorted({(destination / item["path"]).parent for item in manifest["files"]}):
+        parent.mkdir(parents=True, exist_ok=True)
+    def copy_file(item):
         target = destination / item["path"]
-        target.parent.mkdir(parents=True, exist_ok=True)
         with (source / item["path"]).open("rb") as input_stream, target.open("xb") as output_stream:
             shutil.copyfileobj(input_stream, output_stream)
             output_stream.flush(); os.fsync(output_stream.fileno())
+    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="bank-copy") as pool:
+        # Wait for all workers before publishing metadata or propagating failure.
+        list(pool.map(copy_file, manifest["files"]))
     atomic_json(destination / "manifest.json", manifest)
     verify_bundle(destination, version)
     verify_bundle(source, version)

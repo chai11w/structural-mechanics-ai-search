@@ -398,6 +398,35 @@ class PublicationTests(unittest.TestCase):
         self.assertLess((self.directory / "bank/active.json").stat().st_size, 1024)
         self.assertEqual(self.store.current()["revision"], 24)
 
+    def test_copy_worker_failure_never_exposes_a_partial_version_and_can_retry(self):
+        original = self.publish("original")["result"]
+        item = self.candidate("replacement"); self.approved(item)
+        with patch("tiku_shared.bank_publication.shutil.copyfileobj", side_effect=OSError("copy failed")):
+            with self.assertRaisesRegex(PublicationError, "publication-io-failed"):
+                self.store.execute(item["operation_id"], plan_digest=item["plan_digest"])
+        self.assertEqual(self.store.current(), original)
+        self.assertFalse((self.store.root / "versions" / item["plan"]["candidate_version"]).exists())
+        result = self.reopen().execute(item["operation_id"], plan_digest=item["plan_digest"])
+        self.assertEqual(result["state"], "published")
+        verify_bundle(self.store.root / "versions" / result["result"]["version"], result["result"]["version"])
+
+    def test_inventory_rejects_directory_links_before_visiting_external_files(self):
+        from tiku_shared.bank_publication import inventory
+        item = self.candidate("initial")
+        root = self.store.candidate_directory(item["operation_id"])
+        external = self.directory / "external"; external.mkdir()
+        link = root / "main" / "linked-directory"
+        if os.name == "nt":
+            result = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(external)], capture_output=True)
+            self.assertEqual(result.returncode, 0)
+        else:
+            link.symlink_to(external, target_is_directory=True)
+        try:
+            with self.assertRaisesRegex(PublicationError, "linked-path"):
+                inventory(root)
+        finally:
+            link.rmdir() if os.name == "nt" else link.unlink()
+
     def test_pinned_reader_keeps_all_old_answers_after_publication(self):
         import search
         from tiku_shared.bank_versions import pin_bank
