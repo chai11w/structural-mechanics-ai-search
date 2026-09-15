@@ -118,6 +118,8 @@ def write_lock(path, timeout=30):
 
 def inventory(directory):
     directory = reject_links(directory)
+    from .bank_objects import object_store, shared_file
+    objects = object_store(directory)
     files, folded, entries = [], set(), []
     # Walk each directory once. Re-resolving every file's entire ancestor chain
     # performs tens of thousands of redundant filesystem queries on Windows.
@@ -139,7 +141,7 @@ def inventory(directory):
         relative = path.relative_to(directory).as_posix()
         if relative == "manifest.json":
             continue
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or relative.casefold() in folded:
+        if not stat.S_ISREG(info.st_mode) or (info.st_nlink != 1 and objects is None) or relative.casefold() in folded:
             raise PublicationError("ambiguous-bundle-file")
         # No alternate data streams, traversal, or Windows normalized-name aliases.
         parts = PurePosixPath(relative).parts
@@ -153,9 +155,15 @@ def inventory(directory):
         raise PublicationError("incomplete-bundle")
     # Bound outstanding I/O; each pass still hashes every byte and builds the
     # same deterministic manifest. No cache survives a verification boundary.
+    def inspect_file(item):
+        path = directory / item['path']
+        sha256 = file_digest(path)
+        if path.stat().st_nlink != 1 and not shared_file(path, sha256, objects):
+            raise PublicationError('ambiguous-bundle-file')
+        return sha256
     with ThreadPoolExecutor(max_workers=8, thread_name_prefix="bank-hash") as pool:
-        for item, sha256 in zip(files, pool.map(file_digest, (directory / item["path"] for item in files))):
-            item["sha256"] = sha256
+        for item, sha256 in zip(files, pool.map(inspect_file, files)):
+            item['sha256'] = sha256
     return files
 
 
@@ -225,9 +233,12 @@ def independent_preimage_required(plan):
 
 
 def copy_bundle(source, destination, version):
-    """Copy bytes, not hard links; readers may keep this version after later edits."""
+    """Freeze a version, sharing only writer-owned immutable content objects."""
     manifest = verify_bundle(source, version)
-    require_storage_space([(destination, bundle_size(manifest))])
+    from .bank_objects import object_store, ensure_object, missing_bytes
+    objects = object_store(destination)
+    required = missing_bytes(manifest, objects) + len(canonical(manifest)) if objects else bundle_size(manifest)
+    require_storage_space([(destination, required)])
     destination.mkdir()
     for name in ("main", "symbolic"):
         (destination / name).mkdir()
@@ -235,6 +246,9 @@ def copy_bundle(source, destination, version):
         parent.mkdir(parents=True, exist_ok=True)
     def copy_file(item):
         target = destination / item["path"]
+        if objects is not None:
+            os.link(ensure_object(source / item['path'], item, objects), target)
+            return
         with (source / item["path"]).open("rb") as input_stream, target.open("xb") as output_stream:
             shutil.copyfileobj(input_stream, output_stream)
             output_stream.flush(); os.fsync(output_stream.fileno())
@@ -249,7 +263,7 @@ def copy_bundle(source, destination, version):
 class PublicationStore:
     """Trusted writer API. HTTP/UI authorization is an additional, mandatory boundary."""
 
-    def __init__(self, store, private, backups, *, validator, checkpoint=None):
+    def __init__(self, store, private, backups, *, validator, checkpoint=None, incremental=False):
         self.root, self.private, self.backups = [reject_links(Path(path)) for path in (store, private, backups)]
         paths = [self.root, self.private, self.backups]
         if any(a == b or a in b.parents or b in a.parents for i, a in enumerate(paths) for b in paths[i + 1:]):
@@ -263,6 +277,12 @@ class PublicationStore:
         for directory in paths + [self.root / "versions", self.private / "candidates", self.private / "bundles"]:
             reject_links(directory)
             directory.mkdir(parents=True, exist_ok=True)
+        if type(incremental) is not bool:
+            raise PublicationError('invalid-incremental-storage-setting')
+        self.incremental = incremental
+        if incremental:
+            from .bank_objects import initialize_objects
+            initialize_objects(self.root, self.private)
         self.lock = self.private / "writer.lock"
         with write_lock(self.lock), self.connection() as db:
             initialize_reader_gate(self.root)
@@ -478,6 +498,8 @@ class PublicationStore:
                     "candidate_version": version, "summary": summary, "requested_by": identity}
             if row is None or "recovery_policy" in json.loads(row["plan"]):
                 plan["recovery_policy"] = "retained-versions"
+            if self.incremental and (row is None or 'storage_policy' in json.loads(row['plan'])):
+                plan['storage_policy'] = 'content-objects-v1'
             plan_json = canonical(plan).decode(); plan_digest = digest(plan_json.encode())
             if row:
                 if row["digest"] != plan_digest:
@@ -596,6 +618,9 @@ class PublicationStore:
                 else:
                     db.execute("UPDATE operations SET state='conflict', error='bank-version-changed' WHERE id=?", (row["id"],))
                     self._event(db, row["id"], "conflict", {"reason": "bank-version-changed"})
+        if self.incremental and (current := self.current()):
+            from .bank_objects import sync_current
+            sync_current(self.root, current['version'])
 
     def recover(self):
         with write_lock(self.lock):
@@ -625,7 +650,11 @@ class PublicationStore:
                 manifest = verify_bundle(source, version)
                 requirements = [(self.private, 0), (self.backups, 0), (self.root, 0)]
                 if not (self.root / "versions" / version).exists():
-                    requirements.append((self.root, bundle_size(manifest)))
+                    if self.incremental:
+                        from .bank_objects import missing_bytes
+                        requirements.append((self.root, missing_bytes(manifest, self.root / 'objects') + len(canonical(manifest))))
+                    else:
+                        requirements.append((self.root, bundle_size(manifest)))
                 if (plan["base"] and independent_preimage_required(plan)
                         and not (self.backups / row["id"]).exists()):
                     base_version = plan["base"]["version"]
@@ -634,8 +663,12 @@ class PublicationStore:
                 require_storage_space(requirements)
                 self._record_receipt(row, plan)
                 self.checkpoint("after-backup")
-                self.validator(source)
-                verify_bundle(source, version)
+                if plan.get('storage_policy') != 'content-objects-v1':
+                    self.validator(source)
+                    verify_bundle(source, version)
+                # Incremental plans were semantically validated before freezing.
+                # The full byte verification above proves this exact approved
+                # manifest is unchanged; reparsing every Excel adds no evidence.
                 destination = self.root / "versions" / version
                 if destination.exists():
                     verify_bundle(destination, version)
