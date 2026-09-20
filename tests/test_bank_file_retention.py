@@ -11,15 +11,22 @@ from tiku_shared.bank_publication import PublicationError
 
 
 class FileRetentionTests(unittest.TestCase):
+    publication_policies = ("retained-versions",) * 3
+
     def setUp(self):
         self.owner = publication_fixture.PublicationTests(); self.owner.setUp()
         self.addCleanup(self.owner.tearDown)
         self.store, self.root = self.owner.store, self.owner.directory
         self.now = datetime.now(UTC)
         pointers = []
-        for days, label in ((50, "old"), (40, "boundary"), (1, "current")):
+        for (days, label), policy in zip(
+                ((50, "old"), (40, "boundary"), (1, "current")), self.publication_policies, strict=True):
             with patch("tiku_shared.bank_publication.time.time", return_value=(self.now - timedelta(days=days)).timestamp()):
-                pointers.append(self.owner.publish(label)["result"])
+                self.assertIn(policy, {"legacy", "retained-versions"})
+                prepared = (self.owner.legacy_candidate(label) if policy == "legacy"
+                            else self.owner.candidate(label))
+                self.owner.approved(prepared)
+                pointers.append(self.store.execute(prepared["operation_id"], plan_digest=prepared["plan_digest"])["result"])
         self.old, self.boundary, self.current = pointers
         self.item = {"kind": "published", "key": self.old["version"], "version": self.old["version"],
                      "operation_id": self.old["operation_id"]}

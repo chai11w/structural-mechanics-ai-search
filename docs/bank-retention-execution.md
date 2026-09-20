@@ -25,4 +25,39 @@
 
 Windows 进程退出后的句柄释放和文件/SQLite 持久化已纳入测试，不能以此宣称设备断电或存储控制器故障的恢复保证。正式部署仍需完成对应验收。
 
-验证：本工作区 `tests` 加入 `PYTHONPATH` 后运行 `python -B -X utf8 -m unittest tests.test_bank_retention_execution -q`，**5 项通过（20.965 秒）**。实际文件、SQLite、操作系统锁和子进程已执行；子进程分别在请求持久化、账本提交、目录转移、清理进度落盘和首个文件删除后以 `os._exit` 退出，原操作恢复完成且审计不重复。另验证读取占用、保护检查失败、未知文件、被改动的文件清单，以及登记前丢失不冒充过期。基础题库使用简化索引/图片字节，批准、部署与备份依据由隔离夹具提供；该范围不证明完整生产维护或真实渠道可用。日志为 `F:/ruanjian/li-da-phase4-probe/retention-execution-verified-7e09495.log`。
+## 新旧恢复策略兼容验证（2026-09-20）
+
+原测试使用当前 `prepare` 创建 `retained-versions` 发布，却无条件把
+`backups/<operation_id>/bank` 加入清理清单。新策略不生成这份额外整库副本，因而复现
+5 个测试方法中的 7 个失败断言、2 个错误。这是测试夹具与冻结策略不一致，不能靠
+跳过缺失目录、减少安全断言或恢复每次整库复制来让测试通过。
+
+修复仅调整隔离测试夹具及文档，生产发布与清理代码不变。旧策略使用发布测试已有的
+升级前冻结计划夹具，在所有者批准前固定旧摘要，再走真实 approve/execute；新策略
+继续使用当前 prepare。清单按冻结策略确定，不根据文件是否存在临时删减：
+
+| 发布历史 | 可清理旧副本种类 | 必须保留 |
+| --- | --- | --- |
+| 全部新策略 | published、candidate、bundle，3 项 | 旧/边界/当前操作的全部回执，受保护发布版本 |
+| 全部旧策略 | 上述 3 项及 boundary 操作保存的旧 receipt-bank，4 项 | 全部回执、受保护发布版本、未列入计划的当前操作整库备份 |
+| 旧策略升级到新策略 | 4 项，保留旧备份清理覆盖 | 全部回执、受保护发布版本；新操作不产生额外整库备份 |
+
+每组都覆盖重复执行、读者占用、保护核对失败、未知文件和清单篡改、登记前文件丢失，
+以及五个位置的真实子进程退出：请求持久化、账本提交、目录转移、清理进度落盘和首个
+文件删除后。新增“清单要求的副本在开始前缺失”测试，验证不记过期、不移动其他文件；
+恢复原副本后沿用同一计划完成。旧操作的计划、摘要、批准、结果与状态，以及全部批准
+回执逐字节保持不变；受保护版本完整可读，过期行与审计数量精确且不重复。
+
+```powershell
+$retentionTestRoot = (Resolve-Path -LiteralPath '.\tests').Path
+$env:PYTHONPATH = $retentionTestRoot + [IO.Path]::PathSeparator + $env:PYTHONPATH
+python -B -X utf8 -m unittest tests.test_bank_retention_execution tests.test_bank_file_retention tests.test_bank_publication tests.test_bank_versions tests.test_bank_readers tests.test_bank_reference_snapshot tests.test_bank_reader_integration -q
+```
+
+上述 7 个模块合计 76 项分组验证通过，其中清理执行 18 项（含 15 次子进程崩溃恢复）。
+首次组合运行有 3 个导入相关错误：读取测试沿用顶层夹具导入，需要把 `tests` 加入
+`PYTHONPATH`；按上面原有环境约定补齐后，受影响的读取与集成模块 14 项全部通过。
+其余模块首次即通过，原清理模块的 7 个失败、2 个错误已消除；本次未运行全仓测试。
+
+测试仅操作独立临时目录。基础题库使用简化索引/图片字节，批准、部署与备份依据由隔离
+夹具提供；该范围不证明完整生产维护或真实渠道可用，没有启用正式清理或操作 live 题库。

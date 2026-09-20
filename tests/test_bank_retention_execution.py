@@ -36,14 +36,39 @@ with write_lock(store.lock):
 '''
 
 
-class RetirementExecutionTests(unittest.TestCase):
+class _RetirementExecutionCases:
+    publication_policies = ("retained-versions",) * 3
+
     def scenario(self):
-        fixture = retention_fixtures.FileRetentionTests(); fixture.setUp()
+        fixture = retention_fixtures.FileRetentionTests()
+        fixture.publication_policies = self.publication_policies
+        fixture.setUp()
         self.addCleanup(fixture.doCleanups)
+        fixture.original_receipts = {}
+        for pointer, policy in zip((fixture.old, fixture.boundary, fixture.current), self.publication_policies, strict=True):
+            operation = fixture.store.status(pointer["operation_id"])
+            plan = operation["plan"]
+            if policy == "legacy":
+                self.assertNotIn("recovery_policy", plan)
+            else:
+                self.assertEqual(plan["recovery_policy"], "retained-versions")
+            receipt_root = fixture.store.backups / pointer["operation_id"]
+            fixture.original_receipts[receipt_root / "receipt.json"] = (receipt_root / "receipt.json").read_bytes()
+            if policy == "legacy" and plan["base"]:
+                verify_bundle(receipt_root / "bank", plan["base"]["version"])
+            else:
+                self.assertFalse((receipt_root / "bank").exists())
+        with fixture.store.connection() as db:
+            fixture.original_operations = [tuple(row) for row in db.execute(
+                "SELECT id,plan,digest,approval,result,state FROM operations ORDER BY id")]
         items = [fixture.item,
             {"kind": "candidate", "key": fixture.old["operation_id"], "version": fixture.old["version"], "operation_id": fixture.old["operation_id"]},
-            {"kind": "bundle", "key": fixture.old["version"], "version": fixture.old["version"], "operation_id": fixture.old["operation_id"]},
-            {"kind": "receipt-bank", "key": fixture.boundary["operation_id"], "version": fixture.old["version"], "operation_id": fixture.boundary["operation_id"]}]
+            {"kind": "bundle", "key": fixture.old["version"], "version": fixture.old["version"], "operation_id": fixture.old["operation_id"]}]
+        # The frozen publication policy determines required copies. Never infer
+        # permission to omit a planned copy from its accidental absence on disk.
+        if self.publication_policies[1] == "legacy":
+            items.append({"kind": "receipt-bank", "key": fixture.boundary["operation_id"],
+                          "version": fixture.old["version"], "operation_id": fixture.boundary["operation_id"]})
         # Synthetic authority/backup bindings exercise the private core only.
         # They are not evidence that a production controller or ACL is ready.
         plan = {"schema": 1, "id": "retention_" + uuid4().hex, "as_of": fixture.now.isoformat(),
@@ -69,13 +94,50 @@ class RetirementExecutionTests(unittest.TestCase):
     def assert_done(self, fixture, request):
         self.assertEqual(fixture.store.current(), fixture.current)
         verify_bundle(fixture.store.root / "versions" / fixture.current["version"], fixture.current["version"])
+        verify_bundle(fixture.store.root / "versions" / fixture.boundary["version"], fixture.boundary["version"])
+        self.assertEqual(fixture.status(fixture.boundary), "available")
         self.assertEqual(fixture.status(fixture.old), "expired")
         for item in request["plan"]["items"]:
             self.assertTrue(all(not path.exists() for path in _locations(fixture.store, request["plan"], item)))
-        self.assertTrue((fixture.store.backups / fixture.boundary["operation_id"] / "receipt.json").is_file())
+        for path, content in fixture.original_receipts.items():
+            self.assertEqual(path.read_bytes(), content)
+        current_backup = fixture.store.backups / fixture.current["operation_id"] / "bank"
+        if self.publication_policies[2] == "legacy":
+            verify_bundle(current_backup, fixture.boundary["version"])
+        else:
+            self.assertFalse(current_backup.exists())
+        expected_kinds = {"published", "candidate", "bundle"}
+        if self.publication_policies[1] == "legacy":
+            expected_kinds.add("receipt-bank")
+        self.assertEqual({item["kind"] for item in request["plan"]["items"]}, expected_kinds)
+        self.assertEqual(len(request["plan"]["items"]), len(expected_kinds))
         with fixture.store.connection() as db:
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM bank_file_expirations").fetchone()[0], 4)
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM audit WHERE event='files-expired'").fetchone()[0], 4)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM bank_file_expirations").fetchone()[0], len(expected_kinds))
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM audit WHERE event='files-expired'").fetchone()[0], len(expected_kinds))
+            self.assertEqual([tuple(row) for row in db.execute(
+                "SELECT id,plan,digest,approval,result,state FROM operations ORDER BY id")], fixture.original_operations)
+
+    def test_missing_planned_copy_is_refused_before_recording_or_moving_anything(self):
+        fixture, request = self.scenario()
+        item = request["plan"]["items"][-1]  # Legacy bank copy or new-policy frozen bundle.
+        original, _ = _locations(fixture.store, request["plan"], item)
+        missing = fixture.root / "missing-planned-copy"
+        retention_fixtures.move_owned(original, missing, fixture.root)
+        with self.assertRaises(FileNotFoundError):
+            self.execute(fixture, request)
+        self.assertFalse((fixture.store.private / "retention").exists())
+        self.assertEqual(fixture.store.current(), fixture.current)
+        self.assertEqual(fixture.status(fixture.old), "available")
+        with fixture.store.connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM bank_file_expirations").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM audit WHERE event='files-expired'").fetchone()[0], 0)
+        for planned in request["plan"]["items"][:-1]:
+            source, retired = _locations(fixture.store, request["plan"], planned)
+            self.assertTrue(source.is_dir())
+            self.assertFalse(retired.exists())
+        retention_fixtures.move_owned(missing, original, fixture.root)
+        self.execute(fixture, request)
+        self.assert_done(fixture, request)
 
     def test_retirement_keeps_history_receipts_and_repeated_execution_does_not_repeat_events(self):
         fixture, request = self.scenario()
@@ -148,6 +210,22 @@ class RetirementExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "inventory path"):
             self.execute(fixture, request)
         self.assertEqual(unknown.read_bytes(), b"keep this")
+
+
+class RetirementExecutionTests(_RetirementExecutionCases, unittest.TestCase):
+    """Current publications: only retained versions and approval receipts."""
+
+
+class LegacyRetirementExecutionTests(_RetirementExecutionCases, unittest.TestCase):
+    """Pre-upgrade frozen publications still carry independent bank backups."""
+
+    publication_policies = ("legacy",) * 3
+
+
+class MixedRetirementExecutionTests(_RetirementExecutionCases, unittest.TestCase):
+    """Upgrade history: old bank backups coexist with a new-policy publication."""
+
+    publication_policies = ("legacy", "legacy", "retained-versions")
 
 
 if __name__ == "__main__":
