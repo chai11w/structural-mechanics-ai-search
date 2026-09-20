@@ -406,7 +406,7 @@ class AdminReporter:
                     incomplete = True
                 continue
             try:
-                with sqlite3.connect(path) as connection:
+                with readonly_connection(path) as connection:
                     cost_runs += int(connection.execute(
                         "SELECT COUNT(*) FROM model_cost_runs WHERE identity_key = ?",
                         (str(invite_id),),
@@ -591,8 +591,7 @@ class AdminReporter:
                 parameters.extend(keys)
             where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
             try:
-                with sqlite3.connect(path) as connection:
-                    connection.row_factory = sqlite3.Row
+                with readonly_connection(path) as connection:
                     rows = connection.execute(
                         "SELECT run_id, session_key, identity_key, search_key, task_kind, "
                         "started_at, finished_at, outcome, call_count, total_tokens, "

@@ -1,4 +1,4 @@
-"""Bounded, strictly read-only diagnostics for one Agent runtime root."""
+"""Bounded, read-only diagnostics for an Agent runtime and explicit shared stores."""
 
 from __future__ import annotations
 
@@ -26,6 +26,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
         description="Read a bounded privacy-safe diagnostic package without modifying runtime data"
     )
     parser.add_argument("--runtime-root", type=Path, required=True)
+    parser.add_argument("--feedback-database", type=Path, help="Explicit feedback database; defaults to runtime root")
+    parser.add_argument("--response-database", type=Path, help="Explicit response database; defaults to runtime root")
     selector = parser.add_mutually_exclusive_group(required=True)
     selector.add_argument("--trace-id")
     selector.add_argument("--response-id")
@@ -113,7 +115,11 @@ def main(argv: list[str] | None = None) -> int:
             raise DiagnosticQueryError(
                 "--compare-legacy uses fixed authoritative-only and legacy-only views"
             )
-        service = DiagnosticQueryService(args.runtime_root)
+        service = DiagnosticQueryService(
+            args.runtime_root,
+            feedback_database=args.feedback_database,
+            response_database=args.response_database,
+        )
         common = {
             "trace_id": args.trace_id or "",
             "response_id": args.response_id or "",

@@ -1,4 +1,4 @@
-"""Strictly read-only diagnostic queries over one Agent runtime root.
+"""Strictly read-only diagnostics over an Agent runtime and explicit shared stores.
 
 The query layer deliberately does not instantiate the product stores. Their
 read methods run schema creation/migration helpers, which would violate this
@@ -302,11 +302,29 @@ def _mark_source_partial(
 class DiagnosticQueryService:
     """Build a bounded ``summary -> timeline -> evidence`` diagnostic package."""
 
-    def __init__(self, runtime_root: str | Path) -> None:
+    def __init__(
+        self,
+        runtime_root: str | Path,
+        *,
+        feedback_database: str | Path | None = None,
+        response_database: str | Path | None = None,
+    ) -> None:
         root = Path(runtime_root)
         if not root.is_dir():
             raise DiagnosticQueryError("runtime root is not a directory")
         self.runtime_root = root.resolve()
+        # Overrides are trusted deployment configuration, never query input.
+        # Do not fall back to stale runtime copies when a configured store is missing.
+        self._database_paths = {
+            "feedback.sqlite3": (
+                Path(feedback_database).resolve()
+                if feedback_database is not None else self.runtime_root / "feedback.sqlite3"
+            ),
+            "responses.sqlite3": (
+                Path(response_database).resolve()
+                if response_database is not None else self.runtime_root / "responses.sqlite3"
+            ),
+        }
 
     def query(self, spec: QuerySpec) -> dict[str, object]:
         if not isinstance(spec, QuerySpec):
@@ -834,7 +852,7 @@ class DiagnosticQueryService:
         states: dict[str, _SourceState],
         projector,
     ) -> list[dict[str, object]]:
-        path = self.runtime_root / filename
+        path = self._database_paths.get(filename, self.runtime_root / filename)
         if not path.is_file():
             states[source] = _SourceState(source, filename, "missing", reason="file_missing")
             return []

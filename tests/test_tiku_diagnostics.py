@@ -179,6 +179,74 @@ class TikuDiagnosticsTest(unittest.TestCase):
         )
         self.assertEqual(package["summary"]["trace_count"], 1)
 
+    def _split_shared_stores(self):
+        shared = Path(self.temp.name) / "shared control"
+        shared.mkdir()
+        paths = {}
+        for name, table in (("feedback", "message_feedback"), ("responses", "public_responses")):
+            source = self.root / f"{name}.sqlite3"
+            target = shared / f"configured-{name}.sqlite3"
+            with readonly_connection(source) as reader, closing(sqlite3.connect(target)) as writer:
+                reader.backup(writer)
+            # An obsolete, readable runtime copy must not hide the shared store.
+            with closing(sqlite3.connect(source)) as old, old:
+                old.execute(f"DELETE FROM {table}")
+            paths[name] = target
+        return paths
+
+    def test_shared_stores_join_feedback_response_and_trace_without_source_writes(self):
+        paths = self._split_shared_stores()
+        def snapshot():
+            return {
+                str(p): (sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+                for p in Path(self.temp.name).rglob("*") if p.is_file()
+            }
+        before = snapshot()
+        service = DiagnosticQueryService(
+            self.root, feedback_database=paths["feedback"], response_database=paths["responses"]
+        )
+        for selector in (
+            {"feedback_id": self.feedback_id}, {"response_id": self.response_id}, {"trace_id": self.trace_id}
+        ):
+            with self.subTest(selector=next(iter(selector))):
+                package = service.query(QuerySpec(**selector, association_mode="authoritative-only"))
+                for key in ("trace_count", "response_count", "feedback_count"):
+                    self.assertEqual(package["summary"][key], 1, package["summary"])
+                self.assertTrue(all(item["timestamp"] for item in package["timeline"]))
+                rendered = json.dumps(package)
+                self.assertNotIn("configured-feedback", rendered)
+                self.assertNotIn("shared control", rendered)
+                self.assertNotIn("must never appear", rendered)
+        self.assertEqual(snapshot(), before)
+
+    def test_missing_configured_stores_do_not_fall_back_or_create_files(self):
+        missing = Path(self.temp.name) / "missing shared"
+        service = DiagnosticQueryService(
+            self.root, feedback_database=missing / "feedback.sqlite3",
+            response_database=missing / "responses.sqlite3",
+        )
+        for selector, source in (({"feedback_id": self.feedback_id}, "feedback"),
+                                 ({"response_id": self.response_id}, "responses")):
+            with self.subTest(source=source):
+                package = service.query(QuerySpec(**selector, association_mode="authoritative-only"))
+                self.assertEqual(package["summary"]["response_count"], 0)
+                self.assertEqual(package["summary"]["feedback_count"], 0)
+                self.assertIn(f"{source}:missing", package["summary"]["evidence_gaps"])
+        self.assertFalse(missing.exists())
+
+    def test_cli_reads_explicit_shared_stores(self):
+        paths = self._split_shared_stores()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main([
+                "--runtime-root", str(self.root), "--feedback-database", str(paths["feedback"]),
+                "--response-database", str(paths["responses"]), "--feedback-id", self.feedback_id,
+                "--association-mode", "authoritative-only", "--format", "json",
+            ])
+        self.assertEqual(code, 0)
+        summary = json.loads(output.getvalue())["summary"]
+        self.assertEqual((summary["trace_count"], summary["response_count"], summary["feedback_count"]), (1, 1, 1))
+
     def test_invitation_code_and_over_limit_are_rejected(self):
         with self.assertRaisesRegex(DiagnosticQueryError, "invitation codes"):
             QuerySpec(

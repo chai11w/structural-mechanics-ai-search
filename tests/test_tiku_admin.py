@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stdout
+from contextlib import closing, redirect_stdout
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 import io
@@ -984,6 +984,38 @@ class TikuAdminTest(unittest.TestCase):
         self.assertEqual(by_invite[first.invite_id]["today_searches"], 3)
         self.assertEqual(by_invite[second.invite_id]["today_page_searches"], 1)
         self.assertEqual(by_invite[second.invite_id]["today_question_searches"], 1)
+
+    def test_cost_reporting_reads_live_wal_without_source_write_connections(self):
+        costs = self.root / "model_costs.sqlite3"
+        self._create_cost_schema(costs)
+        feedback = SQLiteFeedbackStore(self.root / "feedback.sqlite3")
+        reporter = AdminReporter(control_store=self.control, cost_database=costs, feedback_store=feedback)
+        connect = sqlite3.connect
+        def deny_source_write_connection(database, *args, **kwargs):
+            if str(database) == str(costs):
+                raise sqlite3.OperationalError("source does not permit read-write connections")
+            return connect(database, *args, **kwargs)
+        with closing(connect(costs)) as writer:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            self._insert_cost(costs, identity_key="invite-test", search_key="search-one")
+            saved = feedback.upsert(
+                message_id="wal-feedback", identity_key="invite-test", session_key="session-key",
+                rating="negative", tags=(), detail="", task_revision=1, phase="DONE",
+                candidate_count=1, search_key="search-one", rated_response_id=f"resp_{uuid4().hex}",
+            )
+            def snapshot():
+                return {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.root.glob("model_costs.sqlite3*")}
+            before = snapshot()
+            self.assertTrue(Path(f"{costs}-wal").is_file())
+            with patch("sqlite3.connect", side_effect=deny_source_write_connection):
+                self.assertEqual(reporter.overview()["today_cost_micros"], 1_250_000)
+                detail = reporter.feedback_detail(saved.feedback_id)
+                self.assertEqual(detail["cost"]["estimated_cost_micros"], 1_250_000)
+                self.assertTrue(detail["cost"]["started_at"])
+                self.assertTrue(detail["cost"]["finished_at"])
+                self.assertEqual(reporter.invitation_delete_blockers("invite-test")["cost_runs"], 1)
+            self.assertEqual(snapshot(), before)
 
     def test_invitation_delete_fails_closed_when_one_cost_database_is_unreadable(self):
         self.control.initialize_admin("a-secure-admin-password")

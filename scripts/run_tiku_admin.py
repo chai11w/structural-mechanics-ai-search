@@ -52,7 +52,11 @@ def build_app(
         ),
         feedback_store=feedback_store,
     )
-    diagnostic_query = DiagnosticQueryService(source_root)
+    diagnostic_query = DiagnosticQueryService(
+        source_root,
+        feedback_database=feedback_store.path,
+        response_database=feedback_store.path.with_name("responses.sqlite3"),
+    )
     return create_admin_app(
         control_store=control_store,
         reporter=reporter,
