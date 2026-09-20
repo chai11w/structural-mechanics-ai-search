@@ -5413,6 +5413,14 @@ def _checkpoint_evidence_health(
         value = raw.get(name)
         return min(value, 9_007_199_254_740_991) if type(value) is int and value >= 0 else 0
 
+    budget = raw.get("submission_budget")
+    safe_budget = {}
+    if (isinstance(budget, Mapping) and isinstance(budget.get("stage"), str)
+            and budget["stage"] in {"prepare", "bank_lease"}
+            and all(type(budget.get(key)) is int and budget[key] >= 0 for key in ("spent_ms", "limit_ms"))):
+        safe_budget = {"stage": budget["stage"], **{
+            key: min(budget[key], 2_147_483_647) for key in ("spent_ms", "limit_ms")}}
+
     return {
         "status": status,
         "current_reasons": reasons,
@@ -5429,4 +5437,5 @@ def _checkpoint_evidence_health(
         "accepting": raw.get("accepting") is True,
         "last_failure_code": failure_code,
         "last_failure_at": failure_at,
+        "submission_budget": safe_budget,
     }

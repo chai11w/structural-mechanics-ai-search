@@ -975,6 +975,25 @@ class SQLiteTraceEventStore:
             deleted_event_count=deleted_event_count,
         )
 
+    def terminal_for_trace(self, trace_id: str) -> dict[str, str] | None:
+        """Read a committed terminal without flushing or creating the store."""
+        if not is_valid_trace_id(trace_id):
+            raise TraceEventValidationError("invalid trace_id")
+        _trace_reject_linked_path(self.path)
+        if not _trace_lexists(self.path):
+            return None
+        with self._path_lock, self._lock, closing(
+            _open_readonly_sqlite(self.path, timeout=self._write_timeout_seconds)
+        ) as connection:
+            if not _verify_trace_events_readable(connection):
+                raise TraceCleanupDriftError("trace store schema is unavailable")
+            row = connection.execute(
+                "SELECT event_type,stage,outcome FROM trace_events WHERE trace_id=? "
+                "AND event_type IN ('public_response_finalized','request_failed') LIMIT 1",
+                (trace_id,),
+            ).fetchone()
+            return dict(zip(("event_type", "stage", "outcome"), row)) if row else None
+
     def events_for_trace(self, trace_id: str, *, limit: int = 1000) -> list[TraceEvent]:
         clean_trace_id = str(trace_id or "").strip()
         if not is_valid_trace_id(clean_trace_id):

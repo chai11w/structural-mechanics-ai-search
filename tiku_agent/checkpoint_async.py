@@ -2,6 +2,7 @@
 
 from collections import deque
 from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, UTC
 from hashlib import sha256
 import math
 import re
@@ -33,6 +34,7 @@ class QueuedCapture:
     created: float
     byte_size: int
     bank_lease: BankReaderLease | None = field(default=None, repr=False, compare=False)
+    admission_revision: int = 0
 
 
 class AsyncCheckpointRecorder:
@@ -70,6 +72,10 @@ class AsyncCheckpointRecorder:
         self._counts = {key: 0 for key in ("queued", "stored", "rejected", "expired", "failed",
                        "shutdown_dropped", "circuit_dropped", "partial", "resource_unavailable", "recoveries")}
         self._last_failure = ""
+        self._last_failure_at = ""
+        self._admission_failure = self._consumer_failure = ""
+        self._admission_revision = 0
+        self._submission_budget = {}
         self._worker = Thread(target=self._consume, name="tiku-checkpoint-consumer", daemon=True)
         self._started = False
         if autostart:
@@ -84,10 +90,18 @@ class AsyncCheckpointRecorder:
     def input_unavailable(self):
         self._reject("CAPTURE_INPUT_UNAVAILABLE")
 
-    def _reject(self, code):
+    def _remember_failure(self, code):
+        self._last_failure = code
+        self._last_failure_at = datetime.now(UTC).isoformat()
+
+    def _reject(self, code, *, budget=None, budget_stage="prepare"):
         with self._condition:
             self._counts["rejected"] = min(2_147_483_647, self._counts["rejected"] + 1)
-            self._last_failure = code
+            self._remember_failure(code)
+            self._admission_failure = code
+            self._admission_revision += 1
+            if code == "CAPTURE_REQUEST_BUDGET_EXHAUSTED" and budget is not None:
+                self._submission_budget = budget.snapshot(budget_stage)
         return A2CaptureRecordResultV1(True, False, code)
 
     def submit_stage(self, context, frozen, *, stage, admission, budget=None, started=None):
@@ -149,8 +163,8 @@ class AsyncCheckpointRecorder:
                     if budget is not None and not budget.charge(perf_counter() - lease_started):
                         bank_lease.close()
                         self.resource_leases.release(job.token, cleanup=False)
-                        return self._reject("CAPTURE_REQUEST_BUDGET_EXHAUSTED")
-                    job = replace(job, bank_lease=bank_lease)
+                        return self._reject("CAPTURE_REQUEST_BUDGET_EXHAUSTED", budget=budget, budget_stage="bank_lease")
+                    job = replace(job, bank_lease=bank_lease, admission_revision=self._admission_revision)
                 except Exception:
                     if bank_lease is not None:
                         bank_lease.close()
@@ -163,7 +177,7 @@ class AsyncCheckpointRecorder:
                 self._condition.notify_all()
                 # Acceptance never invents a checkpoint id or a successful persistence.
                 return A2CaptureRecordResultV1(True, False, "CAPTURE_QUEUED")
-        return self._reject(code)
+            return self._reject(code, budget=budget)
 
     def _predecessors(self, context):
         try:
@@ -259,15 +273,20 @@ class AsyncCheckpointRecorder:
                         self._counts["resource_unavailable"] += int(any(word in resource_code
                             for word in ("SOURCE_UNAVAILABLE", "ARTIFACT_UNAVAILABLE", "REFERENCE_UNAVAILABLE")))
                     if (not result.stored or partial) and key not in {"expired", "circuit_dropped"}:
-                        self._last_failure = "CAPTURE_EVIDENCE_PARTIAL" if partial else result.reason_code
+                        self._consumer_failure = "CAPTURE_EVIDENCE_PARTIAL" if partial else result.reason_code
+                        self._remember_failure(self._consumer_failure)
                         self._consecutive_failures += 1
                         if self._consecutive_failures >= self.failure_threshold:
                             self._open_until = self.clock() + self.cooldown_seconds
                     elif result.stored:
-                        self._counts["recoveries"] += int(self._consecutive_failures > 0)
-                        self._consecutive_failures, self._open_until, self._last_failure = 0, 0.0, ""
+                        admission_recovered = bool(self._admission_failure) and job.admission_revision == self._admission_revision
+                        self._counts["recoveries"] += int(bool(self._consumer_failure) or admission_recovered)
+                        self._consecutive_failures, self._open_until, self._consumer_failure = 0, 0.0, ""
+                        if admission_recovered:
+                            self._admission_failure = ""
                     elif key == "expired":
-                        self._last_failure = result.reason_code
+                        self._consumer_failure = result.reason_code
+                        self._remember_failure(result.reason_code)
                     self._counts = {name: min(2_147_483_647, count) for name, count in self._counts.items()}
                     self._pending -= 1
                     self._bytes -= job.byte_size
@@ -286,6 +305,7 @@ class AsyncCheckpointRecorder:
             self._worker.join(timeout=max(0.0, timeout))
         with self._condition:
             if self._pending:
+                self._remember_failure("CAPTURE_SHUTDOWN_PENDING")
                 self._cancel.set()
                 while self._queue:
                     job = self._queue.popleft()
@@ -305,11 +325,14 @@ class AsyncCheckpointRecorder:
         with self._condition:
             stalled = self._stalled()
             circuit = self.clock() < self._open_until
-            code = "CAPTURE_CONSUMER_STALLED" if stalled else "CAPTURE_CIRCUIT_OPEN" if circuit else self._last_failure
+            code = "CAPTURE_CONSUMER_STALLED" if stalled else "CAPTURE_CIRCUIT_OPEN" if circuit else ""
             if self._closed and self._pending:
                 code = "CAPTURE_SHUTDOWN_PENDING"
-            return {"status": "disabled" if not self.gate.enabled else "degraded" if code else "ok",
-                    "current_reasons": [code.lower()] if code else [], "last_failure_code": code.lower(),
+            reasons = list(dict.fromkeys(value.lower() for value in
+                (code, self._consumer_failure, self._admission_failure) if value))
+            return {"status": "disabled" if not self.gate.enabled else "degraded" if reasons else "ok",
+                    "current_reasons": reasons, "last_failure_code": self._last_failure.lower(),
+                    "last_failure_at": self._last_failure_at, "submission_budget": dict(self._submission_budget),
                     "counters": {**self._counts}, "pending": self._pending, "pending_bytes": self._bytes,
                     "queue_capacity": self.max_pending, "queue_byte_capacity": self.max_bytes,
                     "max_age_seconds": self.max_age_seconds, "run_budget_seconds": self.run_budget_seconds,

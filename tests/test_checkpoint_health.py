@@ -90,6 +90,7 @@ class CheckpointHealthTest(unittest.TestCase):
                 "accepting": True,
                 "last_failure_code": "artifact_rows",
                 "last_failure_at": "",
+                "submission_budget": {},
             },
         )
         self.assertNotIn("private", response.text)

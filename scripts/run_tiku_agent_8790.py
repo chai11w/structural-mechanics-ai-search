@@ -202,17 +202,10 @@ def _combined_checkpoint_health(
     failed = store_health.get("status") == "degraded" or retention_health.get(
         "status"
     ) == "degraded" or capture_health.get("status") == "degraded"
-    last_failure_code = str(
-        retention_health.get("last_failure_code")
-        or capture_health.get("last_failure_code")
-        or store_health.get("last_failure_code")
-        or ""
-    )
-    last_failure_at = str(
-        retention_health.get("last_failure_at")
-        or store_health.get("last_failure_at")
-        or ""
-    )
+    failure_source = next((health for health in (retention_health, capture_health, store_health)
+                           if health.get("last_failure_code")), {})
+    last_failure_code = str(failure_source.get("last_failure_code") or "")
+    last_failure_at = str(failure_source.get("last_failure_at") or "")
     return {
         "status": "degraded" if failed else "ok",
         "current_reasons": reasons,
@@ -229,6 +222,7 @@ def _combined_checkpoint_health(
         "accepting": store_health.get("accepting") is True and capture_health.get("accepting", True),
         "last_failure_code": last_failure_code,
         "last_failure_at": last_failure_at,
+        "submission_budget": capture_health.get("submission_budget", {}),
     }
 
 
