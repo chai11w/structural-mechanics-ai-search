@@ -1,5 +1,9 @@
 # 第六阶段迁入 8790
 
+最新运行版本：2026-09-20 21:45 已按授权切换为 `405f6ae`，固定目录
+`F:/ruanjian/lida/b-405f6ae-8790-r2`。Trace 容量及 Checkpoint/后台投递修补、公网验收、
+备份与剩余 I/O 超时见 [最新发布记录](trace-checkpoint-repair-release.md)；下文保留阶段 6 原发布历史。
+
 本版本合并第六阶段后台任务协议与 `f86a44b` 的受管题库、外置配置和独立服务身份部署。8790 通过 `--enable-background-execution` 显式开启生产配置；watchdog 对应 `-EnableBackgroundExecution`，同时要求 durable execution 和显式 control、feedback、evidence 路径。8898 的独立运行目录限制保持不变。
 
 生产模式保留 `tiku_agent_session` 会话标识，邀请码改用 `tiku_phase6_8790_invite`，用户升级后须重新验证邀请码。控制库继续由 8795 管理；反馈、附件和 responses 数据库均为显式共享控制目录的直接子项，其余任务、媒体、费用和 checkpoint 仍限定在搜索运行目录。共享目录必须与搜索运行目录分离，路径拒绝链接。后台工作仍以同一控制库的实时邀请码状态授权。
