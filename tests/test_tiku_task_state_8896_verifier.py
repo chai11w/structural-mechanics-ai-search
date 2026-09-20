@@ -491,7 +491,11 @@ class TikuTaskState8896VerifierTest(unittest.TestCase):
 
             with TestClient(app) as test_client:
                 def transport(method, path, body, headers, timeout_seconds):
-                    del timeout_seconds
+                    # This in-process test checks the HTTP/evidence contract,
+                    # not whether the suite's shared disk drains within the
+                    # live verifier's 200 ms smoke window. Wait for real
+                    # commits without adding HTTP requests or fake evidence.
+                    self.assertTrue(recorder.flush(timeout=timeout_seconds))
                     test_client.cookies.clear()
                     response = test_client.request(
                         method,
