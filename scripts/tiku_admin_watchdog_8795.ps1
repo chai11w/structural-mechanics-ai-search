@@ -30,7 +30,7 @@ if (-not $SourceRuntime) {
 $ExpectedPythonPath = Resolve-WatchdogExecutablePath -Executable $PythonExe
 $AdminArguments = @(
     "-B",
-    "scripts\run_tiku_admin.py",
+    (Join-Path $ProjectDir "scripts\run_tiku_admin.py"),
     "--host", "127.0.0.1",
     "--port", "$Port",
     "--admin-runtime", "$AdminRuntime",
