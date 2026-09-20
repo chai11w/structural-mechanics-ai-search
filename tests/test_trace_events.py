@@ -425,7 +425,7 @@ class TraceEventStoreTest(unittest.TestCase):
             columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(trace_events)")
             }
-        self.assertEqual(tables, [("trace_events",)])
+        self.assertEqual(tables, [("trace_event_counts",), ("trace_events",)])
         self.assertTrue(
             {
                 "event_id",

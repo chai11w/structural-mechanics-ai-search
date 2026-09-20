@@ -24,6 +24,7 @@ from uuid import uuid4
 from weakref import WeakMethod
 
 from tiku_shared.trace_context import current_request_id, current_trace_id, is_valid_trace_id
+from tiku_shared.trace_capacity import ensure_trace_row_count, trace_row_count
 from tiku_shared.trace_write_diagnostics import (
     TraceWriteDiagnostics, write_call, write_context, write_stage, write_transaction,
 )
@@ -790,9 +791,7 @@ class SQLiteTraceEventStore:
                 try:
                     if self._max_rows is not None:
                         with write_stage("capacity"):
-                            current_rows = int(
-                                connection.execute("SELECT COUNT(*) FROM trace_events").fetchone()[0]
-                            )
+                            current_rows = trace_row_count(connection)
                             if current_rows >= self._max_rows:
                                 raise TraceEventCapacityError("trace event capacity exhausted")
                     write_call(
@@ -863,11 +862,7 @@ class SQLiteTraceEventStore:
                         # A complete table without the persistent identity is
                         # not the store governed by this contract.
                         _trace_store_identity_from_connection(connection)
-                        current_rows = int(
-                            connection.execute(
-                                "SELECT COUNT(*) FROM trace_events"
-                            ).fetchone()[0]
-                        )
+                        current_rows = trace_row_count(connection)
             except (OSError, sqlite3.Error, TraceCleanupDriftError, TypeError, ValueError):
                 return unavailable
         remaining_rows = (
@@ -1820,7 +1815,7 @@ def _trace_store_identity_from_connection(connection: sqlite3.Connection) -> str
         raise TraceCleanupDriftError("trace store identity is unavailable") from exc
     # SQLite exposes both pragmas as unsigned 32-bit values.  We reserve the
     # high nibble as a format marker and use the remaining 60 bits for the
-    # random identity, while leaving the visible schema as a single table.
+    # random identity, independent of the additive row-count extension.
     value = (application_id << 31) | user_version
     if value <= 0 or value >> 60 != 0x2:
         raise TraceCleanupDriftError("trace store identity is invalid")
@@ -1860,13 +1855,15 @@ def _prepare_trace_store_for_write(
     if not _verify_trace_events_readable(connection):
         raise TraceCleanupDriftError("trace store schema is invalid")
     try:
-        return _trace_store_identity_from_connection(connection)
+        identity = _trace_store_identity_from_connection(connection)
     except TraceCleanupDriftError:
         application_id = int(connection.execute("PRAGMA application_id").fetchone()[0])
         user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         if application_id != 0 or user_version != 0:
             raise
-        return _new_trace_store_identity(connection)
+        identity = _new_trace_store_identity(connection)
+    ensure_trace_row_count(connection)
+    return identity
 
 
 def _verify_trace_events_readable(connection: sqlite3.Connection) -> bool:
