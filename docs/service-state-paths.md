@@ -28,4 +28,6 @@ python -B scripts/tiku_diagnostics.py --runtime-root <搜索运行目录> --feed
 
 以下为原路径拆分时的历史验证记录：
 
+后续 2026-09-20 已完成 8795 上线及运营账号多余写权限收紧，实际运行版本、验证范围和回退资料见 [8795 发布记录](8795-shared-diagnostics-release.md)。上文“尚未切换”仅描述本地修复时刻。
+
 验证：`PYTHONPATH=tests` 下运行 `python -B -X utf8 -m unittest test_service_state_paths test_tiku_agent_8790_a3_v1 test_tiku_agent_8790_retention_config test_tiku_admin test_tiku_agent_watchdog_8790 test_tiku_admin_watchdog_8795 -q`，44 项通过（5.528 秒）。新增两项使用真实 SQLite、邀请码认证及运营 HTTP 审核，确认两项服务操作同一指定反馈记录、不在各自私有目录新建替代控制/反馈库；另核对数据边界和备份越界拒绝。实际 Windows PowerShell 解析两个 watchdog 及参数元数据通过。没有运行模型、飞书或改正式服务；运行账号的应用验收仍需切换时完成。
