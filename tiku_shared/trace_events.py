@@ -29,7 +29,7 @@ from tiku_shared.trace_write_diagnostics import (
     TraceWriteDiagnostics, write_call, write_context, write_stage, write_transaction,
 )
 from tiku_shared.evidence_io_budget import (
-    EvidenceLockBudget, EvidenceRLock, check_evidence_budget, evidence_io_budget,
+    EvidenceDeadlineExceeded, EvidenceLockBudget, EvidenceRLock, check_evidence_budget, evidence_io_budget,
     evidence_sqlite_timeout, configure_evidence_connection,
 )
 
@@ -42,6 +42,8 @@ TRACE_MAINTENANCE_LOCK_FILENAME = ".checkpoint_retention.lock"
 DEFAULT_TRACE_EVENT_QUEUE_CAPACITY = 1024
 DEFAULT_TRACE_EVENT_SQLITE_TIMEOUT_SECONDS = 0.25
 TRACE_MAINTENANCE_WAIT_SECONDS = 30.0
+TRACE_DEADLINE_MAX_ATTEMPTS = 3
+TRACE_DEADLINE_RECOVERY_SECONDS = 2.0
 TRACE_EVENT_HEALTH_COUNTER_MAX = 2_147_483_647
 MAX_TRACE_EVENT_ROWS = TRACE_EVENT_HEALTH_COUNTER_MAX
 
@@ -242,6 +244,21 @@ class TraceEventQueueFull(RuntimeError):
 
 class TraceEventRecorderClosed(RuntimeError):
     """The recorder no longer accepts events."""
+
+
+class TraceEventRetryableDeadline(EvidenceDeadlineExceeded):
+    """No event commit was attempted; any opened SQLite connection closed cleanly."""
+
+
+@dataclass
+class _TraceWriteAttempt:
+    # Write-layer state, independent of optional observational diagnostics.
+    transaction: str = "not_started"
+    cleanup_failed: bool = False
+
+    def transition(self, state: str) -> None:
+        self.transaction = state
+        write_transaction(state)
 
 
 class TraceEventCapacityError(RuntimeError):
@@ -758,7 +775,18 @@ class SQLiteTraceEventStore:
                 raise TraceCleanupDriftError("trace store identity is unavailable") from exc
 
     def write(self, event: TraceEvent) -> None:
-        write_transaction("not_started")
+        attempt = _TraceWriteAttempt()
+        try:
+            self._write_once(event, attempt)
+        except EvidenceLockBudget:
+            raise  # Preserve the existing pre-transaction lock-wait contract.
+        except EvidenceDeadlineExceeded as exc:
+            if not attempt.cleanup_failed and attempt.transaction in {"not_started", "rolled_back"}:
+                raise TraceEventRetryableDeadline("trace write deadline before event commit") from exc
+            raise
+
+    def _write_once(self, event: TraceEvent, attempt: _TraceWriteAttempt) -> None:
+        attempt.transition("not_started")
         check_evidence_budget()
         if not isinstance(event, TraceEvent):
             raise TypeError("event must be a TraceEvent")
@@ -785,9 +813,9 @@ class SQLiteTraceEventStore:
                     configure_evidence_connection(connection)
                     _prepare_trace_store_for_write(connection, allow_create=not existed)
                 write_call("schema_commit", connection.commit)
-                write_transaction("begin_unknown")
+                attempt.transition("begin_unknown")
                 write_call("begin", connection.execute, "BEGIN IMMEDIATE")
-                write_transaction("active")
+                attempt.transition("active")
                 try:
                     if self._max_rows is not None:
                         with write_stage("capacity"):
@@ -811,25 +839,29 @@ class SQLiteTraceEventStore:
                     )
                     write_call("precommit_check", check_evidence_budget)
                 except sqlite3.IntegrityError as exc:
-                    write_transaction("rollback_unknown")
+                    attempt.transition("rollback_unknown")
                     write_call("rollback", connection.rollback)
-                    write_transaction("rolled_back")
+                    attempt.transition("rolled_back")
                     if event.event_type in TERMINAL_EVENT_TYPES and write_call(
                         "duplicate_check", self._has_terminal, connection, event.trace_id
                     ):
                         raise DuplicateTerminalEvent("trace terminal already recorded") from exc
                     raise
                 except BaseException:
-                    write_transaction("rollback_unknown")
+                    attempt.transition("rollback_unknown")
                     write_call("rollback", connection.rollback)
-                    write_transaction("rolled_back")
+                    attempt.transition("rolled_back")
                     raise
                 else:
-                    write_transaction("commit_unknown")
+                    attempt.transition("commit_unknown")
                     write_call("commit", connection.commit)
-                    write_transaction("committed")
+                    attempt.transition("committed")
             finally:
-                write_call("close", connection.close)
+                try:
+                    write_call("close", connection.close)
+                except BaseException:
+                    attempt.cleanup_failed = True
+                    raise
 
     def capacity_snapshot(self) -> dict[str, Any]:
         """Return bounded row capacity state without creating or changing the database."""
@@ -1241,7 +1273,7 @@ class TraceEventRecorder:
                 continue
 
             try:
-                self._write_after_maintenance(event)
+                self._write_with_retries(event)
             except DuplicateTerminalEvent:
                 self._finish_duplicate_terminal()
             except BaseException as exc:  # noqa: BLE001 - the writer must keep draining.
@@ -1254,21 +1286,39 @@ class TraceEventRecorder:
                     self._active_started = None
                     self._maintenance_waiting = False
 
-    def _write_after_maintenance(self, event: TraceEvent) -> None:
+    def _write_with_retries(self, event: TraceEvent) -> None:
         deadline = monotonic() + TRACE_MAINTENANCE_WAIT_SECONDS
+        recovery_deadline = None
+        deadline_failures = 0
         while True:
+            attempt_started = monotonic()
             with self._condition:
-                self._active_started = monotonic()
+                self._active_started = attempt_started
                 self._maintenance_waiting = False
             try:
                 with self._write_diagnostics.attempt(
                     event.event_type,
-                    retryable=(TraceEventMaintenanceBusy, EvidenceLockBudget),
+                    retryable=(TraceEventMaintenanceBusy, EvidenceLockBudget, TraceEventRetryableDeadline),
                     duplicate=(DuplicateTerminalEvent,),
                 ):
-                    with evidence_io_budget(0.5, cancel=self._cancel):
+                    seconds = 0.5 if recovery_deadline is None else min(0.5, recovery_deadline - monotonic())
+                    with evidence_io_budget(seconds, cancel=self._cancel):
                         self.store.write(event)
                 return
+            except TraceEventRetryableDeadline:
+                # Only the store's explicit outcome contract permits replay.
+                # Retain this same frozen event; never inspect diagnostics to
+                # decide whether a commit happened.
+                deadline_failures += 1
+                if recovery_deadline is None:
+                    recovery_deadline = min(deadline, attempt_started + TRACE_DEADLINE_RECOVERY_SECONDS)
+                remaining = recovery_deadline - monotonic()
+                if deadline_failures >= TRACE_DEADLINE_MAX_ATTEMPTS or remaining <= 0 or self._cancel.is_set():
+                    raise
+                with self._condition:
+                    self._active_started = None
+                if self._cancel.wait(min(0.05, remaining)):
+                    raise
             except (TraceEventMaintenanceBusy, EvidenceLockBudget):
                 # Only fence/lock acquisition can signal this, before any
                 # transaction: nothing of ours was written, so waiting and
@@ -1277,7 +1327,7 @@ class TraceEventRecorder:
                 with self._condition:
                     self._active_started = None
                     self._maintenance_waiting = True
-                remaining = deadline - monotonic()
+                remaining = min(deadline, recovery_deadline or deadline) - monotonic()
                 if remaining <= 0:
                     raise
                 if self._cancel.wait(min(0.05, remaining)):

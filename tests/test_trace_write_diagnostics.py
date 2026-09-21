@@ -93,23 +93,26 @@ class TraceWriteDiagnosticsTests(unittest.TestCase):
 
         with self.fake_time(), patch.object(te, "_trace_reject_linked_path", metadata):
             health = self.run_event()
-        sample = health["write_diagnostics"]["recent_failures"][-1]
+        sample = health["write_diagnostics"]["last_retryable"]
         self.assertEqual(sample["slowest_stage"], "path_checks")
         self.assertEqual(sample["transaction_state"], "not_started")
-        self.assertEqual(sample["error_kind"], "EvidenceDeadlineExceeded")
+        self.assertEqual(sample["error_kind"], "TraceEventRetryableDeadline")
         self.assertEqual(sample["stage_ms"]["path_checks"], 550)
-        self.assertEqual(health["dropped"], 1)
-        self.assertEqual(self.persisted(), 0)
+        self.assertEqual(health["dropped"], 0)
+        self.assertEqual(health["write_diagnostics"]["attempts"], 2)
+        self.assertEqual(self.persisted(), 1)
 
-    def test_insert_stall_rolls_back_and_is_not_replayed(self):
+    def test_repeated_insert_stalls_roll_back_and_exhaust_bounded_retries(self):
         with self.fake_time(), self.connection_patch(delay_at="insert"):
             health = self.run_event()
         diagnostic = health["write_diagnostics"]
-        sample = diagnostic["recent_failures"][-1]
+        sample = diagnostic["last_retryable"]
         self.assertEqual(sample["failure_stage"], "precommit_check")
         self.assertEqual(sample["slowest_stage"], "insert")
         self.assertEqual(sample["transaction_state"], "rolled_back")
-        self.assertEqual(diagnostic["attempts"], 1)
+        self.assertEqual(diagnostic["attempts"], 3)
+        self.assertEqual(diagnostic["retryable_attempts"], 3)
+        self.assertEqual(health["last_failure_kind"], "TraceEventRetryableDeadline")
         self.assertEqual(health["write_failures"], 1)
         self.assertEqual(self.persisted(), 0)
 

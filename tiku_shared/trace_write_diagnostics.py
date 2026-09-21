@@ -23,7 +23,7 @@ _TRANSACTIONS = frozenset({
     "rollback_unknown", "rolled_back",
 })
 _ERRORS = frozenset({
-    "EvidenceDeadlineExceeded", "EvidenceLockBudget", "OperationalError",
+    "EvidenceDeadlineExceeded", "EvidenceLockBudget", "TraceEventRetryableDeadline", "OperationalError",
     "IntegrityError", "OSError", "PermissionError", "FileNotFoundError",
     "TimeoutError", "TraceEventCapacityError", "TraceEventMaintenanceBusy",
     "TraceEventMaintenanceError", "TraceCleanupDriftError", "DuplicateTerminalEvent",

@@ -85,6 +85,10 @@
    给出，不能把仅供观察的 diagnostics 字典当成事务回执。它是容错改进，不是已证实的根因修复，
    本轮未实施。500 ms 上限及生产行为保持原样。
 
+后续用户授权后，安全超时重试已在本地实现并通过相关验证，尚未发布；具体契约和限制见
+[安全超时重试](trace_write_diagnostics.md#安全超时重试2026-09-21本地完成未发布)。以上采样是
+实施前的诊断记录，不是新补丁的线上验收，操作系统根因仍未证实。
+
 原始证据与探针：`F:/cc/_backups/7-题库检索/2026-09-21/trace-io-diagnosis`，包含
 `health-before.json`、`health-after.json`、`health-final.json`、各组 `probe-summary.json` /
 `probe-raw.json`、`environment-after.json` 及探针脚本。C 盘合成测试数据仅在独立测试目录。
