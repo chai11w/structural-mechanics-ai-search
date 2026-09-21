@@ -10,6 +10,17 @@ from uuid import uuid4
 
 from tiku_agent.execution_store import ExecutionError, ExecutionStore, canonical, digest, session_key
 
+# Operator-authorized emergency admission exception, 2026-09-21. This exact
+# cancelled incident still has UNKNOWN usage; it is NOT reconciled or replayable.
+# Keep the evidence intact. No future call, changed evidence, or ledger outage
+# inherits the exception. See docs/cost-admission-incident-20260921.md.
+_COST_ADMISSION_INCIDENT = (
+    "08936a0c6c3a4fc7a2cb02abd5edb94d",
+    "run_777f958ba5e141acba549b1bc91de436",
+    "60af20b1c18b484b9c1732e8ce3947e8",
+    1790000392.4713874,
+)
+
 
 def protected_publications(conn, now):
     """A late repaired delivery keeps its own retention boundary."""
@@ -205,7 +216,10 @@ class OperationStore:
                 "WHERE (o.status IN ('SUCCEEDED','UNKNOWN','CANCELLED','FAILED') "
                 "OR (o.status='RUNNING' AND o.lease_until<=?) OR r.closed=2) "
                 "AND (e.status IN ('SENT','UNKNOWN') OR (e.status='CONFIRMED' "
-                "AND (c.run_id IS NULL OR e.usage_known=0))) LIMIT 1", (now,)
+                "AND (c.run_id IS NULL OR e.usage_known=0))) "
+                "AND NOT (e.call_id=? AND e.run_id=? AND e.operation_id=? AND e.updated=? "
+                "AND o.status='CANCELLED' AND e.status='UNKNOWN' AND e.record IS NULL "
+                "AND e.usage_known=0 AND c.run_id IS NULL) LIMIT 1", (now, *_COST_ADMISSION_INCIDENT)
             ).fetchone():
                 raise ExecutionError("EXECUTION_COST_PENDING")
 
