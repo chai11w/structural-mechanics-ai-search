@@ -3001,7 +3001,7 @@ function refocusComposerOnDesktop() {
 
 function setBusy(value) {
   isBusy = value;
-  textInput.disabled = value;
+  // Keep the next message editable while submission waits for the current task.
   fileInput.disabled = value;
   form.setAttribute('aria-busy', String(value));
   updateComposer();
