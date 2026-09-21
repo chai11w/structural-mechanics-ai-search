@@ -11,7 +11,7 @@ globalThis.TikuStartup = (() => {
     pending() {
       if (!screen || screen.hidden) return;
       screen.dataset.state = 'loading';
-      message.textContent = '正在恢复会话，请稍候…';
+      message.textContent = '正在加载，请稍候…';
       retry.disabled = true;
       newChat.disabled = true;
     },
