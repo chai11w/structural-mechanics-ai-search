@@ -21,6 +21,8 @@ async page => {
   await page.reload({waitUntil:'commit'});
   await page.locator('#startup-screen').waitFor();
   await covered('before application JavaScript');
+  check(await page.locator('#startup-message').isVisible(), 'loading text visible before application JavaScript');
+  check(await page.locator('.startup-spinner').evaluate(el => getComputedStyle(el).visibility === 'visible' && el.getBoundingClientRect().width > 0), 'spinner visible before application JavaScript');
   await page.waitForFunction(() => getComputedStyle(document.querySelector('.startup-progress')).visibility === 'visible');
   await page.screenshot({path:'output/playwright/startup-mobile.png'});
   await page.setViewportSize({width:1280,height:900});

@@ -361,7 +361,7 @@ body[data-background-execution="1"] .conversation { padding-bottom: 24px; }
 .startup-card { display: flex; flex-direction: column; align-items: center; padding: 32px 24px; width: min(100%, 360px); }
 .startup-mark { display: grid; place-items: center; width: 64px; height: 64px; border-radius: 18px; background: #202322; color: #fff; font-size: 38px; font-weight: 700; line-height: 1; }
 .startup-card h1 { display: flex; justify-content: center; gap: 16px; margin: 22px 0 26px; font-size: 22px; line-height: 1.4; font-weight: 600; }
-.startup-progress { display: flex; flex-direction: column; align-items: center; visibility: hidden; animation: startup-reveal 0s .5s forwards; }
+.startup-progress { display: flex; flex-direction: column; align-items: center; visibility: visible; }
 .startup-spinner { width: 20px; height: 20px; border: 2px solid #e6e8e7; border-top-color: #737a77; border-radius: 50%; animation: startup-spin 1s linear infinite; }
 .startup-progress p { margin: 14px 0; color: #737a77; font-size: 14px; line-height: 1.6; }
 .startup-actions { display: flex; gap: 20px; justify-content: center; visibility: hidden; animation: startup-reveal 0s 8s forwards; }
