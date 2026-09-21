@@ -1,3 +1,42 @@
+// The startup surface exists in the initial HTML, before deferred scripts run.
+// It is settled only by an authoritative session or owned background-job read.
+globalThis.TikuStartup = (() => {
+  const screen = document.querySelector('#startup-screen');
+  const shell = document.querySelector('.app-shell');
+  const message = document.querySelector('#startup-message');
+  const retry = document.querySelector('#startup-retry');
+  const reload = document.querySelector('#startup-reload');
+  const newChat = document.querySelector('#startup-new-chat');
+  return {
+    pending() {
+      if (!screen || screen.hidden) return;
+      screen.dataset.state = 'loading';
+      message.textContent = '正在恢复会话，请稍候…';
+      retry.disabled = true;
+      newChat.disabled = true;
+    },
+    finish() {
+      if (!screen || screen.hidden) return;
+      shell.hidden = false;
+      shell.inert = false;
+      screen.hidden = true;
+      document.documentElement.classList.remove('startup-pending');
+    },
+    fail(error) {
+      if (!screen || screen.hidden) return;
+      if (!error && screen.dataset.state === 'error') return;
+      screen.dataset.state = 'error';
+      const login = error?.code === 'LOGIN_REQUIRED';
+      message.textContent = login ? '登录状态已失效，请重新登录。' : '暂时无法恢复会话，请检查网络后重试。';
+      retry.hidden = login;
+      newChat.hidden = login;
+      newChat.disabled = false;
+      retry.disabled = false;
+      reload.textContent = login ? '重新登录' : '重新加载';
+    },
+  };
+})();
+
 const TASK_STATE_ASSET_URL = '/assets/task_state.js?v=20260830-task-state-3-4-5';
 const TASK_STATE_BOOTSTRAP_ATTRIBUTE = 'data-tiku-task-state-bootstrap';
 
@@ -7,6 +46,7 @@ function showTaskStateBootstrapFailure() {
   const runtime = document.querySelector('#runtime-status');
   if (status) status.textContent = message;
   if (runtime) runtime.dataset.state = 'error';
+  globalThis.TikuStartup?.fail();
   console.error('Task-state frontend model unavailable.');
 }
 
@@ -2679,6 +2719,7 @@ async function repairUploadedImageHistory() {
     }
     return true;
   } catch (error) {
+    globalThis.TikuStartup?.fail(error);
     flushStartupNotices();
     const coordinationFailed = ['RESPONSE_INVALID', 'STALE_ACTION'].includes(
       String(error?.code || ''),
@@ -2732,6 +2773,8 @@ function runSessionBootstrap() {
   const pending = repairUploadedImageHistory()
     .then((result) => {
       ready = result;
+      if (ready) globalThis.TikuStartup?.finish();
+      else globalThis.TikuStartup?.fail();
       return result;
     })
     .finally(() => {
@@ -4551,6 +4594,7 @@ async function sendTextValue(value, displayValue = value, actionContext = null, 
       chat.replaceChildren();
       empty.hidden = false;
       setStatus('ready', '已开始新对话');
+    globalThis.TikuStartup?.finish();
       return;
     }
     const response = responseItem(data);
@@ -4800,6 +4844,7 @@ async function resetConversation() {
     chat.replaceChildren();
     empty.hidden = false;
     setStatus('ready', '已开始新对话');
+    globalThis.TikuStartup?.finish();
   } catch (error) {
     if (operation !== operationVersion) return;
     addMessage({
@@ -4816,6 +4861,7 @@ async function resetConversation() {
 
 async function retryConnection() {
   if (isBusy) return;
+  globalThis.TikuStartup?.pending();
   if (backgroundEnabled && backgroundClient) {
     try {
       const unresolved = backgroundClient.records().filter(record => !record.done)
@@ -4827,6 +4873,7 @@ async function retryConnection() {
         // do not wait on the legacy runtime's long-held session lock first.
         try {
           await backgroundClient.query(record);
+          globalThis.TikuStartup?.finish();
           backgroundObserverEpoch = record.epoch;
           await resumeBackgroundJobs();
           return;
@@ -4836,13 +4883,19 @@ async function retryConnection() {
           // current conversation. Preserve its receipt, then read current state.
         }
       }
-    } catch (error) { backgroundNotice(error); return; }
+    } catch (error) { backgroundNotice(error); globalThis.TikuStartup?.fail(error); return; }
   }
   setStatus('working', '正在恢复会话…');
   await runSessionBootstrap();
 }
 
 form.addEventListener('submit', (event) => { event.preventDefault(); sendText(); });
+document.querySelector('#startup-retry')?.addEventListener('click', retryConnection);
+document.querySelector('#startup-new-chat')?.addEventListener('click', async () => {
+  globalThis.TikuStartup?.pending();
+  await resetConversation();
+  globalThis.TikuStartup?.fail();
+});
 textInput.addEventListener('input', () => { resizeComposer(); updateComposer(); });
 textInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
@@ -5247,6 +5300,7 @@ function createExecutionPanel() {
       if (action === 'reset_session' && authoritativeTaskStateIsEmpty()) {
         if (!applyResetSessionContext(envelope) || !publishSessionReset()) throw sessionCoordinationError();
         clearHistory(); renderHistory();
+        globalThis.TikuStartup?.finish();
       } else if (backgroundEnabled && action === 'recover_operation') {
         updateSessionContext(current);
         setTimeout(resumeBackgroundJobs, 0);
@@ -5339,5 +5393,5 @@ resizeComposer();
 updateComposer();
 if (pendingHistoryStorageNotice && !sessionResetRequired) flushStartupNotices();
 if (backgroundEnabled) initializeBackgroundJobs();
-if (backgroundEnabled || history.length || sessionResetRequired) retryConnection();
+retryConnection();
 }

@@ -354,3 +354,22 @@ body[data-background-execution="1"] .conversation { padding-bottom: 24px; }
 .execution-controls { display: flex; gap: 8px; flex-wrap: wrap; }
 .execution-panel button { font: inherit; padding: 7px 10px; margin: 4px 4px 4px 0; border: 1px solid #dedee4; border-radius: 8px; background: #f8f8fa; cursor: pointer; }
 .execution-panel button:disabled { opacity: .5; cursor: default; }
+
+/* Initial HTML keeps the conversation inaccessible until its restore verdict. */
+.app-shell[hidden], .startup-screen[hidden] { display: none !important; }
+.startup-screen { position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center; overflow: auto; background: #fff; color: #202322; text-align: center; }
+.startup-card { display: flex; flex-direction: column; align-items: center; padding: 32px 24px; width: min(100%, 360px); }
+.startup-mark { display: grid; place-items: center; width: 64px; height: 64px; border-radius: 18px; background: #202322; color: #fff; font-size: 38px; font-weight: 700; line-height: 1; }
+.startup-card h1 { display: flex; justify-content: center; gap: 16px; margin: 22px 0 26px; font-size: 22px; line-height: 1.4; font-weight: 600; }
+.startup-progress { display: flex; flex-direction: column; align-items: center; visibility: hidden; animation: startup-reveal 0s .5s forwards; }
+.startup-spinner { width: 20px; height: 20px; border: 2px solid #e6e8e7; border-top-color: #737a77; border-radius: 50%; animation: startup-spin 1s linear infinite; }
+.startup-progress p { margin: 14px 0; color: #737a77; font-size: 14px; line-height: 1.6; }
+.startup-actions { display: flex; gap: 20px; justify-content: center; visibility: hidden; animation: startup-reveal 0s 8s forwards; }
+.startup-actions a, .startup-actions button { color: #737a77; font: inherit; font-size: 13px; text-decoration: underline; text-underline-offset: 3px; background: none; border: 0; padding: 8px 0; cursor: pointer; }
+.startup-screen[data-state="error"] .startup-progress, .startup-screen[data-state="error"] .startup-actions { animation: none; visibility: visible; }
+.startup-screen[data-state="error"] .startup-spinner { visibility: hidden; animation: none; }
+@keyframes startup-reveal { to { visibility: visible; } }
+@keyframes startup-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .startup-spinner { animation: none; } }
+
+.startup-pending body > :not(.startup-screen) { visibility: hidden; }

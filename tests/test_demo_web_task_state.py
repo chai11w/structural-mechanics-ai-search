@@ -594,7 +594,7 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260921-editable-composer-v1"'
+        demo_asset = 'src="/assets/demo.js?v=20260921-startup-v1"'
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
@@ -1308,7 +1308,7 @@ const retryHarness = createRetryHarness();
             "if (pendingHistoryStorageNotice && !sessionResetRequired) flushStartupNotices();",
             startup,
         )
-        self.assertIn("if (backgroundEnabled || history.length || sessionResetRequired) retryConnection();", startup)
+        self.assertIn("retryConnection();", startup)
         self.assertNotIn("runSessionBootstrap();", startup)
         self.assertNotIn("checkHealth();", startup)
         self.assertNotIn("request('/health'", demo)

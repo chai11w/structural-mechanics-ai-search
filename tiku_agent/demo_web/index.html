@@ -1,14 +1,30 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="startup-pending">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffffff">
   <title>力答 · 结构力学搜题</title>
-  <link rel="stylesheet" href="/assets/demo.css?v=20260913-hidden-controls-v1">
+  <link rel="stylesheet" href="/assets/demo.css?v=20260921-startup-v1">
 </head>
 <body>
-  <div class="app-shell">
+  <section id="startup-screen" class="startup-screen" aria-label="正在打开力答">
+    <div class="startup-card">
+      <div class="startup-mark" aria-hidden="true">力</div>
+      <h1 aria-label="力答"><span>力</span><span>答</span></h1>
+      <div class="startup-progress" role="status" aria-live="polite">
+        <div class="startup-spinner" aria-hidden="true"></div>
+        <p id="startup-message">正在加载，请稍候…</p>
+      </div>
+      <div class="startup-actions">
+        <button id="startup-retry" type="button" hidden>重新连接</button>
+        <button id="startup-new-chat" type="button" hidden>开始新对话</button>
+        <a href="" id="startup-reload">重新加载</a>
+      </div>
+      <noscript><p>请启用 JavaScript 后重新加载。</p></noscript>
+    </div>
+  </section>
+  <div class="app-shell" hidden inert>
     <header class="topbar">
       <button class="icon-button" id="menu-button" type="button" aria-label="打开会话菜单" aria-controls="session-drawer" aria-expanded="false">
         <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
@@ -157,6 +173,6 @@
   <script src="/assets/task_state.js?v=20260830-task-state-3-4-5" defer></script>
   <script src="/assets/execution_control.js?v=20260914-public-expiry-v1" defer></script>
   <script src="/assets/background_jobs.js?v=20260913-admission-v3" defer></script>
-  <script src="/assets/demo.js?v=20260921-editable-composer-v1" defer></script>
+  <script src="/assets/demo.js?v=20260921-startup-v1" defer></script>
 </body>
 </html>
