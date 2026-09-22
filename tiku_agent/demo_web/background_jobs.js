@@ -15,7 +15,7 @@
     EXECUTION_INPUT_INVALID: [409, '本次任务未接收，请检查输入后重新提交。'],
     EXECUTION_INPUT_TOO_LARGE: [413, '图片或输入过大，本次任务未接收，请调整后重新提交。'],
     EXECUTION_CAPACITY: [503, '服务存储容量暂时不足，本次任务未接收，请稍后重新提交。'],
-    EXECUTION_COST_PENDING: [409, '服务有费用待核对，本次任务未接收，请核对后重新提交。'],
+    EXECUTION_COST_PENDING: [409, '服务暂时无法接收新任务，请稍后重试；后台正在处理费用记录。'],
     INVITE_DAILY_QUOTA_EXCEEDED: [409, '今日使用额度已用完，本次任务未接收，请额度恢复后重新提交。'],
     GLOBAL_DAILY_QUOTA_EXCEEDED: [409, '服务今日额度已用完，本次任务未接收，请额度恢复后重新提交。'],
   };

@@ -68,6 +68,8 @@ def inspect_execution(database, *, limit=20):
             "tasks":conn.execute("SELECT count(*) FROM execution_tasks").fetchone()[0],
             "files":conn.execute("SELECT count(*) FROM execution_files").fetchone()[0]}
     result["database_bytes"] = sum(path.stat().st_size for path in (Path(database), Path(str(database) + "-wal")) if path.is_file())
+    from tiku_agent.execution_receipts import inspect_receipts
+    result["receipt_journal"] = inspect_receipts(database, limit)
     return result
 
 

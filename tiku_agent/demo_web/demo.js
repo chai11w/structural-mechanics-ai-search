@@ -3151,7 +3151,7 @@ function safeHttpError(status, data, requestId = '') {
       EXECUTION_BUSY: '该会话已有操作正在处理，请重新连接查看进度。',
       EXECUTION_UNKNOWN: '上次操作结果尚未确认，请先核对进度，暂不重复执行。',
       EXECUTION_CAPACITY: '执行记录暂时无法接收新操作，请稍后重新连接。',
-      EXECUTION_COST_PENDING: '已有调用的费用尚待核对，当前结果保留，暂不启动新的操作。',
+      EXECUTION_COST_PENDING: '服务暂时无法接收新任务，当前结果已保留，请稍后重试。',
     };
     return new UserVisibleError(
       messages[data.code] || rawDetail || '这次请求没有处理成功，请稍后重试。',

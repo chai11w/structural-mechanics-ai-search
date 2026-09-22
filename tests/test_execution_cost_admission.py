@@ -117,7 +117,7 @@ class ExecutionCostAdmissionTests(unittest.TestCase):
     def test_registered_operation_cannot_claim_after_other_runtime_leaves_pending_cost(self):
         f = self.fixture
         row = f.ops.register("held", "local", f.request("held"), "handle_text", {"text": "held"})
-        independent = OperationStore(ExecutionStore(f.store.path))
+        independent = OperationStore(ExecutionStore(f.store.path, policy=f.store.policy))
         independent.configuration_version = f.ops.configuration_version
         with self.ledger_outage():
             f.runtime.handle_text("first", "success", operation_request=f.request("first"))
@@ -130,7 +130,7 @@ class ExecutionCostAdmissionTests(unittest.TestCase):
         writer = f.ops.claim(row["id"])
         f.ops.bind_cost_run(writer, "held-run")
         # A different store connection sees accounting from the first runtime.
-        independent = OperationStore(ExecutionStore(f.store.path))
+        independent = OperationStore(ExecutionStore(f.store.path, policy=f.store.policy))
         observer = ExecutionEffects(independent, writer)
         def prepare():
             observer.prepare_model(call_id="held-call", run_id="held-run", provider="fake",

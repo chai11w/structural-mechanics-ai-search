@@ -263,6 +263,9 @@ def timed_model_call(
     try:
         result = function()
     except BaseException as exc:
+        diagnose = getattr(observer, "record_failure", None)
+        if diagnose is not None:
+            diagnose(call_id, "provider_call", exc)
         failed_attempt_count = _safe_attempt_count(
             getattr(exc, "model_attempt_count", attempt_count)
         )
@@ -317,6 +320,9 @@ def timed_model_call(
             provider_request_id=provider_request_id,
         )
     except Exception as exc:
+        diagnose = getattr(observer, "record_failure", None)
+        if diagnose is not None:
+            diagnose(call_id, "usage_adapter", exc)
         failed_attempt_count = _safe_attempt_count(attempt_count)
         try:
             failed_record = record_model_call(
@@ -514,9 +520,14 @@ class SQLiteModelCostLedger:
         observer = execution_observer()
         try:
             self._write_run(collector, finished_at=finished_at, outcome=outcome, idempotent=idempotent)
+        except Exception as exc:
+            diagnose = getattr(observer, "record_failure", None)
+            if diagnose is not None:
+                diagnose("", "cost_ledger", exc)
+            raise
         finally:
             if observer is not None:
-                observer.cost_write_finished(collector.run_id)
+                observer.cost_write_finished(collector.run_id, ledger_path=self.path)
 
     def _write_run(
         self,
@@ -610,7 +621,8 @@ class SQLiteModelCostLedger:
                         run_ids,
                     ).fetchall()
                 except sqlite3.OperationalError:
-                    return 0
+                    # An unreadable ledger is not evidence of zero spending.
+                    raise
         calls_by_run: dict[str, list[sqlite3.Row | tuple[Any, ...]]] = {}
         for call in calls:
             calls_by_run.setdefault(str(call[0]), []).append(call)
