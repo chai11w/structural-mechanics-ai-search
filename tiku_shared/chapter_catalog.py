@@ -278,6 +278,13 @@ def resolve_supported_chapter(text: object, *, allow_numeric: bool = False) -> s
     as chapter names; it must not be used for user-facing textbook answers.
     """
 
+    # Explicit topics must win over broad legacy aliases and internal numbers.
+    result = parse_chapter_scope(text)
+    if result.status == "supported":
+        return result.storage_key
+    if result.status == "unsupported":
+        return None
+
     normalized = _compact(text)
     if allow_numeric:
         for alias, storage_key in LEGACY_CHAPTER_ALIASES.items():
@@ -292,8 +299,7 @@ def resolve_supported_chapter(text: object, *, allow_numeric: bool = False) -> s
             for definition in CHAPTER_DEFINITIONS:
                 if definition.storage_key.startswith(prefix):
                     return definition.storage_key
-    result = parse_chapter_scope(text)
-    return result.storage_key if result.status == "supported" else None
+    return None
 
 
 def supported_topic_names() -> tuple[str, ...]:

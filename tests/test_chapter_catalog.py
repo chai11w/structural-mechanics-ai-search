@@ -160,6 +160,27 @@ class ChapterCatalogTest(unittest.TestCase):
         self.assertIsNone(resolve_supported_chapter("按位移重新搜", allow_numeric=True))
         self.assertIsNone(resolve_supported_chapter("第九章", allow_numeric=True))
 
+    def test_explicit_chapter_wins_over_legacy_alias_and_number(self):
+        cases = {
+            "静定结构位移": "3静定结构位移",
+            "3静定结构位移": "3静定结构位移",
+            "我选静定结构位移": "3静定结构位移",
+            "改成静定结构位移": "3静定结构位移",
+            "第4章静定结构位移": "3静定结构位移",
+            "第3章力法": "4力法",
+        }
+        for text, expected in cases.items():
+            for allow_numeric in (False, True):
+                with self.subTest(text=text, allow_numeric=allow_numeric):
+                    self.assertEqual(
+                        resolve_supported_chapter(text, allow_numeric=allow_numeric), expected
+                    )
+
+    def test_unsupported_topic_is_not_reinterpreted_by_legacy_fallback(self):
+        for text in ("第4章动力学", "静定结构动力学"):
+            with self.subTest(text=text):
+                self.assertIsNone(resolve_supported_chapter(text, allow_numeric=True))
+
 
 if __name__ == "__main__":
     unittest.main()
