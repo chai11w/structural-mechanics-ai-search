@@ -130,6 +130,8 @@ class BackgroundWorker:
                     task_state_capabilities=self.capabilities), admission_check=check,
                 prepare_result=self.publication.prepare if self.publication is not None else None)
         except BaseException as exc:
+            from tiku_agent.execution_receipts import ReceiptJournal
+            ReceiptJournal(self.dispatch.store).failure(writer.operation_id, '', 'background_execution', exc)
             error = safe_error(exc)
             # Covers failure before execute_claimed installs its effect boundary.
             # No returned REGISTERED attempt is ever silently queued a second time.
@@ -168,6 +170,10 @@ class BackgroundWorker:
 
     def maintain(self):
         result = self.dispatch.maintain()
+        from tiku_agent.execution_receipts import recover_accounting
+        runtime = self.dispatch.runtime
+        ledgers = [getattr(target, 'cost_ledger', None) for target in (runtime, getattr(runtime, 'a2_runtime', None))]
+        result.update(recover_accounting(self.dispatch.operations, ledgers))
         removed = 0
         with self.dispatch.store.transaction() as conn:
             now = self.dispatch.store.clock(conn)

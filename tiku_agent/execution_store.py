@@ -43,6 +43,9 @@ class ExecutionPolicy:
     max_total_result_bytes: int = 32 * 1024 * 1024
     max_database_bytes: int = 256 * 1024 * 1024
     min_free_bytes: int = 256 * 1024 * 1024
+    unknown_cost_reserve_micros: int = 1_000_000
+    max_identity_unresolved_cost_calls: int = 10
+    max_global_unresolved_cost_calls: int = 100
 
     def __post_init__(self):
         if any(type(v) is not int or v <= 0 for v in vars(self).values()):

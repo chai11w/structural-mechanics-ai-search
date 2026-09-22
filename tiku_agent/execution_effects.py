@@ -35,6 +35,9 @@ def create_effect_schema(conn):
         if statement.strip():
             conn.execute(statement)
 
+    if 'ledger_key' not in {row[1] for row in conn.execute('PRAGMA table_info(execution_collectors)')}:
+        conn.execute("ALTER TABLE execution_collectors ADD COLUMN ledger_key TEXT NOT NULL DEFAULT ''")
+
 
 def collector_metadata(collector):
     return {name: getattr(collector, name) for name in
@@ -97,12 +100,15 @@ class ExecutionEffects:
         with self.store.transaction() as conn:
             conn.execute("UPDATE execution_collectors SET closed=max(closed,1) WHERE run_id=?", (collector.run_id,))
 
-    def cost_write_finished(self, run_id):
+    def cost_write_finished(self, run_id, ledger_path=None):
         # 0 = collecting, 1 = model scope closed, 2 = ledger attempt ended.
         # Outbox PENDING is normal during the ledger transaction. Only after
         # this marker (or writer loss) does it prove unresolved accounting.
         with self.store.transaction() as conn:
-            conn.execute("UPDATE execution_collectors SET closed=2 WHERE run_id=?", (run_id,))
+            key = digest(str(Path(ledger_path).resolve()).casefold()) if ledger_path is not None else ''
+            if key and key not in self.ledger_keys:
+                raise ExecutionError("EXECUTION_COST_TARGET_INVALID")
+            conn.execute("UPDATE execution_collectors SET closed=2,ledger_key=? WHERE run_id=?", (key, run_id))
 
     def prepare_model(self, *, call_id, run_id, provider, model, call_type):
         with self.store.transaction() as conn:
@@ -112,7 +118,8 @@ class ExecutionEffects:
             if conn.execute("SELECT 1 FROM execution_effects WHERE operation_id=? AND status='UNKNOWN' LIMIT 1",
                             (self.writer.operation_id,)).fetchone():
                 raise ExecutionError("EXECUTION_UNKNOWN")
-            self.operations.ensure_cost_available()
+            self.operations.ensure_cost_available(identity_digest=conn.execute(
+                "SELECT identity FROM execution_operations WHERE id=?", (self.writer.operation_id,)).fetchone()[0])
             link = conn.execute("SELECT operation_id,attempt_id FROM execution_cost_runs WHERE run_id=?", (run_id,)).fetchone()
             if link is None or tuple(link) != (self.writer.operation_id, self.writer.attempt_id):
                 raise ExecutionError("EXECUTION_CONTEXT_REQUIRED")
@@ -127,32 +134,40 @@ class ExecutionEffects:
             now = self._validate(conn)
             if self.admission_check is not None:
                 self.admission_check()
-            self.operations.ensure_cost_available()
+            self.operations.ensure_cost_available(identity_digest=conn.execute(
+                "SELECT identity FROM execution_operations WHERE id=?", (self.writer.operation_id,)).fetchone()[0])
             changed = conn.execute("UPDATE execution_effects SET status='SENT',updated=? "
                                    "WHERE call_id=? AND attempt_id=? AND status='PREPARED'",
                                    (now, call_id, self.writer.attempt_id)).rowcount
             if changed != 1:
                 raise ExecutionError("EXECUTION_UNKNOWN")
 
+    def record_failure(self, call_id, stage, exc):
+        from tiku_agent.execution_receipts import ReceiptJournal
+        ReceiptJournal(self.store).failure(self.writer.operation_id, call_id, stage, exc)
+
     def model_finished(self, call_id, record, *, confirmed, usage_known=False):
-        # A late provider response may add evidence to its original call only.
-        # It never changes operation ownership or applies a business result.
-        encoded = canonical(record.to_dict()) if record is not None else None
-        with self.store.transaction() as conn:
-            now = self.store.clock(conn)
-            row = conn.execute("SELECT * FROM execution_effects WHERE call_id=? AND attempt_id=?",
-                               (call_id, self.writer.attempt_id)).fetchone()
-            if row is None:
-                raise ExecutionError("EXECUTION_UNKNOWN")
-            if row["status"] == "NOT_SENT":
-                raise ExecutionError("EXECUTION_COST_CONFLICT")
-            status = "CONFIRMED" if confirmed else "UNKNOWN"
-            if row["status"] == "CONFIRMED":
-                if row["record"] != encoded:
-                    raise ExecutionError("EXECUTION_COST_CONFLICT")
-                return
-            conn.execute("UPDATE execution_effects SET status=?,record=?,updated=?,usage_known=? WHERE call_id=?",
-                         (status, encoded, now, int(usage_known), call_id))
+        from tiku_agent.execution_receipts import ReceiptJournal, apply_receipt
+        journal = ReceiptJournal(self.store)
+        try:
+            journal.save(call_id, self.writer.attempt_id, record, confirmed, usage_known)
+        except Exception as exc:
+            self.record_failure(call_id, 'receipt_journal', exc)
+            if isinstance(exc, ExecutionError) and exc.code == 'EXECUTION_COST_CONFLICT':
+                raise
+            # Primary persistence is still worth attempting if the journal disk
+            # is unavailable. Never issue another provider call here.
+        try:
+            apply_receipt(self.store, call_id, self.writer.attempt_id, {
+                'record': record.to_dict() if record is not None else None,
+                'confirmed': confirmed, 'usage_known': usage_known})
+        except Exception as exc:
+            self.record_failure(call_id, 'receipt_persistence', exc)
+            raise
+        try:
+            journal.remove(call_id, self.writer.attempt_id)
+        except Exception as exc:
+            self.record_failure(call_id, 'receipt_cleanup', exc)
 
     def prepare_cost(self, ledger_path, collector, *, finished_at, outcome):
         payload = {"collector": collector_metadata(collector),

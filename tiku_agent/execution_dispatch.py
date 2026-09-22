@@ -155,7 +155,7 @@ class DispatchStore:
             raise ExecutionError("EXECUTION_STALE")
         self.operations.verify_owner(sid, identity)
         if budget:
-            self.operations.ensure_cost_available()
+            self.operations.ensure_cost_available(identity_digest=digest(identity))
             getattr(self.runtime, "a2_runtime", self.runtime).ensure_budget_available(identity)
         # Control/ledger reads may have consumed time. Recheck local expiration
         # with a fresh clock immediately before accepting or sending work.

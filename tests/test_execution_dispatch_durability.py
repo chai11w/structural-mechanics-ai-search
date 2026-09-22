@@ -188,6 +188,8 @@ class ExecutionDispatchDurabilityTests(unittest.TestCase):
     def test_pending_accounting_after_queue_cannot_be_bypassed(self):
         with tempfile.TemporaryDirectory() as root:
             f = DispatchFixture(root)
+            from dataclasses import replace
+            f.authority.policy = replace(f.authority.policy, max_global_unresolved_cost_calls=1)
             f.accept("timeout", sid="first")
             _, req, grant = f.accept(sid="second")
             self.assertTrue(f.worker.run_once())

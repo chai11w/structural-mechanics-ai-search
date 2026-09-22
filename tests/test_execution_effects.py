@@ -25,6 +25,8 @@ class ExecutionEffectsTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.store = ExecutionStore(self.root / "execution.db")
+        # Exercise saturation boundaries with a one-incident contingency limit.
+        self.store.policy = replace(self.store.policy, max_global_unresolved_cost_calls=1)
         self.ledger = SQLiteModelCostLedger(self.root / "costs.db")
         self.calls = []
         owner = self

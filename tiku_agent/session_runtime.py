@@ -1785,7 +1785,7 @@ class AgentSessionRuntime:
                 with lock, reader_gate():
                     try:
                         self._await_background_image_work(session_id)
-                        ensure_execution_cost_available(self)
+                        ensure_execution_cost_available(self, identity_key or "local")
                         self._check_daily_budget(identity_key)
                         response = execute()
                     except Exception as exc:
@@ -2070,9 +2070,11 @@ class AgentSessionRuntime:
         now = datetime.now(self._budget_timezone)
         local_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         started_at = local_start.astimezone(UTC).isoformat()
-        if global_budget_micros > 0 and self.cost_ledger.estimated_cost_micros_since(
+        operations = getattr(self, "execution_operations", None)
+        global_reserve = operations.cost_exposure()['reserved_micros'] if operations is not None else 0
+        if global_budget_micros > 0 and (global_reserve + self.cost_ledger.estimated_cost_micros_since(
             started_at
-        ) >= global_budget_micros:
+        )) >= global_budget_micros:
             raise AgentBudgetExceededError(
                 "今日服务额度已用完，请明天再试。",
                 code="GLOBAL_DAILY_QUOTA_EXCEEDED",
@@ -2088,7 +2090,8 @@ class AgentSessionRuntime:
         spent = self.cost_ledger.estimated_cost_micros_since(
             started_at, identity_key=clean_identity
         )
-        if spent >= identity_budget_micros:
+        identity_reserve = operations.cost_exposure(clean_identity)['reserved_micros'] if operations is not None else 0
+        if spent + identity_reserve >= identity_budget_micros:
             raise AgentBudgetExceededError(
                 "该邀请码今日额度已用完，请明天再试。",
                 code="INVITE_DAILY_QUOTA_EXCEEDED",

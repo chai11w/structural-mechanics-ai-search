@@ -12,7 +12,7 @@ from pathlib import Path
 import threading
 
 from tiku_agent.execution_operations import OperationRequest, OperationStore
-from tiku_agent.execution_store import ExecutionError, ExecutionSessionStore, _WRITER, canonical, session_key
+from tiku_agent.execution_store import ExecutionError, ExecutionSessionStore, _WRITER, canonical, digest, session_key
 
 
 OPERATION_HEADER = "X-Tiku-Operation"
@@ -47,10 +47,10 @@ def execution_snapshot_scope(runtime):
     return operations.authority.transaction() if operations is not None else nullcontext()
 
 
-def ensure_execution_cost_available(runtime):
+def ensure_execution_cost_available(runtime, identity_key="local"):
     operations = getattr(runtime, "execution_operations", None)
     if operations is not None:
-        operations.ensure_cost_available()
+        operations.ensure_cost_available(identity_digest=digest(identity_key))
 
 
 def bind_snapshot_context(runtime, sid, snapshot):
@@ -291,7 +291,7 @@ def execution_message(code):
         "EXECUTION_UNKNOWN":"上次操作结果尚未确认，请先核对进度，暂不重复执行。",
         "EXECUTION_RESULT_UNAVAILABLE":"该操作已有记录，但保存的结果已不可用，请先核对进度。",
         "EXECUTION_CAPACITY":"执行记录暂时无法接收新操作，请稍后重新连接。",
-        "EXECUTION_COST_PENDING":"已有调用的费用尚待核对，当前结果保留，暂不启动新的操作。",
+        "EXECUTION_COST_PENDING":"服务暂时无法接收新任务，当前结果已保留，请稍后重试。",
         "EXECUTION_COST_CONFLICT":"费用记录存在不一致，需要核对后再继续。",
         "EXECUTION_CONTROL_INVALID":"停止范围无效，请从当前任务重新选择。",
         "EXECUTION_RECOVERY_INVALID":"现有记录不足以安全恢复，请先核对当前任务。",

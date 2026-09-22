@@ -177,7 +177,7 @@ def _capture_a3_response_snapshot(method: Callable[..., AgentResponse]):
                     captured: SessionResponseSnapshotV1 | None = None
                     capture_in_progress = False
                     try:
-                        ensure_execution_cost_available(runtime)
+                        ensure_execution_cost_available(runtime, kwargs.get("identity_key") or "local")
                         defer_child_capture = getattr(
                             runtime.a2_runtime,
                             "_defer_error_response_snapshot_capture",
