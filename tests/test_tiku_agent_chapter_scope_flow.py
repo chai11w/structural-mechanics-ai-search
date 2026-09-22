@@ -82,6 +82,52 @@ class ChapterScopeFlowTests(unittest.TestCase):
         response = agent.handle_image("direct.jpg", prechecked_single=True)
         return agent, response, calls
 
+    def test_default_flow_searches_the_explicit_chapter(self):
+        chapters = {
+            "静定结构受力": "2静定结构",
+            "静定结构位移": "3静定结构位移",
+            "力法": "4力法",
+            "位移法": "5位移法",
+            "力矩分配": "6力矩分配",
+            "矩阵位移": "7矩阵位移",
+            "影响线": "8影响线",
+        }
+        for name, storage_key in chapters.items():
+            for text in (name, storage_key, f"我选{name}"):
+                with self.subTest(text=text):
+                    tools, calls = self._tools()
+                    agent = TikuSearchAgent(
+                        state=AgentState(
+                            phase=STATE_WAIT_CHAPTER,
+                            current_image_path="isolated-placeholder.jpg",
+                            current_question_image_path="isolated-placeholder.jpg",
+                            current_loads=list(LOADS),
+                            chapter_scope_status="uncertain",
+                        ),
+                        tools=tools,
+                        use_llm_intent=False,
+                    )
+                    response = agent.handle_text(text)
+                    self.assertEqual(response.state["current_chapter"], storage_key)
+                    self.assertEqual(calls["coarse_chapters"], [storage_key])
+
+    def test_default_flow_corrects_static_force_to_displacement(self):
+        tools, calls = self._tools()
+        agent = TikuSearchAgent(
+            state=AgentState(
+                phase=STATE_WAIT_CHAPTER,
+                current_image_path="isolated-placeholder.jpg",
+                current_question_image_path="isolated-placeholder.jpg",
+                current_loads=list(LOADS),
+            ),
+            tools=tools,
+            use_llm_intent=False,
+        )
+        agent.handle_text("静定结构")
+        response = agent.handle_text("改成静定结构位移")
+        self.assertEqual(response.state["current_chapter"], "3静定结构位移")
+        self.assertEqual(calls["coarse_chapters"], ["2静定结构", "3静定结构位移"])
+
     def _a3_to_a2(self, *, chapter="", context_text=""):
         tools, calls = self._tools()
         agent = TikuSearchAgent(
