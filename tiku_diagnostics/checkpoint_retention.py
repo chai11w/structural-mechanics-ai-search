@@ -2010,6 +2010,11 @@ def _verify_sqlite_integrity(path: Path) -> None:
         with closing(sqlite3.connect(uri, uri=True, timeout=evidence_sqlite_timeout(5.0))) as connection:
             configure_evidence_connection(connection)
             connection.execute("PRAGMA query_only=ON")
+            # Integrity verification walks table and index pages repeatedly.
+            # Bound the cache/mapping without the default tiny-cache I/O churn;
+            # this connection reads only the closed, immutable backup copy.
+            connection.execute("PRAGMA cache_size=-16384")
+            connection.execute("PRAGMA mmap_size=268435456")
             row = connection.execute("PRAGMA integrity_check").fetchone()
             check_evidence_budget()
     except sqlite3.Error as exc:
