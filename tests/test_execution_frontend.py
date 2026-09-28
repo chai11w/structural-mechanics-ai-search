@@ -75,17 +75,18 @@ for (const mutate of [v=>v.execution.state_version++, v=>v.execution_control.con
 }
 let stored = new Map(), calls = [], mode = 'lost', sequence = 0, commits = [], cleared = [], retires = 0;
 const storage = {getItem:key=>stored.get(key)??null, setItem:(key,value)=>stored.set(key,value), removeItem:key=>stored.delete(key)};
-const host = {taskStateV1,storage, locks:{request:async (name,options,fn)=>{assert.equal(name,'tiku-agent-execution-command-v1');return fn({});}},
+const host = {taskStateV1,storage, locks:{request:async (name,options,fn)=>{assert.ok(['tiku-agent-execution-command-v1','tiku-agent-session-request-v1'].includes(name));return fn({});}},
  createFence:()=>({id:'command-'+(++sequence),records:[],ownRecord:{}}), validFence:f=>f?.id?.startsWith('command-'),
- headers:()=>new Headers(), acknowledged:()=>true, retire:()=>retires++, publish:()=>{},
+ headers:f=>new Headers({'X-Session-Request-Fence':f.id}), acknowledged:()=>true, retire:()=>retires++, publish:()=>{},
  clearFence:(f,own)=>cleared.push({id:f.id,own}), committed:(result,current,action)=>commits.push({result,current,action}),
  fetch:async(path,options)=>{
-   calls.push({path,body:options.body,operation:options.headers?.get('X-Tiku-Operation')});
+   calls.push({path,body:options.body,operation:options.headers?.get('X-Tiku-Operation'),fence:options.headers?.get('X-Session-Request-Fence')});
    assert.equal(options.cache,'no-store');
    if (path === '/api/execution') return new Response(JSON.stringify(base),{headers:{'content-type':'application/json'}});
    assert.equal(path,'/api/reset');
    if(mode==='lost') throw new TypeError('response lost');
    if(mode==='stale') return new Response(JSON.stringify({code:'EXECUTION_STALE'}),{status:409,headers:{'content-type':'application/json'}});
+   if(mode==='transport-stale') return Response.json({code:'STALE_ACTION'},{status:409});
    return new Response(JSON.stringify(good),{headers:{'content-type':'application/json'}});
  }};
 (async()=>{
@@ -104,6 +105,7 @@ const host = {taskStateV1,storage, locks:{request:async (name,options,fn)=>{asse
  await client.retry();
  const replay=calls.filter(c=>c.path==='/api/reset')[1];
  assert.equal(replay.operation,original.operation); assert.equal(replay.body,original.body);
+ assert.notEqual(replay.fence,original.fence);
  assert.equal(client.hasPending(),false);
  assert.equal(commits[0].current.execution.state_version,8); // historical receipt never authorizes live actions
  assert.equal(commits[0].result.execution.state_version,4);
@@ -118,6 +120,20 @@ const host = {taskStateV1,storage, locks:{request:async (name,options,fn)=>{asse
  assert.equal(client.hasPending(),true); // ACK cannot discard unfinished durable delivery
  host.beforeCommitted=async()=>{};
  await client.retry(); assert.equal(client.hasPending(),false);
+ mode='transport-stale';
+ await assert.rejects(client.execute((await client.inspect()).view,0),/此次操作未完成/);
+ const rejected=calls.filter(c=>c.path==='/api/reset').at(-1);
+ assert.equal(client.hasPending(),true);
+ client=api.createClient(host); // a reload preserves command identity
+ mode='ok'; await client.retry();
+ const recovered=calls.filter(c=>c.path==='/api/reset').at(-1);
+ assert.equal(recovered.operation,rejected.operation);
+ assert.notEqual(recovered.fence,rejected.fence);
+ assert.equal(client.hasPending(),false);
+ host.locks.request=async(name,options,fn)=>fn(name==='tiku-agent-session-request-v1'?null:{});
+ const beforeSessionLock=calls.length;
+ await assert.rejects(client.execute((await client.inspect()).view,0),/另一页面正在核对会话/);
+ assert.equal(calls.length,beforeSessionLock+1); // only the read; no command/fence
  host.locks.request=async(name,options,fn)=>fn(null);
  const before=calls.length; await assert.rejects(client.retry(),/另一页面/); assert.equal(calls.length,before);
  stored.set(api.JOURNAL_KEY,'{broken'); assert.throws(()=>client.hasPending(),/记录损坏/);

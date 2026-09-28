@@ -4878,9 +4878,9 @@ async function retryConnection() {
           await resumeBackgroundJobs();
           return;
         } catch (error) {
-          if (error?.code !== 'EXECUTION_STALE') throw error;
-          // A server-rejected old epoch cannot block initialization of the
-          // current conversation. Preserve its receipt, then read current state.
+          if (!['EXECUTION_STALE', 'EXECUTION_NOT_FOUND'].includes(error?.code)) throw error;
+          // A missing receipt is not permission to resubmit or erase history.
+          // Keep it, then read the current session so explicit reset is usable.
         }
       }
     } catch (error) { backgroundNotice(error); globalThis.TikuStartup?.fail(error); return; }
