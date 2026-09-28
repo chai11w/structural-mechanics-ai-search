@@ -56,6 +56,7 @@ RETENTION_RUNTIME_NOT_CONFIRMED = "RETENTION_RUNTIME_NOT_CONFIRMED"
 RETENTION_ALREADY_RUNNING = "RETENTION_ALREADY_RUNNING"
 RETENTION_CAPACITY_INVALID = "RETENTION_CAPACITY_INVALID"
 RETENTION_IO_FAILED = "RETENTION_IO_FAILED"
+RETENTION_BUDGET_EXHAUSTED = "RETENTION_BUDGET_EXHAUSTED"
 
 _RUNTIME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -170,7 +171,10 @@ def build_checkpoint_retention_plan(
             cutoff=(anchor - timedelta(days=TRACE_RETENTION_DAYS)).isoformat()
         )
         metrics = _combined_metrics(checkpoint_store, trace_store)
+    except EvidenceDeadlineExceeded:
+        raise
     except (EvidenceMaintenanceError, TraceCleanupDriftError, ValueError, OSError, sqlite3.Error) as exc:
+        check_evidence_budget()
         raise CheckpointRetentionError("retention planning failed") from exc
 
     checkpoint_payload = _object_dict(checkpoint_plan, "checkpoint retention plan")
@@ -468,6 +472,7 @@ def _apply_checkpoint_retention_plan_unlocked(
             state = _validated_progress_state(state, validated)
             _assert_plan_store_identities(checkpoint_store, trace_store, validated)
         except Exception as exc:
+            deadline = _deadline_cause(exc)
             if target.is_dir():
                 _persist_retention_failure(
                     target,
@@ -476,8 +481,10 @@ def _apply_checkpoint_retention_plan_unlocked(
                     state=state,
                     phases={},
                     current=current,
-                    exc=exc,
+                    exc=deadline or exc,
                 )
+            if deadline is not None:
+                raise deadline
             if isinstance(exc, CheckpointRetentionError):
                 raise
             if isinstance(exc, (EvidenceMaintenanceError, TraceCleanupDriftError)):
@@ -588,6 +595,8 @@ def _apply_checkpoint_retention_plan_unlocked(
         _atomic_write_json(result_path, result)
         return result
     except Exception as exc:
+        # Persist the real failure category even if a component wrapped it.
+        deadline = _deadline_cause(exc)
         _persist_retention_failure(
             target,
             backup_base=backup_base,
@@ -595,8 +604,10 @@ def _apply_checkpoint_retention_plan_unlocked(
             state=state,
             phases=phases,
             current=current,
-            exc=exc,
+            exc=deadline or exc,
         )
+        if deadline is not None:
+            raise deadline
         if isinstance(exc, CheckpointRetentionError):
             raise
         if isinstance(exc, (EvidenceMaintenanceError, TraceCleanupDriftError)):
@@ -705,12 +716,7 @@ class CheckpointRetentionRunner:
                 now=current,
             )
         except Exception as exc:
-            code = (
-                exc.code
-                if isinstance(exc, CheckpointRetentionError)
-                else "RETENTION_BUDGET_EXHAUSTED" if isinstance(exc, EvidenceDeadlineExceeded)
-                else RETENTION_APPLY_FAILED
-            )
+            code = _exception_code(exc)
             with self._health_lock:
                 self._failures = _bounded_counter(self._failures + 1)
                 if code == RETENTION_ALREADY_RUNNING:
@@ -726,7 +732,7 @@ class CheckpointRetentionRunner:
                     )
                 except Exception:
                     self._last_failure_at = ""
-            if isinstance(exc, CheckpointRetentionError):
+            if isinstance(exc, CheckpointRetentionError) and exc.code == code:
                 raise
             raise CheckpointRetentionError(
                 "periodic retention run failed", code=code
@@ -1009,7 +1015,11 @@ def _assert_store_identity(
         )
     try:
         actual = getter()
+    except EvidenceDeadlineExceeded:
+        raise
     except Exception as exc:  # noqa: BLE001
+        _propagate_deadline(exc)
+        check_evidence_budget()
         raise CheckpointRetentionError(
             f"{name} store identity is unavailable", code=RETENTION_DRIFT_DETECTED
         ) from exc
@@ -1050,7 +1060,11 @@ def _assert_live_cleanup_satisfied(
     checkpoint_plan = _checkpoint_plan_object(plan)
     try:
         satisfied = checkpoint_store.retention_plan_satisfied(checkpoint_plan)
+        check_evidence_budget()
+    except EvidenceDeadlineExceeded:
+        raise
     except Exception as exc:  # noqa: BLE001 - expose only stable drift.
+        _propagate_deadline(exc)
         raise CheckpointRetentionError(
             "checkpoint cleanup state is unavailable", code=RETENTION_DRIFT_DETECTED
         ) from exc
@@ -1148,8 +1162,8 @@ def _backup_record_from_file(
             raise CheckpointRetentionError(
                 "backup artifact verification failed", code=RETENTION_BACKUP_FAILED
             )
-    else:
-        _verify_sqlite_integrity(backup)
+    # Database integrity is checked once, after the full manifest is built.
+    # No cleanup is allowed until that verification succeeds.
     return {
         "kind": spec["kind"],
         "source": spec["source"],
@@ -1291,6 +1305,8 @@ def _prepare_verified_backup(
             nearest_backup_parent=nearest_backup_parent,
         )
     except CheckpointRetentionError:
+        raise
+    except EvidenceDeadlineExceeded:
         raise
     except OSError as exc:
         raise CheckpointRetentionError(
@@ -1961,9 +1977,9 @@ def _backup_sqlite(source: Path, destination: Path) -> None:
         # sidecars beside the copied main file; the retention artifact is a
         # single verified SQLite file, so remove those transient companions
         # before publishing the manifest.
-        _verify_sqlite_integrity(destination)
         _remove_sqlite_sidecars(destination)
     except sqlite3.Error as exc:
+        check_evidence_budget()
         raise CheckpointRetentionError(
             "SQLite online backup failed", code=RETENTION_BACKUP_FAILED
         ) from exc
@@ -1991,10 +2007,13 @@ def _verify_sqlite_integrity(path: Path) -> None:
         )
     uri = f"file:{_absolute_path(path).resolve().as_posix()}?mode=ro&immutable=1"
     try:
-        with closing(sqlite3.connect(uri, uri=True, timeout=5.0)) as connection:
+        with closing(sqlite3.connect(uri, uri=True, timeout=evidence_sqlite_timeout(5.0))) as connection:
+            configure_evidence_connection(connection)
             connection.execute("PRAGMA query_only=ON")
             row = connection.execute("PRAGMA integrity_check").fetchone()
+            check_evidence_budget()
     except sqlite3.Error as exc:
+        check_evidence_budget()
         raise CheckpointRetentionError(
             "SQLite backup integrity check failed", code=RETENTION_BACKUP_FAILED
         ) from exc
@@ -2008,34 +2027,15 @@ def _trace_candidates_already_satisfied(
     store: SQLiteTraceEventStore, snapshot: TraceCleanupSnapshot
 ) -> bool:
     try:
-        actual_store_id = store.store_id()
+        return store.cleanup_satisfied(snapshot)
+    except EvidenceDeadlineExceeded:
+        raise
     except (TraceCleanupDriftError, OSError, sqlite3.Error) as exc:
-        raise CheckpointRetentionError(
-            "trace store identity is unavailable", code=RETENTION_DRIFT_DETECTED
-        ) from exc
-    if actual_store_id != snapshot.store_id:
-        raise CheckpointRetentionError(
-            "trace store identity changed", code=RETENTION_DRIFT_DETECTED
-        )
-    if not snapshot.candidates:
-        return True
-    try:
-        missing = [
-            not store.events_for_trace(candidate.trace_id, limit=1)
-            for candidate in snapshot.candidates
-        ]
-    except (TraceCleanupDriftError, OSError, sqlite3.Error) as exc:
+        _propagate_deadline(exc)
+        check_evidence_budget()
         raise CheckpointRetentionError(
             "trace cleanup state is unavailable", code=RETENTION_DRIFT_DETECTED
         ) from exc
-    if all(missing):
-        return True
-    if any(missing):
-        raise CheckpointRetentionError(
-            "trace cleanup has an ambiguous partial result",
-            code=RETENTION_DRIFT_DETECTED,
-        )
-    return False
 
 
 def _released_metrics(
@@ -2126,6 +2126,8 @@ def _safe_prune_backup_runs(
             ),
             "",
         )
+    except EvidenceDeadlineExceeded:
+        return 0, RETENTION_BUDGET_EXHAUSTED.lower()
     except (CheckpointRetentionError, OSError):
         return 0, RETENTION_BACKUP_FAILED.lower()
 
@@ -2392,7 +2394,25 @@ def _bounded_counter(value: int) -> int:
     return min(2_147_483_647, max(0, int(value)))
 
 
+def _deadline_cause(exc: BaseException) -> EvidenceDeadlineExceeded | None:
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        if isinstance(exc, EvidenceDeadlineExceeded):
+            return exc
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+    return None
+
+
+def _propagate_deadline(exc: BaseException) -> None:
+    deadline = _deadline_cause(exc)
+    if deadline is not None:
+        raise deadline
+
+
 def _exception_code(exc: BaseException) -> str:
+    if _deadline_cause(exc) is not None:
+        return RETENTION_BUDGET_EXHAUSTED
     if isinstance(exc, CheckpointRetentionError):
         return exc.code
     if isinstance(exc, (EvidenceMaintenanceError, TraceCleanupDriftError)):
@@ -2568,10 +2588,13 @@ def _sha256_file(path: Path) -> str:
     try:
         with path.open("rb") as stream:
             while True:
+                check_evidence_budget()
                 block = stream.read(1024 * 1024)
                 if not block:
                     break
                 digest.update(block)
+    except EvidenceDeadlineExceeded:
+        raise
     except OSError as exc:
         raise CheckpointRetentionError(
             "maintenance file could not be hashed", code=RETENTION_IO_FAILED

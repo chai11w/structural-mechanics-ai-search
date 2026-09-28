@@ -26,6 +26,7 @@ from tiku_agent.checkpoint_contract import (
 )
 from tiku_agent.checkpoint_store import EvidenceMaintenanceError, SQLiteCheckpointStore
 from tiku_diagnostics import checkpoint_retention as retention
+from tiku_shared.evidence_io_budget import EvidenceDeadlineExceeded
 from tiku_shared.trace_context import TraceContext
 from tiku_shared.trace_events import (
     SQLiteTraceEventStore,
@@ -526,6 +527,59 @@ class CheckpointRetentionTest(unittest.TestCase):
             with retention._execution_lock(self.runtime):
                 pass
         self.assertEqual(caught.exception.code, retention.RETENTION_PATH_REJECTED)
+
+    def test_backup_deadline_is_resumable_and_never_deletes_unverified_data(self) -> None:
+        trace = TraceContext.create()
+        store = self.trace_store()
+        store.write(self.event(trace.trace_id, "2026-07-01T00:00:00Z"))
+        plan = self.build_plan()
+        with patch.object(retention, "_verify_sqlite_integrity", side_effect=EvidenceDeadlineExceeded("budget")):
+            with self.assertRaises(EvidenceDeadlineExceeded):
+                self.apply(plan)
+        self.assertEqual(len(store.events_for_trace(trace.trace_id)), 1)
+        failure_path = next(self.backups.rglob("failure.json"))
+        failure = json.loads(failure_path.read_text(encoding="utf8"))
+        self.assertEqual(failure["failure_code"], retention.RETENTION_BUDGET_EXHAUSTED)
+        self.assertEqual(failure["completed_phase_names"], [])
+        self.assertEqual(self.apply(plan)["status"], "applied")
+        self.assertFalse(failure_path.exists())
+
+    def test_fresh_database_backups_are_integrity_checked_once_before_cleanup(self) -> None:
+        self.create_missing_artifact()
+        trace = TraceContext.create()
+        self.trace_store().write(self.event(trace.trace_id, "2026-07-01T00:00:00Z"))
+        plan = self.build_plan()
+        with patch.object(retention, "_verify_sqlite_integrity", wraps=retention._verify_sqlite_integrity) as checks:
+            self.assertEqual(self.apply(plan)["status"], "applied")
+        self.assertCountEqual([call.args[0].name for call in checks.call_args_list],
+                              [retention.CHECKPOINT_DATABASE, retention.TRACE_DATABASE])
+
+    def test_sqlite_integrity_interrupt_preserves_expired_budget(self) -> None:
+        path = self.runtime / "integrity.sqlite3"
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute("CREATE TABLE sample (value INTEGER)")
+        with (
+            patch.object(retention, "configure_evidence_connection", side_effect=lambda connection: connection.set_progress_handler(lambda: 1, 1)),
+            patch.object(retention, "check_evidence_budget", side_effect=EvidenceDeadlineExceeded("budget")),
+        ):
+            with self.assertRaises(EvidenceDeadlineExceeded):
+                retention._verify_sqlite_integrity(path)
+
+    def test_identity_deadline_is_not_drift_and_runner_reports_budget(self) -> None:
+        store = self.trace_store()
+        trace = TraceContext.create()
+        store.write(self.event(trace.trace_id, "2026-07-01T00:00:00Z"))
+        plan = self.build_plan()
+        with patch.object(store, "store_id", side_effect=EvidenceDeadlineExceeded("budget")):
+            with self.assertRaises(EvidenceDeadlineExceeded):
+                retention._assert_store_identity(store, retention._trace_payload(plan), name="trace", candidate_count=1)
+        runner = retention.CheckpointRetentionRunner(runtime_root=self.runtime, runtime_name=retention.RUNTIME_NAME_8790,
+            repository_root=self.repository, backup_root=self.backups, capacity=self.capacity, backup_keep_runs=2, clock=lambda: NOW)
+        with patch.object(retention, "run_checkpoint_retention_once", side_effect=EvidenceDeadlineExceeded("budget")):
+            with self.assertRaises(retention.CheckpointRetentionError) as error:
+                runner.run_once()
+        self.assertEqual(error.exception.code, retention.RETENTION_BUDGET_EXHAUSTED)
+        self.assertEqual(runner.health()["last_failure_code"], "retention_budget_exhausted")
 
     def test_runner_records_arbitrary_failure_in_safe_health(self) -> None:
         runner = retention.CheckpointRetentionRunner(
