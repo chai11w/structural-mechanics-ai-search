@@ -3,6 +3,7 @@
   'use strict';
   const JOURNAL_KEY = 'tiku-agent-execution-command-v1';
   const LOCK_NAME = 'tiku-agent-execution-command-v1';
+  const SESSION_LOCK_NAME = 'tiku-agent-session-request-v1';
   const ACTIONS = new Set(['reset_session', 'stop_child', 'finish_page', 'recover_operation']);
   const TERMINAL_REJECTIONS = new Set([
     'EXECUTION_STALE', 'EXECUTION_INPUT_CONFLICT', 'EXECUTION_CONTROL_INVALID',
@@ -91,7 +92,7 @@
           || !exact(entry.operation, ['key', 'epoch', 'state_version'])
           || !/^[A-Za-z0-9:_.-]{8,128}$/.test(entry.operation.key)
           || !/^[0-9a-f]{32}$/.test(entry.operation.epoch) || !version(entry.operation.state_version)
-          || !host.validFence(entry.fence) || entry.fence.id !== entry.operation.key) throw fail();
+          || !host.validFence(entry.fence)) throw fail();
       return entry;
     }
     async function inspect() {
@@ -106,7 +107,12 @@
       if (!host.locks?.request) throw fail('当前浏览器不支持安全任务控制，请使用新版 Chrome 或 Edge。');
       return host.locks.request(LOCK_NAME, { mode: 'exclusive', ifAvailable: true }, async (lock) => {
         if (!lock) throw fail('另一页面正在提交控制操作，请稍后刷新任务状态。');
-        return callback();
+        // Session reads reconcile pending fences. Serialize them with command
+        // submission so a read cannot retire a newly minted command fence.
+        return host.locks.request(SESSION_LOCK_NAME, { mode: 'exclusive', ifAvailable: true }, async (sessionLock) => {
+          if (!sessionLock) throw fail('另一页面正在核对会话，请稍后重试。');
+          return callback();
+        });
       });
     }
     function erase(entry, ownOnly = false) {
@@ -167,7 +173,20 @@
           return send(entry);
         });
       },
-      retry() { return locked(() => { const entry = saved(); if (!entry) throw fail(); return send(entry); }); },
+      retry() { return locked(() => {
+        const entry = saved();
+        if (!entry) throw fail();
+        // A reconciled/expired transport fence is not the durable command ID.
+        // Explicit retry refreshes only transport coordination; the original
+        // operation, epoch, version and target still enforce exactly-once work.
+        const fence = host.createFence();
+        if (!host.validFence(fence)) throw fail();
+        const refreshed = { ...entry, fence };
+        const raw = JSON.stringify(refreshed);
+        storage.setItem(JOURNAL_KEY, raw);
+        if (storage.getItem(JOURNAL_KEY) !== raw) throw fail();
+        return send(refreshed);
+      }); },
     });
   }
   const api = Object.freeze({ createClient, parseView, JOURNAL_KEY });
