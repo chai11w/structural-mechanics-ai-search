@@ -14,4 +14,4 @@
 
 `admin-tiku.cysbuting.cn` 与 `yanshi-tiku.cysbuting.cn` 的本机访问故障来自代理的 `.cn` 直连规则；仅为这两个域名增加精确代理规则，并保留原节点选择。真实浏览器分别显示管理员登录页及演示首页。NATAPP 和 Cloudflared 未重启或修改。
 
-剩余告警：原有后台证据自动清理在本次启动后因 `RETENTION_DRIFT_DETECTED` 安全停止，没有完成删除阶段；维护锁已释放，日志写入恢复，但健康状态仍为 degraded。此次修复不宣称消除了该维护告警，也不把原 UNKNOWN 模型结果标记为成功。
+剩余告警：原有后台证据自动清理因 `RETENTION_DRIFT_DETECTED` 停止，维护锁释放后日志写入恢复，但健康状态仍为 degraded。后续[独立诊断](retention-alarm-diagnosis-20260928.md)确认是维护预算超时被误报为数据漂移，并发现重复完整性检查及逐条 Trace 复核的耗时问题；该维护问题尚未修复。此次网页恢复不把原 UNKNOWN 模型结果标记为成功。
