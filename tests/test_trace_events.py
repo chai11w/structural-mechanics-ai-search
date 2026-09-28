@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 import json
 import shutil
@@ -304,6 +305,37 @@ class TraceEventStoreTest(unittest.TestCase):
         payload["candidates"][0]["events_hash"] = int("1" * 64)
         with self.assertRaisesRegex(TraceEventValidationError, "events_hash"):
             TraceCleanupSnapshot.from_dict(payload)
+
+    def test_cleanup_satisfaction_checks_frozen_candidates_and_rejects_partial_deletion(self):
+        store = SQLiteTraceEventStore(self.make_directory() / "trace_events.sqlite3")
+        traces = [TraceContext.create() for _ in range(3)]
+        for trace in traces:
+            store.write(self.make_event(trace.trace_id, "2026-08-01T00:00:00Z"))
+        snapshot = store.cleanup_candidates(cutoff="2026-08-06T00:00:00Z")
+        self.assertFalse(store.cleanup_satisfied(snapshot))
+        with closing(sqlite3.connect(store.path)) as connection, connection:
+            connection.execute("DELETE FROM trace_events WHERE trace_id=?", (traces[0].trace_id,))
+        with self.assertRaises(TraceCleanupDriftError):
+            store.cleanup_satisfied(snapshot)
+        with closing(sqlite3.connect(store.path)) as connection, connection:
+            connection.execute("DELETE FROM trace_events")
+        store.write(self.make_event(TraceContext.create().trace_id, "2026-08-01T00:00:00Z"))
+        self.assertTrue(store.cleanup_satisfied(snapshot))
+        store.path.unlink()
+        with self.assertRaises(TraceCleanupDriftError):
+            store.cleanup_satisfied(snapshot)
+        self.assertFalse(store.path.exists())
+
+    def test_cleanup_satisfaction_spans_batches_in_one_connection(self):
+        from tiku_shared import trace_events
+        store = SQLiteTraceEventStore(self.make_directory() / "trace_events.sqlite3")
+        for _ in range(401):
+            store.write(self.make_event(TraceContext.create().trace_id, "2026-08-01T00:00:00Z"))
+        snapshot = store.cleanup_candidates(cutoff="2026-08-06T00:00:00Z")
+        store.apply_cleanup(snapshot)
+        with patch.object(trace_events, "_open_readonly_sqlite", wraps=trace_events._open_readonly_sqlite) as opens:
+            self.assertTrue(store.cleanup_satisfied(snapshot))
+        self.assertEqual(opens.call_count, 1)
 
     def test_cleanup_apply_is_idempotent_after_the_original_traces_are_gone(self):
         store = SQLiteTraceEventStore(

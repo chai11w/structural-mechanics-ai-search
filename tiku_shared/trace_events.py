@@ -938,6 +938,30 @@ class SQLiteTraceEventStore:
             except (OSError, sqlite3.Error) as exc:
                 raise TraceCleanupDriftError("trace store is unavailable") from exc
 
+    def cleanup_satisfied(self, snapshot: TraceCleanupSnapshot) -> bool:
+        """Check only frozen candidates in one identity-bound read transaction."""
+        if not isinstance(snapshot, TraceCleanupSnapshot):
+            raise TypeError("snapshot must be a TraceCleanupSnapshot")
+        self._flush_pending()
+        _trace_reject_linked_path(self.path)
+        if not _trace_lexists(self.path):
+            if snapshot.store_id != TRACE_ABSENT_STORE_ID or snapshot.candidates:
+                raise TraceCleanupDriftError("trace store identity changed")
+            return True
+        if not self.path.is_file():
+            raise TraceCleanupDriftError("trace database path is not a regular file")
+        with self._path_lock, self._lock:
+            with closing(_open_readonly_sqlite(self.path, timeout=self._write_timeout_seconds)) as connection:
+                connection.execute("BEGIN")
+                if _trace_store_identity_from_connection(connection) != snapshot.store_id:
+                    raise TraceCleanupDriftError("trace store identity changed")
+                present = _cleanup_candidate_trace_count(connection, snapshot)
+                if present == 0:
+                    return True
+                if present != len(snapshot.candidates):
+                    raise TraceCleanupDriftError("trace cleanup has an ambiguous partial result")
+                return False
+
     def apply_cleanup(self, snapshot: TraceCleanupSnapshot) -> dict[str, Any]:
         """Delete an unchanged candidate set atomically, one complete trace at a time."""
 
@@ -2067,14 +2091,23 @@ def _cleanup_candidate_traces_absent(
     connection: sqlite3.Connection,
     snapshot: TraceCleanupSnapshot,
 ) -> bool:
-    return all(
-        connection.execute(
-            "SELECT 1 FROM trace_events WHERE trace_id = ? LIMIT 1",
-            (candidate.trace_id,),
-        ).fetchone()
-        is None
-        for candidate in snapshot.candidates
-    )
+    return _cleanup_candidate_trace_count(connection, snapshot) == 0
+
+
+def _cleanup_candidate_trace_count(
+    connection: sqlite3.Connection, snapshot: TraceCleanupSnapshot,
+) -> int:
+    count = 0
+    for offset in range(0, len(snapshot.candidates), 400):
+        check_evidence_budget()
+        identifiers = [candidate.trace_id for candidate in snapshot.candidates[offset:offset + 400]]
+        placeholders = ",".join("?" for _ in identifiers)
+        count += int(connection.execute(
+            f"SELECT COUNT(DISTINCT trace_id) FROM trace_events WHERE trace_id IN ({placeholders})",
+            identifiers,
+        ).fetchone()[0])
+    check_evidence_budget()
+    return count
 
 
 def _event_row(event: TraceEvent) -> tuple[Any, ...]:
