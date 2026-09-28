@@ -962,6 +962,10 @@ class SQLiteTraceEventStore:
             with closing(connection):
                 connection.row_factory = sqlite3.Row
                 try:
+                    # Cleanup revisits table/index pages for many frozen traces.
+                    # Keep a bounded cache for this maintenance connection only.
+                    connection.execute("PRAGMA cache_size=-32768")
+                    connection.execute("PRAGMA mmap_size=268435456")
                     connection.execute("BEGIN IMMEDIATE")
                     actual_store_id = _trace_store_identity_from_connection(connection)
                     if actual_store_id != snapshot.store_id:
@@ -982,10 +986,13 @@ class SQLiteTraceEventStore:
                             raise TraceCleanupDriftError(
                                 "trace cleanup candidates changed"
                             )
-                        for candidate in snapshot.candidates:
+                        for offset in range(0, len(snapshot.candidates), 400):
+                            check_evidence_budget()
+                            identifiers = [candidate.trace_id for candidate in snapshot.candidates[offset:offset + 400]]
+                            placeholders = ",".join("?" for _ in identifiers)
                             cursor = connection.execute(
-                                "DELETE FROM trace_events WHERE trace_id = ?",
-                                (candidate.trace_id,),
+                                f"DELETE FROM trace_events WHERE trace_id IN ({placeholders})",
+                                identifiers,
                             )
                             deleted_event_count += int(cursor.rowcount)
                         if deleted_event_count != snapshot.event_count:
@@ -993,6 +1000,10 @@ class SQLiteTraceEventStore:
                                 "trace cleanup delete count changed"
                             )
                     check_evidence_budget()
+                except sqlite3.Error:
+                    connection.rollback()
+                    check_evidence_budget()
+                    raise
                 except BaseException:
                     connection.rollback()
                     raise

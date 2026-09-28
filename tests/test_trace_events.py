@@ -337,6 +337,39 @@ class TraceEventStoreTest(unittest.TestCase):
             self.assertTrue(store.cleanup_satisfied(snapshot))
         self.assertEqual(opens.call_count, 1)
 
+    def test_interrupted_cleanup_rolls_back_all_batches_and_preserves_deadline(self):
+        from tiku_shared import trace_events
+        store = SQLiteTraceEventStore(self.make_directory() / "trace_events.sqlite3")
+        for _ in range(401):
+            store.write(self.make_event(TraceContext.create().trace_id, "2026-08-01T00:00:00Z"))
+        snapshot = store.cleanup_candidates(cutoff="2026-08-06T00:00:00Z")
+        interrupted = Event()
+
+        class InterruptSecondBatch(sqlite3.Connection):
+            deletes = 0
+
+            def execute(self, statement, *args, **kwargs):
+                if statement.startswith("DELETE FROM trace_events"):
+                    self.deletes += 1
+                    if self.deletes == 2:
+                        interrupted.set()
+                        raise sqlite3.OperationalError("interrupted")
+                return super().execute(statement, *args, **kwargs)
+
+        def check_budget():
+            if interrupted.is_set():
+                raise EvidenceDeadlineExceeded("budget")
+
+        connection = sqlite3.connect(store.path, factory=InterruptSecondBatch)
+        with (
+            patch.object(trace_events, "_open_existing_sqlite", return_value=connection),
+            patch.object(trace_events, "check_evidence_budget", side_effect=check_budget),
+        ):
+            with self.assertRaises(EvidenceDeadlineExceeded):
+                store.apply_cleanup(snapshot)
+        self.assertEqual(store.cleanup_candidates(cutoff=snapshot.cutoff), snapshot)
+        self.assertEqual(store.apply_cleanup(snapshot)["deleted_event_count"], 401)
+
     def test_cleanup_apply_is_idempotent_after_the_original_traces_are_gone(self):
         store = SQLiteTraceEventStore(
             self.make_directory() / "trace_events.sqlite3"

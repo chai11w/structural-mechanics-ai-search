@@ -1968,7 +1968,10 @@ def _backup_sqlite(source: Path, destination: Path) -> None:
         with closing(sqlite3.connect(uri, uri=True, timeout=evidence_sqlite_timeout(5.0))) as source_connection:
             configure_evidence_connection(source_connection)
             source_connection.execute("PRAGMA query_only=ON")
+            source_connection.execute("PRAGMA cache_size=-16384")
+            source_connection.execute("PRAGMA mmap_size=268435456")
             with closing(sqlite3.connect(destination, timeout=evidence_sqlite_timeout(5.0))) as destination_connection:
+                destination_connection.execute("PRAGMA cache_size=-16384")
                 source_connection.backup(destination_connection, pages=256,
                     progress=lambda *_: check_evidence_budget(), sleep=0.01)
                 check_evidence_budget()
