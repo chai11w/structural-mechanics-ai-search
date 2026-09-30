@@ -1625,8 +1625,14 @@ def search(
     rerank_top=DISPLAY_MAX_RESULTS,
     rerank_provider=None,
     rerank_model=None,
+    query_image_path=None,
 ):
-    scan = scan_chapter_candidates(query_loads, chapter_name, bank_root())
+    structure_type = ""
+    if query_image_path or rerank_image_path:
+        from tiku_agent.tools import classify_structure_tool
+        classified = classify_structure_tool(query_image_path or rerank_image_path, route="main")
+        structure_type = str(classified.data.get("structure_type") or "")
+    scan = scan_chapter_candidates(query_loads, chapter_name, bank_root(), structure_type=structure_type)
     if scan is None:
         print(f"ERROR: Chapter '{chapter_name}' not found")
         return
@@ -1927,6 +1933,7 @@ def main():
             rerank_image_path=rerank_image_path,
             rerank_provider=args.rerank_provider,
             rerank_model=args.rerank_model,
+            query_image_path=query_image_path,
         )
 
     elif args.cmd == "store":

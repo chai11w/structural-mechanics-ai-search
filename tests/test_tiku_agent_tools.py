@@ -808,13 +808,57 @@ class TikuAgentToolsTest(unittest.TestCase):
         self.assertEqual(result.code, "MULTI_CROPS_UNAVAILABLE")
         self.assertEqual(len(result.data["questions"]), 2)
 
-    def test_structure_tool_skips_non_symbolic_routes(self):
-        result = classify_structure_tool(None, route="main")
+    def test_main_reuses_symbolic_structure_classifier(self):
+        for route in ("main", "symbolic"):
+            with self.subTest(route=route), patch("tiku_agent.tools._make_qwen") as factory:
+                factory.return_value.classify_structure_type.return_value = {
+                    "structure_type": "钢架", "confidence": 0.95, "reason": "组合结构",
+                }
+                result = classify_structure_tool("query.jpg", route=route)
+                self.assertEqual(result.data["structure_type"], "钢架")
+                factory.return_value.classify_structure_type.assert_called_once_with("query.jpg")
+                factory.return_value.recognize_dimensions.assert_not_called()
+
+    def test_combination_structure_text_takes_priority_over_truss(self):
+        with patch("tiku_agent.tools._make_qwen") as factory:
+            result = classify_structure_tool(None, route="main", classified={
+                "problem_text": "梁与桁架组成的组合结构",
+            })
+        self.assertEqual(result.data["structure_type"], "钢架")
+        factory.assert_not_called()
+
+    def test_main_structure_filter_and_no_dimension_model(self):
+        frame = pd.DataFrame([
+            {"题目名称": "beam.jpg", "荷载": '{"loads":[{"type":"集中","raw":"10"}]}', "结构类型": "梁"},
+            {"题目名称": "frame.jpg", "荷载": '{"loads":[{"type":"集中","raw":"10"}]}', "结构类型": "钢架"},
+        ])
+        with patch("tiku_agent.tools.load_bank_excel", return_value=frame), patch(
+            "tiku_agent.tools.search.resolve_question_path", side_effect=lambda name, **kw: (Path(name), name, False)
+        ), patch("tiku_agent.tools._make_qwen") as factory:
+            result = coarse_search_tool([{"type": "集中", "raw": "10"}], chapter="2静定结构",
+                route="main", structure_type="钢架", query_image_path="query.jpg",
+                config=AgentToolConfig(dimension_filter_enabled=True))
+        self.assertEqual([r["name"] for r in result.data["candidates"]], ["frame.jpg"])
+        self.assertTrue(result.data["structure_filter_applied"])
+        self.assertEqual(result.data["dimension_filter"]["reason"], "not_symbolic")
+        factory.assert_not_called()
+
+    def test_structure_tool_skips_unsupported_routes(self):
+        result = classify_structure_tool(None, route="unsupported")
         self.assertTrue(result.ok)
         self.assertEqual(result.tool, "classify_structure")
         self.assertEqual(result.code, "STRUCTURE_FILTER_NOT_APPLICABLE")
         self.assertEqual(result.data["structure_type"], "")
         self.assertFalse(result.data["filter_applicable"])
+
+    def test_main_global_scan_receives_structure_type(self):
+        with patch("tiku_agent.tools.CHAPTERS", ["2静定结构"]), patch(
+            "tiku_agent.tools.search.scan_chapter_candidates",
+            return_value=SimpleNamespace(scored=[], structure_filter_applied=True),
+        ) as scan:
+            tools_module._collect_global_perfect_candidates(
+                [{"type": "集中", "raw": "10"}], route="main", structure_type="钢架", threshold=0.65)
+        self.assertEqual(scan.call_args.kwargs["structure_type"], "钢架")
 
     def test_candidate_action_parser_answer_delete_and_cancel(self):
         self.assertEqual(
