@@ -430,13 +430,13 @@ def classify_structure_tool(
     classified: dict[str, Any] | None = None,
     config: AgentToolConfig | None = None,
 ) -> ToolResult:
-    """Classify structure type for symbolic-bank image searches.
+    """Classify structure type for main and symbolic bank image searches.
 
     Returns an empty structure type when the route does not benefit from this
     filter, so callers can always invoke it safely.
     """
 
-    if route != "symbolic":
+    if route not in {"main", "symbolic"}:
         return ToolResult.success(
             code="STRUCTURE_FILTER_NOT_APPLICABLE",
             data={"structure_type": "", "source": "not_applicable", "filter_applicable": False},
@@ -528,7 +528,7 @@ def coarse_search_tool(
             loads,
             chapter,
             excel_root,
-            structure_type=filter_type if route == "symbolic" else "",
+            structure_type=filter_type,
             load_excel=load_bank_excel,
         )
         if scan is None:
@@ -587,7 +587,7 @@ def coarse_search_tool(
             route=route,
             structure_type=filter_type,
             query_image_path=query_image_path,
-            recognizer=_make_qwen(config) if config.dimension_filter_enabled else None,
+            recognizer=_make_qwen(config) if config.dimension_filter_enabled and route == "symbolic" else None,
         )
 
         data = {
@@ -867,7 +867,7 @@ def _collect_global_perfect_candidates(
     def scan_one(chapter):
         return chapter, search.scan_chapter_candidates(
             loads, chapter, excel_root,
-            structure_type=filter_type if route == "symbolic" else "",
+            structure_type=filter_type,
             load_excel=load_bank_excel,
         )
 

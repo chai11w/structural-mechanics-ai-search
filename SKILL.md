@@ -54,6 +54,8 @@ python scripts/multi_agent_search.py --image "D:\path\to\question.jpg" --chapter
 python scripts/evaluate_rerank_matrix.py --prompts v1 v4 --providers zhipu qwen --workers 10
 ```
 
+主库和字母库图片检索共用结构类型识别与筛选：题干明确类型时直接采用，否则由千问识别；组合结构归钢架。识别未知/失败或章节内没有对应类型时保留原荷载检索。主库不识别或筛选尺寸，纯荷载查询没有题图时不新增结构识别。
+
 多 Agent CLI 默认对字母库大候选池启用 V5.2 尺寸复筛；如需临时回退：
 
 ```powershell

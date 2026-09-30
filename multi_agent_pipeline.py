@@ -404,7 +404,7 @@ class MultiAgentCoordinator:
             classified["structure_type"] = structure_type
             classified["structure_type_confidence"] = structure_data.get("confidence", 0.0)
             classified["structure_type_reason"] = structure_data.get("reason", "")
-        if status_callback and route_name == "symbolic" and structure_result.outcome is ToolOutcome.PARTIAL:
+        if status_callback and structure_result.outcome is ToolOutcome.PARTIAL:
             status_callback("结构类型识别未完成，继续按荷载检索...")
 
         coarse_query_image = query_image_path if (query_image_path and (rerank or self.dimension_filter_enabled)) else None
@@ -548,6 +548,8 @@ def infer_structure_type_from_text(classified: dict[str, Any] | None) -> str:
     text = text.replace("刚架", "钢架").replace("行架", "桁架")
     if not text.strip():
         return ""
+    if "组合结构" in text:
+        return "钢架"
     if "桁架" in text:
         return "桁架"
     if "钢架" in text or "框架" in text or "刚构" in text or "门架" in text:

@@ -68,7 +68,7 @@ def main():
             print("未识别到荷载，返回章节前几题")
         else:
             rerank_image_path = args.image if args.rerank else None
-            search(query_loads, args.chapter, rerank_image_path=rerank_image_path)
+            search(query_loads, args.chapter, rerank_image_path=rerank_image_path, query_image_path=args.image)
 
     elif args.cmd == "answer":
         answer(args.rank)
