@@ -15,3 +15,13 @@ CLI 的显式章节参数、旧飞书独立解析器和题库 Skill 的章节键
 90 项目录、Agent 选章流程和意图回归通过。新增用例覆盖生产默认流程下七个章节的名称、标准存储键、口语选章，以及从“静定结构”改为“静定结构位移”后实际粗筛参数由 `2静定结构` 切换到 `3静定结构位移`。测试使用隔离假工具，不上传用户图片、不调用收费模型。
 
 命令：`$env:PYTHONPATH='tests'; python -B -m unittest test_chapter_catalog test_tiku_agent_chapter_scope_flow test_tiku_agent_intent_v2 test_tiku_agent_intent_v2_blind_contract test_tiku_agent_intent_eval_v2 test_a3_intent_v1 test_evaluate_chapter_scope`
+
+## 发布状态
+
+- 主线修复提交 `d69f1c4f1b9de6cb8fb032372de5889fe554d0fe`。以原生产 `1350486` 为基线发布固定版本 `ab1415609961541a4d501c289908ef61d4aa2670`，目录 `F:/ruanjian/lida/b-chapter-selection-20260922`，保留既有费用及 Trace 修复。
+- 候选使用生产 Python，以上回归加后台 HTTP、状态路径、启动器和网页客户端测试共 127 项全部通过。
+- 用户继续授权后完成管理员确认、在线备份、副本演练、停止后备份和切换。2026-09-22 10:16:49 发布成功；服务 PID 3768、看门狗 PID 11184。切换时 17 张业务表指纹一致，计划任务定义及 8795/8898 进程身份不变。
+- 维护脚本在 `F:/ruanjian/lida/maint-8790-ab14156`，备份在 `F:/cc/_backups/7-题库检索/2026-09-22/chapter-selection-ab14156`。回退只切换固定版本，不用旧数据库覆盖发布后的业务。
+- 公网真实浏览器通过登录、首帧加载文字/转圈、有效会话恢复、过期回主页、失败保留历史、重连与新对话重试。文字任务 `780262edd88340c897237dacffada483` 携带真实公网 Origin 返回 202，最终 SUCCEEDED，回复可见。
+- 临时验收邀请码已移除；验收新增 3 个 clear 和 1 个 handle_text，均成功。17 张原业务表的旧记录全部保留，费用表不变；仅新增 4 个操作/attempt、3 条管理员审计及 1 个公共回复。连续 30 秒健康为 ok，Trace 写失败和丢弃为 0，Checkpoint 正常。
+- 章节实际检索参数由生产版本的隔离假工具回归验证；公网未上传题图、未进行真实收费模型检索，不能把此次公网文字验收称为真实图片搜题全链路验收。
