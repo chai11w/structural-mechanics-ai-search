@@ -19,7 +19,7 @@ from typing import Any, Callable, Literal
 
 import search
 from tiku_shared.bank_versions import pin_bank
-from tiku_shared.execution_hooks import bounded_transport_retries
+from tiku_shared.execution_hooks import accept_model_fallback, bounded_transport_retries
 from multi_agent_pipeline import (
     AUTO_CHAPTER_MIN_CONFIDENCE,
     CHAPTER_UNKNOWN,
@@ -282,7 +282,7 @@ def analyze_multi_image_tool(
             next_state="READY_FOR_MULTI_DETAILS",
         )
     except Exception as exc:  # noqa: BLE001 - keep the single-question flow usable.
-        del exc
+        accept_model_fallback(exc, "single_question_route")
         return ToolResult.partial(
             code="MULTI_DETECTION_FALLBACK",
             data={"is_multi": False, "questions": []},
@@ -490,7 +490,7 @@ def classify_structure_tool(
             next_state="READY_FOR_COARSE_SEARCH",
         )
     except Exception as exc:  # noqa: BLE001 - optional speed-up; search can continue.
-        del exc
+        accept_model_fallback(exc, "structure_filter_skip")
         return ToolResult.partial(
             code="STRUCTURE_CLASSIFICATION_FALLBACK",
             data={"structure_type": "", "source": "vision_failed", "filter_applicable": False},

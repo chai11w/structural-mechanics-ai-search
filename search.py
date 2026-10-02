@@ -724,12 +724,15 @@ def apply_length_tie_break(
                 pair_options.update(provider=provider, endpoint=endpoint, enable_thinking=enable_thinking)
             return score_candidate_pair(client, query_image_path, str(Path(item["path"])), **pair_options)
         except Exception as exc:  # noqa: BLE001
+            from tiku_shared.execution_hooks import accept_model_fallback
+            accept_model_fallback(exc, "length_existing_order")
             print(f"WARNING: 候选 {item['rank']} 杆长复核失败: {exc}")
             return 0.0, "杆长复核失败"
 
     workers = max(1, min(RERANK_CONCURRENT_MAX_WORKERS, len(perfect)))
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        scored_pairs = list(executor.map(score_one, perfect))
+        futures = [submit_with_model_cost_context(executor, score_one, item) for item in perfect]
+        scored_pairs = [future.result() for future in futures]
     for item, (length_score, length_reason) in zip(perfect, scored_pairs):
         item["length_score"] = length_score
         item["length_reason"] = length_reason
@@ -809,6 +812,8 @@ def score_rerank_candidate(
             **pair_options,
         )
     except Exception as exc:  # noqa: BLE001
+        from tiku_shared.execution_hooks import accept_rerank_fallback
+        accept_rerank_fallback(exc)
         print(f"WARNING: 候选 {candidate['rank']} 复筛失败: {exc}")
         if _is_timeout_error(exc):
             # A timeout must not silently eliminate a potentially correct candidate.

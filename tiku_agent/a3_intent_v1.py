@@ -213,7 +213,9 @@ class A3IntentEngineV1:
         try:
             payload = self.model_client(build_a3_intent_input_v1(clean, context))
             decision = A3ActionDecisionV1.from_dict(payload)
-        except Exception:  # noqa: BLE001 - unavailable intent model must not mutate state.
+        except Exception as exc:  # noqa: BLE001 - unavailable intent model must not mutate state.
+            from tiku_shared.execution_hooks import accept_model_fallback
+            accept_model_fallback(exc, "intent_clarify")
             return _clarification("ambiguous_action", source="validator")
         checked = _validate_model_evidence(clean, decision, context)
         return _authorize_or_clarify(checked, context)

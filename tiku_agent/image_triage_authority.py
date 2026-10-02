@@ -202,6 +202,8 @@ class ImageTriageAuthority:
         try:
             reply = self.reply_client(handoff)
         except Exception as exc:  # The route remains safe if the second call fails.
+            from tiku_shared.execution_hooks import accept_model_fallback
+            accept_model_fallback(exc, "fixed_reply")
             return ImageTriageDecision(
                 handoff=handoff,
                 reply=self._fallback_reply(handoff),

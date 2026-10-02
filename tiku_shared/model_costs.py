@@ -285,6 +285,12 @@ def timed_model_call(
         )
         if observer is not None:
             observer.model_finished(call_id, record, confirmed=False)
+            # Let a caller with an explicit business fallback identify this
+            # exact failed call. Confirmation failures themselves are not tagged.
+            try:
+                exc._tiku_model_call_id = call_id
+            except (AttributeError, TypeError):
+                pass  # Preserve exceptions that prohibit additional attributes.
         _emit_model_call_finished(
             record=record,
             provider=clean_provider,
