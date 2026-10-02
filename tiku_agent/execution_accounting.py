@@ -1,4 +1,4 @@
-"""Pending accounting consumes a bounded reserve, never invents a paid receipt."""
+"""Keep pending accounting evidence without interrupting independent new work."""
 import json
 import time
 
@@ -38,6 +38,11 @@ def cost_exposure(conn, policy, identity_digest=None, *, now=None):
 
 
 def check_cost_admission(conn, policy, identity_digest=None, *, now=None):
+    # A lost usage response may never be recoverable. Do not make accumulated
+    # historical incidents a permanent lockout; reconciliation still runs and
+    # exact-once effect guards still reject replay of the original UNKNOWN call.
+    if not policy.block_on_pending_costs:
+        return
     # Broken ownership or a conflicting immutable ledger cannot be priced safely.
     if conn.execute(
         "SELECT 1 FROM execution_cost_outbox c LEFT JOIN execution_cost_runs r ON r.run_id=c.run_id "

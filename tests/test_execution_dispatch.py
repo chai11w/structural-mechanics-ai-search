@@ -241,7 +241,8 @@ class ExecutionDispatchTests(unittest.TestCase):
     def test_unknown_provider_failure_cannot_automatically_replay(self):
         f = self.f
         from dataclasses import replace
-        f.authority.policy = replace(f.authority.policy, max_global_unresolved_cost_calls=1)
+        f.authority.policy = replace(f.authority.policy, max_global_unresolved_cost_calls=1,
+                                     block_on_pending_costs=True)
         _, req, grant = f.accept("timeout")
         f.worker.run_once()
         self.assertEqual(f.observe(req, grant)["status"], "UNKNOWN")

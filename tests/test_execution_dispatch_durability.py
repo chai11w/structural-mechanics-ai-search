@@ -189,7 +189,8 @@ class ExecutionDispatchDurabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             f = DispatchFixture(root)
             from dataclasses import replace
-            f.authority.policy = replace(f.authority.policy, max_global_unresolved_cost_calls=1)
+            f.authority.policy = replace(f.authority.policy, max_global_unresolved_cost_calls=1,
+                                         block_on_pending_costs=True)
             f.accept("timeout", sid="first")
             _, req, grant = f.accept(sid="second")
             self.assertTrue(f.worker.run_once())
