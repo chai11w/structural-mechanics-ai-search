@@ -2,6 +2,8 @@
 
 2026-09-09。5.4 实现及 5.5 隔离验收已完成，未上线。最终逐门证据见 [验收矩阵](phase5_acceptance_matrix.md)；下文各轮测试数量保留其历史批次含义。
 
+2026-10-02 更新：下文费用阻断规则为历史策略。当前默认只保留待核对证据，不因旧任务费用拒绝新任务；每日额度按已记录费用检查。原 UNKNOWN 不自动重放、不可变费用回执和本地补账约束继续生效，详见 [当前费用规则](cost-accounting-recovery.md)。
+
 ## 已实现：调用记录与费用交接
 
 启用执行门时，`timed_model_call` 在调用前持久建立 `execution_effects` 的 PREPARED 记录，再提交 SENT，才执行 provider function。结果及费用白名单保存成功为 CONFIRMED；网络异常、确认失败或旧租约失效保留 UNKNOWN。每次 schema 纠错是新的 call ID，继承 operation/attempt/run；不记录 Prompt、模型正文、原始 OCR 或异常消息。
