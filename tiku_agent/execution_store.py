@@ -46,9 +46,14 @@ class ExecutionPolicy:
     unknown_cost_reserve_micros: int = 1_000_000
     max_identity_unresolved_cost_calls: int = 10
     max_global_unresolved_cost_calls: int = 100
+    # Historical accounting uncertainty is observable debt, not a service outage.
+    block_on_pending_costs: bool = False
 
     def __post_init__(self):
-        if any(type(v) is not int or v <= 0 for v in vars(self).values()):
+        if type(self.block_on_pending_costs) is not bool:
+            raise ValueError("block_on_pending_costs must be boolean")
+        if any(type(v) is not int or v <= 0 for k, v in vars(self).items()
+               if k != "block_on_pending_costs"):
             raise ValueError("execution limits must be positive integers")
 
 

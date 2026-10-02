@@ -2071,7 +2071,8 @@ class AgentSessionRuntime:
         local_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         started_at = local_start.astimezone(UTC).isoformat()
         operations = getattr(self, "execution_operations", None)
-        global_reserve = operations.cost_exposure()['reserved_micros'] if operations is not None else 0
+        enforce_pending = operations is not None and operations.authority.policy.block_on_pending_costs
+        global_reserve = operations.cost_exposure()['reserved_micros'] if enforce_pending else 0
         if global_budget_micros > 0 and (global_reserve + self.cost_ledger.estimated_cost_micros_since(
             started_at
         )) >= global_budget_micros:
@@ -2090,7 +2091,7 @@ class AgentSessionRuntime:
         spent = self.cost_ledger.estimated_cost_micros_since(
             started_at, identity_key=clean_identity
         )
-        identity_reserve = operations.cost_exposure(clean_identity)['reserved_micros'] if operations is not None else 0
+        identity_reserve = operations.cost_exposure(clean_identity)['reserved_micros'] if enforce_pending else 0
         if spent + identity_reserve >= identity_budget_micros:
             raise AgentBudgetExceededError(
                 "该邀请码今日额度已用完，请明天再试。",
