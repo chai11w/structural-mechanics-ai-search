@@ -230,7 +230,7 @@ const RECOVERY_ACTION_LABELS = {
 
 class UserVisibleError extends Error {
   constructor(message, recoveryActions = [], { retryable = true, protocol = {} } = {}) {
-    super(message);
+    super(userFacingErrorText(message));
     this.name = 'UserVisibleError';
     this.recoveryActions = normalizeRecoveryActions(recoveryActions);
     this.retryable = Boolean(retryable);
@@ -238,10 +238,27 @@ class UserVisibleError extends Error {
   }
 }
 
+function userFacingErrorText(message, fallback = '暂时无法完成操作，请稍后重试。') {
+  const text = typeof message === 'string' ? message.trim() : '';
+  // Native exceptions can also arrive through a server event or old history.
+  // Enforce the display boundary even when a caller labelled them user-visible.
+  if (/failed to fetch|networkerror|network request failed|load failed|err_(?:network|connection|empty_response|internet)/i.test(text)) {
+    return '连接暂时中断，当前对话已保留，请重新连接后继续。';
+  }
+  if (/aborterror|signal is aborted|operation was aborted|timeouterror|timed?\s*out/i.test(text)) {
+    return '连接等待中断，当前对话已保留，请重新连接后继续。';
+  }
+  const chinese = /[\u3400-\u9fff]/;
+  if (!chinese.test(text) || /\b(?:TypeError|SyntaxError|ReferenceError|RangeError|Traceback|Exception)\b|unexpected token|is not defined|cannot read properties/i.test(text)) {
+    return chinese.test(fallback) ? fallback : '暂时无法完成操作，请稍后重试。';
+  }
+  return text;
+}
+
 function userFacingErrorMessage(error, fallback) {
-  if (error instanceof UserVisibleError) return error.message;
-  if (typeof error?.publicMessage === 'string' && error.publicMessage) return error.publicMessage;
-  return fallback;
+  if (error instanceof UserVisibleError) return userFacingErrorText(error.message, fallback);
+  if (typeof error?.publicMessage === 'string' && error.publicMessage) return userFacingErrorText(error.publicMessage, fallback);
+  return userFacingErrorText('', fallback);
 }
 
 let history = [];
@@ -1944,7 +1961,7 @@ function showFailureNotice(key, message, recoveryActions = [], protocol = {}) {
   const noticeKey = String(key || '').trim();
   if (!noticeKey || activeFailureNotices.has(noticeKey)) return null;
   const item = {
-    message, variant: 'error', recoveryActions, noticeKey, ...protocolFields(protocol),
+    message: userFacingErrorText(message), variant: 'error', recoveryActions, noticeKey, ...protocolFields(protocol),
   };
   activeFailureNotices.set(noticeKey, item);
   return addMessage(item, false);
@@ -2373,6 +2390,7 @@ function createMediaCard(url, index, item) {
 }
 
 function addMessage(item, persist = true) {
+  if (!item.me && item.variant === 'error') item = { ...item, message: userFacingErrorText(item.message) };
   if (persist && backgroundEnabled && executionContext?.epoch) {
     // A tab may type before another tab's storage event is dispatched. Preserve
     // already-published replies from the same epoch before saving that input.
@@ -4654,7 +4672,7 @@ function setUploadRowStatus(row, message, variant = '') {
   row.classList.remove('error');
   if (variant) row.classList.add(variant);
   const paragraph = row.querySelector('.message-text');
-  if (paragraph) paragraph.textContent = message;
+  if (paragraph) paragraph.textContent = variant === 'error' ? userFacingErrorText(message) : message;
   row.querySelector('.retry-upload')?.remove();
 }
 
