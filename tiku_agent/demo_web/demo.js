@@ -129,6 +129,7 @@ const a3ImageArea = $('.a3-image-area');
 const a3ImageFrame = $('#a3-image-frame');
 const a3SourceImage = $('#a3-source-image');
 const a3Selection = $('#a3-selection');
+const a3Reconnect = $('#a3-reconnect');
 const a3ImageHint = $('#a3-image-hint');
 const a3CropStatus = $('#a3-crop-status');
 const a3Submit = $('#a3-submit');
@@ -235,6 +236,12 @@ class UserVisibleError extends Error {
     this.retryable = Boolean(retryable);
     Object.assign(this, protocolFields(protocol));
   }
+}
+
+function userFacingErrorMessage(error, fallback) {
+  if (error instanceof UserVisibleError) return error.message;
+  if (typeof error?.publicMessage === 'string' && error.publicMessage) return error.publicMessage;
+  return fallback;
 }
 
 let history = [];
@@ -2267,7 +2274,7 @@ async function submitFeedback() {
     setStatus('ready', '感谢你的反馈');
     setTimeout(() => { if (!isBusy) setStatus('ready', '准备就绪'); }, 2200);
   } catch (error) {
-    feedbackError.textContent = error.message || '反馈提交失败，请稍后重试。';
+    feedbackError.textContent = userFacingErrorMessage(error, '反馈提交失败，请稍后重试。');
     feedbackError.hidden = false;
     setFeedbackPending(false);
     feedbackSubmit.textContent = '重新提交';
@@ -2293,7 +2300,7 @@ async function cancelFeedback() {
     setStatus('ready', '反馈已取消');
     setTimeout(() => { if (!isBusy) setStatus('ready', '准备就绪'); }, 2200);
   } catch (error) {
-    feedbackError.textContent = error.message || '取消反馈失败，请稍后重试。';
+    feedbackError.textContent = userFacingErrorMessage(error, '取消反馈失败，请稍后重试。');
     feedbackError.hidden = false;
     setFeedbackPending(false);
     feedbackCancel.textContent = '重新取消';
@@ -3363,13 +3370,13 @@ async function request(
     }
     return data;
   } catch (error) {
-    if (error.name === 'AbortError') {
+    if (error instanceof UserVisibleError) throw error;
+    if (controller.signal.aborted || ['AbortError', 'TimeoutError'].includes(error?.name)) {
       if (controller.signal.reason === 'new-chat') throw new UserVisibleError('当前识别已取消。');
       throw new UserVisibleError(timeoutMessage, ['retry_request'], {
         protocol: { status: 'ERROR', layer: 'network', code: 'REQUEST_TIMEOUT', retryable: true, action: 'retry_request', request_id: requestId },
       });
     }
-    if (error instanceof UserVisibleError) throw error;
     if (error instanceof TypeError) throw new UserVisibleError(networkMessage || '无法连接服务，请检查网络后重试。', ['retry_request'], {
       protocol: { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: requestId },
     });
@@ -3542,13 +3549,13 @@ async function requestStream(
     }
     throw clientProtocolError('服务返回格式异常，请稍后重试。', 'RESPONSE_INVALID', requestId);
   } catch (error) {
-    if (error.name === 'AbortError') {
+    if (error instanceof UserVisibleError) throw error;
+    if (controller.signal.aborted || ['AbortError', 'TimeoutError'].includes(error?.name)) {
       if (controller.signal.reason === 'new-chat') throw new UserVisibleError('当前识别已取消。');
       throw new UserVisibleError(timeoutMessage, ['retry_request'], {
         protocol: { status: 'ERROR', layer: 'network', code: 'REQUEST_TIMEOUT', retryable: true, action: 'retry_request', request_id: requestId },
       });
     }
-    if (error instanceof UserVisibleError) throw error;
     if (error instanceof TypeError) throw new UserVisibleError(networkMessage || '无法连接服务，请检查网络后重试。', ['retry_request'], {
       protocol: { status: 'ERROR', layer: 'network', code: 'NETWORK_UNAVAILABLE', retryable: true, action: 'retry_request', request_id: requestId },
     });
@@ -3938,7 +3945,7 @@ async function selectA3Unit(target) {
     if (operation !== operationVersion) return;
     pending.remove();
     addMessage({
-      message: error.message || '选题失败，请重新选择。',
+      message: userFacingErrorMessage(error, '选题失败，请重新选择。'),
       variant: 'error', recoveryActions: taskStateFailureRecoveryActions(error.recoveryActions),
       ...protocolFields(error),
     });
@@ -4089,7 +4096,8 @@ function renderA3Selection() {
   a3Selection.hidden = !bounds;
   a3ImageHint.hidden = Boolean(bounds);
   a3Submit.disabled = !bounds || isBusy || !canSubmit;
-  a3CropStatus.classList.toggle('is-warning', Boolean(a3Current()?.crop_review_required));
+  const connectionNotice = a3CropStatus.dataset.connectionNotice || '';
+  a3CropStatus.classList.toggle('is-warning', Boolean(connectionNotice || a3Current()?.crop_review_required));
   if (!bounds) {
     a3CropStatus.textContent = '尚未框选结构图';
     return;
@@ -4098,9 +4106,9 @@ function renderA3Selection() {
   a3Selection.style.top = `${bounds.y * 100}%`;
   a3Selection.style.width = `${bounds.width * 100}%`;
   a3Selection.style.height = `${bounds.height * 100}%`;
-  a3CropStatus.textContent = a3Current()?.crop_review_required
+  a3CropStatus.textContent = connectionNotice || (a3Current()?.crop_review_required
     ? a3CropReviewMessage()
-    : '已框选，可以提交校验';
+    : '已框选，可以提交校验');
 }
 
 function fitA3Image() {
@@ -4257,9 +4265,9 @@ async function submitA3Crop() {
   } catch (error) {
     if (operation !== operationVersion) return;
     a3CropStatus.classList.add('is-warning');
-    a3CropStatus.textContent = error.message || '裁剪校验失败，可以直接重试';
+    a3CropStatus.textContent = userFacingErrorMessage(error, '裁剪校验失败，可以直接重试');
     addMessage({
-      message: error.message || '裁剪校验失败，可以直接重试。',
+      message: userFacingErrorMessage(error, '裁剪校验失败，可以直接重试。'),
       variant: 'error', recoveryActions: taskStateFailureRecoveryActions(error.recoveryActions),
       ...protocolFields(error),
     });
@@ -4456,7 +4464,7 @@ async function prepareA3Units() {
   } catch (error) {
     if (operation !== operationVersion) return;
     addMessage({
-      message: error.message || '裁图校验失败，请重新选择。',
+      message: userFacingErrorMessage(error, '裁图校验失败，请重新选择。'),
       variant: 'error', recoveryActions: taskStateFailureRecoveryActions(error.recoveryActions),
       ...protocolFields(error),
     });
@@ -4605,7 +4613,7 @@ async function sendTextValue(value, displayValue = value, actionContext = null, 
     if (operation !== operationVersion) return;
     pending?.remove();
     if (error.message !== '当前识别已取消。') addMessage({
-      message: error.message || '暂时无法处理，请再试一次。',
+      message: userFacingErrorMessage(error, '暂时无法处理，请再试一次。'),
       variant: 'error',
       recoveryActions: error.retryable === false
         ? normalizeRecoveryActions(error.recoveryActions || [])
@@ -4718,7 +4726,7 @@ async function submitPreparedImage(prepared, uploadRow) {
     pending.remove();
     addUploadFailure(
       uploadRow,
-      error.message || '服务端处理失败，请稍后重试。',
+      userFacingErrorMessage(error, '服务端处理失败，请稍后重试。'),
       prepared,
       error.recoveryActions || [],
       error,
@@ -4773,9 +4781,9 @@ async function uploadImage(selected) {
     pendingUpload = prepared;
   } catch (error) {
     if (operation === operationVersion) {
-      setUploadRowStatus(uploadRow, error.message || '裁剪处理失败，请重新选择图片。', 'error');
+      setUploadRowStatus(uploadRow, userFacingErrorMessage(error, '裁剪处理失败，请重新选择图片。'), 'error');
       addMessage({
-        message: error.message || '图片处理失败，请重新选择图片。',
+        message: userFacingErrorMessage(error, '图片处理失败，请重新选择图片。'),
         variant: 'error', recoveryActions: ['reupload'],
         status: 'NEEDS_INPUT', layer: 'upload', code: 'UPLOAD_DECODE_FAILED',
         retryable: false, action: 'retry_upload', requestId: createRequestId(), searchId: '',
@@ -4848,7 +4856,7 @@ async function resetConversation() {
   } catch (error) {
     if (operation !== operationVersion) return;
     addMessage({
-      message: error.message || '新对话创建失败，请稍后重试。',
+      message: userFacingErrorMessage(error, '新对话创建失败，请稍后重试。'),
       variant: 'error', recoveryActions: error.recoveryActions || [],
     });
     setStatus('error', '新对话创建失败');
@@ -4933,6 +4941,7 @@ a3ImageFrame.addEventListener('pointerup', endA3Selection);
 a3ImageFrame.addEventListener('pointercancel', endA3Selection);
 a3SourceImage.addEventListener('load', fitA3Image);
 a3Submit.addEventListener('click', submitA3Crop);
+a3Reconnect.addEventListener('click', () => { a3Reconnect.hidden = true; retryConnection(); });
 feedbackClose.addEventListener('click', closeFeedback);
 feedbackBackdrop.addEventListener('click', (event) => { if (event.target === feedbackBackdrop) closeFeedback(); });
 feedbackCancel.addEventListener('click', cancelFeedback);
@@ -5059,19 +5068,38 @@ window.visualViewport?.addEventListener('resize', syncVisualViewport, { passive:
 window.visualViewport?.addEventListener('scroll', syncVisualViewport, { passive: true });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) expireHistoryIfNeeded(); });
 
-function backgroundNotice(error) {
+function backgroundNotice(error, { kind = '' } = {}) {
   if (error?.admissionRejected) {
     setStatus('error', '任务未接收');
-    showFailureNotice('connection', error.message, []);
+    showFailureNotice('connection', userFacingErrorMessage(error, '本次任务未接收，请稍后重试。'), []);
     return;
   }
   const login = error?.status === 401;
   const missing = error?.code === 'EXECUTION_NOT_FOUND';
+  if (error?.submissionNotSent && !login) {
+    const message = kind === 'handle_crop'
+      ? '连接暂时中断，本次裁剪尚未提交，裁剪范围已保留，请再次提交。'
+      : '连接暂时不稳定，本次任务尚未提交。请重新连接后继续。';
+    setStatus('error', '连接暂时中断');
+    if (kind === 'handle_crop') {
+      a3CropStatus.dataset.connectionNotice = message;
+      a3CropStatus.classList.add('is-warning');
+      a3CropStatus.textContent = message;
+    }
+    showFailureNotice('connection', message, kind === 'handle_crop' ? [] : ['retry_connection']);
+    return;
+  }
   setStatus('error', login ? '需要重新登录' : '原任务待核对');
   showFailureNotice('connection', login ? '登录已失效，请重新登录。'
     : missing ? '尚未找到上次提交的任务。不会自动重发，请重新连接核对，或开始新对话。'
-      : (error?.message || '暂时无法读取原任务，请重新连接。'),
+      : userFacingErrorMessage(error, '连接暂时中断，请重新连接查看原任务。'),
     login ? ['relogin'] : ['retry_connection', 'new_chat']);
+  if (!login && !a3CropWorkspace.hidden) {
+    a3CropStatus.classList.add('is-warning');
+    a3CropStatus.dataset.connectionNotice = '连接暂时中断，裁剪范围已保留，请重新连接查看结果。';
+    a3CropStatus.textContent = a3CropStatus.dataset.connectionNotice;
+    a3Reconnect.hidden = false;
+  }
 }
 
 function initializeBackgroundJobs() {
@@ -5146,6 +5174,8 @@ function initializeBackgroundJobs() {
               && persisted.responseId !== result.response_id)) throw sessionCoordinationError();
           resolveFailureNotice('connection');
           resolveFailureNotice('session-recovery');
+          a3Reconnect.hidden = true;
+          delete a3CropStatus.dataset.connectionNotice;
           syncTaskStateActionButtons();
         };
         if (navigator.locks?.request) await navigator.locks.request('tiku-agent-background-history-v1', render);
@@ -5164,6 +5194,8 @@ function initializeBackgroundJobs() {
 
 async function requestBackgroundJob(url, options, onProgress) {
   if (!backgroundClient) throw sessionCoordinationError();
+  a3Reconnect.hidden = true;
+  delete a3CropStatus.dataset.connectionNotice;
   const resetEpoch = sessionResetEpoch;
   let record;
   try {
@@ -5173,9 +5205,9 @@ async function requestBackgroundJob(url, options, onProgress) {
         applySessionCoordinationHeaders(headers, fence);
         assertSessionRequestCoordination(fence, url);
         try {
-          record = await backgroundClient.submit(url, options, executionContext, fence, headers);
+          record = await backgroundClient.submit(url, options, executionContext, fence, headers, onProgress);
         } catch (error) {
-          if (error?.admissionRejected) resolveSessionRequestFence(fence);
+          if (error?.admissionRejected || error?.submissionNotSent) resolveSessionRequestFence(fence);
           throw error;
         }
         // An acknowledged operation is now protected by the persistent job
@@ -5192,7 +5224,9 @@ async function requestBackgroundJob(url, options, onProgress) {
       if (resetEpoch === sessionResetEpoch && executionContext?.epoch === record.epoch) onProgress?.(event);
     });
   } catch (error) {
-    if (resetEpoch === sessionResetEpoch && (!record || executionContext?.epoch === record.epoch)) backgroundNotice(error);
+    if (resetEpoch === sessionResetEpoch && (!record || executionContext?.epoch === record.epoch)) {
+      backgroundNotice(error, { kind: url === '/api/a3/crop/stream' ? 'handle_crop' : '' });
+    }
   }
   return { backgroundHandled: true };
 }
@@ -5345,7 +5379,7 @@ function createExecutionPanel() {
       resolveFailureNotice('execution-control');
     } catch (error) {
       controls.replaceChildren();
-      note.textContent = error.message || '状态查询失败，请稍后刷新任务状态。';
+      note.textContent = userFacingErrorMessage(error, '状态查询失败，请稍后刷新任务状态。');
       try { retry.hidden = !client.hasPending(); } catch (_error) { retry.hidden = true; }
       resolveFailureNotice('execution-control');
       showFailureNotice('execution-control', note.textContent,

@@ -4256,8 +4256,10 @@ const historyExpirySource = block('function clearHistory(', 'function showSessio
 const submitSource = block('async function submitA3Crop', 'function renderA3SheetUnits');
 const renderSheetSource = block('function renderA3SheetUnits', 'async function prepareA3Units');
 const prepareSource = block('async function prepareA3Units', 'function openA3Sheet');
+const publicErrorSource = block('class UserVisibleError', 'let history =');
 
 const createHarness = new Function('taskStateV1', `
+  ${publicErrorSource}
   let taskStateContext = taskStateV1.createTaskStateModel();
   let sessionContext = {
     a3: null, a3WorkflowId: '', a3WorkflowRevision: 0,
