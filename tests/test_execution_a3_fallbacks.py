@@ -16,7 +16,7 @@ class A3FallbackTests(unittest.TestCase):
         self.addCleanup(self.f.doCleanups)
         self.failures = []
 
-    def fail(self, call_type):
+    def model_outage(self, call_type):
         def send():
             self.failures.append(call_type)
             raise TimeoutError("controlled model outage")
@@ -34,7 +34,7 @@ class A3FallbackTests(unittest.TestCase):
     def test_auto_grounding_failure_still_reaches_manual_crop(self):
         f = self.f
         f.a3.auto_cropper = FakeAutoCropper()
-        with patch.object(f.a3.auto_cropper, "ground", side_effect=lambda *a: self.fail("glm_a3_page_auto_crop")):
+        with patch.object(f.a3.auto_cropper, "ground", side_effect=lambda *a: self.model_outage("glm_a3_page_auto_crop")):
             f.run_command("handle_image", {}, image=f.image)
         self.assertFalse(f.a3.store.load("s").auto_crop_enabled)
         f.run_command("select_unit", {"unit_id": "g1-u1", **f.target()})
@@ -46,7 +46,7 @@ class A3FallbackTests(unittest.TestCase):
         f = self.f
         f.a3.auto_cropper = FakeAutoCropper(second_status="auto_ready")
         f.run_command("handle_image", {}, image=f.image)
-        with patch.object(f.a3.crop_verifier, "verify", side_effect=lambda *a: self.fail("qwen_a3_crop_compare")):
+        with patch.object(f.a3.crop_verifier, "verify", side_effect=lambda *a: self.model_outage("qwen_a3_crop_compare")):
             f.run_command("prepare_units", {"unit_ids": ["g1-u1", "g1-u2"], **f.target()})
         state = f.a3.store.load("s")
         self.assertTrue(all(state.auto_crops[u]["validation_status"] == "manual_required" for u in ["g1-u1", "g1-u2"]))
@@ -58,7 +58,7 @@ class A3FallbackTests(unittest.TestCase):
         f = self.f
         f.a3.auto_cropper = FakeAutoCropper(second_status="auto_ready")
         f.run_command("handle_image", {}, image=f.image)
-        f.a3.external_load_screen = lambda path: self.fail("external_load_screen")
+        f.a3.external_load_screen = lambda path: self.model_outage("external_load_screen")
         f.a3.external_load_screen.execution_version = "test-load-outage-v1"
         f.run_command("prepare_units", {"unit_ids": ["g1-u1", "g1-u2"], **f.target()})
         self.assertTrue(all(r["validation_status"] == "manual_required" for r in f.a3.store.load("s").auto_crops.values()))
@@ -69,9 +69,9 @@ class A3FallbackTests(unittest.TestCase):
         f.run_command("handle_image", {}, image=f.image)
         f.run_command("select_unit", {"unit_id": "g1-u1", **f.target()})
         if stage == "load":
-            f.a3.external_load_screen = lambda path: self.fail("external_load_screen")
+            f.a3.external_load_screen = lambda path: self.model_outage("external_load_screen")
         else:
-            f.a3.crop_verifier.verify = lambda *args: self.fail("qwen_a3_crop_compare")
+            f.a3.crop_verifier.verify = lambda *args: self.model_outage("qwen_a3_crop_compare")
         f.run_command("handle_crop", {"bounds": {"x": 0.1, "y": 0.1, "width": 0.7, "height": 0.7},
                                      "unit_id": "g1-u1", **f.target()})
         state = f.a3.store.load("s")
@@ -87,7 +87,7 @@ class A3FallbackTests(unittest.TestCase):
 
     def test_page_error_keeps_image_and_allows_explicit_new_retry(self):
         f = self.f
-        f.a3.page_observer.observe = lambda *args: self.fail("qwen_a3_page_understanding")
+        f.a3.page_observer.observe = lambda *args: self.model_outage("qwen_a3_page_understanding")
         f.run_command("handle_image", {}, image=f.image)
         self.assertEqual(f.a3.store.load("s").phase, "ERROR")
         self.assertTrue(Path(f.a3.store.load("s").source_page_path).is_file())
@@ -107,6 +107,39 @@ class A3FallbackTests(unittest.TestCase):
         self.assertTrue(all(not Path(p).exists() for row in aborted for p in row))
         f.run_command("select_unit", {"unit_id": "g1-u1", **f.target()})
         self.assertEqual(f.a3.store.load("s").phase, "CROP_REQUIRED")
+
+    def test_selected_unit_rerank_outage_delivers_coarse_candidates_through_child_handoff(self):
+        from PIL import Image
+        from tiku_agent.tools import ToolResult, rerank_candidates_tool
+        f = self.f
+        candidate = f.root / "candidate.png"
+        Image.new("RGB", (80, 60), "white").save(candidate)
+        coarse = [{"rank": i, "name": f"candidate-{i}", "path": str(candidate), "score": 1.0}
+                  for i in (1, 2, 3)]
+        analyze = f.tools.analyze_image
+        def known_chapter(*args, **kwargs):
+            result = analyze(*args, **kwargs)
+            result.data.update(chapter="4力法", chapter_confidence=1.0, needs_manual_chapter=False)
+            return result
+        f.tools.analyze_image = known_chapter
+        f.tools.coarse_search = lambda *a, **k: ToolResult(ok=True, data={"candidates": coarse})
+        f.tools.rerank_candidates = lambda image, rows, **options: rerank_candidates_tool(
+            image, rows, **options, force_rerank=True, rerank_provider="qwen", max_workers=2)
+        f.a3.auto_cropper = FakeAutoCropper(second_status="auto_ready")
+        f.run_command("handle_image", {}, image=f.image)
+        f.run_command("prepare_units", {"unit_ids": ["g1-u1"], **f.target()})
+        with patch("search.score_candidate_pair", side_effect=lambda *a, **k: self.model_outage("qwen_shape_rerank")):
+            receipt = f.run_command("select_unit", {"unit_id": "g1-u1", **f.target()})
+        self.assertEqual(f.a3.store.load("s").phase, "A2_ACTIVE")
+        child = f.a2.store.load("s")
+        self.assertEqual(child.phase, "WAIT_CANDIDATE_CHOICE")
+        self.assertEqual([item["name"] for item in child.candidates], [item["name"] for item in coarse])
+        self.assertIn("粗筛", str(receipt))
+        with f.store.transaction() as conn:
+            handoff = conn.execute("SELECT status FROM execution_handoffs WHERE operation_id=?",
+                                   (receipt["operation_id"],)).fetchone()
+        self.assertEqual(handoff[0], "COMMITTED")
+        self.assert_preserved("rerank_coarse")
 
 
 if __name__ == "__main__":
