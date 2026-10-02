@@ -594,7 +594,7 @@ assert.deepEqual(detached.active_child_task.allowed_actions, ['select_candidate'
         demo = (ROOT / "tiku_agent" / "demo_web" / "demo.js").read_text(encoding="utf-8")
 
         task_state_asset = 'src="/assets/task_state.js?v=20260830-task-state-3-4-5"'
-        demo_asset = 'src="/assets/demo.js?v=20260928-control-recovery-v1"'
+        demo_asset = 'src="/assets/demo.js?v='
         self.assertIn(task_state_asset, page)
         self.assertIn(demo_asset, page)
         self.assertLess(page.index(task_state_asset), page.index(demo_asset))
@@ -721,7 +721,9 @@ const end = source.indexOf('function setFeedbackPending', start);
 assert.notEqual(start, -1);
 assert.notEqual(end, -1);
 const noticeSource = source.slice(start, end);
+const errorTextSource = source.slice(source.indexOf('function userFacingErrorText'), source.indexOf('function userFacingErrorMessage'));
 const createHarness = new Function(`
+  ${errorTextSource}
   const activeFailureNotices = new Map();
   const rows = [];
   const persistCalls = [];

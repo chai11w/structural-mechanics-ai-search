@@ -13,6 +13,7 @@ async (page, { imagePath, screenshotPath }) => {
         window.__bindingCalls++;
         if (window.__bindingFailures > 0) {
           window.__bindingFailures--;
+          if (window.__bindingNativeError === 'network') throw new TypeError('Failed to fetch');
           return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => {
             window.__transportAborts.push(options.signal.reason.message);
             reject(options.signal.reason);
