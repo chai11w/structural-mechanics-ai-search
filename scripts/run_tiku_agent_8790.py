@@ -36,6 +36,7 @@ from tiku_diagnostics.checkpoint_retention import (
     CheckpointRetentionRunner,
 )
 from tiku_shared.trace_events import SQLiteTraceEventStore, TraceEventRecorder
+from tiku_shared.qwen_transport import configure_qwen_connect_retries_from_env
 
 
 DEFAULT_PORT = 8790
@@ -611,6 +612,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_argument_parser().parse_args()
+    configure_qwen_connect_retries_from_env()
     uvicorn.run(
         build_app(
             args.runtime_dir,
