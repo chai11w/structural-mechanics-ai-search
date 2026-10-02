@@ -20,7 +20,7 @@
     GLOBAL_DAILY_QUOTA_EXCEEDED: [409, '服务今日额度已用完，本次任务未接收，请额度恢复后重新提交。'],
   };
   function failure(code, message, status = 0) {
-    return Object.assign(new Error(message), { code, status, background: true });
+    return Object.assign(new Error(message), { code, status, background: true, publicMessage: message });
   }
   function invalid() { return failure('RESPONSE_INVALID', '任务记录无法核验，请重新连接。'); }
   function validContext(context) {
@@ -103,6 +103,13 @@
         }
         if (data.schema_version !== 1) throw invalid();
         return data;
+      } catch (error) {
+        if (error?.background) throw error;
+        if (controller.signal.aborted || ['AbortError', 'TimeoutError'].includes(error?.name)) {
+          throw failure('REQUEST_TIMEOUT', '连接等待超时，请重新连接后继续。');
+        }
+        if (error instanceof TypeError) throw failure('NETWORK_UNAVAILABLE', '连接暂时中断，请检查网络后重新连接。');
+        throw invalid();
       } finally { clearTimeout(timer); }
     }
     function accept(record, data, { create = false } = {}) {
@@ -117,13 +124,25 @@
       return job;
     }
     function pending(epoch) { return records().filter(record => !record.done && record.epoch === epoch); }
-    async function submit(path, options, context, fence, headers) {
+    async function submit(path, options, context, fence, headers, onProgress = () => {}) {
       if (!host.locks?.request) throw failure('WEB_LOCK_REQUIRED', '此浏览器无法安全协调任务，请更换浏览器。');
       if (!validContext(context) || !KEY.test(fence?.id)) throw invalid();
       if (pending(context.epoch).length) throw failure('PENDING_JOB', '上次任务尚待确认，请重新连接查看原任务。');
       const value = command(path, options);
       // Caller owns the shared session Web Lock for this entire admission only.
-      const bound = await http('/api/jobs/session', { method: 'POST', headers: { 'X-Tiku-Background': '1' } });
+      let bound;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          // Binding is idempotent and never starts model/business work.
+          bound = await http('/api/jobs/session', { method: 'POST', headers: { 'X-Tiku-Background': '1' } });
+          break;
+        } catch (error) {
+          error.submissionNotSent = true; // The business POST has not been reached.
+          if (attempt || !['REQUEST_TIMEOUT', 'NETWORK_UNAVAILABLE'].includes(error.code)) throw error;
+          onProgress({ message: '连接暂时不稳定，正在重新连接…' });
+          await sleep(500);
+        }
+      }
       if (!validContext(bound.execution) || bound.execution.epoch !== context.epoch
           || bound.execution.state_version !== context.state_version) throw failure('EXECUTION_STALE', '会话已更新，请重新连接。');
       // Only a fresh server binding under the shared submission Web Lock proves

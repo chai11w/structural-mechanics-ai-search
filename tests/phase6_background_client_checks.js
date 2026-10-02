@@ -244,6 +244,49 @@ async function run() {
     await assert.rejects(api.createClient(broken.host).queueRecovery(id, broken.context), /full/);
     assert.equal(broken.delivered.length, 0);
   });
+  await test('session-binding abort reconnects once before the only business POST', async () => {
+    const f = fixture(), original = f.host.fetch;
+    let bindings = 0;
+    f.host.fetch = async (path, options) => {
+      if (path === '/api/jobs/session' && ++bindings === 1) throw new DOMException('signal is aborted without reason', 'AbortError');
+      return original(path, options);
+    };
+    const client = api.createClient(f.host), record = await submit(f, client);
+    await client.observe(record);
+    assert.equal(bindings, 2);
+    assert.equal(f.calls.filter(c => c.path === '/api/jobs').length, 1);
+    assert.equal(f.delivered.length, 1);
+  });
+  await test('persistent binding failure is Chinese and proves no crop submission', async () => {
+    for (const error of [new DOMException('signal is aborted without reason', 'AbortError'), new TypeError('Failed to fetch')]) {
+      const f = fixture(); let bindings = 0;
+      f.host.fetch = async path => { assert.equal(path, '/api/jobs/session'); bindings++; throw error; };
+      await assert.rejects(submit(f, api.createClient(f.host)), e => e.submissionNotSent === true
+        && e.publicMessage === e.message && /连接/.test(e.message) && !/aborted|fetch/.test(e.message));
+      assert.equal(bindings, 2);
+      assert.equal(f.entries.size, 0);
+    }
+  });
+  await test('lost business response never repeats the POST and observes original result', async () => {
+    const f = fixture(), original = f.host.fetch; let posts = 0;
+    f.host.fetch = async (path, options) => {
+      const response = await original(path, options);
+      if (path === '/api/jobs') { posts++; throw new DOMException('signal is aborted without reason', 'AbortError'); }
+      return response;
+    };
+    const client = api.createClient(f.host), record = await submit(f, client);
+    assert.equal(record.id, '');
+    await client.observe(record);
+    assert.equal(posts, 1);
+    assert.equal(f.delivered.length, 1);
+  });
+  await test('invalid JSON uses a registered message without retrying session binding', async () => {
+    const f = fixture(); let bindings = 0;
+    f.host.fetch = async () => { bindings++; return new Response('<html>proxy failure</html>'); };
+    await assert.rejects(submit(f, api.createClient(f.host)), e => e.code === 'RESPONSE_INVALID'
+      && e.submissionNotSent && !e.message.includes('JSON'));
+    assert.equal(bindings, 1);
+  });
   console.log(count + ' client checks passed');
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });

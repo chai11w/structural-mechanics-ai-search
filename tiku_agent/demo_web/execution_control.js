@@ -10,7 +10,7 @@
     'EXECUTION_RECOVERY_INVALID', 'EXECUTION_UNKNOWN', 'EXECUTION_RESULT_UNAVAILABLE',
     'EXECUTION_BUSY', 'EXECUTION_CAPACITY',
   ]);
-  const fail = (text = '无法确认任务状态，请刷新任务状态后重试。') => new Error(text);
+  const fail = (text = '无法确认任务状态，请刷新任务状态后重试。') => Object.assign(new Error(text), { publicMessage: text });
   const object = (value) => value && typeof value === 'object' && !Array.isArray(value);
   const exact = (value, keys) => object(value) && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
   const id = (value) => typeof value === 'string' && value.length > 0 && value.length <= 128;
@@ -76,10 +76,10 @@
         if (!(response.headers.get('content-type') || '').includes('application/json')) throw fail();
         return { response, data: await response.json() };
       } catch (error) {
-        if (error instanceof TypeError || error.name === 'AbortError') {
+        if (controller.signal.aborted || error instanceof TypeError || ['AbortError', 'TimeoutError'].includes(error?.name)) {
           throw fail('连接中断或等待超时，请刷新任务状态；控制请求若已发出，请核对上次操作。');
         }
-        throw error;
+        throw error?.publicMessage ? error : fail();
       } finally { clearTimeout(timer); }
     }
     function saved() {
