@@ -31,6 +31,11 @@ def atomic_output(target):
         os.link(temporary, target)
         if observer is not None:
             observer.file_published(file_id)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        if observer is not None:
+            observer.file_aborted(file_id)
+        raise
     finally:
         # Only this function's freshly generated temporary path is removed.
         temporary.unlink(missing_ok=True)

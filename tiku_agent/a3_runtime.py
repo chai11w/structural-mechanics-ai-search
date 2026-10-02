@@ -1642,6 +1642,8 @@ class A3MvpRuntime:
                 identity_key=identity_key,
             )
         except Exception as exc:  # noqa: BLE001 - automatic crop degrades to manual.
+            from tiku_shared.execution_hooks import accept_model_fallback
+            accept_model_fallback(exc, "crop_manual")
             return {
                 "validation_status": "manual_required",
                 "external_load_status": "not_run",
@@ -1673,6 +1675,8 @@ class A3MvpRuntime:
                 )
             ).strip().lower()
         except Exception as exc:  # noqa: BLE001 - independent gate is fail-closed.
+            from tiku_shared.execution_hooks import accept_model_fallback
+            accept_model_fallback(exc, "crop_manual")
             return {
                 "validation_status": "manual_required",
                 "external_load_status": "error",
@@ -1782,6 +1786,8 @@ class A3MvpRuntime:
                     identity_key=identity_key,
                 )
             except Exception as exc:  # noqa: BLE001 - preserve the crop draft for retry.
+                from tiku_shared.execution_hooks import accept_model_fallback
+                accept_model_fallback(exc, "crop_draft")
                 self._capture_checkpoint(state, "crop_validated", identity_key=identity_key,
                     unit_id=state.selected_unit_id, record=state.crop_drafts[state.selected_unit_id],
                     failure_code="CROP_VALIDATION_FAILED")
@@ -1821,6 +1827,8 @@ class A3MvpRuntime:
                         )
                     ).strip().lower()
                 except Exception as exc:  # noqa: BLE001 - do not pass an unverified crop to A2.
+                    from tiku_shared.execution_hooks import accept_model_fallback
+                    accept_model_fallback(exc, "crop_draft")
                     self._capture_crop_validation(state, verdict, "error", identity_key=identity_key)
                     state.phase = A3_PHASE_CROP_REQUIRED
                     state.crop_review_required = True
@@ -2786,6 +2794,8 @@ class A3MvpRuntime:
                 identity_key=identity_key,
             )
         except Exception as exc:  # noqa: BLE001 - keep the upload available for retry.
+            from tiku_shared.execution_hooks import accept_model_fallback
+            accept_model_fallback(exc, "page_retry")
             self._capture_checkpoint(state, "page_understood", identity_key=identity_key,
                 failure_code="PAGE_UNDERSTANDING_FAILED")
             state.phase = A3_PHASE_ERROR
@@ -2830,7 +2840,9 @@ class A3MvpRuntime:
                 ),
                 identity_key=identity_key,
             )
-        except A3ModelError as exc:
+        except Exception as exc:  # Match the initial page-error fallback for network failures.
+            from tiku_shared.execution_hooks import accept_model_fallback
+            accept_model_fallback(exc, "page_retry")
             self._capture_checkpoint(state, "page_understood", identity_key=identity_key,
                 failure_code="PAGE_UNDERSTANDING_FAILED")
             state.last_error = type(exc).__name__
@@ -2974,6 +2986,8 @@ class A3MvpRuntime:
                 identity_key=identity_key,
             )
         except Exception as exc:  # noqa: BLE001 - automatic crop always degrades to manual.
+            from tiku_shared.execution_hooks import accept_model_fallback
+            accept_model_fallback(exc, "crop_manual")
             state.auto_crop_enabled = False
             state.auto_crop_page = {
                 "schema_version": "a3-page-crops-v1",

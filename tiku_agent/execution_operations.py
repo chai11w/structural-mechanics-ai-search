@@ -311,7 +311,7 @@ class OperationStore:
             deadline = min(now+self.authority.policy.lease_seconds, attempt[0]+self.authority.policy.max_execution_seconds)
             conn.execute("UPDATE execution_operations SET lease_until=? WHERE id=?",(deadline,writer.operation_id))
 
-    def finish(self, writer, result, *, reset=False):
+    def finish(self, writer, result, *, reset=False, model_fallbacks=None):
         with self.authority.transaction() as conn:
             now = self.authority.clock(conn)
             writer.validate(conn,self.authority,writer.session,writer.epoch,now)
@@ -321,10 +321,20 @@ class OperationStore:
             if conn.execute("SELECT 1 FROM execution_unit_batches WHERE operation_id=? AND status<>'CONFIRMED' LIMIT 1",
                             (writer.operation_id,)).fetchone():
                 raise ExecutionError("EXECUTION_UNKNOWN")
-            if conn.execute("SELECT 1 FROM execution_effects WHERE operation_id=? AND status<>'CONFIRMED' LIMIT 1",
-                            (writer.operation_id,)).fetchone():
+            from tiku_agent.execution_effects import valid_model_fallback
+            handled = dict(model_fallbacks or {})
+            unresolved = conn.execute("SELECT * FROM execution_effects WHERE operation_id=? AND status<>'CONFIRMED'",
+                                      (writer.operation_id,)).fetchall()
+            if any(row["call_id"] not in handled or not valid_model_fallback(row, writer.attempt_id, handled[row["call_id"]])
+                   for row in unresolved):
                 raise ExecutionError("EXECUTION_UNKNOWN")
-            if conn.execute("SELECT 1 FROM execution_files WHERE operation_id=? AND status<>'PUBLISHED' LIMIT 1",
+            # Preserve explicit proof of the business fallback separately from
+            # the UNKNOWN provider/fee evidence, which is never changed here.
+            if handled:
+                if set(handled) != {row["call_id"] for row in unresolved}:
+                    raise ExecutionError("EXECUTION_UNKNOWN")
+                result = {**result, "model_fallbacks": handled}
+            if conn.execute("SELECT 1 FROM execution_files WHERE operation_id=? AND status NOT IN ('PUBLISHED','ABORTED') LIMIT 1",
                             (writer.operation_id,)).fetchone():
                 raise ExecutionError("EXECUTION_UNKNOWN")
             session = self.authority._session(conn,writer.session,now)

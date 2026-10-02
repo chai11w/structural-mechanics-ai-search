@@ -3,10 +3,33 @@ from __future__ import annotations
 
 import json
 import hashlib
+import threading
 from pathlib import Path
 from uuid import uuid4
 
 from tiku_agent.execution_store import ExecutionError, canonical, digest
+
+
+MODEL_FALLBACK_CALL_TYPES = {
+    "rerank_coarse": {"qwen_shape_rerank", "zhipu_shape_rerank"},
+    "length_existing_order": {"qwen_length_tie_break", "zhipu_length_tie_break"},
+    "crop_manual": {"glm_a3_page_auto_crop", "qwen_a3_crop_compare", "external_load_screen"},
+    "crop_draft": {"qwen_a3_crop_compare", "external_load_screen"},
+    "page_retry": {"qwen_a3_page_understanding"},
+    "intent_clarify": {"qwen_intent_decision", "qwen_a3_intent_decision"},
+    "fixed_reply": {"qwen_safe_answer", "qwen_image_triage_reply"},
+    "structure_filter_skip": {"qwen_structure_type"},
+    "single_question_route": {"qwen_image_scope"},
+}
+
+
+def valid_model_fallback(effect, attempt_id, kind):
+    """An observed model error handled by a defined business fallback."""
+    if (effect["attempt_id"] != attempt_id or effect["status"] != "UNKNOWN"
+            or effect["call_type"] not in MODEL_FALLBACK_CALL_TYPES.get(kind, ()) or not effect["record"]):
+        return False
+    record = json.loads(effect["record"])
+    return record.get("status") == "error" and record.get("call_id") == effect["call_id"]
 
 
 def create_effect_schema(conn):
@@ -52,6 +75,24 @@ class ExecutionEffects:
         self.ledger_keys = {digest(str(Path(path).resolve()).casefold()) for path in ledger_paths}
         self.artifact_roots = tuple(Path(path).resolve() for path in artifact_roots)
         self.admission_check = admission_check
+        self._model_fallbacks = {}
+        self._fallback_lock = threading.Lock()
+
+    def model_fallbacks(self):
+        with self._fallback_lock:
+            return dict(self._model_fallbacks)
+
+    def accept_model_fallback(self, call_id, kind):
+        # The acknowledgment lives only in this writer. A crash does not invent
+        # a completed business result; finish persists it together with the reply.
+        with self.store.transaction() as conn:
+            self._validate(conn)
+            effect = conn.execute("SELECT * FROM execution_effects WHERE call_id=? AND operation_id=?",
+                                  (call_id, self.writer.operation_id)).fetchone()
+            if effect is None or not valid_model_fallback(effect, self.writer.attempt_id, kind):
+                raise ExecutionError("EXECUTION_UNKNOWN")
+            with self._fallback_lock:
+                self._model_fallbacks[call_id] = kind
 
     def prepare_file(self, path, temporary):
         if not any(path.is_relative_to(root) and temporary.is_relative_to(root) for root in self.artifact_roots):
@@ -82,6 +123,18 @@ class ExecutionEffects:
                                  (self.store.clock(conn), file_id, self.writer.attempt_id)).rowcount
             if count != 1:
                 raise ExecutionError("EXECUTION_ARTIFACT_INVALID")
+
+    def file_aborted(self, file_id):
+        """Record proven local non-publication after temporary-file cleanup."""
+        with self.store.transaction() as conn:
+            row = conn.execute("SELECT * FROM execution_files WHERE id=? AND attempt_id=?",
+                               (file_id, self.writer.attempt_id)).fetchone()
+            if row is None or row["status"] not in {"PREPARED", "READY"}:
+                return
+            if Path(row["path"]).exists() or Path(row["temporary_path"]).exists():
+                return  # A possibly published artifact still needs its receipt.
+            conn.execute("UPDATE execution_files SET status='ABORTED',updated=? WHERE id=?",
+                         (self.store.clock(conn), file_id))
 
     def _validate(self, conn):
         now = self.store.clock(conn)
@@ -115,8 +168,10 @@ class ExecutionEffects:
             now = self._validate(conn)
             if self.admission_check is not None:
                 self.admission_check()
-            if conn.execute("SELECT 1 FROM execution_effects WHERE operation_id=? AND status='UNKNOWN' LIMIT 1",
-                            (self.writer.operation_id,)).fetchone():
+            handled = set(self.model_fallbacks())
+            if any(row[0] not in handled for row in conn.execute(
+                    "SELECT call_id FROM execution_effects WHERE operation_id=? AND status='UNKNOWN'",
+                    (self.writer.operation_id,))):
                 raise ExecutionError("EXECUTION_UNKNOWN")
             self.operations.ensure_cost_available(identity_digest=conn.execute(
                 "SELECT identity FROM execution_operations WHERE id=?", (self.writer.operation_id,)).fetchone()[0])

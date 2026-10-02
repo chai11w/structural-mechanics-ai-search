@@ -197,7 +197,9 @@ def execute_claimed(runtime, session_id, writer, execute, *, admission_check=Non
         ledgers = [getattr(target, "cost_ledger", None) for target in (runtime, getattr(runtime, "a2_runtime", None))]
         ledger_paths = [ledger.path for ledger in ledgers if ledger is not None and getattr(ledger, "path", None) is not None]
         artifact_roots = [target.artifacts.root for target in (runtime, getattr(runtime, "a2_runtime", None)) if target is not None and getattr(target, "artifacts", None) is not None]
-        with model_run_binding(lambda run_id:operations.bind_cost_run(writer,run_id)), execution_effect_scope(ExecutionEffects(operations, writer, ledger_paths=ledger_paths, artifact_roots=artifact_roots, admission_check=admission_check)):
+        observer = ExecutionEffects(operations, writer, ledger_paths=ledger_paths,
+                                    artifact_roots=artifact_roots, admission_check=admission_check)
+        with model_run_binding(lambda run_id:operations.bind_cost_run(writer,run_id)), execution_effect_scope(observer):
             response = execute()
             child_runtime=getattr(runtime,"a2_runtime",runtime)
             await_background=getattr(child_runtime,"_await_background_image_work",None)
@@ -211,7 +213,8 @@ def execute_claimed(runtime, session_id, writer, execute, *, admission_check=Non
                 # Business completion remains durable even if presentation or
                 # media preparation fails. A bounded publisher repairs delivery.
                 pass
-        context = operations.finish(writer,encoded,reset=False)
+        context = operations.finish(writer,encoded,reset=False,
+                                    model_fallbacks=observer.model_fallbacks())
         if hasattr(response,"text"):
             response.execution_context = context
             response.execution_receipt = {"operation_id":writer.operation_id,"attempt_id":writer.attempt_id,"status":"SUCCEEDED","replayed":False}

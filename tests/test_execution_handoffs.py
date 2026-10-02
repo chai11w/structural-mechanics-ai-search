@@ -569,6 +569,22 @@ class ExecutionHandoffTests(unittest.TestCase):
         self.assertEqual(outputs[0].read_bytes(), b"first answer")
         self.assertEqual(outputs[1].read_bytes(), b"changed answer")
 
+    def test_published_artifact_with_lost_receipt_is_not_marked_aborted(self):
+        target = self.root / "lost-receipt.jpg"
+        ops = self.a3.execution_operations
+        row = ops.register("s", "local", self.request(), "answer_copy", {})
+        writer = ops.claim(row["id"])
+        observer = ExecutionEffects(ops, writer, artifact_roots=[self.root])
+        with execution_effect_scope(observer), patch.object(
+                observer, "file_published", side_effect=RuntimeError("receipt lost")):
+            with self.assertRaisesRegex(RuntimeError, "receipt lost"):
+                with atomic_output(target) as temporary:
+                    temporary.write_bytes(b"complete")
+        self.assertEqual(target.read_bytes(), b"complete")
+        self.assertEqual(self.rows("execution_files")[0]["status"], "READY")
+        with self.assertRaisesRegex(Exception, "EXECUTION_UNKNOWN"):
+            ops.finish(writer, {"schema": 1, "response": None})
+
 
 if __name__ == "__main__":
     unittest.main()

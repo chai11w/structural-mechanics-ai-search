@@ -100,7 +100,9 @@ class SafeAnswerGeneratorV0:
         started = self.clock()
         try:
             output = self.model_client(request)
-        except TimeoutError:
+        except TimeoutError as exc:
+            from tiku_shared.execution_hooks import accept_model_fallback
+            accept_model_fallback(exc, "fixed_reply")
             return self._fallback(
                 decision.category,
                 "model_timeout",
@@ -108,7 +110,9 @@ class SafeAnswerGeneratorV0:
                 context,
                 validation_facts,
             )
-        except Exception:  # noqa: BLE001 - every provider failure must use the safe fallback.
+        except Exception as exc:  # noqa: BLE001 - every provider failure must use the safe fallback.
+            from tiku_shared.execution_hooks import accept_model_fallback
+            accept_model_fallback(exc, "fixed_reply")
             return self._fallback(
                 decision.category,
                 "model_error",

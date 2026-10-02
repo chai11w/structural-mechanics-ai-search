@@ -76,7 +76,9 @@ def decide_intent_v2(
         payload["source"] = "context_llm"
         payload.setdefault("confidence", 0.0)
         decision = ActionDecisionV2.from_dict(payload)
-    except Exception:  # noqa: BLE001 - model availability must degrade to a safe question.
+    except Exception as exc:  # noqa: BLE001 - model availability must degrade to a safe question.
+        from tiku_shared.execution_hooks import accept_model_fallback
+        accept_model_fallback(exc, "intent_clarify")
         return _clarification("ambiguous_action", source="validator")
     evidence_checked = _validate_contextual_selection_evidence(clean, decision, context)
     if evidence_checked is not None:
