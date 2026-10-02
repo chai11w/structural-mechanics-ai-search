@@ -4,6 +4,7 @@ This journal only repairs local accounting evidence. It cannot execute a provide
 request, authorize an operation, or publish a business result.
 """
 from contextlib import closing, contextmanager
+from collections import deque
 import json
 from pathlib import Path
 import re
@@ -12,6 +13,46 @@ import time
 import traceback
 
 from tiku_agent.execution_store import ExecutionError, canonical
+
+
+def _exception_attribute(exc, name):
+    try:
+        return getattr(exc, name, None)
+    except Exception:
+        return None
+
+
+def _exception_summary(exc, clean):
+    details = {'type': clean(type(exc).__name__)}
+    for name in ('errno', 'winerror'):
+        value = _exception_attribute(exc, name)
+        if type(value) is int:
+            details[name] = value
+    return details
+
+
+def _exception_details(exc, clean, depth=0, seen=None):
+    # Only exception objects are traversed. In particular, URLError.reason may
+    # be a string containing a URL or provider response and must stay private.
+    seen = set() if seen is None else seen
+    seen.add(id(exc))
+    details = _exception_summary(exc, clean)
+    frames = deque(traceback.walk_tb(exc.__traceback__), maxlen=8)
+    details['frames'] = [
+        {'file': clean(Path(frame.f_code.co_filename).name),
+         'function': clean(frame.f_code.co_name), 'line': line}
+        for frame, line in frames
+    ]
+    if depth < 2:
+        reason = _exception_attribute(exc, 'reason')
+        if isinstance(reason, BaseException) and id(reason) not in seen:
+            details['reason'] = _exception_details(reason, clean, depth + 1, seen)
+    cause = exc.__cause__
+    if isinstance(cause, BaseException) and id(cause) not in seen:
+        seen.add(id(cause))
+        # Causes provide only a compact hint, never another recursive chain.
+        details['cause'] = _exception_summary(cause, clean)
+    return details
 
 
 def inspect_receipts(database, limit=20):
@@ -61,14 +102,12 @@ class ReceiptJournal:
     def failure(self, operation_id, call_id, stage, exc):
         # Never stringify exceptions: provider errors may contain request bodies.
         clean = lambda value: re.sub(r'[^A-Za-z0-9_.-]', '_', str(value))[:100]
-        details = {'type': clean(type(exc).__name__), 'frames': [
-            {'file': clean(Path(frame.filename).name), 'function': clean(frame.name), 'line': frame.lineno}
-            for frame in traceback.extract_tb(exc.__traceback__)[-8:]]}
-        if isinstance(exc, sqlite3.Error):
-            details['sqlite_error'] = clean(getattr(exc, 'sqlite_errorname', ''))
-        if isinstance(exc, ExecutionError):
-            details['code'] = clean(exc.code)
         try:
+            details = _exception_details(exc, clean)
+            if isinstance(exc, sqlite3.Error):
+                details['sqlite_error'] = clean(getattr(exc, 'sqlite_errorname', ''))
+            if isinstance(exc, ExecutionError):
+                details['code'] = clean(exc.code)
             with self.connect() as conn:
                 conn.execute('INSERT INTO diagnostics(operation_id,call_id,stage,details,created) VALUES (?,?,?,?,?)',
                              (operation_id, call_id, clean(stage), canonical(details), time.time()))
