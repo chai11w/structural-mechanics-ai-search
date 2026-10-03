@@ -33,6 +33,16 @@ function fixture() {
 }
 const options = { body: JSON.stringify({ text: 'private body' }) };
 const fence = { id: '12345678:original-key' };
+const diagnosticKey = 'tiku-agent-bind-diagnostics-v1';
+const diagnosticFields = ['code', 'elapsed_ms', 'phase', 'request_id', 'schema', 'status'];
+function diagnosticFixture() {
+  const f = fixture(), saved = new Map();
+  let sequence = 0, clock = 100;
+  f.host.diagnosticStorage = { getItem: key => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value) };
+  f.host.newRequestId = () => 'req_' + (++sequence).toString(16).padStart(32, '0');
+  f.host.clock = () => (clock += 7.4);
+  return Object.assign(f, { saved, diagnostic: () => JSON.parse(saved.get(diagnosticKey)) });
+}
 async function submit(f, client) {
   return client.submit('/api/message/stream', options, f.context, fence, new Headers());
 }
@@ -286,6 +296,326 @@ async function run() {
     await assert.rejects(submit(f, api.createClient(f.host)), e => e.code === 'RESPONSE_INVALID'
       && e.submissionNotSent && !e.message.includes('JSON'));
     assert.equal(bindings, 1);
+  });
+  await test('JSON non-object responses never masquerade as a lost connection', async () => {
+    for (const status of [200, 503]) {
+      for (const data of [null, [], 0, true, 'invalid']) {
+        const f = fixture(), progress = []; let bindings = 0;
+        f.host.fetch = async path => {
+          assert.equal(path, '/api/jobs/session'); bindings++;
+          return Response.json(data, { status });
+        };
+        await assert.rejects(api.createClient(f.host).submit('/api/message/stream', options,
+          f.context, fence, new Headers(), event => progress.push(event)),
+        error => error.code === 'RESPONSE_INVALID' && error.submissionNotSent === true);
+        assert.equal(bindings, 1);
+        assert.deepEqual(progress, []);
+        assert.equal(f.entries.size, 0);
+      }
+    }
+  });
+  await test('body transfer failure can reconnect but invalid JSON and HTTP errors cannot', async () => {
+    for (const [response, code, attempts] of [
+      [() => ({ ok: true, json: async () => { throw new TypeError('body transfer failed'); } }), 'NETWORK_UNAVAILABLE', 2],
+      [() => ({ ok: true, json: async () => { throw new SyntaxError('invalid JSON'); } }), 'RESPONSE_INVALID', 1],
+      [() => Response.json({ schema_version: 1, code: 'EXECUTION_UNAVAILABLE' }, { status: 502 }), 'EXECUTION_UNAVAILABLE', 1],
+      [() => new Response('<html>upstream failure</html>', { status: 502 }), 'RESPONSE_INVALID', 1],
+      [() => new Response('<html>login</html>'), 'RESPONSE_INVALID', 1],
+    ]) {
+      const f = fixture(); let bindings = 0;
+      f.host.fetch = async path => { assert.equal(path, '/api/jobs/session'); bindings++; return response(); };
+      await assert.rejects(submit(f, api.createClient(f.host)), error => error.code === code && error.submissionNotSent);
+      assert.equal(bindings, attempts);
+      assert.equal(f.entries.size, 0);
+    }
+  });
+  await test('successive question selections bind and submit once with one isolated binding retry', async () => {
+    const f = fixture(), client = api.createClient(f.host), jobs = new Map(), counts = [];
+    const progress = [];
+    let selection = 0, current;
+    f.host.fetch = async (path, request) => {
+      assert.equal(request.credentials, 'same-origin');
+      assert.equal(request.cache, 'no-store');
+      const count = counts[selection];
+      if (path === '/api/jobs/session') {
+        count.bindings++;
+        if (selection === 1 && count.bindings === 1) throw new TypeError('controlled binding loss');
+        return Response.json({ schema_version: 1, execution: current });
+      }
+      if (path === '/api/jobs') {
+        count.posts++;
+        const operation = JSON.parse(request.headers.get('X-Tiku-Operation'));
+        const command = JSON.parse(request.body);
+        assert.equal(operation.state_version, current.state_version);
+        assert.equal(command.kind, 'select_unit');
+        assert.equal(command.parameters.unit_id, 'unit-' + selection);
+        assert.equal(command.parameters.workflow_search_id, 'workflow-fixture');
+        assert.equal(f.entries.size, selection + 1, 'new intent is saved before submission');
+        const operationId = (selection + 1).toString(16).padStart(32, '0');
+        const job = { operation_id: operationId, kind: 'select_unit', status: 'SUCCEEDED', progress_version: 1,
+          publication: { status: 'READY', result: { snapshot_role: 'historical',
+            origin: { operation_id: operationId, epoch }, response_id: 'selection-' + selection } } };
+        jobs.set(operationId, job);
+        return Response.json({ schema_version: 1, job }, { status: 202 });
+      }
+      const job = jobs.get(path.slice('/api/jobs/'.length));
+      assert(job, 'observation must refer to an already submitted operation');
+      count.reads++;
+      return Response.json({ schema_version: 1, job });
+    };
+    for (selection = 0; selection < 3; selection++) {
+      current = { epoch, state_version: 4 + selection };
+      counts.push({ bindings: 0, posts: 0, reads: 0 });
+      const record = await client.submit('/api/a3/select/stream', {
+        body: JSON.stringify({ workflow_id: 'workflow-fixture', unit_id: 'unit-' + selection, task_revision: selection }),
+      }, current, { id: 'selection-fixture-' + selection }, new Headers(), event => progress.push(event));
+      await client.observe(record);
+      assert.equal(client.pending(epoch).length, 0);
+      assert.equal(f.delivered.length, selection + 1);
+    }
+    assert.deepEqual(counts, [{ bindings: 1, posts: 1, reads: 1 },
+      { bindings: 2, posts: 1, reads: 1 }, { bindings: 1, posts: 1, reads: 1 }]);
+    assert.equal(progress.length, 1);
+    assert.equal(client.records().length, 3);
+    assert(client.records().every(record => record.done));
+  });
+  await test('two failed selection bindings leave no submitted intent or delivery', async () => {
+    const f = fixture(), progress = [];
+    let bindings = 0;
+    f.host.fetch = async path => {
+      assert.equal(path, '/api/jobs/session'); bindings++;
+      throw new DOMException('controlled timeout', 'TimeoutError');
+    };
+    await assert.rejects(api.createClient(f.host).submit('/api/a3/select/stream', {
+      body: JSON.stringify({ workflow_id: 'workflow-fixture', unit_id: 'unit-2', task_revision: 2 }),
+    }, f.context, fence, new Headers(), event => progress.push(event)),
+    error => error.code === 'REQUEST_TIMEOUT' && error.submissionNotSent === true);
+    assert.equal(bindings, 2);
+    assert.equal(progress.length, 1);
+    assert.equal(f.entries.size, 0);
+    assert.equal(f.delivered.length, 0);
+  });
+  await test('binding diagnostics distinguish fetch, body and protocol without leaking payloads', async () => {
+    const privateText = 'private-body https://private.invalid/image?token=secret Cookie=image-data';
+    const cases = [
+      [async () => { throw new TypeError(privateText); }, 'fetch', 'NETWORK_UNAVAILABLE', 0, 2],
+      [async () => { throw new DOMException(privateText, 'AbortError'); }, 'fetch', 'REQUEST_TIMEOUT', 0, 2],
+      [async () => ({ status: 200, ok: true, json: async () => { throw new TypeError(privateText); } }), 'body', 'NETWORK_UNAVAILABLE', 200, 2],
+      [async () => ({ status: 200, ok: true, json: async () => { throw new SyntaxError(privateText); } }), 'body', 'RESPONSE_INVALID', 200, 1],
+      [async () => Response.json(null, { status: 503 }), 'protocol', 'RESPONSE_INVALID', 503, 1],
+      [async () => Response.json({ schema_version: 1, code: 'EXECUTION_AUTH_REQUIRED', message: privateText }, { status: 401 }), 'protocol', 'HTTP_ERROR', 401, 1],
+    ];
+    for (const [response, phase, code, status, attempts] of cases) {
+      const f = diagnosticFixture(), seen = [];
+      f.host.fetch = async (path, request) => {
+        assert.equal(path, '/api/jobs/session');
+        seen.push(request.headers);
+        return response();
+      };
+      await assert.rejects(submit(f, api.createClient(f.host)), error => {
+        assert.equal(error.submissionNotSent, true);
+        assert.equal(error.code, code === 'HTTP_ERROR' ? 'EXECUTION_AUTH_REQUIRED' : code);
+        assert.deepEqual(error.transportDiagnostic, f.diagnostic().pending);
+        return true;
+      });
+      const saved = f.diagnostic();
+      assert.equal(seen.length, attempts);
+      assert.equal(saved.entries.length, attempts);
+      assert.equal(seen[0].get('X-Tiku-Bind-Diagnostic'), null);
+      for (let index = 0; index < attempts; index++) {
+        const entry = saved.entries[index];
+        assert.deepEqual(Object.keys(entry).sort(), diagnosticFields);
+        assert.deepEqual(entry, { schema: 1, request_id: seen[index].get('X-Request-ID'), phase, code, elapsed_ms: 7, status });
+        assert.match(entry.request_id, /^req_[0-9a-f]{32}$/);
+        if (index) {
+          assert.notEqual(entry.request_id, saved.entries[index - 1].request_id);
+          assert.deepEqual(JSON.parse(seen[index].get('X-Tiku-Bind-Diagnostic')), saved.entries[index - 1]);
+        }
+      }
+      assert(!JSON.stringify(saved).includes(privateText));
+      assert(!JSON.stringify(saved).includes('private'));
+      assert.equal(f.entries.size, 0, 'diagnostic storage is independent of business receipts');
+    }
+  });
+  await test('one recovered binding reports its failure once and leaves business headers untouched', async () => {
+    const f = diagnosticFixture(), original = f.host.fetch, headers = [];
+    f.host.fetch = async (path, request) => {
+      headers.push({ path, value: new Headers(request.headers) });
+      if (headers.length === 1) throw new TypeError('private exception text');
+      return original(path, request);
+    };
+    const client = api.createClient(f.host);
+    await client.observe(await submit(f, client));
+    assert.equal(headers.length, 4, 'two binds, one business POST and one observation');
+    const carried = headers[1].value.get('X-Tiku-Bind-Diagnostic');
+    assert(carried.length <= 512 && /^[\x20-\x7e]+$/.test(carried));
+    assert.deepEqual(JSON.parse(carried), f.diagnostic().entries[0]);
+    assert.notEqual(headers[0].value.get('X-Request-ID'), headers[1].value.get('X-Request-ID'));
+    for (const entry of headers.slice(2)) {
+      assert.equal(entry.value.get('X-Request-ID'), null);
+      assert.equal(entry.value.get('X-Tiku-Bind-Diagnostic'), null);
+    }
+    assert.equal(f.diagnostic().pending, null);
+    assert.equal(f.diagnostic().entries.length, 1);
+    assert.equal(f.delivered.length, 1);
+    assert(![...f.saved.values()].join('').includes('private'));
+  });
+  await test('reload carries the latest failed binding and success keeps history but clears pending', async () => {
+    const f = diagnosticFixture(), original = f.host.fetch, ids = [];
+    f.host.fetch = async (_path, request) => {
+      ids.push(request.headers.get('X-Request-ID'));
+      throw new TypeError('offline');
+    };
+    await assert.rejects(submit(f, api.createClient(f.host)), error => error.submissionNotSent);
+    const pending = f.diagnostic().pending;
+    let carried;
+    f.host.fetch = async (path, request) => {
+      if (path === '/api/jobs/session') {
+        ids.push(request.headers.get('X-Request-ID'));
+        carried = request.headers.get('X-Tiku-Bind-Diagnostic');
+      }
+      return original(path, request);
+    };
+    const reloaded = api.createClient(f.host);
+    await reloaded.observe(await submit(f, reloaded));
+    assert.deepEqual(JSON.parse(carried), pending);
+    assert.equal(new Set(ids).size, 3);
+    assert.equal(f.diagnostic().pending, null);
+    assert.equal(f.diagnostic().entries.length, 2);
+    assert.equal(f.calls.filter(call => call.path === '/api/jobs').length, 1);
+  });
+  await test('diagnostic history has a fixed capacity while repeated failed submissions remain unsubmitted', async () => {
+    const f = diagnosticFixture(); let bindings = 0;
+    f.host.fetch = async path => { assert.equal(path, '/api/jobs/session'); bindings++; throw new TypeError('offline'); };
+    const client = api.createClient(f.host);
+    for (let attempt = 0; attempt < 10; attempt++) await assert.rejects(submit(f, client));
+    const saved = f.diagnostic();
+    assert.equal(bindings, 20);
+    assert.equal(saved.entries.length, 16);
+    assert.equal(saved.entries[0].request_id, 'req_' + (5).toString(16).padStart(32, '0'));
+    assert.deepEqual(saved.pending, saved.entries.at(-1));
+    assert([...f.saved.values()][0].length <= 8192);
+    assert.deepEqual([...f.saved.keys()], [diagnosticKey]);
+    assert.equal(f.entries.size, 0);
+  });
+  await test('corrupt, oversized and non-whitelisted stored diagnostics fail open without forwarding', async () => {
+    const valid = { schema: 1, request_id: 'req_' + 'f'.repeat(32), phase: 'fetch', code: 'NETWORK_UNAVAILABLE', elapsed_ms: 1, status: 0 };
+    const envelope = entry => JSON.stringify({ schema: 1, entries: [entry], pending: entry });
+    for (const raw of ['{', 'x'.repeat(8193), 'null', '[]',
+      envelope({ ...valid, secret: 'must-not-forward' }), envelope({ ...valid, request_id: 'foreign-id' }),
+      envelope({ ...valid, phase: 'private-phase' }), envelope({ ...valid, elapsed_ms: 120001 }),
+      envelope({ ...valid, status: 600 }), envelope({ ...valid, code: 'UNREGISTERED_CODE' }),
+      JSON.stringify({ schema: 1, entries: Array(17).fill(valid), pending: valid }),
+      JSON.stringify({ schema: 1, entries: [], pending: valid }),
+      JSON.stringify({ schema: 1, entries: [valid], pending: valid, body: 'must-not-forward' }),
+    ]) {
+      const f = diagnosticFixture(), original = f.host.fetch;
+      f.saved.set(diagnosticKey, raw);
+      f.host.fetch = async (path, request) => {
+        assert.equal(new Headers(request.headers).get('X-Tiku-Bind-Diagnostic'), null);
+        return original(path, request);
+      };
+      const client = api.createClient(f.host);
+      await client.observe(await submit(f, client));
+      assert.equal(f.delivered.length, 1);
+      assert.equal(f.calls.filter(call => call.path === '/api/jobs').length, 1);
+    }
+  });
+  await test('unavailable diagnostic storage still forwards an in-memory retry and allows one business POST', async () => {
+    for (const mode of ['absent', 'read-error', 'write-error', 'getter-error']) {
+      const f = diagnosticFixture(), original = f.host.fetch;
+      if (mode === 'absent') delete f.host.diagnosticStorage;
+      if (mode === 'read-error') f.host.diagnosticStorage.getItem = () => { throw new Error('storage denied'); };
+      if (mode === 'write-error') f.host.diagnosticStorage.setItem = () => { throw new Error('quota exceeded'); };
+      if (mode === 'getter-error') Object.defineProperty(f.host, 'diagnosticStorage', { get() { throw new Error('denied getter'); } });
+      let attempts = 0, carried;
+      f.host.fetch = async (path, request) => {
+        if (path === '/api/jobs/session') {
+          if (++attempts === 1) throw new TypeError('offline');
+          carried = request.headers.get('X-Tiku-Bind-Diagnostic');
+        }
+        return original(path, request);
+      };
+      const client = api.createClient(f.host);
+      await client.observe(await submit(f, client));
+      assert.equal(attempts, 2);
+      assert.equal(JSON.parse(carried).code, 'NETWORK_UNAVAILABLE');
+      assert.equal(f.calls.filter(call => call.path === '/api/jobs').length, 1);
+      assert.equal(f.delivered.length, 1);
+    }
+  });
+  await test('request-ID generation failures degrade diagnostics without changing binding recovery', async () => {
+    for (const generate of [() => { throw new Error('no crypto'); }, () => 'req_INVALID', () => null]) {
+      const f = diagnosticFixture(), original = f.host.fetch;
+      f.host.newRequestId = generate;
+      let attempts = 0;
+      f.host.fetch = async (path, request) => {
+        assert.equal(new Headers(request.headers).get('X-Request-ID'), null);
+        assert.equal(new Headers(request.headers).get('X-Tiku-Bind-Diagnostic'), null);
+        if (path === '/api/jobs/session' && ++attempts === 1) throw new TypeError('offline');
+        return original(path, request);
+      };
+      const client = api.createClient(f.host);
+      await client.observe(await submit(f, client));
+      assert.equal(attempts, 2);
+      assert.equal(f.saved.size, 0);
+      assert.equal(f.delivered.length, 1);
+    }
+  });
+  await test('diagnostic elapsed time is bounded even when the optional clock fails or moves backwards', async () => {
+    for (const [clock, elapsed] of [[() => { throw new Error('bad clock'); }, 0],
+      [(() => { let value = 0; return () => ++value * 999999; })(), 120000],
+      [(() => { let value = 0; return () => --value; })(), 0], [() => NaN, 0]]) {
+      const f = diagnosticFixture(); f.host.clock = clock;
+      f.host.fetch = async () => Response.json(null);
+      await assert.rejects(submit(f, api.createClient(f.host)), error => error.transportDiagnostic.elapsed_ms === elapsed);
+      assert.equal(f.diagnostic().pending.elapsed_ms, elapsed);
+    }
+  });
+  await test('a changed binding context proves no business submission and consumes a carried diagnostic', async () => {
+    const f = diagnosticFixture(), original = f.host.fetch;
+    f.host.fetch = async () => { throw new TypeError('offline'); };
+    await assert.rejects(submit(f, api.createClient(f.host)));
+    const pending = f.diagnostic().pending;
+    f.host.fetch = async (path, request) => {
+      assert.equal(path, '/api/jobs/session');
+      assert.deepEqual(JSON.parse(request.headers.get('X-Tiku-Bind-Diagnostic')), pending);
+      return Response.json({ schema_version: 1, execution: { ...f.context, state_version: f.context.state_version + 1 } });
+    };
+    await assert.rejects(submit(f, api.createClient(f.host)), error => error.code === 'EXECUTION_STALE' && error.submissionNotSent);
+    assert.equal(f.entries.size, 0);
+    assert.equal(f.diagnostic().pending, null);
+    assert.equal(f.diagnostic().entries.length, 2);
+    f.host.fetch = async (path, request) => {
+      assert.equal(new Headers(request.headers).get('X-Tiku-Bind-Diagnostic'), null);
+      return original(path, request);
+    };
+    const reloaded = api.createClient(f.host);
+    await reloaded.observe(await submit(f, reloaded));
+    assert.equal(f.calls.filter(call => call.path === '/api/jobs').length, 1);
+  });
+  await test('malformed binding contexts are protocol failures and preserve the new pending evidence', async () => {
+    for (const execution of [undefined, null, [], {}, { epoch, state_version: -1 },
+      { epoch, state_version: '4' }, { epoch: 'invalid', state_version: 4 }]) {
+      const f = diagnosticFixture();
+      f.host.fetch = async () => { throw new TypeError('earlier offline'); };
+      await assert.rejects(submit(f, api.createClient(f.host)));
+      const previous = f.diagnostic().pending;
+      let attempts = 0;
+      f.host.fetch = async (path, request) => {
+        assert.equal(path, '/api/jobs/session'); attempts++;
+        assert.deepEqual(JSON.parse(request.headers.get('X-Tiku-Bind-Diagnostic')), previous);
+        return Response.json({ schema_version: 1, execution });
+      };
+      await assert.rejects(submit(f, api.createClient(f.host)), error => error.code === 'RESPONSE_INVALID'
+        && error.submissionNotSent && error.transportDiagnostic.phase === 'protocol');
+      assert.equal(attempts, 1);
+      assert.equal(f.diagnostic().entries.length, 3);
+      assert.equal(f.diagnostic().pending.code, 'RESPONSE_INVALID');
+      assert.notEqual(f.diagnostic().pending.request_id, previous.request_id);
+      assert.deepEqual(f.diagnostic().entries[1], previous);
+      assert.equal(f.entries.size, 0);
+    }
   });
   console.log(count + ' client checks passed');
 }

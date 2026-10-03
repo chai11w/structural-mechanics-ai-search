@@ -55,6 +55,7 @@ from tiku_agent.task_state_public import public_task_state_snapshot
 from tiku_agent.task_state_contract import TaskStateSnapshotV1, empty_task_state_snapshot
 from tiku_agent.task_state_runtime import TaskStateEntryCapabilities
 from tiku_agent.tool_result import is_public_tool_code
+from tiku_agent.bind_diagnostics import BIND_DIAGNOSTIC_HEADER, record_bind_diagnostic
 from tiku_shared.model_costs import SQLiteModelCostLedger
 from tiku_shared.bank_readers import bank_access
 from tiku_shared.request_protocol import (
@@ -1192,6 +1193,10 @@ def create_app(
                         result = RedirectResponse(target, status_code=303)
                         _record_generic_terminal(result.status_code)
                         return result
+                if background is not None and request.method == "POST" and request.url.path == "/api/jobs/session":
+                    # Diagnostic-only, authenticated client observations. Keep
+                    # the shared Trace schema readable by existing releases.
+                    record_bind_diagnostic(request.headers.get(BIND_DIAGNOSTIC_HEADER, ""), request_id)
                 phase5 = getattr(runtime, "execution_operations", None)
                 if phase5 is not None and existing_session and not request.url.path.startswith('/api/invite/') and not (background is not None and request.url.path.startswith('/api/jobs')):
                     try:
@@ -2850,6 +2855,8 @@ def _current_public_trace_meta() -> dict[str, object]:
 
 def _normalized_trace_endpoint(path: object) -> str:
     clean = str(path or "/").split("?", 1)[0]
+    if clean == "/api/jobs/session":
+        return clean
     for prefix, template in (
         ("/api/jobs/", "/api/jobs/:id"),
         ("/api/media/", "/api/media/:id"),

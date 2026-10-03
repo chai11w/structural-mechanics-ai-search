@@ -5123,9 +5123,12 @@ function backgroundNotice(error, { kind = '' } = {}) {
 function initializeBackgroundJobs() {
   const api = globalThis.TikuBackgroundJobs;
   if (!api) { showTaskStateBootstrapFailure(); return; }
+  let diagnosticStorage;
+  try { diagnosticStorage = window.sessionStorage; } catch (_) { /* Diagnostics must not block search. */ }
   try {
     backgroundClient = api.createClient({
       storage: window.localStorage, locks: navigator.locks,
+      diagnosticStorage,
       fetch: (...args) => fetch(...args), currentEpoch: () => executionContext?.epoch || backgroundObserverEpoch,
       async deliver(job, record) {
         // Refresh current action authority separately. Never consume the result's

@@ -6,6 +6,9 @@
 })(globalThis, function () {
   'use strict';
   const PREFIX = 'tiku-agent-background-job-v1:';
+  const DIAGNOSTICS_KEY = 'tiku-agent-bind-diagnostics-v1';
+  const REQUEST_ID = /^req_[0-9a-f]{32}$/;
+  const DIAGNOSTIC_FIELDS = 'code,elapsed_ms,phase,request_id,schema,status';
   const ID = /^[0-9a-f]{32}$/;
   const KEY = /^[A-Za-z0-9:_.-]{8,128}$/;
   const KINDS = new Set(['handle_text', 'handle_image', 'select_unit', 'prepare_units', 'handle_crop']);
@@ -23,6 +26,15 @@
     return Object.assign(new Error(message), { code, status, background: true, publicMessage: message });
   }
   function invalid() { return failure('RESPONSE_INVALID', '任务记录无法核验，请重新连接。'); }
+  function validDiagnostic(value) {
+    return value && typeof value === 'object' && !Array.isArray(value)
+      && Object.keys(value).sort().join(',') === DIAGNOSTIC_FIELDS && value.schema === 1
+      && typeof value.request_id === 'string' && REQUEST_ID.test(value.request_id)
+      && ['fetch', 'body', 'protocol'].includes(value.phase)
+      && ['REQUEST_TIMEOUT', 'NETWORK_UNAVAILABLE', 'RESPONSE_INVALID', 'HTTP_ERROR'].includes(value.code)
+      && Number.isInteger(value.elapsed_ms) && value.elapsed_ms >= 0 && value.elapsed_ms <= 120000
+      && Number.isInteger(value.status) && value.status >= 0 && value.status <= 599;
+  }
   function validContext(context) {
     return context && ID.test(context.epoch) && Number.isSafeInteger(context.state_version) && context.state_version >= 0;
   }
@@ -56,6 +68,59 @@
     const storage = host.storage;
     const observing = new Map();
     const sleep = host.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+    let diagnostics = { schema: 1, entries: [], pending: null };
+    let previousRequestId = '';
+    try {
+      const raw = host.diagnosticStorage?.getItem(DIAGNOSTICS_KEY);
+      if (typeof raw === 'string' && raw.length <= 8192) {
+        const value = JSON.parse(raw);
+        if (value && typeof value === 'object' && !Array.isArray(value)
+            && Object.keys(value).sort().join(',') === 'entries,pending,schema' && value.schema === 1
+            && Array.isArray(value.entries) && value.entries.length <= 16 && value.entries.every(validDiagnostic)
+            && (value.pending === null || (validDiagnostic(value.pending)
+              && JSON.stringify(value.pending) === JSON.stringify(value.entries.at(-1))))) {
+          diagnostics = { schema: 1, entries: value.entries.map(entry => Object.freeze(entry)),
+            pending: value.pending === null ? null : Object.freeze(value.pending) };
+        }
+      }
+    } catch (_) { /* Diagnostics must never block submission or recovery. */ }
+    function persistDiagnostics() {
+      try { host.diagnosticStorage?.setItem(DIAGNOSTICS_KEY, JSON.stringify(diagnostics)); }
+      catch (_) { /* The in-memory pending record can still accompany the retry. */ }
+    }
+    function diagnosticClock() {
+      try {
+        const value = host.clock ? host.clock()
+          : host.performance?.now ? host.performance.now() : globalThis.performance?.now?.() ?? Date.now();
+        return Number.isFinite(value) ? value : 0;
+      } catch (_) { return 0; }
+    }
+    function newRequestId() {
+      try {
+        const value = host.newRequestId ? host.newRequestId()
+          : 'req_' + globalThis.crypto.randomUUID().replaceAll('-', '');
+        if (typeof value !== 'string' || !REQUEST_ID.test(value) || value === previousRequestId) return '';
+        previousRequestId = value;
+        return value;
+      } catch (_) { return ''; }
+    }
+    function rememberBindingFailure(error, requestId, phase, started, status) {
+      if (!requestId) return;
+      const value = Object.freeze({ schema: 1, request_id: requestId, phase,
+        code: ['REQUEST_TIMEOUT', 'NETWORK_UNAVAILABLE', 'RESPONSE_INVALID'].includes(error.code)
+          ? error.code : 'HTTP_ERROR',
+        elapsed_ms: Math.max(0, Math.min(120000, Math.round(diagnosticClock() - started))), status });
+      if (!validDiagnostic(value)) return;
+      try { error.transportDiagnostic = value; } catch (_) { /* Optional diagnostic only. */ }
+      diagnostics.entries = [...diagnostics.entries, value].slice(-16);
+      diagnostics.pending = value;
+      persistDiagnostics();
+    }
+    function clearPendingDiagnostic() {
+      if (diagnostics.pending === null) return;
+      diagnostics.pending = null;
+      persistDiagnostics();
+    }
     function records() {
       const result = [];
       for (let i = 0; i < storage.length; i++) {
@@ -90,9 +155,45 @@
     async function http(path, options = {}) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 15000);
+      const binding = path === '/api/jobs/session' && options.method === 'POST';
+      const requestId = binding ? newRequestId() : '';
+      const started = binding ? diagnosticClock() : 0;
+      let phase = 'fetch', status = 0;
+      let headers = options.headers;
+      if (binding) {
+        try {
+          const boundHeaders = new Headers(headers);
+          if (requestId) boundHeaders.set('X-Request-ID', requestId);
+          if (validDiagnostic(diagnostics.pending)) {
+            const pending = JSON.stringify(diagnostics.pending);
+            if (pending.length <= 512 && /^[\x20-\x7e]+$/.test(pending)) boundHeaders.set('X-Tiku-Bind-Diagnostic', pending);
+          }
+          headers = boundHeaders;
+        } catch (_) { /* Unavailable diagnostics cannot change the request. */ }
+      }
+      const transportFailure = error => {
+        if (error?.background) return error;
+        if (controller.signal.aborted || ['AbortError', 'TimeoutError'].includes(error?.name)) {
+          return failure('REQUEST_TIMEOUT', '连接等待超时，请重新连接后继续。');
+        }
+        if (error instanceof TypeError) return failure('NETWORK_UNAVAILABLE', '连接暂时中断，请检查网络后重新连接。');
+        return invalid();
+      };
       try {
-        const response = await host.fetch(path, { ...options, cache: 'no-store', credentials: 'same-origin', signal: controller.signal });
-        const data = await response.json();
+        let response;
+        try {
+          response = await host.fetch(path, { ...options, headers, cache: 'no-store', credentials: 'same-origin', signal: controller.signal });
+        } catch (error) { throw transportFailure(error); }
+        status = Number.isInteger(response?.status) && response.status >= 0 && response.status <= 599 ? response.status : 0;
+        phase = 'body';
+        let data;
+        try {
+          data = await response.json();
+        } catch (error) { throw error instanceof SyntaxError ? invalid() : transportFailure(error); }
+        phase = 'protocol';
+        // Validation errors are not transport failures. In particular, a valid
+        // JSON null must never be reported as a dropped network connection.
+        if (!data || typeof data !== 'object' || Array.isArray(data)) throw invalid();
         if (!response.ok) {
           const rejection = REJECTIONS[data.code];
           const admissionRejected = options.method === 'POST' && ['/api/jobs', '/api/jobs/image'].includes(path)
@@ -102,14 +203,12 @@
             { admissionRejected });
         }
         if (data.schema_version !== 1) throw invalid();
+        if (binding && !validContext(data.execution)) throw invalid();
         return data;
       } catch (error) {
-        if (error?.background) throw error;
-        if (controller.signal.aborted || ['AbortError', 'TimeoutError'].includes(error?.name)) {
-          throw failure('REQUEST_TIMEOUT', '连接等待超时，请重新连接后继续。');
-        }
-        if (error instanceof TypeError) throw failure('NETWORK_UNAVAILABLE', '连接暂时中断，请检查网络后重新连接。');
-        throw invalid();
+        const result = error?.background ? error : invalid();
+        if (binding) rememberBindingFailure(result, requestId, phase, started, status);
+        throw result;
       } finally { clearTimeout(timer); }
     }
     function accept(record, data, { create = false } = {}) {
@@ -143,8 +242,11 @@
           await sleep(500);
         }
       }
+      clearPendingDiagnostic();
       if (!validContext(bound.execution) || bound.execution.epoch !== context.epoch
-          || bound.execution.state_version !== context.state_version) throw failure('EXECUTION_STALE', '会话已更新，请重新连接。');
+          || bound.execution.state_version !== context.state_version) {
+        throw Object.assign(failure('EXECUTION_STALE', '会话已更新，请重新连接。'), { submissionNotSent: true });
+      }
       // Only a fresh server binding under the shared submission Web Lock proves
       // which epoch is current. A stale tab's cached context cannot prune records.
       // Retire transport metadata, never mark unknown business execution done.
