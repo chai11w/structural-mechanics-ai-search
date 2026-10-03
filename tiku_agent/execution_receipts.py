@@ -116,7 +116,7 @@ class ReceiptJournal:
             pass  # A diagnostic failure must not replace the original exception.
 
 
-def apply_receipt(store, call_id, attempt_id, payload):
+def apply_receipt(store, call_id, attempt_id, payload, *, after_apply=None):
     record = payload['record']
     encoded = canonical(record) if record is not None else None
     status = 'CONFIRMED' if payload['confirmed'] else 'UNKNOWN'
@@ -132,6 +132,8 @@ def apply_receipt(store, call_id, attempt_id, payload):
             return
         conn.execute('UPDATE execution_effects SET status=?,record=?,updated=?,usage_known=? WHERE call_id=?',
                      (status, encoded, store.clock(conn), int(payload['usage_known']), call_id))
+        if after_apply is not None:
+            after_apply(conn)
 
 
 def recover_accounting(operations, ledgers, limit=20):

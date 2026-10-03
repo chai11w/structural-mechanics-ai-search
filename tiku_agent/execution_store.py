@@ -48,12 +48,15 @@ class ExecutionPolicy:
     max_global_unresolved_cost_calls: int = 100
     # Historical accounting uncertainty is observable debt, not a service outage.
     block_on_pending_costs: bool = False
+    # Only a live, explicitly enabled model boundary may make one new attempt.
+    model_transport_recovery: bool = False
 
     def __post_init__(self):
-        if type(self.block_on_pending_costs) is not bool:
-            raise ValueError("block_on_pending_costs must be boolean")
+        if any(type(value) is not bool for value in
+               (self.block_on_pending_costs, self.model_transport_recovery)):
+            raise ValueError("execution switches must be boolean")
         if any(type(v) is not int or v <= 0 for k, v in vars(self).items()
-               if k != "block_on_pending_costs"):
+               if k not in {"block_on_pending_costs", "model_transport_recovery"}):
             raise ValueError("execution limits must be positive integers")
 
 

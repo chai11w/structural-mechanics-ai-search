@@ -280,6 +280,7 @@ def build_app(
     checkpoint_code_revision: str = "",
     enable_a3_checkpoint_capture: bool = False,
     enable_durable_execution: bool = False,
+    enable_model_transport_recovery: bool = False,
     background_execution: bool = False,
     background_production: bool = False,
     public_origin: str = "",
@@ -428,8 +429,9 @@ def build_app(
     )
     if enable_durable_execution:
         from tiku_agent.execution_runtime import attach_execution
-        from tiku_agent.execution_store import ExecutionStore
-        attach_execution(runtime, ExecutionStore(root / "execution.sqlite3"))
+        from tiku_agent.execution_store import ExecutionStore, ExecutionPolicy
+        attach_execution(runtime, ExecutionStore(root / "execution.sqlite3", policy=ExecutionPolicy(
+            model_transport_recovery=enable_model_transport_recovery)))
     if background_execution:
         from tiku_agent.execution_dispatch import DispatchStore, DispatchPolicy
         DispatchStore(runtime, authorize=lambda identity, version: control_store.active_invitation(identity, version) is not None,
@@ -508,6 +510,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-a3-checkpoint-capture", action="store_true", default=False)
     parser.add_argument("--enable-durable-execution", action="store_true", default=False,
                         help="Enable phase-five execution; existing sessions require offline migration")
+    parser.add_argument("--disable-model-transport-recovery", action="store_true",
+                        help="Disable the single additional attempt for transient essential model failures")
     parser.add_argument("--enable-background-execution", action="store_true", default=False,
                         help="Enable phase-six production background jobs with explicit shared service paths")
     parser.add_argument("--checkpoint-code-revision", default="")
@@ -631,6 +635,7 @@ def main() -> int:
             enable_a2_checkpoint_capture=args.enable_a2_checkpoint_capture,
             enable_a3_checkpoint_capture=args.enable_a3_checkpoint_capture,
             enable_durable_execution=args.enable_durable_execution,
+            enable_model_transport_recovery=not args.disable_model_transport_recovery,
             background_execution=args.enable_background_execution,
             background_production=args.enable_background_execution,
             checkpoint_code_revision=args.checkpoint_code_revision,

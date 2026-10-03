@@ -27,7 +27,7 @@ EXECUTION_TABLES = {
     "execution_meta", "execution_sessions", "execution_states", "execution_tasks", "execution_page_errors",
     "execution_operations", "execution_attempts", "execution_owners", "execution_cost_runs", "execution_task_attempts",
     "execution_effects", "execution_cost_outbox", "execution_collectors", "execution_files", "execution_handoffs",
-    "execution_unit_batches", "execution_unit_checks",
+    "execution_unit_batches", "execution_unit_checks", "execution_model_recoveries",
 }
 
 

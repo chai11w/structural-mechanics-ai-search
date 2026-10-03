@@ -228,6 +228,54 @@ def timed_model_call(
     attempt_count_getter: Callable[[Any], int] | None = None,
     attempt_count: int = 1,
 ) -> Any:
+    """One observed call, with at most one explicitly enabled live recovery.
+
+    A recovery is a new physical call in its own cost run. It never replays an
+    old operation, confirms the first attempt, or retries receipt/parse errors.
+    """
+    options = dict(provider=provider, model=model, call_type=call_type,
+                   usage_getter=usage_getter, provider_request_id_getter=provider_request_id_getter,
+                   request_id_getter=request_id_getter, attempt_count_getter=attempt_count_getter,
+                   attempt_count=attempt_count)
+    observer = execution_observer()
+    enabled = getattr(observer, "model_recovery_enabled", lambda: False)() is True
+    try:
+        return _timed_model_call_once(function, **options, allow_recovery=enabled)
+    except Exception as error:
+        source = getattr(error, "_tiku_model_call_id", None)
+        parent = _ACTIVE_COLLECTOR.get()
+        if not enabled or source is None or parent is None or not observer.model_recovery_pending(source):
+            raise
+        # Keep the failed parent's run intact. Its UNKNOWN must not prevent the
+        # replacement's known usage from being settled in an independent run.
+        recovery = ModelCostCollector(
+            run_id=new_run_id(), session_key=parent.session_key, identity_key=parent.identity_key,
+            search_key=parent.search_key, task_kind=parent.task_kind, trace_id=parent.trace_id)
+        outcome = "model_recovery_failed"
+        try:
+            time.sleep(0.25)
+            with model_cost_scope(recovery):
+                result = _timed_model_call_once(function, **options, recovery_of=source)
+                outcome = "model_recovery_succeeded"
+                return result
+        finally:
+            observer.write_recovery_cost(recovery, finished_at=utc_now(), outcome=outcome)
+
+
+def _timed_model_call_once(
+    function: Callable[[], Any],
+    *,
+    provider: str,
+    model: str,
+    call_type: str,
+    usage_getter: Callable[[Any], Any],
+    provider_request_id_getter: Callable[[Any], str] | None = None,
+    request_id_getter: Callable[[Any], str] | None = None,
+    attempt_count_getter: Callable[[Any], int] | None = None,
+    attempt_count: int = 1,
+    allow_recovery: bool = False,
+    recovery_of: str | None = None,
+) -> Any:
     """Run one provider request and emit usage without changing its return value."""
 
     if provider_request_id_getter is not None and request_id_getter is not None:
@@ -244,8 +292,9 @@ def timed_model_call(
     started = time.perf_counter()
     observer = execution_observer()
     if observer is not None:
+        recovery_options = {"recovery_of": recovery_of} if recovery_of is not None else {}
         observer.prepare_model(call_id=call_id, run_id=run_id, provider=clean_provider,
-                               model=clean_model, call_type=clean_call_type)
+                               model=clean_model, call_type=clean_call_type, **recovery_options)
         observer.model_sent(call_id)
     _emit_trace_event(
         "model_call_started",
@@ -284,7 +333,10 @@ def timed_model_call(
             error_kind=type(exc).__name__,
         )
         if observer is not None:
-            observer.model_finished(call_id, record, confirmed=False)
+            from tiku_shared.model_recovery import model_recovery_allowed
+            recovery_options = ({"recovery_requested": True} if allow_recovery
+                                and model_recovery_allowed(clean_provider, clean_call_type, exc) else {})
+            observer.model_finished(call_id, record, confirmed=False, **recovery_options)
             # Let a caller with an explicit business fallback identify this
             # exact failed call. Confirmation failures themselves are not tagged.
             try:

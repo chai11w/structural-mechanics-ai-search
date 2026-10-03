@@ -32,6 +32,30 @@ def valid_model_fallback(effect, attempt_id, kind):
     return record.get("status") == "error" and record.get("call_id") == effect["call_id"]
 
 
+def confirmed_model_recoveries(conn, operation_id, attempt_id):
+    """Business recovery proof never changes the first provider's UNKNOWN state."""
+    result = {}
+    for link in conn.execute(
+            "SELECT source_call_id,target_call_id FROM execution_model_recoveries "
+            "WHERE operation_id=? AND attempt_id=? AND target_call_id IS NOT NULL",
+            (operation_id, attempt_id)):
+        source = conn.execute("SELECT * FROM execution_effects WHERE call_id=?", (link[0],)).fetchone()
+        target = conn.execute("SELECT * FROM execution_effects WHERE call_id=?", (link[1],)).fetchone()
+        if source is None or target is None:
+            continue
+        fields = ("operation_id", "attempt_id", "provider", "model", "call_type")
+        if (any(source[name] != target[name] for name in fields)
+                or source["attempt_id"] != attempt_id or source["operation_id"] != operation_id
+                or source["status"] != "UNKNOWN" or target["status"] != "CONFIRMED"
+                or not source["record"] or not target["record"]):
+            continue
+        original, replacement = json.loads(source["record"]), json.loads(target["record"])
+        if (original.get("status") == "error" and original.get("call_id") == source["call_id"]
+                and replacement.get("status") == "success" and replacement.get("call_id") == target["call_id"]):
+            result[source["call_id"]] = target["call_id"]
+    return result
+
+
 def create_effect_schema(conn):
     for statement in """
         CREATE TABLE IF NOT EXISTS execution_effects (
@@ -42,6 +66,13 @@ def create_effect_schema(conn):
             status TEXT NOT NULL, record TEXT, created REAL NOT NULL, updated REAL NOT NULL,
             usage_known INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS execution_effects_operation ON execution_effects(operation_id,status);
+        CREATE TABLE IF NOT EXISTS execution_model_recoveries (
+            source_call_id TEXT PRIMARY KEY REFERENCES execution_effects(call_id) ON DELETE CASCADE,
+            target_call_id TEXT UNIQUE,
+            operation_id TEXT NOT NULL REFERENCES execution_operations(id),
+            attempt_id TEXT NOT NULL REFERENCES execution_attempts(id));
+        CREATE INDEX IF NOT EXISTS execution_model_recoveries_operation
+            ON execution_model_recoveries(operation_id,attempt_id);
         CREATE TABLE IF NOT EXISTS execution_cost_outbox (
             run_id TEXT PRIMARY KEY REFERENCES execution_cost_runs(run_id),
             ledger_key TEXT NOT NULL, payload TEXT NOT NULL, fingerprint TEXT NOT NULL,
@@ -77,6 +108,26 @@ class ExecutionEffects:
         self.admission_check = admission_check
         self._model_fallbacks = {}
         self._fallback_lock = threading.Lock()
+        self._recovery_sources = set()
+        paths = {Path(path).resolve() for path in ledger_paths}
+        self._recovery_ledger = next(iter(paths)) if len(paths) == 1 else None
+
+    def model_recovery_enabled(self):
+        return self.store.policy.model_transport_recovery and self._recovery_ledger is not None
+
+    def model_recovery_pending(self, call_id):
+        with self._fallback_lock:
+            return call_id in self._recovery_sources
+
+    def write_recovery_cost(self, collector, *, finished_at, outcome):
+        from tiku_shared.model_costs import SQLiteModelCostLedger
+        try:
+            SQLiteModelCostLedger(self._recovery_ledger).write_run(
+                collector, finished_at=finished_at, outcome=outcome)
+        except Exception as exc:
+            # The independent receipt/outbox retains exact successful usage.
+            # Accounting recovery may write fees, never repeat a provider call.
+            self.record_failure("", "recovery_cost_ledger", exc)
 
     def model_fallbacks(self):
         with self._fallback_lock:
@@ -87,12 +138,19 @@ class ExecutionEffects:
         # a completed business result; finish persists it together with the reply.
         with self.store.transaction() as conn:
             self._validate(conn)
-            effect = conn.execute("SELECT * FROM execution_effects WHERE call_id=? AND operation_id=?",
-                                  (call_id, self.writer.operation_id)).fetchone()
-            if effect is None or not valid_model_fallback(effect, self.writer.attempt_id, kind):
-                raise ExecutionError("EXECUTION_UNKNOWN")
+            call_ids = [call_id]
+            link = conn.execute("SELECT source_call_id FROM execution_model_recoveries "
+                                "WHERE target_call_id=? AND operation_id=? AND attempt_id=?",
+                                (call_id, self.writer.operation_id, self.writer.attempt_id)).fetchone()
+            if link is not None:
+                call_ids.append(link[0])
+            for current in call_ids:
+                effect = conn.execute("SELECT * FROM execution_effects WHERE call_id=? AND operation_id=?",
+                                      (current, self.writer.operation_id)).fetchone()
+                if effect is None or not valid_model_fallback(effect, self.writer.attempt_id, kind):
+                    raise ExecutionError("EXECUTION_UNKNOWN")
             with self._fallback_lock:
-                self._model_fallbacks[call_id] = kind
+                self._model_fallbacks.update({current: kind for current in call_ids})
 
     def prepare_file(self, path, temporary):
         if not any(path.is_relative_to(root) and temporary.is_relative_to(root) for root in self.artifact_roots):
@@ -163,16 +221,37 @@ class ExecutionEffects:
                 raise ExecutionError("EXECUTION_COST_TARGET_INVALID")
             conn.execute("UPDATE execution_collectors SET closed=2,ledger_key=? WHERE run_id=?", (key, run_id))
 
-    def prepare_model(self, *, call_id, run_id, provider, model, call_type):
+    def prepare_model(self, *, call_id, run_id, provider, model, call_type, recovery_of=None):
         with self.store.transaction() as conn:
             now = self._validate(conn)
             if self.admission_check is not None:
                 self.admission_check()
             handled = set(self.model_fallbacks())
+            with self._fallback_lock:
+                handled.update(self._recovery_sources)
+                live_sources = set(self._recovery_sources)
+            # A sibling may still be returning its second failure to the crop
+            # fallback handler. Do not block independent in-flight work during
+            # that interval; finish still requires explicit proof for BOTH calls.
+            handled.update(row[1] for row in conn.execute(
+                "SELECT source_call_id,target_call_id FROM execution_model_recoveries "
+                "WHERE operation_id=? AND attempt_id=? AND target_call_id IS NOT NULL",
+                (self.writer.operation_id, self.writer.attempt_id)) if row[0] in live_sources)
             if any(row[0] not in handled for row in conn.execute(
                     "SELECT call_id FROM execution_effects WHERE operation_id=? AND status='UNKNOWN'",
                     (self.writer.operation_id,))):
                 raise ExecutionError("EXECUTION_UNKNOWN")
+            if recovery_of is not None:
+                source = conn.execute("SELECT * FROM execution_effects WHERE call_id=?", (recovery_of,)).fetchone()
+                link = conn.execute("SELECT * FROM execution_model_recoveries WHERE source_call_id=?",
+                                    (recovery_of,)).fetchone()
+                if (not self.model_recovery_enabled() or not self.model_recovery_pending(recovery_of)
+                        or source is None or link is None or link["target_call_id"] is not None
+                        or source["status"] != "UNKNOWN"
+                        or run_id == source["run_id"]
+                        or (source["operation_id"], source["attempt_id"], source["provider"], source["model"], source["call_type"])
+                        != (self.writer.operation_id, self.writer.attempt_id, provider, model, call_type)):
+                    raise ExecutionError("EXECUTION_UNKNOWN")
             self.operations.ensure_cost_available(identity_digest=conn.execute(
                 "SELECT identity FROM execution_operations WHERE id=?", (self.writer.operation_id,)).fetchone()[0])
             link = conn.execute("SELECT operation_id,attempt_id FROM execution_cost_runs WHERE run_id=?", (run_id,)).fetchone()
@@ -183,6 +262,9 @@ class ExecutionEffects:
             conn.execute("INSERT INTO execution_effects (call_id,run_id,operation_id,attempt_id,provider,model,call_type,status,record,created,updated) VALUES (?,?,?,?,?,?,?,'PREPARED',NULL,?,?)",
                          (call_id, run_id, self.writer.operation_id, self.writer.attempt_id,
                           provider, model, call_type, now, now))
+            if recovery_of is not None:
+                conn.execute("UPDATE execution_model_recoveries SET target_call_id=? WHERE source_call_id=?",
+                             (call_id, recovery_of))
 
     def model_sent(self, call_id):
         with self.store.transaction() as conn:
@@ -201,7 +283,7 @@ class ExecutionEffects:
         from tiku_agent.execution_receipts import ReceiptJournal
         ReceiptJournal(self.store).failure(self.writer.operation_id, call_id, stage, exc)
 
-    def model_finished(self, call_id, record, *, confirmed, usage_known=False):
+    def model_finished(self, call_id, record, *, confirmed, usage_known=False, recovery_requested=False):
         from tiku_agent.execution_receipts import ReceiptJournal, apply_receipt
         journal = ReceiptJournal(self.store)
         try:
@@ -213,9 +295,23 @@ class ExecutionEffects:
             # Primary persistence is still worth attempting if the journal disk
             # is unavailable. Never issue another provider call here.
         try:
+            def authorize_recovery(conn):
+                self._validate(conn)
+                if (not self.model_recovery_enabled() or confirmed or record is None or record.status != "error"
+                        or conn.execute("SELECT 1 FROM execution_model_recoveries WHERE target_call_id=?",
+                                        (call_id,)).fetchone()):
+                    raise ExecutionError("EXECUTION_UNKNOWN")
+                self.store.storage_capacity(extra=1024)
+                conn.execute("INSERT INTO execution_model_recoveries VALUES (?,NULL,?,?)",
+                             (call_id, self.writer.operation_id, self.writer.attempt_id))
+                # Published while holding the same transaction that publishes
+                # UNKNOWN: parallel siblings cannot see an unhandled gap.
+                with self._fallback_lock:
+                    self._recovery_sources.add(call_id)
             apply_receipt(self.store, call_id, self.writer.attempt_id, {
                 'record': record.to_dict() if record is not None else None,
-                'confirmed': confirmed, 'usage_known': usage_known})
+                'confirmed': confirmed, 'usage_known': usage_known},
+                after_apply=authorize_recovery if recovery_requested else None)
         except Exception as exc:
             self.record_failure(call_id, 'receipt_persistence', exc)
             raise

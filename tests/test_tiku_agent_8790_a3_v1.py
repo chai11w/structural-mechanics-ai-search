@@ -40,6 +40,9 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
         self.assertTrue(defaults.enable_output_watchdog)
         self.assertFalse(defaults.enable_a3_text_orientation)
         self.assertFalse(defaults.enable_durable_execution)
+        self.assertFalse(defaults.disable_model_transport_recovery)
+        self.assertTrue(build_argument_parser().parse_args(
+            [*EVIDENCE_CLI_ARGUMENTS, "--disable-model-transport-recovery"]).disable_model_transport_recovery)
         self.assertTrue(build_argument_parser().parse_args(
             [*EVIDENCE_CLI_ARGUMENTS, "--enable-durable-execution"]).enable_durable_execution)
         self.assertEqual(defaults.max_concurrent_tasks, 1)
@@ -134,6 +137,18 @@ class TikuAgent8790A3V1Test(unittest.TestCase):
             )
 
             self.assertIsNotNone(app)
+
+    def test_durable_model_recovery_setting_is_explicit_and_can_be_disabled(self):
+        import json
+        import sqlite3
+        from contextlib import closing
+        for enabled in (None, True, False):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as temp:
+                options = {} if enabled is None else {"enable_model_transport_recovery": enabled}
+                build_app(temp, enable_durable_execution=True, **options)
+                with closing(sqlite3.connect(Path(temp) / "execution.sqlite3")) as conn:
+                    raw = conn.execute("SELECT value FROM execution_meta WHERE key='execution_policy'").fetchone()[0]
+                self.assertIs(json.loads(raw)["model_transport_recovery"], bool(enabled))
 
     def test_phase5_standard_production_graph_supports_reset_without_model_calls(self):
         import json

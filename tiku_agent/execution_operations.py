@@ -321,19 +321,23 @@ class OperationStore:
             if conn.execute("SELECT 1 FROM execution_unit_batches WHERE operation_id=? AND status<>'CONFIRMED' LIMIT 1",
                             (writer.operation_id,)).fetchone():
                 raise ExecutionError("EXECUTION_UNKNOWN")
-            from tiku_agent.execution_effects import valid_model_fallback
+            from tiku_agent.execution_effects import valid_model_fallback, confirmed_model_recoveries
             handled = dict(model_fallbacks or {})
+            recovered = confirmed_model_recoveries(conn, writer.operation_id, writer.attempt_id)
             unresolved = conn.execute("SELECT * FROM execution_effects WHERE operation_id=? AND status<>'CONFIRMED'",
                                       (writer.operation_id,)).fetchall()
-            if any(row["call_id"] not in handled or not valid_model_fallback(row, writer.attempt_id, handled[row["call_id"]])
+            if any(row["call_id"] not in recovered and (row["call_id"] not in handled
+                   or not valid_model_fallback(row, writer.attempt_id, handled[row["call_id"]]))
                    for row in unresolved):
                 raise ExecutionError("EXECUTION_UNKNOWN")
             # Preserve explicit proof of the business fallback separately from
             # the UNKNOWN provider/fee evidence, which is never changed here.
             if handled:
-                if set(handled) != {row["call_id"] for row in unresolved}:
+                if set(handled) != {row["call_id"] for row in unresolved} - set(recovered):
                     raise ExecutionError("EXECUTION_UNKNOWN")
                 result = {**result, "model_fallbacks": handled}
+            if recovered:
+                result = {**result, "model_recoveries": recovered}
             if conn.execute("SELECT 1 FROM execution_files WHERE operation_id=? AND status NOT IN ('PUBLISHED','ABORTED') LIMIT 1",
                             (writer.operation_id,)).fetchone():
                 raise ExecutionError("EXECUTION_UNKNOWN")
@@ -396,7 +400,8 @@ class OperationStore:
     @staticmethod
     def _delete_operation_rows(conn, operation_id):
         """Caller proves expiry and reference safety inside the same transaction."""
-        for table in ("execution_unit_checks", "execution_unit_batches", "execution_handoffs", "execution_effects"):
+        for table in ("execution_unit_checks", "execution_unit_batches", "execution_handoffs",
+                      "execution_model_recoveries", "execution_effects"):
             conn.execute(f"DELETE FROM {table} WHERE operation_id=?", (operation_id,))
         for table in ("execution_collectors", "execution_cost_outbox"):
             conn.execute(f"DELETE FROM {table} WHERE run_id IN (SELECT run_id FROM execution_cost_runs WHERE operation_id=?)", (operation_id,))

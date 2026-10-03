@@ -22,6 +22,7 @@ TABLES = ("execution_sessions", "execution_states", "execution_tasks", "executio
           "execution_handoffs", "execution_unit_batches", "execution_unit_checks")
 BACKGROUND_TABLES = ("execution_dispatch_grants", "execution_dispatch", "execution_dispatch_inputs",
                      "execution_http_logins", "execution_http_bindings", "execution_publications", "execution_public_media")
+OPTIONAL_EFFECT_TABLES = ("execution_model_recoveries",)
 SCAN_LIMIT = 10000
 HASH_LIMIT = 256 * 1024 * 1024
 
@@ -34,7 +35,7 @@ def execution_policy(conn):
 def source_digest(conn):
     hasher = hashlib.sha256()
     available = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    for table in (*TABLES, *(table for table in BACKGROUND_TABLES if table in available)):
+    for table in (*TABLES, *(table for table in (*BACKGROUND_TABLES, *OPTIONAL_EFFECT_TABLES) if table in available)):
         hasher.update(table.encode())
         for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid"):
             values = [{"blob_sha256": hashlib.sha256(value).hexdigest(), "bytes": len(value)}

@@ -91,15 +91,13 @@ def call_glm_json(
     )
 
     def request_data() -> dict[str, Any]:
-        try:
-            with urllib.request.urlopen(
-                request,
-                timeout=max(1.0, float(timeout_seconds)),
-            ) as response:
-                value = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:800]
-            raise RuntimeError(f"GLM HTTP {exc.code}: {detail}") from exc
+        # Preserve the typed HTTP failure for bounded recovery. Do not put a
+        # provider response body into an exception or public diagnostic.
+        with urllib.request.urlopen(
+            request,
+            timeout=max(1.0, float(timeout_seconds)),
+        ) as response:
+            value = json.loads(response.read().decode("utf-8"))
         if not isinstance(value, dict):
             raise ValueError("model response must be an object")
         return value
