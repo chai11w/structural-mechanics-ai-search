@@ -251,12 +251,12 @@ def timed_model_call(
         recovery = ModelCostCollector(
             run_id=new_run_id(), session_key=parent.session_key, identity_key=parent.identity_key,
             search_key=parent.search_key, task_kind=parent.task_kind, trace_id=parent.trace_id)
-        outcome = "model_recovery_failed"
+        outcome = "error"
         try:
             time.sleep(0.25)
             with model_cost_scope(recovery):
                 result = _timed_model_call_once(function, **options, recovery_of=source)
-                outcome = "model_recovery_succeeded"
+                outcome = "success"
                 return result
         finally:
             observer.write_recovery_cost(recovery, finished_at=utc_now(), outcome=outcome)
