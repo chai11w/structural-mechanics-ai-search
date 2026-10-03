@@ -511,7 +511,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-durable-execution", action="store_true", default=False,
                         help="Enable phase-five execution; existing sessions require offline migration")
     parser.add_argument("--disable-model-transport-recovery", action="store_true",
-                        help="Disable the single additional attempt for transient essential model failures")
+                        help="Disable the single additional attempt for registered transient vision/search model failures")
     parser.add_argument("--enable-background-execution", action="store_true", default=False,
                         help="Enable phase-six production background jobs with explicit shared service paths")
     parser.add_argument("--checkpoint-code-revision", default="")

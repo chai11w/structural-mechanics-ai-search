@@ -306,7 +306,7 @@ class ExecutionModelRecoveryTests(unittest.TestCase):
         self.assertEqual(self.f.rows("execution_model_recoveries"), [])
 
     def test_noneligible_call_type_keeps_its_existing_single_attempt_policy(self):
-        self.install(self.always_fail, call_type="qwen_shape_rerank", catch_failure=True)
+        self.install(self.always_fail, call_type="qwen_safe_answer", catch_failure=True)
         self.f.assert_code("EXECUTION_UNKNOWN", self.run_request)
         self.assertEqual(len(self.sends), 1)
         self.assertEqual(self.f.rows("execution_model_recoveries"), [])

@@ -15,10 +15,11 @@ class ModelRecoveryPolicyTests(unittest.TestCase):
     def allowed(self, error, *, provider="dashscope", call_type="qwen_a3_crop_compare"):
         return model_recovery_allowed(provider, call_type, error)
 
-    def test_only_required_provider_stage_pairs_are_eligible(self):
+    def test_only_registered_provider_stage_pairs_are_eligible(self):
         expected = {
             "qwen_image_triage", "qwen_a3_page_understanding", "qwen_a3_crop_compare",
             "qwen_image_classification", "qwen_a3_unit_analysis",
+            "qwen_structure_type", "qwen_shape_rerank", "qwen_length_tie_break",
             "glm_a3_page_auto_crop", "external_load_screen",
         }
         self.assertEqual(MODEL_RECOVERY_CALL_TYPES, expected)
@@ -32,8 +33,8 @@ class ModelRecoveryPolicyTests(unittest.TestCase):
         self.assertFalse(self.allowed(TimeoutError(), provider="zhipu"))
         self.assertFalse(self.allowed(TimeoutError(), call_type="glm_a3_page_auto_crop"))
 
-    def test_optional_and_unknown_calls_and_providers_are_denied(self):
-        for call_type in ("qwen_shape_rerank", "qwen_length_tie", "qwen_structure_type",
+    def test_unregistered_calls_and_providers_are_denied(self):
+        for call_type in ("zhipu_shape_rerank", "zhipu_length_tie_break", "qwen_length_tie",
                           "reply", "intent", "qwen_layout_analysis", "", "QWEN_A3_CROP_COMPARE"):
             with self.subTest(call_type=call_type):
                 self.assertFalse(self.allowed(TimeoutError(), call_type=call_type))
@@ -41,6 +42,8 @@ class ModelRecoveryPolicyTests(unittest.TestCase):
             with self.subTest(provider=provider):
                 self.assertFalse(self.allowed(TimeoutError(), provider=provider))
         self.assertFalse(self.allowed(TimeoutError(), call_type=None))
+        for call_type in ("qwen_structure_type", "qwen_shape_rerank", "qwen_length_tie_break"):
+            self.assertFalse(self.allowed(TimeoutError(), provider="zhipu", call_type=call_type))
         self.assertTrue(self.allowed(TimeoutError(), provider=" DashScope ", call_type=" qwen_a3_crop_compare "))
 
     def test_known_transient_connection_errors_direct_and_url_wrapped(self):

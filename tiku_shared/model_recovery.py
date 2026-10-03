@@ -19,6 +19,9 @@ _DASHSCOPE_CALL_TYPES = frozenset({
     "qwen_a3_crop_compare",
     "qwen_image_classification",
     "qwen_a3_unit_analysis",
+    "qwen_structure_type",
+    "qwen_shape_rerank",
+    "qwen_length_tie_break",
     "external_load_screen",
 })
 _ZHIPU_CALL_TYPES = frozenset({
@@ -68,11 +71,11 @@ def _transient_transport_error(error: BaseException) -> bool:
 
 
 def model_recovery_allowed(provider: str, call_type: str, error: BaseException) -> bool:
-    """Allow only known transient failures in the necessary vision stages.
+    """Allow known transient failures in registered vision and search stages.
 
     The provider/stage pairs are explicit so an unrelated caller cannot opt in by
-    reusing a stage name. Optional classification, reranking and reply/intent calls
-    keep their own existing fallback policies.
+    reusing a stage name. Structure filtering and candidate ranking retain their
+    existing fallbacks after the bounded recovery; reply/intent calls stay out.
     """
     if not isinstance(provider, str) or not isinstance(call_type, str):
         return False
